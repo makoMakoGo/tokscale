@@ -14,6 +14,10 @@ const TWO_COLUMN_MIN_WIDTH: u16 = 80;
 const ONE_COLUMN_MIN_WIDTH: u16 = 40;
 const METRIC_LABEL_WIDTH: usize = 20;
 const CONTENT_PADDING: u16 = 1;
+// Portrait plus section/favorite spacing, slogan and family stats.
+const FULL_FUN_THINGS_HEIGHT: usize = portraits::PORTRAIT_HEIGHT + 7;
+// Section title, portrait, slogan and family stats without blank rows.
+const COMPACT_FUN_THINGS_HEIGHT: usize = portraits::PORTRAIT_HEIGHT + 3;
 
 pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let snapshot_area = super::overview::render(frame, app, area);
@@ -158,37 +162,29 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary)
 /// stats, then the favorite model, client (with its own slogan) and day.
 fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary) {
     let total = data.tokens.total();
-
     let width = area.width as usize;
 
-    // Build the Fun Things blocks; how many of them survive depends on the
-    // available height (see the tiers below).
-    let mut model_block: Vec<Line<'static>> = Vec::new();
-    let mut family_line: Option<Line<'static>> = None;
-    let mut model_line: Option<Line<'static>> = None;
+    let mut favorite_label = None;
+    let portrait;
+    let slogan;
+    let mut family_stats = None;
     match data.favorite_family.as_ref() {
         Some(favorite) => {
             let family = favorite.family;
             let color = portraits::family_color(app, family);
-            model_block.push(Line::from(Span::styled(
+            favorite_label = Some(Line::from(Span::styled(
                 "Favorite Model",
                 Style::default().fg(app.theme.muted),
             )));
-            model_block.push(Line::default());
-            model_block.extend(
-                portraits::lines(app, family)
-                    .into_iter()
-                    .map(|line| center_line(line, width)),
-            );
-            model_block.push(Line::default());
-            model_block.push(center_line(
+            portrait = portraits::lines(app, family).map(|line| center_line(line, width));
+            slogan = Some(center_line(
                 Line::from(Span::styled(
                     portraits::slogan(family),
                     Style::default().fg(color),
                 )),
                 width,
             ));
-            family_line = Some(center_line(
+            family_stats = Some(center_line(
                 Line::from(vec![
                     Span::styled(
                         portraits::display_name(family),
@@ -208,15 +204,16 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
             ));
         }
         None => {
-            model_block.extend(portraits::lines(app, OverviewFamily::Unknown));
-            model_block.push(Line::from(Span::styled(
+            portrait = portraits::lines(app, OverviewFamily::Unknown);
+            slogan = Some(Line::from(Span::styled(
                 "no data yet",
                 Style::default().fg(app.theme.muted),
             )));
         }
     }
-    if let Some(favorite) = data.favorite_model.as_ref() {
-        model_line = Some(center_line(
+
+    let model_stats = data.favorite_model.as_ref().map(|favorite| {
+        center_line(
             Line::from(vec![
                 Span::styled(
                     favorite.id.clone(),
@@ -235,10 +232,10 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
                 ),
             ]),
             width,
-        ));
-    }
+        )
+    });
 
-    let mut client_block: Vec<Line<'static>> = Vec::new();
+    let mut client_block = Vec::new();
     if let Some(favorite) = data.favorite_client.as_ref() {
         let display = get_client_display_name(&favorite.id).to_string();
         client_block.push(Line::default());
@@ -275,55 +272,59 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
         ));
     }
 
-    // Height tiers: the portrait block is the anchor, everything else is
-    // shed from the tail as the column gets shorter.
-    let header: Vec<Line<'static>> = vec![section_title(app, "Fun Things"), Line::default()];
-    let full_height = header.len()
-        + model_block.len()
-        + family_line.is_some() as usize
-        + model_line.is_some() as usize
-        + client_block.len();
     let height = area.height as usize;
+    let has_favorite_label = favorite_label.is_some();
+    let full_height = if has_favorite_label {
+        FULL_FUN_THINGS_HEIGHT
+    } else {
+        COMPACT_FUN_THINGS_HEIGHT
+    };
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    if height >= full_height.min(10) {
-        lines.extend(header);
-        lines.extend(model_block);
-        if let Some(line) = family_line {
-            lines.push(line);
+    let mut lines = Vec::new();
+    if height >= full_height {
+        lines.push(section_title(app, "Fun Things"));
+        lines.push(Line::default());
+        if let Some(label) = favorite_label {
+            lines.push(label);
+            lines.push(Line::default());
         }
-        if height >= 11 {
-            if let Some(line) = model_line {
-                lines.push(line);
+        lines.extend(portrait);
+        if let Some(slogan) = slogan {
+            if has_favorite_label {
+                lines.push(Line::default());
+            }
+            lines.push(slogan);
+        }
+        if let Some(family_stats) = family_stats {
+            lines.push(family_stats);
+        }
+        if let Some(model_stats) = model_stats {
+            if lines.len() < height {
+                lines.push(model_stats);
             }
         }
-        if height >= full_height {
+        if lines.len() + client_block.len() <= height {
             lines.extend(client_block);
         }
-    } else if height >= 6 {
-        // Compact: title + portrait + slogan + family line.
+    } else if height >= COMPACT_FUN_THINGS_HEIGHT {
         lines.push(section_title(app, "Fun Things"));
-        if model_block.len() >= 7 {
-            lines.extend(model_block[2..7].iter().cloned());
-        } else {
-            lines.extend(model_block);
+        lines.extend(portrait);
+        if let Some(slogan) = slogan {
+            lines.push(slogan);
         }
-        if let Some(line) = family_line {
-            lines.push(line);
+        if let Some(family_stats) = family_stats {
+            lines.push(family_stats);
         }
     } else {
-        // Minimal: portrait + family line only.
-        if model_block.len() >= 5 {
-            lines.extend(model_block[2..5].iter().cloned());
-        } else {
-            lines.extend(model_block);
-        }
-        if let Some(line) = family_line {
-            lines.push(line);
+        lines.extend(portrait);
+        if let Some(family_stats) = family_stats {
+            lines.push(family_stats);
+        } else if let Some(slogan) = slogan {
+            lines.push(slogan);
         }
     }
+    lines.truncate(height);
 
-    lines.truncate(area.height as usize);
     // No wrap: the center padding on the portrait block is meaningful and
     // `Wrap { trim: true }` would strip it.
     frame.render_widget(Paragraph::new(lines), area);

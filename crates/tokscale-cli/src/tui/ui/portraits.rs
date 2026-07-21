@@ -55,19 +55,23 @@ pub(super) fn family_color(app: &App, family: OverviewFamily) -> Color {
     app.theme.color(color)
 }
 
-const GPT: &[&str] = &["     ╲", "  (¬‿¬)╮", "   ⁄|~|⁄"];
-const CLAUDE: &[&str] = &["    ✧", "  ╭────╮ ✧", "  (｡•ᴗ•｡)", "   \\∪∪/"];
-const GEMINI: &[&str] = &["  ✦    ✦", "  (◕‿◕)✦", "   /||\\"];
-const GLM: &[&str] = &["   ___", "  (⌐■_■)▤", "   /|  |\\"];
-const DEEPSEEK: &[&str] = &["  ～～～", " (｡•́︿•̀｡)", "   ～|～"];
-const QWEN: &[&str] = &["   ☁", "  (｡•̀ᴗ•́｡)☁", "   /|\\"];
-const KIMI: &[&str] = &["   ☾", "  (｡･ω･｡)☾", "   /|\\"];
-const MINIMAX: &[&str] = &["   /\\  /\\", "  (｡•̀ᴗ•́)◆", "   /|  |\\"];
-const MIMO: &[&str] = &["   ___", "  (｡•ω•｡)¤", "   /|  |\\"];
-const UNKNOWN: &[&str] = &["  [■_■]", "  (•_•)", "   /|\\"];
+/// Overview card artwork uses one fixed three-row visual contract.
+pub(super) const PORTRAIT_HEIGHT: usize = 3;
+type Portrait = [&'static str; PORTRAIT_HEIGHT];
+
+const GPT: Portrait = ["     ╲", "  (¬‿¬)╮", "   ⁄|~|⁄"];
+const CLAUDE: Portrait = ["  ╭────╮ ✧", "  (｡•ᴗ•｡)", "   \\∪∪/"];
+const GEMINI: Portrait = ["  ✦    ✦", "  (◕‿◕)✦", "   /||\\"];
+const GLM: Portrait = ["   ___", "  (⌐■_■)▤", "   /|  |\\"];
+const DEEPSEEK: Portrait = ["  ～～～", " (｡•́︿•̀｡)", "   ～|～"];
+const QWEN: Portrait = ["   ☁", "  (｡•̀ᴗ•́｡)☁", "   /|\\"];
+const KIMI: Portrait = ["   ☾", "  (｡･ω･｡)☾", "   /|\\"];
+const MINIMAX: Portrait = ["   /\\  /\\", "  (｡•̀ᴗ•́)◆", "   /|  |\\"];
+const MIMO: Portrait = ["   ___", "  (｡•ω•｡)¤", "   /|  |\\"];
+const UNKNOWN: Portrait = ["  [■_■]", "  (•_•)", "   /|\\"];
 const ROW_PADDING: &str = "                ";
 
-pub(super) fn portrait(family: OverviewFamily) -> &'static [&'static str] {
+pub(super) fn portrait(family: OverviewFamily) -> [&'static str; PORTRAIT_HEIGHT] {
     match family {
         OverviewFamily::Gpt => GPT,
         OverviewFamily::Claude => CLAUDE,
@@ -85,26 +89,24 @@ pub(super) fn portrait(family: OverviewFamily) -> &'static [&'static str] {
 /// Every line is padded on the right to the family block's width so the
 /// artwork's authored left-edge alignment survives per-line centering
 /// (left-padding each line independently was the misalignment bug).
-pub(super) fn lines(app: &App, family: OverviewFamily) -> Vec<Line<'static>> {
+pub(super) fn lines(app: &App, family: OverviewFamily) -> [Line<'static>; PORTRAIT_HEIGHT] {
     styled_lines(family, family_color(app, family))
 }
 
-fn styled_lines(family: OverviewFamily, color: Color) -> Vec<Line<'static>> {
+fn styled_lines(family: OverviewFamily, color: Color) -> [Line<'static>; PORTRAIT_HEIGHT] {
     let art = portrait(family);
     let block_width = art
         .iter()
         .map(|row| UnicodeWidthStr::width(*row))
         .max()
         .unwrap_or(0);
-    art.iter()
-        .map(|row| {
-            let padding_width = block_width - UnicodeWidthStr::width(*row);
-            Line::from(vec![
-                Span::styled(*row, Style::default().fg(color)),
-                Span::raw(&ROW_PADDING[..padding_width]),
-            ])
-        })
-        .collect()
+    art.map(|row| {
+        let padding_width = block_width - UnicodeWidthStr::width(row);
+        Line::from(vec![
+            Span::styled(row, Style::default().fg(color)),
+            Span::raw(&ROW_PADDING[..padding_width]),
+        ])
+    })
 }
 
 #[cfg(test)]
@@ -112,7 +114,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn portrait_lines_share_one_block_width_per_family() {
+    fn portrait_lines_have_fixed_height_and_equal_display_width() {
         for family in [
             OverviewFamily::Gpt,
             OverviewFamily::Claude,
@@ -131,14 +133,10 @@ mod tests {
                 .map(|row| UnicodeWidthStr::width(*row))
                 .max()
                 .unwrap();
-            assert!(
-                art.iter().all(|row| UnicodeWidthStr::width(*row) <= width),
-                "portrait rows must fit the block width"
-            );
             assert!(width <= 16, "portrait too wide for the column: {width}");
 
             let lines = styled_lines(family, Color::White);
-            assert_eq!(lines.len(), art.len());
+            assert_eq!(lines.len(), PORTRAIT_HEIGHT);
             assert!(lines.iter().all(|line| line.width() == width));
             assert!(
                 lines.iter().all(|line| line.spans.len() == 2),
