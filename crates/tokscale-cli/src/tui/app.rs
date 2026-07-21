@@ -9,9 +9,8 @@ use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use tokscale_core::{
-    ordered_clients_by_token_contribution,
-    pricing::{DIAGNOSTIC_PRICING_UNAVAILABLE, DIAGNOSTIC_USING_CACHED_PRICING},
-    ClientContributionOrder, ClientId,
+    ordered_clients_by_token_contribution, pricing::PricingStatus, ClientContributionOrder,
+    ClientId,
 };
 
 use ratatui::style::Color;
@@ -191,41 +190,12 @@ enum StatusMessageKind {
     LocalReport,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum PricingStatus {
-    #[default]
-    Available,
-    AvailableWithWarnings,
-    CachedFallback,
-    Unavailable,
-}
-
-impl PricingStatus {
-    fn from_diagnostics(diagnostics: &[String]) -> Self {
-        if diagnostics
-            .iter()
-            .any(|line| line.starts_with(DIAGNOSTIC_PRICING_UNAVAILABLE))
-        {
-            Self::Unavailable
-        } else if diagnostics
-            .iter()
-            .any(|line| line.starts_with(DIAGNOSTIC_USING_CACHED_PRICING))
-        {
-            Self::CachedFallback
-        } else if diagnostics.is_empty() {
-            Self::Available
-        } else {
-            Self::AvailableWithWarnings
-        }
-    }
-
-    fn warning(self) -> Option<&'static str> {
-        match self {
-            Self::Available => None,
-            Self::AvailableWithWarnings => Some("Pricing warnings; some costs may be missing"),
-            Self::CachedFallback => Some("Pricing refresh failed; using cached rates"),
-            Self::Unavailable => Some("Pricing unavailable; costs may be missing"),
-        }
+fn pricing_warning(status: PricingStatus) -> Option<&'static str> {
+    match status {
+        PricingStatus::Available => None,
+        PricingStatus::AvailableWithWarnings => Some("Pricing warnings; some costs may be missing"),
+        PricingStatus::CachedFallback => Some("Pricing refresh failed; using cached rates"),
+        PricingStatus::Unavailable => Some("Pricing unavailable; costs may be missing"),
     }
 }
 
@@ -927,7 +897,7 @@ impl App {
     }
 
     pub(crate) fn pricing_warning(&self) -> Option<&'static str> {
-        self.pricing_status.warning()
+        pricing_warning(self.pricing_status)
     }
 
     fn refresh_current_tab_if_overdue(&mut self) {
@@ -4886,13 +4856,19 @@ mod tests {
     fn pricing_diagnostics_update_global_cost_status() {
         let mut app = make_app();
 
-        app.set_pricing_diagnostics(&[format!("{DIAGNOSTIC_PRICING_UNAVAILABLE}: network error")]);
+        app.set_pricing_diagnostics(&[format!(
+            "{}: network error",
+            tokscale_core::pricing::DIAGNOSTIC_PRICING_UNAVAILABLE
+        )]);
         assert_eq!(
             app.pricing_warning(),
             Some("Pricing unavailable; costs may be missing")
         );
 
-        app.set_pricing_diagnostics(&[format!("{DIAGNOSTIC_USING_CACHED_PRICING}: network error")]);
+        app.set_pricing_diagnostics(&[format!(
+            "{}: network error",
+            tokscale_core::pricing::DIAGNOSTIC_USING_CACHED_PRICING
+        )]);
         assert_eq!(
             app.pricing_warning(),
             Some("Pricing refresh failed; using cached rates")

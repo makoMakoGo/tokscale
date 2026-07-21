@@ -22,11 +22,10 @@ mod aggregate;
 pub mod usage_views;
 
 pub use aggregate::{
-    aggregate_by_period, aggregate_by_weekday, build_contribution_graph,
-    build_contribution_graph_for_today, build_period_usage, calculate_streaks,
-    calculate_streaks_for_today, calculate_summary, calculate_years, find_peak_hour, AgentUsage,
-    AggregatedViews, AggregationConfig, DateRange, PeriodBucket, TuiAcc, TuiSessionEntry,
-    TuiSessionTokens, ViewSet, WeekdayBucket, UNKNOWN_WORKSPACE_LABEL,
+    aggregate_by_period, build_contribution_graph, build_contribution_graph_for_today,
+    build_period_usage, calculate_streaks, calculate_streaks_for_today, calculate_summary,
+    calculate_years, find_peak_hour, AgentUsage, AggregatedViews, AggregationConfig, DateRange,
+    PeriodBucket, TuiAcc, TuiSessionEntry, TuiSessionTokens, ViewSet, UNKNOWN_WORKSPACE_LABEL,
 };
 pub use clients::{
     cline_session_data_dir_with_env_strategy, warp_sqlite_roots_with_env_strategy, ClientCounts,
@@ -538,6 +537,10 @@ pub struct GraphMeta {
     pub date_range_start: String,
     pub date_range_end: String,
     pub processing_time_ms: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pricing_status: Option<pricing::PricingStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pricing_diagnostics: pricing::PricingDiagnostics,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1312,16 +1315,19 @@ pub async fn get_time_metrics_report(
     Ok(report)
 }
 
+/// Generate a usage graph without making pricing a report-availability gate.
+///
+/// A failed pricing refresh uses an older cache when available. Without any
+/// pricing data, token usage is still returned, affected costs remain zero,
+/// and [`GraphMeta::pricing_status`] plus diagnostics expose the condition.
 pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, LocalReportError> {
-    let pricing = pricing::PricingService::get_or_init().await?;
-    generate_graph_with_loaded_pricing(options, Some(&pricing)).await
-}
-
-pub async fn generate_local_graph_report(
-    options: ReportOptions,
-) -> Result<GraphResult, LocalReportError> {
-    let pricing = load_pricing_for_local_parse().await;
-    generate_graph_with_loaded_pricing(options, pricing.as_deref()).await
+    let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
+    let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
+    let pricing_status = pricing::PricingStatus::from_diagnostics(&pricing_diagnostics);
+    let mut graph = generate_graph_with_loaded_pricing(options, pricing.as_deref()).await?;
+    graph.meta.pricing_status = Some(pricing_status);
+    graph.meta.pricing_diagnostics = pricing_diagnostics;
+    Ok(graph)
 }
 
 // Test-only thin wrappers exposing the live aggregation logic with a message
@@ -1640,71 +1646,6 @@ pub fn load_prepared_usage_data_with_pricing(
     Ok(data)
 }
 
-#[derive(Debug)]
-pub struct UsageDataWithDiagnostics {
-    pub data: usage_views::UsageData,
-    pub pricing_diagnostics: pricing::PricingDiagnostics,
-    pub source_inventory_signature: SourceInventorySignature,
-    pub health: DataHealth,
-}
-
-pub async fn load_usage_data_with_diagnostics(
-    options: LocalParseOptions,
-    group_by: GroupBy,
-) -> Result<UsageDataWithDiagnostics, LocalReportError> {
-    let prepared = prepare_local_sources(options)?;
-    load_prepared_usage_data_with_diagnostics(prepared, group_by).await
-}
-
-pub async fn load_prepared_usage_data_with_diagnostics(
-    prepared: PreparedLocalSources,
-    group_by: GroupBy,
-) -> Result<UsageDataWithDiagnostics, LocalReportError> {
-    let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
-    let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
-    let date_range = DateRange {
-        since: prepared.options.since.clone(),
-        until: prepared.options.until.clone(),
-        year: prepared.options.year.clone(),
-    };
-    let (mut views, source_inventory_signature) = load_prepared_aggregated_views(
-        prepared,
-        group_by,
-        date_range,
-        ViewSet::TUI,
-        pricing.as_deref(),
-    )?;
-    let mut data = views.tui_usage.take().expect("tui view requested");
-    data.health = views.health.to_report();
-    Ok(UsageDataWithDiagnostics {
-        data,
-        pricing_diagnostics,
-        source_inventory_signature,
-        health: views.health,
-    })
-}
-
-pub async fn load_usage_data(
-    options: LocalParseOptions,
-    group_by: GroupBy,
-) -> Result<usage_views::UsageData, LocalReportError> {
-    let prepared = prepare_local_sources(options)?;
-    let pricing = load_pricing_for_local_parse().await;
-    load_prepared_usage_data_with_pricing(prepared, group_by, pricing.as_deref())
-}
-
-/// The canonical TUI usage accumulator (finest-granularity, group-independent
-/// fold state) plus the load diagnostics the single-shot entry points
-/// surface. Group-by views are projected from it in memory via
-/// [`TuiAcc::project`], so switching the TUI grouping does not rescan,
-/// reparse, or reprice local sources (issue #161).
-pub struct UsageAccumulatorWithDiagnostics {
-    pub accumulator: TuiAcc,
-    pub pricing_diagnostics: pricing::PricingDiagnostics,
-    pub source_inventory_signature: SourceInventorySignature,
-    pub health: DataHealth,
-}
-
 /// The complete TUI-local projection produced by one source fold. Usage
 /// groupings are projected lazily from `accumulator`; Sessions data and source
 /// sizes are materialized alongside it without retaining raw messages or
@@ -1717,55 +1658,6 @@ pub struct TuiBundleWithDiagnostics {
     pub pricing_diagnostics: pricing::PricingDiagnostics,
     pub source_inventory_signature: SourceInventorySignature,
     pub health: DataHealth,
-}
-
-pub async fn load_usage_accumulator_with_diagnostics(
-    options: LocalParseOptions,
-) -> Result<UsageAccumulatorWithDiagnostics, LocalReportError> {
-    let prepared = prepare_local_sources(options)?;
-    load_prepared_usage_accumulator_with_diagnostics(prepared).await
-}
-
-pub async fn load_prepared_usage_accumulator_with_diagnostics(
-    prepared: PreparedLocalSources,
-) -> Result<UsageAccumulatorWithDiagnostics, LocalReportError> {
-    let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
-    let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
-    let date_range = DateRange {
-        since: prepared.options.since.clone(),
-        until: prepared.options.until.clone(),
-        year: prepared.options.year.clone(),
-    };
-    let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
-        // The fold is group-independent; the grouping only enters through
-        // `TuiAcc::project`, which the accumulator's caller drives.
-        group_by: GroupBy::default(),
-        date_range,
-        views: ViewSet::TUI,
-    });
-    let FoldOutcome {
-        source_inventory_signature,
-        health,
-        ..
-    } = match stream_local_sources_into_engine(prepared, pricing.as_deref(), &mut engine) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            drop(engine);
-            sessions::intern::prune_dead();
-            return Err(error);
-        }
-    };
-    let accumulator = engine.into_tui_accumulator().expect("tui view requested");
-    // Same lifecycle seam as `load_prepared_aggregated_views`: the stream has
-    // dropped every source message, and the accumulator holds strong refs to
-    // the identities it still needs, so dead weak indices can be reclaimed.
-    sessions::intern::prune_dead();
-    Ok(UsageAccumulatorWithDiagnostics {
-        accumulator,
-        pricing_diagnostics,
-        source_inventory_signature,
-        health,
-    })
 }
 
 pub async fn load_prepared_tui_bundle_with_diagnostics(

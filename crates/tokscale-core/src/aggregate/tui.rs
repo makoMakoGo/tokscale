@@ -360,13 +360,6 @@ pub struct PeriodBucket {
     pub total_tokens: u64,
 }
 
-/// Weekday bucket for the profile view.
-#[derive(Debug, Clone)]
-pub struct WeekdayBucket {
-    pub day: &'static str,
-    pub total_tokens: u64,
-}
-
 pub fn aggregate_by_period(hourly: &[HourlyUsage]) -> Vec<PeriodBucket> {
     let periods: [(&str, &str, Vec<usize>); 4] = [
         ("Morning", "05:00-11:59", (5..=11).collect()),
@@ -391,33 +384,6 @@ pub fn aggregate_by_period(hourly: &[HourlyUsage]) -> Vec<PeriodBucket> {
                 hour_range,
                 total_tokens,
             }
-        })
-        .collect()
-}
-
-pub fn aggregate_by_weekday(hourly: &[HourlyUsage]) -> Vec<WeekdayBucket> {
-    let weekdays = [
-        "Monday",
-        "Tuesday",
-        "Wednesday",
-        "Thursday",
-        "Friday",
-        "Saturday",
-        "Sunday",
-    ];
-    let mut buckets: Vec<u64> = vec![0; 7];
-    for entry in hourly {
-        let weekday = entry.datetime.weekday().num_days_from_monday() as usize;
-        buckets[weekday] = buckets[weekday]
-            .checked_add(entry.tokens.total())
-            .expect("weekday token total exceeds u64::MAX");
-    }
-    weekdays
-        .iter()
-        .enumerate()
-        .map(|(i, day)| WeekdayBucket {
-            day,
-            total_tokens: buckets[i],
         })
         .collect()
 }

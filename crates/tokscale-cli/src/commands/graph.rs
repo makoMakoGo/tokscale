@@ -80,6 +80,10 @@ pub(crate) struct GraphExportMeta {
     generated_at: String,
     version: String,
     date_range: GraphDateRange,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pricing_status: Option<tokscale_core::pricing::PricingStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pricing_diagnostics: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -111,6 +115,8 @@ pub(crate) fn to_graph_export_data(graph: &tokscale_core::GraphResult) -> GraphE
                 start: graph.meta.date_range_start.clone(),
                 end: graph.meta.date_range_end.clone(),
             },
+            pricing_status: graph.meta.pricing_status,
+            pricing_diagnostics: graph.meta.pricing_diagnostics.clone(),
         },
         summary: GraphDataSummary {
             total_tokens: graph.summary.total_tokens,
@@ -200,7 +206,7 @@ pub(crate) fn run_graph_command(
 ) -> Result<()> {
     use colored::Colorize;
     use std::time::Instant;
-    use tokscale_core::{generate_local_graph_report, GroupBy, ReportOptions};
+    use tokscale_core::{generate_graph, GroupBy, ReportOptions};
 
     let show_progress = output.is_some() && !no_spinner;
 
@@ -217,7 +223,7 @@ pub(crate) fn run_graph_command(
     let rt = tokio::runtime::Runtime::new()?;
     let graph_result = rt
         .block_on(async {
-            generate_local_graph_report(ReportOptions {
+            generate_graph(ReportOptions {
                 home_dir: home_dir.clone(),
                 use_env_roots,
                 clients,
@@ -231,6 +237,9 @@ pub(crate) fn run_graph_command(
         })
         .map_err(anyhow::Error::new)?;
     super::shared::emit_health_summary(&graph_result.health);
+    for diagnostic in &graph_result.meta.pricing_diagnostics {
+        eprintln!("{diagnostic}");
+    }
 
     let processing_time_ms = start.elapsed().as_millis() as u32;
     let output_data = to_graph_export_data(&graph_result);
@@ -294,6 +303,8 @@ mod tests {
                 date_range_start: "2026-07-14".to_string(),
                 date_range_end: "2026-07-14".to_string(),
                 processing_time_ms: 0,
+                pricing_status: Some(tokscale_core::pricing::PricingStatus::CachedFallback),
+                pricing_diagnostics: vec!["cached pricing".to_string()],
             },
             summary: tokscale_core::DataSummary {
                 total_tokens: 0,
@@ -333,5 +344,13 @@ mod tests {
         assert_eq!(json["health"]["rejectedRecords"], 2);
         assert_eq!(json["health"]["partialSources"], 1);
         assert_eq!(json["health"]["sourceDataBytes"], 12_345);
+        assert_eq!(
+            json["data"]["meta"]["pricingStatus"],
+            serde_json::json!("cachedFallback")
+        );
+        assert_eq!(
+            json["data"]["meta"]["pricingDiagnostics"],
+            serde_json::json!(["cached pricing"])
+        );
     }
 }

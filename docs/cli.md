@@ -144,6 +144,25 @@ tokscale graph --no-spinner --output graph.json
 Without `--output`, the JSON document is stdout. With an output file, stdout
 contains only the final path and operational details use stderr.
 
+Graph usage does not depend on pricing availability. Pricing data is loaded
+once per process; on-disk source caches are valid for one hour, so `graph` does
+not contact pricing sources on every invocation. Missing or expired caches may
+trigger a refresh. If that refresh fails, Tokscale uses an older cache when one
+exists; without any usable pricing, it still emits every token and leaves
+unpriceable cost at `0.0`.
+
+The JSON field `data.meta.pricingStatus` makes that outcome explicit:
+
+| Status | Meaning |
+| --- | --- |
+| `available` | Pricing initialized without diagnostics. |
+| `availableWithWarnings` | Pricing initialized, but one or more non-fatal diagnostics were recorded. |
+| `cachedFallback` | Refresh failed and an older on-disk cache supplied pricing. |
+| `unavailable` | Refresh failed and no cached pricing was available; usage is still complete. |
+
+When diagnostics exist, `data.meta.pricingDiagnostics` contains them and the
+same messages are written to stderr.
+
 Inspect source locations and counts with:
 
 ```bash
