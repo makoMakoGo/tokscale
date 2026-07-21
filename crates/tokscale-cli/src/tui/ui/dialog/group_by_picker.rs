@@ -91,10 +91,8 @@ impl GroupByPickerDialog {
         if changed {
             *self.selected.borrow_mut() = new_value;
             *self.changed.borrow_mut() = true;
-            InteractionOutcome::NeedsReload
-        } else {
-            InteractionOutcome::Handled
         }
+        InteractionOutcome::Handled
     }
 
     fn option_index_at(&self, area: Rect, column: u16, row: u16) -> Option<usize> {

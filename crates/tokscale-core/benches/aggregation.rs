@@ -1,10 +1,11 @@
 use codspeed_criterion_compat::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
 };
+use std::collections::HashSet;
 use std::sync::OnceLock;
 use tokscale_core::{
-    aggregate_unified_messages, build_tui_accumulator, AggregationConfig, DateRange, GroupBy,
-    TokenBreakdown, UnifiedMessage, ViewSet,
+    aggregate_unified_messages, build_tui_accumulator, AggregationConfig, ClientId, DateRange,
+    GroupBy, TokenBreakdown, UnifiedMessage, ViewSet,
 };
 
 const MESSAGE_COUNT: usize = 100_000;
@@ -453,6 +454,36 @@ fn bench_tui_accumulator_project(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_tui_accumulator_project_for_clients(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tui_accumulator_project_for_clients");
+    group.throughput(Throughput::Elements(MESSAGE_COUNT as u64));
+
+    let single_source = HashSet::from([ClientId::Claude]);
+    let multi_source = HashSet::from([ClientId::Claude, ClientId::Codex]);
+    let cases = [
+        ("production_shaped_single_source_model_100k", &single_source),
+        ("production_shaped_multi_source_model_100k", &multi_source),
+    ];
+    let messages = production_shaped_messages();
+
+    for (name, selected) in cases {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(name),
+            &selected,
+            |b, selected| {
+                let accumulator = build_tui_accumulator(messages, DateRange::none());
+                b.iter_batched(
+                    || (),
+                    |_| accumulator.project_for_clients(&GroupBy::Model, black_box(selected)),
+                    BatchSize::PerIteration,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn bench_tui_accumulator_lifecycle(c: &mut Criterion) {
     let mut group = c.benchmark_group("tui_accumulator_lifecycle");
     group.throughput(Throughput::Elements(MESSAGE_COUNT as u64));
@@ -514,6 +545,7 @@ criterion_group!(
     bench_aggregation_engine,
     bench_tui_accumulator_build,
     bench_tui_accumulator_project,
+    bench_tui_accumulator_project_for_clients,
     bench_tui_accumulator_lifecycle
 );
 criterion_main!(benches);

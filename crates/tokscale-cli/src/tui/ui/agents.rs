@@ -314,9 +314,9 @@ fn agents_table_layout(
 }
 
 fn get_empty_message(app: &App) -> String {
-    let enabled_clients = app.enabled_clients.borrow();
-    let only_codex = !enabled_clients.is_empty()
-        && enabled_clients
+    let selected_clients = app.selected_clients.borrow();
+    let only_codex = !selected_clients.is_empty()
+        && selected_clients
             .iter()
             .all(|client| *client == ClientId::Codex);
 
@@ -383,7 +383,7 @@ mod tests {
         )
         .unwrap();
 
-        *app.enabled_clients.borrow_mut() = clients.into_iter().collect();
+        *app.selected_clients.borrow_mut() = clients.into_iter().collect();
         app
     }
 

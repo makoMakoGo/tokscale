@@ -2,10 +2,10 @@
 
 Status: Accepted
 
-ADR 0020 refines source failure containment, input-dependency completeness,
-snapshot revalidation, and usage identity. This ADR continues to own the
-single-copy pipeline, cache-envelope/pruning contract, and the schema 39 TUI
-snapshot-bundle lifecycle.
+ADR 0020 owns source failure containment, input-dependency completeness,
+snapshot revalidation, and usage identity. ADR 0028 owns the fixed TUI source
+universe and session-local source selection. This ADR owns the single-copy
+pipeline, cache-envelope/pruning contract, and atomic TUI generation lifecycle.
 
 ## Context
 
@@ -69,12 +69,14 @@ The parse pipeline must hold at most one owned copy of any message.
   and the session projection; a full `Vec<UnifiedMessage>` is not part of this
   path. APIs whose explicit public contract returns all messages remain
   unchanged.
-- Schema 39 stores one immutable TUI generation containing its manifest,
-  session projection, and every exposed Group By usage projection in one atomic
-  JSON bundle. The writer serializes borrowed views through a buffered temporary
-  file and publishes the complete generation with one rename. A reader pins the
-  opened bundle inode, so a grouping switch cannot mix data from different
-  refreshes even while a newer generation is being published.
+- Schema 41 stores one immutable TUI generation containing its manifest,
+  session projection, source-aware canonical aggregate, and every exposed
+  Group By usage projection in one atomic JSON bundle. The writer serializes
+  borrowed views through a buffered temporary file and publishes the complete
+  generation with one rename. The bundle carries a SHA-256 digest for the
+  canonical aggregate, which startup verifies before accepting the generation.
+  A reader pins the opened bundle inode, so a view switch cannot mix data from
+  different refreshes even while a newer generation is being published.
 - Startup treats that generation as one logical bundle. A fresh bundle serves
   every tab, including Sessions, without scanning sources. A stale bundle
   remains wholly visible while one background fold prepares its replacement.
@@ -84,10 +86,11 @@ The parse pipeline must hold at most one owned copy of any message.
   sessions, and every Group By projection with one generation. A failed
   refresh preserves the prior complete generation and reports an explicit
   degraded state; it never publishes a partially refreshed mix.
-- The normal steady-state TUI retains the pinned on-disk projections, not the
-  fine-grained `TuiAcc`. If generation persistence fails, the TUI reports that
-  failure and may explicitly retain the in-memory accumulator as a degraded
-  projection backend so Group By remains usable.
+- The normal full-universe TUI retains the pinned eager projections and loads
+  the persisted fine-grained `TuiAcc` lazily only when a proper source subset
+  is requested. If generation persistence fails, the TUI reports that failure
+  and may explicitly retain the in-memory accumulator as a degraded projection
+  backend so Group By and Source filtering remain usable.
 - On Linux/glibc the TUI bounds the allocator to one arena before it starts
   worker threads, then trims after transient fold state is dropped and after a
   snapshot is replaced. This prevents short-lived background folds from
@@ -175,9 +178,9 @@ The parse pipeline must hold at most one owned copy of any message.
 - Serialization layout changes bump `CACHE_FORMAT_VERSION`; parser-only
   changes bump the relevant parser revision. The shard envelope stores a
   fixed magic and format version before the bincode header. Ordinary reads
-  accept only v4; explicit pruning recognizes the frozen v1, v2, and v3
-  envelopes only for deletion. Unknown, future, or malformed-current envelopes
-  stop classification before deletion.
+  accept only v7; explicit pruning recognizes classified v1 through v6 shards
+  only for deletion. Unknown, future, or malformed-current envelopes stop
+  classification before deletion.
 
 ADR 0018 implements the planned streaming follow-up with a bounded ordered
 source-fold pipeline. Aggregation paths no longer retain adapter-wide parsed
@@ -191,21 +194,20 @@ that final output.
 - The total serialized shard payload shrinks roughly in half (no date
   strings, no string dedup keys, interned strings still serialize as strings).
 - Cache layout changes cause a one-time shard rebuild after the format bump.
-  Old v2 files remain until explicit prune, so disk usage can temporarily
-  include both layouts.
+  Legacy v1 through v6 files remain until explicit prune, so disk usage can
+  temporarily include multiple layouts.
 - A corrupt generic shard produces one visible warning and a same-run source
   reparse instead of silently suppressing usage. Normal exact hits still read
   no source bytes and do not eagerly materialize adapter-wide cache bodies.
-- TUI cache schema 26 requires `sourceInventorySignature`; schema 25 and cache
-  documents missing the field are explicit misses and rebuild once. The marker
-  advanced with the OpenCode current-format transition so retired JSON-derived
-  aggregates cannot remain visible.
-- TUI cache schema 39 replaces the earlier single-projection cache with one
-  atomic multi-projection bundle. Older schemas are explicit misses and rebuild once;
-  a fresh schema 39 hit no longer causes a Sessions-only background scan.
-- Group By normally reads one projection from the already pinned generation,
-  while steady-state memory holds only the active view and session snapshot.
-  Refresh failure leaves the previous cross-tab snapshot coherent and visible.
+- The TUI accepts only schema 41 generation bundles. Any other schema or a
+  bundle missing its inventory signature, canonical source-aware aggregate, or
+  canonical digest is an explicit miss and rebuilds once. An accepted bundle
+  supports Source and Group By projection without a background scan.
+- The full-universe TUI normally reads one projection from the pinned
+  generation while steady-state memory holds only the active view and session
+  snapshot. Selecting a source subset lazily loads canonical aggregate state
+  and retains it for later local projections. Refresh failure leaves the
+  previous cross-tab snapshot coherent and visible.
 - Code touching `UnifiedMessage.date` or `dedup_key` as `String` must go
   through the new accessors; new parsers must intern identity fields.
 - High-cardinality scans no longer leave the interner strongly retaining every

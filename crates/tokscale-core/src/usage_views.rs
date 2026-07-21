@@ -11,13 +11,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{NaiveDate, NaiveDateTime};
+use serde::{Deserialize, Serialize};
 
 use crate::ModelPerformance;
 
 /// Sanitized token breakdown with non-negative `u64` fields. Distinct from the
 /// core parsed `TokenBreakdown` (`i64`), which can carry negative/placeholder
 /// values from parsers.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageTokenBreakdown {
     pub input: u64,
     pub output: u64,

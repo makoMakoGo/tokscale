@@ -49,7 +49,7 @@ pub(crate) fn render_with_state(frame: &mut Frame, app: &mut App, state: &mut Vi
 
     header::render(frame, app, chunks[0]);
 
-    if app.is_blocking_loading() || (app.data.loading && !app.background_loading) {
+    if app.data.loading && !app.background_loading {
         render_loading(frame, app, chunks[1]);
     } else if let Some(ref error) = app.data.error {
         render_error(frame, app, chunks[1], error);

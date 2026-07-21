@@ -123,7 +123,6 @@ impl DialogStack {
                 self.close();
                 InteractionOutcome::Close
             }
-            DialogResult::NeedsReload => InteractionOutcome::NeedsReload,
         }
     }
 }

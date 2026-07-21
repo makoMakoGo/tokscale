@@ -131,10 +131,12 @@ impl SessionSnapshot {
             .map(|index| &self.sessions[*index])
     }
 
+    #[cfg(test)]
     pub(crate) fn source_count(&self) -> usize {
         self.source_summaries.len()
     }
 
+    #[cfg(test)]
     pub(crate) fn session_count(&self) -> usize {
         self.sessions.len()
     }

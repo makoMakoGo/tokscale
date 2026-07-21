@@ -60,13 +60,23 @@ pub(crate) enum KeyEventOutcome {
 pub(crate) enum ProjectionBackend {
     Cache(ProjectionStore),
     Memory(tokscale_core::TuiAcc),
+    #[cfg(test)]
+    Failing(&'static str),
 }
 
 impl ProjectionBackend {
-    pub(crate) fn project(&mut self, group_by: &tokscale_core::GroupBy) -> Result<UsageData> {
+    pub(crate) fn project(
+        &mut self,
+        group_by: &tokscale_core::GroupBy,
+        selected_clients: &HashSet<ClientId>,
+    ) -> Result<UsageData> {
         match self {
-            Self::Cache(store) => store.project(group_by),
-            Self::Memory(accumulator) => Ok(accumulator.project(group_by)),
+            Self::Cache(store) => store.project(group_by, selected_clients),
+            Self::Memory(accumulator) => {
+                Ok(accumulator.project_for_clients(group_by, selected_clients))
+            }
+            #[cfg(test)]
+            Self::Failing(diagnostic) => anyhow::bail!(*diagnostic),
         }
     }
 }
@@ -394,8 +404,12 @@ pub struct App {
     pub data: UsageData,
     pub data_loader: DataLoader,
 
-    /// Set of clients currently selected in the source picker.
-    pub enabled_clients: Rc<RefCell<HashSet<ClientId>>>,
+    /// Immutable acquisition boundary chosen when this TUI process starts.
+    /// Cache identity, digest probes, and every refresh use this set.
+    pub(crate) source_universe: HashSet<ClientId>,
+    /// Session-local view filter. The source picker may only choose a subset
+    /// of `source_universe`; it never changes scanner inputs or cache identity.
+    pub selected_clients: Rc<RefCell<HashSet<ClientId>>>,
     pub group_by: Rc<RefCell<tokscale_core::GroupBy>>,
     /// Projections and Sessions are installed as one immutable generation.
     pub(crate) projection_backend: Option<ProjectionBackend>,
@@ -404,6 +418,9 @@ pub struct App {
     /// The grouping the currently loaded `data` was projected with. It stays
     /// paired with `data` for exports while a replacement snapshot is pending.
     pub data_group_by: tokscale_core::GroupBy,
+    /// The source selection paired atomically with the currently installed
+    /// `data` projection. Used to roll back a failed local projection.
+    pub data_clients: HashSet<ClientId>,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
     tab_sort_state: HashMap<Tab, (SortField, SortDirection)>,
@@ -446,8 +463,6 @@ pub struct App {
 
     pub background_loading: bool,
 
-    pub blocking_loading: bool,
-
     pub needs_reload: bool,
 
     /// Forces the next background reload to skip the source-digest probe
@@ -460,7 +475,7 @@ pub struct App {
 
     pub dialog_stack: DialogStack,
 
-    pub dialog_needs_reload: Rc<RefCell<bool>>,
+    pub dialog_source_changed: Rc<RefCell<bool>>,
     pub dialog_group_changed: Rc<RefCell<bool>>,
 
     pub hourly_view_mode: HourlyViewMode,
@@ -507,7 +522,7 @@ impl App {
         };
         let theme = Theme::from_name_for_current_terminal(theme_name);
 
-        let enabled_clients: HashSet<ClientId> = if let Some(ref cli_clients) = config.clients {
+        let source_universe: HashSet<ClientId> = if let Some(ref cli_clients) = config.clients {
             // CLI-provided filter list. Each entry is the canonical
             // lowercase client id.
             cli_clients
@@ -547,7 +562,7 @@ impl App {
         let data = cached_data.unwrap_or_default();
         let has_data = !data.models.is_empty();
         let dialog_stack = DialogStack::new(theme.clone());
-        let dialog_needs_reload = Rc::new(RefCell::new(false));
+        let dialog_source_changed = Rc::new(RefCell::new(false));
         let dialog_group_changed = Rc::new(RefCell::new(false));
         let requested_tab = config.initial_tab.unwrap_or(Tab::Overview);
         if !Self::tab_visible(&settings, requested_tab) {
@@ -565,12 +580,14 @@ impl App {
             settings,
             data,
             data_loader,
-            enabled_clients: Rc::new(RefCell::new(enabled_clients)),
+            source_universe: source_universe.clone(),
+            selected_clients: Rc::new(RefCell::new(source_universe.clone())),
             group_by: Rc::new(RefCell::new(super::cache::TUI_DEFAULT_GROUP_BY)),
             projection_backend: None,
             session_snapshot: SessionSnapshot::default(),
             session_projection_status: SessionProjectionStatus::Pending,
             data_group_by: super::cache::TUI_DEFAULT_GROUP_BY,
+            data_clients: source_universe,
             sort_field,
             sort_direction,
             tab_sort_state: HashMap::new(),
@@ -612,12 +629,11 @@ impl App {
             click_areas: Vec::new(),
             spinner_frame: 0,
             background_loading: false,
-            blocking_loading: false,
             needs_reload: false,
             reload_force: false,
             last_source_digest: None,
             dialog_stack,
-            dialog_needs_reload,
+            dialog_source_changed,
             dialog_group_changed,
             hourly_view_mode: HourlyViewMode::default(),
             model_shade_map: HashMap::new(),
@@ -648,16 +664,11 @@ impl App {
 
     pub fn set_background_loading(&mut self, loading: bool) {
         self.background_loading = loading;
-        if !loading {
-            self.blocking_loading = false;
-        }
         // Don't set data.loading - let cached data remain visible during background refresh
     }
 
-    pub fn request_blocking_reload(&mut self) {
-        self.needs_reload = true;
-        self.reload_force = true;
-        self.blocking_loading = true;
+    pub fn has_installed_generation(&self) -> bool {
+        self.projection_backend.is_some()
     }
 
     pub fn has_enabled_subscription_providers(&self) -> bool {
@@ -671,53 +682,62 @@ impl App {
         self.last_refresh = now;
     }
 
-    pub fn is_blocking_loading(&self) -> bool {
-        self.blocking_loading
-            || (!self.dialog_stack.is_active() && *self.dialog_needs_reload.borrow())
-    }
-
-    fn consume_dialog_reload_if_ready(&mut self) {
+    fn consume_dialog_changes_if_ready(&mut self) {
         if self.dialog_stack.is_active() {
             return;
         }
-        let source_reload = std::mem::take(&mut *self.dialog_needs_reload.borrow_mut());
+        let source_changed = std::mem::take(&mut *self.dialog_source_changed.borrow_mut());
         let group_changed = std::mem::take(&mut *self.dialog_group_changed.borrow_mut());
 
-        if source_reload {
-            self.request_blocking_reload();
-            return;
-        }
-        if group_changed {
-            self.apply_selected_group_by();
+        if source_changed || group_changed {
+            self.apply_selected_projection(source_changed, group_changed);
         }
     }
 
-    fn apply_selected_group_by(&mut self) {
+    fn apply_selected_projection(&mut self, source_changed: bool, group_changed: bool) {
         let group_by = self.group_by.borrow().clone();
+        let selected_clients = self.selected_clients.borrow().clone();
+        if !selected_clients.is_subset(&self.source_universe) || selected_clients.is_empty() {
+            *self.selected_clients.borrow_mut() = self.data_clients.clone();
+            *self.group_by.borrow_mut() = self.data_group_by.clone();
+            self.set_status("Source selection is outside the loaded source universe");
+            return;
+        }
+        if selected_clients == self.data_clients && group_by == self.data_group_by {
+            return;
+        }
         let Some(backend) = self.projection_backend.as_mut() else {
-            if self.background_loading {
-                self.set_status("Group By will apply when data finishes loading");
-                return;
-            }
-            self.request_blocking_reload();
+            *self.selected_clients.borrow_mut() = self.data_clients.clone();
+            *self.group_by.borrow_mut() = self.data_group_by.clone();
+            self.set_status("Local reports are not loaded yet");
             return;
         };
 
-        let mut data = match backend.project(&group_by) {
+        let mut data = match backend.project(&group_by, &selected_clients) {
             Ok(data) => data,
             Err(error) => {
-                let diagnostic = format!("Group By projection failed: {error:#}");
-                self.set_error(Some(diagnostic.clone()));
+                let operation = if source_changed && !group_changed {
+                    "Source projection"
+                } else {
+                    "Group By projection"
+                };
+                let diagnostic = format!("{operation} failed: {error:#}");
+                *self.selected_clients.borrow_mut() = self.data_clients.clone();
+                *self.group_by.borrow_mut() = self.data_group_by.clone();
                 self.set_status(&diagnostic);
-                self.request_blocking_reload();
                 return;
             }
         };
         data.health = self.data.health.clone();
         data.error = self.data.error.clone();
-        self.update_data(data);
+        self.update_projected_data(data);
         self.data_group_by = group_by.clone();
-        self.set_local_report_status(&format!("Regrouped by {group_by}"));
+        self.data_clients = selected_clients;
+        if source_changed && !group_changed {
+            self.set_local_report_status("Sources filtered locally");
+        } else {
+            self.set_local_report_status(&format!("Regrouped by {group_by}"));
+        }
     }
 
     fn graph_cell_for_date(&self, date: NaiveDate) -> Option<(usize, usize)> {
@@ -762,19 +782,26 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub fn update_data(&mut self, data: UsageData) {
-        self.replace_usage_data(data);
+        self.replace_usage_data(data, true);
         super::data::trim_allocator();
     }
 
-    fn replace_usage_data(&mut self, data: UsageData) {
+    fn update_projected_data(&mut self, data: UsageData) {
+        self.replace_usage_data(data, false);
+        super::data::trim_allocator();
+    }
+
+    fn replace_usage_data(&mut self, data: UsageData, mark_refresh: bool) {
         let had_graph_selection = self.selected_graph_cell.is_some();
         let selected_graph_date = self
             .selected_graph_cell
             .and_then(|cell| self.graph_date_for_cell(cell));
         drop(std::mem::replace(&mut self.data, data));
-        let now = Instant::now();
-        self.last_refresh = now;
+        if mark_refresh {
+            self.last_refresh = Instant::now();
+        }
         self.build_model_shade_map();
         if had_graph_selection {
             self.selected_graph_cell =
@@ -818,7 +845,7 @@ impl App {
         projection_backend: ProjectionBackend,
         group_by: tokscale_core::GroupBy,
     ) {
-        self.replace_usage_data(data);
+        self.replace_usage_data(data, true);
         drop(std::mem::replace(
             &mut self.session_snapshot,
             SessionSnapshot::new(sessions, source_space),
@@ -826,6 +853,7 @@ impl App {
         drop(self.projection_backend.replace(projection_backend));
         self.session_projection_status = SessionProjectionStatus::Ready;
         self.data_group_by = group_by;
+        self.data_clients = self.selected_clients.borrow().clone();
         super::data::trim_allocator();
     }
 
@@ -934,7 +962,7 @@ impl App {
 
         self.refresh_current_tab_if_overdue();
 
-        self.consume_dialog_reload_if_ready();
+        self.consume_dialog_changes_if_ready();
 
         // Poll background usage fetch
         if let Some(ref rx) = self.usage_rx {
@@ -984,7 +1012,7 @@ impl App {
 
         if self.dialog_stack.is_active() {
             self.dialog_stack.handle_key(key);
-            self.consume_dialog_reload_if_ready();
+            self.consume_dialog_changes_if_ready();
             return KeyEventOutcome::Continue;
         }
 
@@ -1183,7 +1211,7 @@ impl App {
     pub fn handle_mouse_event(&mut self, event: MouseEvent) {
         if self.dialog_stack.is_active() {
             self.dialog_stack.handle_mouse(event);
-            self.consume_dialog_reload_if_ready();
+            self.consume_dialog_changes_if_ready();
             return;
         }
 
@@ -1729,20 +1757,33 @@ impl App {
     }
 
     fn open_client_picker(&mut self) {
+        if !self.has_installed_generation() {
+            self.set_status("Sources are unavailable until local reports finish loading");
+            return;
+        }
+        let mut sources: Vec<ClientId> = self.source_universe.iter().copied().collect();
+        sources.sort_by_key(|client| *client as usize);
         let dialog = ClientPickerDialog::new(
-            self.enabled_clients.clone(),
-            self.dialog_needs_reload.clone(),
+            sources,
+            self.selected_clients.clone(),
+            self.dialog_source_changed.clone(),
         );
         self.dialog_stack.show(Box::new(dialog));
     }
 
     pub fn scan_clients(&self) -> Vec<ClientId> {
-        let mut out: Vec<ClientId> = self.enabled_clients.borrow().iter().copied().collect();
+        let mut out: Vec<ClientId> = self.source_universe.iter().copied().collect();
         // Stable order for downstream cache key + log output. Sort by the
         // declaration index in ClientId::ALL so the projection mirrors
         // the canonical ordering used elsewhere.
         out.sort_by_key(|c| *c as usize);
         out
+    }
+
+    pub(crate) fn is_source_selected(&self, source: &str) -> bool {
+        let selected = self.selected_clients.borrow();
+        ClientId::from_str(source).is_some_and(|client| selected.contains(&client))
+            || (selected.contains(&ClientId::Claude) && source.starts_with("cc-mirror/"))
     }
 
     /// Group By only reshapes the group-keyed projections (ADR 0026):
@@ -1756,6 +1797,10 @@ impl App {
     }
 
     fn open_group_by_picker(&mut self) {
+        if !self.has_installed_generation() {
+            self.set_status("Group By is unavailable until local reports finish loading");
+            return;
+        }
         use super::ui::dialog::GroupByPickerDialog;
         let dialog =
             GroupByPickerDialog::new(self.group_by.clone(), self.dialog_group_changed.clone());
@@ -2767,13 +2812,39 @@ mod tests {
     #[test]
     fn test_app_no_filter_default_uses_catalog() {
         let app = make_app();
-        let actual = app.enabled_clients.borrow().clone();
+        let actual = app.selected_clients.borrow().clone();
         let expected: HashSet<ClientId> = ClientId::iter().collect();
         assert_eq!(
             actual, expected,
             "no-filter TUI must select exactly the accepted client catalog"
         );
         assert!(actual.contains(&ClientId::Claude));
+        assert_eq!(app.source_universe, expected);
+    }
+
+    #[test]
+    fn explicit_clients_define_an_immutable_source_universe() {
+        let config = TuiConfig {
+            theme: Some("blue".to_string()),
+            refresh: 0,
+            no_refresh: false,
+            home_dir: None,
+            clients: Some(vec!["claude".to_string(), "codex".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            initial_tab: None,
+        };
+        let app = App::new_with_cached_data_and_settings(config, None, test_settings()).unwrap();
+        let expected = HashSet::from([ClientId::Claude, ClientId::Codex]);
+
+        assert_eq!(app.source_universe, expected);
+        assert_eq!(*app.selected_clients.borrow(), expected);
+        assert_eq!(app.data_clients, expected);
+        assert_eq!(
+            app.scan_clients().into_iter().collect::<HashSet<_>>(),
+            expected
+        );
     }
 
     fn make_app_with_models(n: usize) -> App {
@@ -2906,12 +2977,13 @@ mod tests {
     #[test]
     fn test_dialog_ctrl_c_still_global_quit() {
         let mut app = make_app();
+        app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
         app.open_client_picker();
 
         let outcome = app.handle_key_event(key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
         assert_eq!(outcome, KeyEventOutcome::Exit(TuiExit::Interrupted));
-        assert!(!*app.dialog_needs_reload.borrow());
+        assert!(!*app.dialog_source_changed.borrow());
     }
 
     // ── handle_key_event: tab switching ─────────────────────────────
@@ -4108,6 +4180,8 @@ mod tests {
         app.projection_backend = Some(ProjectionBackend::Memory(accumulator));
         *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
         app.data_group_by = tokscale_core::GroupBy::ClientModel;
+        app.last_refresh = Instant::now() - Duration::from_secs(10);
+        let last_refresh = app.last_refresh;
 
         app.handle_key_event(key(KeyCode::Char('g')));
         app.handle_key_event(key(KeyCode::Down));
@@ -4123,8 +4197,7 @@ mod tests {
             .all(|model| model.workspace_key.is_some()));
         assert!(!app.needs_reload);
         assert!(!app.background_loading);
-        assert!(!app.blocking_loading);
-        assert!(!app.is_blocking_loading());
+        assert_eq!(app.last_refresh, last_refresh);
         assert!(!app.data.health.complete);
         assert_eq!(app.data.health.failed_sources, 1);
         assert_eq!(app.data.error.as_deref(), Some("retained error"));
@@ -4153,49 +4226,65 @@ mod tests {
     }
 
     #[test]
-    fn test_group_by_change_without_projection_backend_requests_blocking_reload() {
+    fn test_group_by_is_unavailable_without_an_installed_generation() {
         let mut app = make_app();
         app.current_tab = Tab::Models;
         *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
+
+        app.handle_key_event(key(KeyCode::Char('g')));
+
+        assert_eq!(*app.group_by.borrow(), tokscale_core::GroupBy::ClientModel);
+        assert!(!app.dialog_stack.is_active());
+        assert!(!app.needs_reload);
+        assert!(!app.reload_force);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Group By is unavailable until local reports finish loading")
+        );
+    }
+
+    #[test]
+    fn failed_group_projection_rolls_back_without_requesting_a_scan() {
+        let mut app = make_app();
+        app.current_tab = Tab::Models;
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
+        app.data_group_by = tokscale_core::GroupBy::ClientModel;
+        app.projection_backend = Some(ProjectionBackend::Failing("injected projection failure"));
+        app.data.total_tokens = 42;
 
         app.handle_key_event(key(KeyCode::Char('g')));
         app.handle_key_event(key(KeyCode::Down));
         app.handle_key_event(key(KeyCode::Down));
         app.handle_key_event(key(KeyCode::Enter));
 
-        assert_eq!(
-            *app.group_by.borrow(),
-            tokscale_core::GroupBy::WorkspaceModel
-        );
-        assert!(!app.dialog_stack.is_active());
-        assert!(app.needs_reload);
-        assert!(app.reload_force);
-        assert!(app.blocking_loading);
-        assert!(app.is_blocking_loading());
+        assert_eq!(*app.group_by.borrow(), tokscale_core::GroupBy::ClientModel);
+        assert_eq!(app.data_group_by, tokscale_core::GroupBy::ClientModel);
+        assert_eq!(app.data.total_tokens, 42);
+        assert!(app.projection_backend.is_some());
+        assert!(!app.needs_reload);
+        assert!(!app.reload_force);
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("injected projection failure")));
     }
 
     #[test]
-    fn test_group_by_change_during_cold_load_does_not_queue_a_second_scan() {
+    fn test_group_by_is_unavailable_during_cold_load() {
         let mut app = make_app();
         app.current_tab = Tab::Models;
         app.background_loading = true;
         *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
 
         app.handle_key_event(key(KeyCode::Char('g')));
-        app.handle_key_event(key(KeyCode::Down));
-        app.handle_key_event(key(KeyCode::Down));
-        app.handle_key_event(key(KeyCode::Enter));
 
-        assert_eq!(
-            *app.group_by.borrow(),
-            tokscale_core::GroupBy::WorkspaceModel
-        );
+        assert_eq!(*app.group_by.borrow(), tokscale_core::GroupBy::ClientModel);
+        assert!(!app.dialog_stack.is_active());
         assert!(!app.needs_reload);
         assert!(!app.reload_force);
-        assert!(!app.blocking_loading);
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Group By will apply when data finishes loading")
+            Some("Group By is unavailable until local reports finish loading")
         );
     }
 
@@ -4220,15 +4309,41 @@ mod tests {
     }
 
     #[test]
-    fn test_source_picker_still_requests_forced_reload() {
+    fn test_source_picker_reprojects_without_requesting_reload() {
         let mut app = make_app();
+        app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
+        app.last_refresh = Instant::now() - Duration::from_secs(10);
+        let last_refresh = app.last_refresh;
 
         app.handle_key_event(key(KeyCode::Char('s')));
         app.handle_key_event(key(KeyCode::Enter));
         app.handle_key_event(key(KeyCode::Esc));
 
-        assert!(app.needs_reload);
-        assert!(app.reload_force);
+        assert!(!app.needs_reload);
+        assert!(!app.reload_force);
+        assert_eq!(app.last_refresh, last_refresh);
+        assert_eq!(app.data_clients, *app.selected_clients.borrow());
+        assert_eq!(app.scan_clients().len(), app.source_universe.len());
+    }
+
+    #[test]
+    fn failed_source_projection_rolls_back_without_requesting_a_scan() {
+        let mut app = make_app();
+        app.projection_backend = Some(ProjectionBackend::Failing("injected source failure"));
+        let original = app.data_clients.clone();
+
+        app.handle_key_event(key(KeyCode::Char('s')));
+        app.handle_key_event(key(KeyCode::Enter));
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert_eq!(*app.selected_clients.borrow(), original);
+        assert_eq!(app.data_clients, original);
+        assert!(!app.needs_reload);
+        assert!(!app.reload_force);
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("injected source failure")));
     }
 
     #[test]
@@ -4236,6 +4351,7 @@ mod tests {
         for tab in [Tab::Models, Tab::Daily, Tab::Monthly, Tab::Weekly] {
             let mut app = make_app();
             app.current_tab = tab;
+            app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
 
             app.handle_key_event(key(KeyCode::Char('g')));
 
@@ -4266,8 +4382,10 @@ mod tests {
     }
 
     #[test]
-    fn test_source_picker_waits_until_close_before_blocking_reload() {
+    fn test_source_picker_waits_until_close_before_local_projection() {
         let mut app = make_app();
+        app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
+        let original_clients = app.data_clients.clone();
 
         app.handle_key_event(key(KeyCode::Char('s')));
         assert!(app.dialog_stack.is_active());
@@ -4275,31 +4393,35 @@ mod tests {
         app.handle_key_event(key(KeyCode::Enter));
         assert!(app.dialog_stack.is_active());
         assert!(!app.needs_reload);
-        assert!(!app.blocking_loading);
-        assert!(!app.is_blocking_loading());
+        assert_eq!(app.data_clients, original_clients);
 
         app.on_tick();
         assert!(!app.needs_reload);
-        assert!(!app.blocking_loading);
+        assert_eq!(app.data_clients, original_clients);
 
         app.handle_key_event(key(KeyCode::Esc));
 
         assert!(!app.dialog_stack.is_active());
-        assert!(app.needs_reload);
-        assert!(app.blocking_loading);
-        assert!(app.is_blocking_loading());
+        assert!(!app.needs_reload);
+        assert!(!app.reload_force);
+        assert_eq!(app.data_clients, *app.selected_clients.borrow());
+        assert_ne!(app.data_clients, original_clients);
     }
 
     #[test]
-    fn test_background_loading_clear_resets_blocking_loading() {
+    fn test_source_picker_is_unavailable_during_cold_load() {
         let mut app = make_app();
+        app.background_loading = true;
 
-        app.request_blocking_reload();
-        app.set_background_loading(true);
-        app.set_background_loading(false);
+        app.handle_key_event(key(KeyCode::Char('s')));
 
-        assert!(!app.background_loading);
-        assert!(!app.blocking_loading);
+        assert!(!app.dialog_stack.is_active());
+        assert!(!app.needs_reload);
+        assert!(!app.reload_force);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Sources are unavailable until local reports finish loading")
+        );
     }
 
     // ── handle_key_event: misc keys ─────────────────────────────────

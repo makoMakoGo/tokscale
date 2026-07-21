@@ -93,11 +93,20 @@ tokscale models --home /tmp/test-home --no-spinner
 tokscale tui --client codex --home /tmp/test-home
 ```
 
-Repeated client ids are deduplicated. Without a CLI filter, Tokscale uses
-`defaultClients` when configured and otherwise scans all local clients. An
-unknown client is an error. `--home` must be an existing directory and is
-authoritative: source discovery does not silently fall back to the process
-home or client-specific environment roots.
+Repeated client ids are deduplicated. Source scope resolves once: an explicit
+`--client` list wins, otherwise `defaultClients` applies, and without either
+Tokscale uses every accepted local client. Unknown clients are errors. `--home`
+must be an existing directory and is authoritative; discovery does not fall
+back to the process home or client-specific environment roots.
+
+Report commands scan the resolved scope for that invocation. The TUI fixes it
+as the process-wide source universe: its Sources picker initially checks every
+member and can apply only a session-local, non-persisted subset. Picker and
+Group By changes reproject the installed generation without scanning, writing
+the cache, or resetting automatic refresh. Manual and automatic refresh scan
+the original universe. Usage and Sessions follow the selected subset, while
+scanner-health diagnostics continue to describe the complete universe so a
+view filter cannot conceal an acquisition failure.
 
 Date boundaries are inclusive and use the local timezone:
 

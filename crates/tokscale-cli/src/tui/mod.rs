@@ -41,7 +41,7 @@ use std::panic;
 
 use anyhow::Result;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, MouseEvent},
+    event::{DisableMouseCapture, EnableMouseCapture, KeyEvent, MouseEvent},
     execute,
     terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
@@ -81,8 +81,8 @@ fn should_force_source_reload(
 enum BackgroundLoad {
     Unchanged,
     Persisted {
-        store: cache::ProjectionStore,
-        enabled_clients: HashSet<ClientId>,
+        store: Box<cache::ProjectionStore>,
+        source_universe: HashSet<ClientId>,
         report_scope: CacheReportScope,
         pricing_diagnostics: Vec<String>,
     },
@@ -100,6 +100,15 @@ enum BackgroundLoad {
         pricing_diagnostics: Vec<String>,
         cache_persistence_warning: Option<String>,
     },
+}
+
+fn report_background_failure(app: &mut App, diagnostic: String) {
+    let has_installed_generation = app.has_installed_generation();
+    app.mark_snapshot_refresh_failed(diagnostic.clone());
+    if !has_installed_generation {
+        app.set_error(Some(diagnostic.clone()));
+    }
+    app.set_status(&format!("Error: {diagnostic}"));
 }
 
 fn load_background_data(
@@ -137,7 +146,7 @@ fn load_background_data(
 
 fn persist_background_load(
     result: Result<BackgroundLoad>,
-    enabled_clients: &HashSet<ClientId>,
+    source_universe: &HashSet<ClientId>,
     report_scope: &CacheReportScope,
 ) -> Result<BackgroundLoad> {
     let result = result?;
@@ -171,7 +180,7 @@ fn persist_background_load(
         &sessions,
         &source_space,
         &health,
-        enabled_clients,
+        source_universe,
         report_scope,
         source_inventory_signature,
     ) {
@@ -186,8 +195,8 @@ fn persist_background_load(
             data::trim_allocator();
 
             Ok(BackgroundLoad::Persisted {
-                store,
-                enabled_clients: enabled_clients.clone(),
+                store: Box::new(store),
+                source_universe: source_universe.clone(),
                 report_scope: report_scope.clone(),
                 pricing_diagnostics,
             })
@@ -221,23 +230,35 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
     match result {
         Ok(BackgroundLoad::Persisted {
             store,
-            enabled_clients,
+            source_universe,
             report_scope,
             pricing_diagnostics,
         }) => {
             let selected_group_by = { app.group_by.borrow().clone() };
-            let cached =
-                match store.load_snapshot(&enabled_clients, &selected_group_by, &report_scope) {
+            let mut cached =
+                match (*store).load_snapshot(&source_universe, &selected_group_by, &report_scope) {
                     Ok(cached) => cached,
                     Err(error) => {
                         let diagnostic =
                             format!("Persisted TUI snapshot failed to load: {error:#}");
-                        app.mark_snapshot_refresh_failed(diagnostic.clone());
-                        app.set_error(Some(diagnostic.clone()));
-                        app.set_status(&diagnostic);
+                        report_background_failure(app, diagnostic);
                         return;
                     }
                 };
+            let selected_clients = app.selected_clients.borrow().clone();
+            if selected_clients != source_universe {
+                match cached
+                    .projection_store
+                    .project(&selected_group_by, &selected_clients)
+                {
+                    Ok(data) => cached.data = data,
+                    Err(error) => {
+                        let diagnostic = format!("Source projection failed: {error:#}");
+                        report_background_failure(app, diagnostic);
+                        return;
+                    }
+                }
+            }
             let digest = cached.source_inventory_signature.process_digest();
             app.install_tui_snapshot(
                 cached.data,
@@ -263,24 +284,24 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
             cache_persistence_warning,
         }) => {
             let selected_group_by = { app.group_by.borrow().clone() };
-            let current_data = if selected_group_by == group_by {
-                *data
-            } else {
-                match projection_backend.project(&selected_group_by) {
-                    Ok(mut current_data) => {
-                        current_data.health = data.health.clone();
-                        current_data.error = data.error.clone();
-                        current_data
+            let selected_clients = app.selected_clients.borrow().clone();
+            let current_data =
+                if selected_group_by == group_by && selected_clients == app.source_universe {
+                    *data
+                } else {
+                    match projection_backend.project(&selected_group_by, &selected_clients) {
+                        Ok(mut current_data) => {
+                            current_data.health = data.health.clone();
+                            current_data.error = data.error.clone();
+                            current_data
+                        }
+                        Err(error) => {
+                            let diagnostic = format!("Group By projection failed: {error:#}");
+                            report_background_failure(app, diagnostic);
+                            return;
+                        }
                     }
-                    Err(error) => {
-                        let diagnostic = format!("Group By projection failed: {error:#}");
-                        app.mark_snapshot_refresh_failed(diagnostic.clone());
-                        app.set_error(Some(diagnostic.clone()));
-                        app.set_status(&diagnostic);
-                        return;
-                    }
-                }
-            };
+                };
             app.install_tui_snapshot(
                 current_data,
                 sessions,
@@ -298,9 +319,7 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
         }
         Err(error) => {
             let diagnostic = format!("{error:#}");
-            app.mark_snapshot_refresh_failed(diagnostic.clone());
-            app.set_error(Some(diagnostic.clone()));
-            app.set_status(&format!("Error: {diagnostic}"));
+            report_background_failure(app, diagnostic);
         }
     }
 }
@@ -376,7 +395,7 @@ pub fn run(
     // resolution rules App::new_with_cached_data uses so the cache
     // lookup and the in-app state always agree. Drift between them
     // makes every launch a stale-cache hit instead of a fresh one.
-    let enabled_clients: HashSet<ClientId> = if let Some(ref cli_clients) = clients {
+    let source_universe: HashSet<ClientId> = if let Some(ref cli_clients) = clients {
         cli_clients
             .iter()
             .filter_map(|s| ClientId::from_str(&s.to_lowercase()))
@@ -389,7 +408,7 @@ pub fn run(
     let initial_group_by = TUI_DEFAULT_GROUP_BY;
     let initial_report_scope = background_cache_scope(&home_dir, &since, &until, &year)?;
     let (cached_snapshot, needs_background_load, initial_source_digest) = decide_initial_data(
-        load_cache(&enabled_clients, &initial_group_by, &initial_report_scope),
+        load_cache(&source_universe, &initial_group_by, &initial_report_scope),
     );
 
     let original_hook = panic::take_hook();
@@ -448,13 +467,13 @@ pub fn run(
         app.set_background_loading(true);
 
         let tx = bg_tx.clone();
-        let mut bg_clients: Vec<ClientId> = enabled_clients.iter().copied().collect();
+        let mut bg_clients: Vec<ClientId> = source_universe.iter().copied().collect();
         bg_clients.sort_by_key(|client| *client as usize);
         let bg_since = since.clone();
         let bg_until = until.clone();
         let bg_year = year.clone();
         let bg_home_dir = home_dir.clone();
-        let bg_enabled_clients = enabled_clients.clone();
+        let bg_source_universe = source_universe.clone();
         let bg_group_by = app.group_by.borrow().clone();
         let bg_report_scope = background_cache_scope(&home_dir, &since, &until, &year)?;
         let bg_last_digest = initial_source_digest;
@@ -471,7 +490,7 @@ pub fn run(
                         bg_force,
                         bg_last_digest,
                     ),
-                    &bg_enabled_clients,
+                    &bg_source_universe,
                     &bg_report_scope,
                 )
             });
@@ -560,9 +579,7 @@ fn run_loop_with_background(
                 if app.background_loading {
                     app.set_background_loading(false);
                     let diagnostic = "Background thread disconnected".to_string();
-                    app.mark_snapshot_refresh_failed(diagnostic.clone());
-                    app.set_error(Some(diagnostic));
-                    app.set_status("Error: Background thread disconnected");
+                    report_background_failure(app, diagnostic);
                 }
             }
             Err(TryRecvError::Empty) => {}
@@ -585,7 +602,7 @@ fn run_loop_with_background(
                 .home_dir
                 .as_ref()
                 .map(|path| path.to_string_lossy().into_owned());
-            let enabled_clients = app.enabled_clients.borrow().clone();
+            let source_universe = app.source_universe.clone();
             let group_by = app.group_by.borrow().clone();
             let report_scope = background_cache_scope(&home_dir, &since, &until, &year)?;
 
@@ -594,7 +611,7 @@ fn run_loop_with_background(
                     let loader = background_data_loader(home_dir, since, until, year);
                     persist_background_load(
                         load_background_data(&loader, &clients, &group_by, force, last_digest),
-                        &enabled_clients,
+                        &source_universe,
                         &report_scope,
                     )
                 });
@@ -606,10 +623,7 @@ fn run_loop_with_background(
                 app.on_tick();
             }
             Event::Key(key) => {
-                if view_state.handle_key(app, &key) {
-                    continue;
-                }
-                if let KeyEventOutcome::Exit(exit) = app.handle_key_event(key) {
+                if let KeyEventOutcome::Exit(exit) = dispatch_key_event(app, view_state, key) {
                     return Ok(exit);
                 }
             }
@@ -623,9 +637,28 @@ fn run_loop_with_background(
     }
 }
 
+fn dispatch_key_event(
+    app: &mut App,
+    view_state: &mut view_state::ViewState,
+    key: KeyEvent,
+) -> KeyEventOutcome {
+    if view_state.handle_key(app, &key) {
+        return KeyEventOutcome::Continue;
+    }
+
+    let outcome = app.handle_key_event(key);
+    if !app.dialog_stack.is_active() {
+        view_state.reconcile_session_snapshot(app);
+    }
+    outcome
+}
+
 fn dispatch_mouse_event(app: &mut App, view_state: &mut view_state::ViewState, event: MouseEvent) {
     if !view_state.handle_mouse(app, &event) {
         app.handle_mouse_event(event);
+        if !app.dialog_stack.is_active() {
+            view_state.reconcile_session_snapshot(app);
+        }
     }
 }
 
@@ -722,6 +755,59 @@ mod tests {
             app.selected_index, 7,
             "Sessions wheel input must not reach App's non-owning list state"
         );
+    }
+
+    #[test]
+    fn closing_source_picker_exits_detail_for_a_deselected_source_without_scanning() {
+        let mut app = app_on(Tab::Sessions);
+        app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
+        app.session_snapshot = session_data::SessionSnapshot::new(
+            vec![tokscale_core::TuiSessionEntry {
+                source: ClientId::Codex.as_str().to_string(),
+                session_id: "codex-session".to_string(),
+                ..Default::default()
+            }],
+            Default::default(),
+        );
+        let mut view_state = view_state::ViewState::default();
+        view_state.select_session_source_for_test(ClientId::Codex.as_str());
+        assert!(view_state.session_detail_active());
+        assert_eq!(view_state.session_rows(&app).len(), 1);
+
+        assert_eq!(
+            dispatch_key_event(
+                &mut app,
+                &mut view_state,
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            ),
+            KeyEventOutcome::Continue
+        );
+        assert!(app.dialog_stack.is_active());
+
+        let codex_hotkey = ClientId::Codex
+            .hotkey()
+            .expect("Codex must have a source picker hotkey");
+        dispatch_key_event(
+            &mut app,
+            &mut view_state,
+            KeyEvent::new(KeyCode::Char(codex_hotkey), KeyModifiers::ALT),
+        );
+        assert!(app.dialog_stack.is_active());
+        assert!(view_state.session_detail_active());
+
+        dispatch_key_event(
+            &mut app,
+            &mut view_state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+
+        assert!(!app.dialog_stack.is_active());
+        assert!(!view_state.session_detail_active());
+        assert_eq!(view_state.selected_session_source(), None);
+        assert!(!app.selected_clients.borrow().contains(&ClientId::Codex));
+        assert_eq!(app.data_clients, *app.selected_clients.borrow());
+        assert!(!app.needs_reload);
+        assert!(!app.reload_force);
     }
 
     #[test]
@@ -1010,11 +1096,12 @@ mod tests {
         );
         assert_eq!(app.data.models[0].model, "new-model");
         assert_eq!(app.data.models[0].client, "amp");
+        let selected_clients = app.selected_clients.borrow().clone();
         let model_projection = app
             .projection_backend
             .as_mut()
             .expect("loaded snapshot must install a projection backend")
-            .project(&tokscale_core::GroupBy::Model)
+            .project(&tokscale_core::GroupBy::Model, &selected_clients)
             .unwrap();
         assert_eq!(model_projection.models[0].model, "new-model");
         assert_eq!(
@@ -1043,7 +1130,6 @@ mod tests {
             )),
         );
         app.background_loading = true;
-        app.blocking_loading = true;
 
         apply_background_result(
             &mut app,
@@ -1061,7 +1147,6 @@ mod tests {
         );
 
         assert!(!app.background_loading);
-        assert!(!app.blocking_loading);
         assert_eq!(app.data.total_tokens, 99);
         assert_eq!(app.session_snapshot.sessions()[0].session_id, "new-session");
         assert_eq!(source_space_for(&app, "codex"), Some(4096));
@@ -1095,12 +1180,10 @@ mod tests {
             )),
         );
         app.background_loading = true;
-        app.blocking_loading = true;
 
         apply_background_result(&mut app, Ok(BackgroundLoad::Unchanged));
 
         assert!(!app.background_loading);
-        assert!(!app.blocking_loading);
         assert_eq!(app.data.total_tokens, 77);
         assert_eq!(
             app.session_snapshot.sessions()[0].session_id,
@@ -1119,12 +1202,10 @@ mod tests {
     fn failed_cold_load_marks_sessions_unavailable_without_inventing_snapshot() {
         let mut app = app_on(Tab::Models);
         app.background_loading = true;
-        app.blocking_loading = true;
 
         apply_background_result(&mut app, Err(anyhow::anyhow!("load failed")));
 
         assert!(!app.background_loading);
-        assert!(!app.blocking_loading);
         assert!(app.projection_backend.is_none());
         assert!(app.session_snapshot.sessions().is_empty());
         assert!(matches!(
@@ -1138,7 +1219,7 @@ mod tests {
     fn background_worker_panic_clears_loading_and_marks_snapshot_degraded() {
         let mut app = app_on(Tab::Models);
         app.background_loading = true;
-        app.blocking_loading = true;
+        app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
         app.session_projection_status = session_data::SessionProjectionStatus::Ready;
         let (tx, rx) = mpsc::channel();
 
@@ -1148,17 +1229,12 @@ mod tests {
         apply_background_result(&mut app, rx.recv().unwrap());
 
         assert!(!app.background_loading);
-        assert!(!app.blocking_loading);
         assert!(matches!(
             &app.session_projection_status,
             session_data::SessionProjectionStatus::Degraded { diagnostic }
                 if diagnostic.contains("injected worker panic")
         ));
-        assert!(app
-            .data
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("background worker panicked")));
+        assert!(app.data.error.is_none());
     }
 
     #[test]
@@ -1224,6 +1300,7 @@ mod tests {
             app.session_projection_status,
             session_data::SessionProjectionStatus::Degraded { .. }
         ));
+        assert!(app.data.error.is_none());
         assert_eq!(app.status_message.as_deref(), Some("Error: load failed"));
     }
 
@@ -1319,6 +1396,9 @@ mod tests {
 
         assert!(matches!(&persisted, BackgroundLoad::Persisted { .. }));
         let mut app = app_on(Tab::Models);
+        app.source_universe = HashSet::from([ClientId::Amp]);
+        *app.selected_clients.borrow_mut() = app.source_universe.clone();
+        app.data_clients = app.source_universe.clone();
         apply_background_result(&mut app, Ok(persisted));
         assert!(!app.session_snapshot.sessions().is_empty());
         assert_eq!(app.data.total_tokens, 66);
@@ -1364,7 +1444,6 @@ mod tests {
         assert!(!app.needs_reload);
         assert!(!app.reload_force);
         assert!(!app.background_loading);
-        assert!(!app.blocking_loading);
         assert_eq!(app.session_snapshot.sessions(), sessions_before);
         assert_eq!(
             app.session_snapshot

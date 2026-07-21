@@ -7,11 +7,12 @@
 //! grouping's `UsageData` in memory (issue #161).
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
 use chrono::{Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Weekday};
+use serde::{Deserialize, Serialize};
 
 use crate::usage_views::{
     AgentEntry, ContributionDay, DailyModelInfo, DailySourceInfo, DailyUsage, HourlyModelInfo,
@@ -23,7 +24,7 @@ use crate::{
         workspace_fields, FineHourlyModelKey, FineModelKey, GroupedModelKey, HourlyModelKey,
         IdentitySet,
     },
-    sessions, ClientContributionOrder, GroupBy, ModelPerformance, UnifiedMessage,
+    sessions, ClientContributionOrder, ClientId, GroupBy, ModelPerformance, UnifiedMessage,
 };
 
 fn positive_unified_token_total(tokens: &crate::TokenBreakdown) -> i64 {
@@ -418,13 +419,83 @@ pub fn find_peak_hour(hourly: &[HourlyUsage]) -> Option<(u32, u64, f64)> {
 /// [`UsageData`] and may be called repeatedly with different groupings —
 /// switching the TUI group-by no longer rescans, reparses, or reprices local
 /// sources (issue #161).
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct TuiAcc {
+    #[serde(with = "map_as_vec")]
     model_map: HashMap<FineModelKey, FineModelBucket>,
     agent_map: HashMap<String, AgentBucket>,
+    #[serde(with = "map_as_vec")]
     daily_map: HashMap<NaiveDate, DailyBucket>,
+    #[serde(with = "map_as_vec")]
     hourly_map: HashMap<NaiveDateTime, HourlyBucket>,
     next_sequence: usize,
+}
+
+mod map_as_vec {
+    use std::{collections::HashMap, hash::Hash};
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<K, V, S>(map: &HashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        K: Serialize,
+        V: Serialize,
+        S: Serializer,
+    {
+        map.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, K, V, D>(deserializer: D) -> Result<HashMap<K, V>, D::Error>
+    where
+        K: Deserialize<'de> + Eq + Hash,
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        let entries = Vec::<(K, V)>::deserialize(deserializer)?;
+        let mut map = HashMap::with_capacity(entries.len());
+        for (key, value) in entries {
+            if map.insert(key, value).is_some() {
+                return Err(serde::de::Error::custom(
+                    "duplicate key in canonical TUI map",
+                ));
+            }
+        }
+        Ok(map)
+    }
+}
+
+#[cfg(test)]
+mod map_as_vec_tests {
+    use std::collections::HashMap;
+
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct Wrapper {
+        #[serde(with = "super::map_as_vec")]
+        values: HashMap<String, u64>,
+    }
+
+    #[test]
+    fn duplicate_canonical_map_keys_are_rejected() {
+        let error =
+            serde_json::from_str::<Wrapper>(r#"{"values":[["duplicate",1],["duplicate",2]]}"#)
+                .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("duplicate key in canonical TUI map"));
+    }
+
+    #[test]
+    fn unique_canonical_map_keys_round_trip() {
+        let parsed =
+            serde_json::from_str::<Wrapper>(r#"{"values":[["first",1],["second",2]]}"#).unwrap();
+
+        assert_eq!(parsed.values.len(), 2);
+        assert_eq!(parsed.values["first"], 1);
+        assert_eq!(parsed.values["second"], 2);
+    }
 }
 
 /// Stores singleton groups inline and allocates only when a second value joins.
@@ -502,6 +573,7 @@ mod one_or_many_tests {
 /// of the bucket's first message, for provider/label attribution and client
 /// ordering tie-breaks) and `workspace_label` (the workspace DTO label of
 /// that first message).
+#[derive(Serialize, Deserialize)]
 struct FineModelBucket {
     workspace_label: Arc<str>,
     first_seen: usize,
@@ -530,35 +602,42 @@ struct TuiModelBucket {
     client_totals: Option<Box<HashMap<Arc<str>, ClientContributionOrder>>>,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 enum AgentInstanceKey {
     Explicit(Arc<str>),
     Derived { client: Arc<str>, session: Arc<str> },
 }
 
+#[derive(Default, Serialize, Deserialize)]
 struct AgentBucket {
-    clients: IdentitySet<Arc<str>>,
+    sources: HashMap<Arc<str>, AgentSourceBucket>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AgentSourceBucket {
     instances: IdentitySet<AgentInstanceKey>,
     tokens: UsageTokenBreakdown,
     cost: f64,
     message_count: u32,
 }
 
+#[derive(Serialize, Deserialize)]
 struct DailyBucket {
     date: NaiveDate,
-    tokens: UsageTokenBreakdown,
-    cost: f64,
     sources: HashMap<Arc<str>, DailySourceBucket>,
-    message_count: u32,
-    turn_count: u32,
 }
 
+#[derive(Serialize, Deserialize)]
 struct DailySourceBucket {
     tokens: UsageTokenBreakdown,
     cost: f64,
+    message_count: u32,
+    turn_count: u32,
+    #[serde(with = "map_as_vec")]
     models: HashMap<FineModelKey, FineDailyModelBucket>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct FineDailyModelBucket {
     workspace_label: Arc<str>,
     first_seen: usize,
@@ -581,16 +660,23 @@ struct DailyModelBucket {
     messages: u64,
 }
 
+#[derive(Serialize, Deserialize)]
 struct HourlyBucket {
     datetime: NaiveDateTime,
+    sources: HashMap<Arc<str>, HourlySourceBucket>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct HourlySourceBucket {
     tokens: UsageTokenBreakdown,
     cost: f64,
-    clients: IdentitySet<Arc<str>>,
+    #[serde(with = "map_as_vec")]
     models: HashMap<FineHourlyModelKey, FineHourlyModelBucket>,
     message_count: u32,
     turn_count: u32,
 }
 
+#[derive(Serialize, Deserialize)]
 struct FineHourlyModelBucket {
     first_seen: usize,
     tokens: UsageTokenBreakdown,
@@ -666,9 +752,24 @@ fn materialize_daily_model(model: DailyModelBucket, group_by: &GroupBy) -> Daily
 /// floating-point sums stay deterministic; the first-created bucket in the group
 /// attributes the provider and workspace label (its first message is the
 /// group's first message, matching a direct grouped fold).
-fn materialize_daily(bucket: &DailyBucket, group_by: &GroupBy) -> DailyUsage {
+fn source_is_selected(client: &str, selected: Option<&HashSet<ClientId>>) -> bool {
+    selected.is_none_or(|selected| crate::selected_client_ids_include(client, selected))
+}
+
+fn materialize_daily(
+    bucket: &DailyBucket,
+    group_by: &GroupBy,
+    selected: Option<&HashSet<ClientId>>,
+) -> Option<DailyUsage> {
     let mut source_breakdown = BTreeMap::new();
+    let mut tokens = UsageTokenBreakdown::default();
+    let mut cost = 0.0;
+    let mut message_count = 0_u32;
+    let mut turn_count = 0_u32;
     for (client, source) in &bucket.sources {
+        if !source_is_selected(client, selected) {
+            continue;
+        }
         let mut grouped_fine_models: HashMap<
             GroupedModelKey,
             OneOrMany<(&FineModelKey, &FineDailyModelBucket)>,
@@ -734,15 +835,19 @@ fn materialize_daily(bucket: &DailyBucket, group_by: &GroupBy) -> DailyUsage {
                 models,
             },
         );
+        add_tokens(&mut tokens, &source.tokens);
+        cost += source.cost;
+        message_count = message_count.saturating_add(source.message_count);
+        turn_count = turn_count.saturating_add(source.turn_count);
     }
-    DailyUsage {
+    (!source_breakdown.is_empty()).then_some(DailyUsage {
         date: bucket.date,
-        tokens: bucket.tokens.clone(),
-        cost: bucket.cost,
+        tokens,
+        cost,
         source_breakdown,
-        message_count: bucket.message_count,
-        turn_count: bucket.turn_count,
-    }
+        message_count,
+        turn_count,
+    })
 }
 
 fn materialize_hourly_model(model: HourlyModelBucket, group_by: &GroupBy) -> HourlyModelInfo {
@@ -760,8 +865,31 @@ fn materialize_hourly_model(model: HourlyModelBucket, group_by: &GroupBy) -> Hou
 /// models map. Only ClientProviderModel keeps the provider split; the other
 /// groupings merge providers, attributing the first-created bucket's
 /// provider (matching a direct grouped fold).
-fn materialize_hourly(bucket: &HourlyBucket, group_by: &GroupBy) -> HourlyUsage {
-    let mut fine_models: Vec<_> = bucket.models.iter().collect();
+fn materialize_hourly(
+    bucket: &HourlyBucket,
+    group_by: &GroupBy,
+    selected: Option<&HashSet<ClientId>>,
+) -> Option<HourlyUsage> {
+    let mut fine_models = Vec::new();
+    let mut tokens = UsageTokenBreakdown::default();
+    let mut cost = 0.0;
+    let mut clients = BTreeSet::new();
+    let mut message_count = 0_u32;
+    let mut turn_count = 0_u32;
+    for (client, source) in &bucket.sources {
+        if !source_is_selected(client, selected) {
+            continue;
+        }
+        clients.insert(client.to_string());
+        add_tokens(&mut tokens, &source.tokens);
+        cost += source.cost;
+        message_count = message_count.saturating_add(source.message_count);
+        turn_count = turn_count.saturating_add(source.turn_count);
+        fine_models.extend(source.models.iter());
+    }
+    if clients.is_empty() {
+        return None;
+    }
     fine_models.sort_by_key(|(_, model)| model.first_seen);
     let mut grouped_models: HashMap<HourlyModelKey, HourlyModelBucket> = HashMap::new();
     for (fine_key, fine_model) in fine_models {
@@ -780,21 +908,15 @@ fn materialize_hourly(bucket: &HourlyBucket, group_by: &GroupBy) -> HourlyUsage 
         .into_iter()
         .map(|(key, model)| (key.map_key(), materialize_hourly_model(model, group_by)))
         .collect();
-    let clients = bucket
-        .clients
-        .to_vec()
-        .into_iter()
-        .map(|client| client.to_string())
-        .collect();
-    HourlyUsage {
+    Some(HourlyUsage {
         datetime: bucket.datetime,
-        tokens: bucket.tokens.clone(),
-        cost: bucket.cost,
+        tokens,
+        cost,
         clients,
         models,
-        message_count: bucket.message_count,
-        turn_count: bucket.turn_count,
-    }
+        message_count,
+        turn_count,
+    })
 }
 
 impl TuiAcc {
@@ -841,22 +963,23 @@ impl TuiAcc {
             } else {
                 sessions::normalize_agent_name(agent)
             };
-            let agent_entry =
-                self.agent_map
-                    .entry(normalized_agent)
-                    .or_insert_with(|| AgentBucket {
-                        clients: IdentitySet::default(),
-                        instances: IdentitySet::default(),
-                        tokens: UsageTokenBreakdown::default(),
-                        cost: 0.0,
-                        message_count: 0,
-                    });
-            add_unified_tokens(&mut agent_entry.tokens, &msg.tokens);
-            agent_entry.cost += msg_cost;
-            agent_entry.message_count = agent_entry
+            let source_entry = self
+                .agent_map
+                .entry(normalized_agent)
+                .or_default()
+                .sources
+                .entry(Arc::clone(&msg.client))
+                .or_insert_with(|| AgentSourceBucket {
+                    instances: IdentitySet::default(),
+                    tokens: UsageTokenBreakdown::default(),
+                    cost: 0.0,
+                    message_count: 0,
+                });
+            add_unified_tokens(&mut source_entry.tokens, &msg.tokens);
+            source_entry.cost += msg_cost;
+            source_entry.message_count = source_entry
                 .message_count
                 .saturating_add(msg.message_count.max(0) as u32);
-            agent_entry.clients.insert(Arc::clone(&msg.client));
             let instance_key = msg.agent_instance.as_ref().map_or_else(
                 || AgentInstanceKey::Derived {
                     client: Arc::clone(&msg.client),
@@ -864,24 +987,14 @@ impl TuiAcc {
                 },
                 |instance| AgentInstanceKey::Explicit(Arc::clone(instance)),
             );
-            agent_entry.instances.insert(instance_key);
+            source_entry.instances.insert(instance_key);
         }
 
         if let Some(date) = msg.local_date() {
             let daily_entry = self.daily_map.entry(date).or_insert_with(|| DailyBucket {
                 date,
-                tokens: UsageTokenBreakdown::default(),
-                cost: 0.0,
                 sources: HashMap::new(),
-                message_count: 0,
-                turn_count: 0,
             });
-            add_unified_tokens(&mut daily_entry.tokens, &msg.tokens);
-            daily_entry.cost += msg_cost;
-            daily_entry.message_count += msg.message_count.max(0) as u32;
-            if msg.is_turn_start {
-                daily_entry.turn_count += 1;
-            }
 
             let source_entry = daily_entry
                 .sources
@@ -889,10 +1002,18 @@ impl TuiAcc {
                 .or_insert_with(|| DailySourceBucket {
                     tokens: UsageTokenBreakdown::default(),
                     cost: 0.0,
+                    message_count: 0,
+                    turn_count: 0,
                     models: HashMap::new(),
                 });
             add_unified_tokens(&mut source_entry.tokens, &msg.tokens);
             source_entry.cost += msg_cost;
+            source_entry.message_count = source_entry
+                .message_count
+                .saturating_add(msg.message_count.max(0) as u32);
+            if msg.is_turn_start {
+                source_entry.turn_count = source_entry.turn_count.saturating_add(1);
+            }
 
             let model_info = source_entry
                 .models
@@ -917,21 +1038,27 @@ impl TuiAcc {
                 .entry(bucket)
                 .or_insert_with(|| HourlyBucket {
                     datetime: bucket,
+                    sources: HashMap::new(),
+                });
+            let source_entry = hourly_entry
+                .sources
+                .entry(Arc::clone(&msg.client))
+                .or_insert_with(|| HourlySourceBucket {
                     tokens: UsageTokenBreakdown::default(),
                     cost: 0.0,
-                    clients: IdentitySet::default(),
                     models: HashMap::new(),
                     message_count: 0,
                     turn_count: 0,
                 });
-            add_unified_tokens(&mut hourly_entry.tokens, &msg.tokens);
-            hourly_entry.cost += msg_cost;
-            hourly_entry.clients.insert(Arc::clone(&msg.client));
-            hourly_entry.message_count += msg.message_count.max(0) as u32;
+            add_unified_tokens(&mut source_entry.tokens, &msg.tokens);
+            source_entry.cost += msg_cost;
+            source_entry.message_count = source_entry
+                .message_count
+                .saturating_add(msg.message_count.max(0) as u32);
             if msg.is_turn_start {
-                hourly_entry.turn_count += 1;
+                source_entry.turn_count = source_entry.turn_count.saturating_add(1);
             }
-            let hmodel = hourly_entry
+            let hmodel = source_entry
                 .models
                 .entry(FineHourlyModelKey::from_message(msg))
                 .or_insert_with(|| FineHourlyModelBucket {
@@ -950,12 +1077,19 @@ impl TuiAcc {
     /// first-created bucket in the group attributes the single-client field,
     /// workspace label, and client first-seen (its first message is the
     /// group's first message, matching a direct grouped fold).
-    fn refold_models(&self, group_by: &GroupBy) -> Vec<(GroupedModelKey, TuiModelBucket)> {
+    fn refold_models(
+        &self,
+        group_by: &GroupBy,
+        selected: Option<&HashSet<ClientId>>,
+    ) -> Vec<(GroupedModelKey, TuiModelBucket)> {
         let mut grouped_fine_models: HashMap<
             GroupedModelKey,
             OneOrMany<(&FineModelKey, &FineModelBucket)>,
         > = HashMap::new();
         for (fine_key, fine_model) in &self.model_map {
+            if !source_is_selected(&fine_key.client, selected) {
+                continue;
+            }
             let fine_bucket = (fine_key, fine_model);
             grouped_fine_models
                 .entry(fine_key.grouped(group_by))
@@ -1031,8 +1165,27 @@ impl TuiAcc {
     /// state. Borrowing, so the same accumulator can be projected repeatedly
     /// with different groupings without rescanning local sources.
     pub fn project(&self, group_by: &GroupBy) -> UsageData {
+        self.project_selected(group_by, None)
+    }
+
+    /// Materialize a TUI view for a session-local subset of the clients that
+    /// produced this accumulator. This is a pure projection: it never scans,
+    /// reparses, or reprices source data.
+    pub fn project_for_clients(
+        &self,
+        group_by: &GroupBy,
+        selected: &HashSet<ClientId>,
+    ) -> UsageData {
+        self.project_selected(group_by, Some(selected))
+    }
+
+    fn project_selected(
+        &self,
+        group_by: &GroupBy,
+        selected: Option<&HashSet<ClientId>>,
+    ) -> UsageData {
         let mut keyed_models: Vec<_> = self
-            .refold_models(group_by)
+            .refold_models(group_by, selected)
             .into_iter()
             .map(|(key, bucket)| (key, materialize_tui_model(bucket)))
             .collect();
@@ -1052,17 +1205,35 @@ impl TuiAcc {
         let mut agents: Vec<AgentEntry> = self
             .agent_map
             .iter()
-            .map(|(agent_name, agent)| AgentEntry {
-                agent: agent_name.clone(),
-                clients: agent.clients.to_sorted_string(),
-                tokens: agent.tokens.clone(),
-                cost: agent.cost,
-                message_count: agent.message_count,
-                instance_count: agent
-                    .instances
-                    .len()
-                    .try_into()
-                    .expect("agent instance count exceeds u32::MAX"),
+            .filter_map(|(agent_name, agent)| {
+                let mut clients = IdentitySet::default();
+                let mut instances = IdentitySet::default();
+                let mut tokens = UsageTokenBreakdown::default();
+                let mut cost = 0.0;
+                let mut message_count = 0_u32;
+                for (client, source) in &agent.sources {
+                    if !source_is_selected(client, selected) {
+                        continue;
+                    }
+                    clients.insert(Arc::clone(client));
+                    for instance in source.instances.to_vec() {
+                        instances.insert(instance);
+                    }
+                    add_tokens(&mut tokens, &source.tokens);
+                    cost += source.cost;
+                    message_count = message_count.saturating_add(source.message_count);
+                }
+                (clients.len() > 0).then(|| AgentEntry {
+                    agent: agent_name.clone(),
+                    clients: clients.to_sorted_string(),
+                    tokens,
+                    cost,
+                    message_count,
+                    instance_count: instances
+                        .len()
+                        .try_into()
+                        .expect("agent instance count exceeds u32::MAX"),
+                })
             })
             .collect();
         agents.sort_by(|a, b| {
@@ -1075,14 +1246,14 @@ impl TuiAcc {
         let mut daily: Vec<DailyUsage> = self
             .daily_map
             .values()
-            .map(|bucket| materialize_daily(bucket, group_by))
+            .filter_map(|bucket| materialize_daily(bucket, group_by, selected))
             .collect();
         daily.sort_by_key(|b| std::cmp::Reverse(b.date));
 
         let mut hourly: Vec<HourlyUsage> = self
             .hourly_map
             .values()
-            .map(|bucket| materialize_hourly(bucket, group_by))
+            .filter_map(|bucket| materialize_hourly(bucket, group_by, selected))
             .collect();
         hourly.sort_by_key(|b| std::cmp::Reverse(b.datetime));
 
@@ -1114,7 +1285,7 @@ impl TuiAcc {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
 
     use chrono::NaiveDate;
 
@@ -2666,6 +2837,37 @@ mod tests {
             GroupBy::ClientSession,
         ] {
             assert_usage_data_eq(&first.project(&group_by), &second.project(&group_by));
+        }
+    }
+
+    #[test]
+    fn source_projection_matches_a_fresh_fold_of_only_the_selected_sources() {
+        let corpus = reprojection_corpus();
+        let full = reprojection_accumulator();
+        for selected in [
+            HashSet::from([ClientId::Claude]),
+            HashSet::from([ClientId::Codex]),
+            HashSet::from([ClientId::Claude, ClientId::Codex]),
+        ] {
+            let mut expected = TuiAcc::new();
+            for message in &corpus {
+                if crate::selected_client_ids_include(&message.client, &selected) {
+                    expected.push(message);
+                }
+            }
+            for group_by in [
+                GroupBy::Model,
+                GroupBy::ClientModel,
+                GroupBy::ClientProviderModel,
+                GroupBy::WorkspaceModel,
+                GroupBy::Session,
+                GroupBy::ClientSession,
+            ] {
+                assert_usage_data_eq(
+                    &full.project_for_clients(&group_by, &selected),
+                    &expected.project(&group_by),
+                );
+            }
         }
     }
 

@@ -29,16 +29,14 @@ Group By is a display projection of the Models-class tables. Switching it
 changes how model rows are keyed and labeled; it must not change any
 authoritative number.
 
-The earlier accepted implementation strategy in this ADR retained the
-canonical fine-grained `TuiAcc` after each source load and allowed the first
-grouping change after a startup cache hit to trigger a bootstrap source load.
-Schema 39 supersedes that strategy. Each atomic TUI bundle contains every
-exposed grouping projection, and the running TUI pins the opened projection
-bundle from one immutable generation. A grouping change streams only the target
-projection from that pinned generation and should appear near-instantly; it
-does not scan sources, refresh sessions, write the cache, or retain `TuiAcc` in
-the normal path. An explicitly reported cache-persistence failure may retain
-`TuiAcc` as a degraded in-memory backend.
+Each atomic TUI generation contains every exposed full-universe grouping
+projection plus source-aware canonical aggregate state. The running TUI pins
+that generation. A Group By change selects an eager projection for the full
+universe or derives the requested grouping from the canonical state for a
+source subset. It never scans sources, refreshes sessions, writes the cache, or
+changes the refresh clock. Canonical state is loaded lazily when a source
+subset first needs it. An explicitly reported cache-persistence failure may
+retain `TuiAcc` as a degraded in-memory projection backend.
 
 Usage and Sessions share the same snapshot boundary. A fresh startup cache
 serves both without a scan; stale startup data remains one coherent generation
@@ -99,10 +97,10 @@ export) emit the grouping (`groupBy`) and the dimension fields
   separate, deliberate UI change that consumes the structured fields.
 - Any future grouping dimension follows the same rule: a structured field on
   the view entry plus an export field, never a label prefix.
-- Schema 39 cache hits can switch among all exposed groupings without a source
-  bootstrap load. The steady-state cost is the active usage projection, the
-  session snapshot, and pinned file handles rather than the fine-grained
-  accumulator.
+- An accepted TUI generation can switch among every exposed grouping without a
+  source load. The full-universe steady-state cost is the active usage
+  projection, session snapshot, and pinned file handles; fine-grained canonical
+  state enters memory only after source-subset projection needs it.
 - Session projection and source-space values are generation-scoped even though
   Group By does not reshape them. Source space means the source-input bytes
   confirmed for the report's final fold, not an earlier prepared snapshot or

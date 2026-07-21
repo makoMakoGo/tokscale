@@ -94,7 +94,16 @@ fn retain_for_requested_clients(
     _provider_id: &str,
     requested: &HashSet<&str>,
 ) -> bool {
+    requested_clients_include(client, requested)
+}
+
+pub(crate) fn requested_clients_include(client: &str, requested: &HashSet<&str>) -> bool {
     requested.contains(client) || (requested.contains("claude") && client.starts_with("cc-mirror/"))
+}
+
+pub(crate) fn selected_client_ids_include(client: &str, selected: &HashSet<ClientId>) -> bool {
+    ClientId::from_str(client).is_some_and(|client_id| selected.contains(&client_id))
+        || (selected.contains(&ClientId::Claude) && client.starts_with("cc-mirror/"))
 }
 
 fn client_count_bucket(client: &str) -> Option<ClientId> {
