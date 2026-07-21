@@ -65,6 +65,21 @@ pub(super) fn display_name(family: Family) -> &'static str {
     }
 }
 
+pub(super) fn slogan(family: Family) -> &'static str {
+    match family {
+        Family::Gpt => "最后还得找我~",
+        Family::Claude => "You are absolutely right!",
+        Family::Gemini => "你真是太棒了",
+        Family::Mimo => "我流口水",
+        Family::Minimax => "我不爱刷榜",
+        Family::Qwen => "我这次是真学会了",
+        Family::Kimi => "我不是区",
+        Family::Glm => "蒸馏之神,不解释",
+        Family::Deepseek => "杂鱼 杂鱼",
+        Family::Unknown => "……",
+    }
+}
+
 /// Fixed brand color per family (logo primary colors), run through the
 /// theme's color-mode mapping so legacy terminals degrade gracefully.
 pub(super) fn family_color(app: &App, family: Family) -> Color {

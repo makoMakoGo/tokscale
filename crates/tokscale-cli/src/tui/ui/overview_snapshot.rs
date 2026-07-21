@@ -70,16 +70,16 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(28),
+                Constraint::Percentage(34),
                 Constraint::Length(1),
-                Constraint::Percentage(44),
+                Constraint::Percentage(30),
                 Constraint::Length(1),
-                Constraint::Percentage(28),
+                Constraint::Percentage(36),
             ])
             .split(inner);
-        render_left_hero(frame, app, section_area(columns[0]), &data);
+        render_fun_things(frame, app, section_area(columns[0]), &data);
         render_divider(frame, app, columns[1]);
-        render_middle_portrait(frame, app, section_area(columns[2]), &data);
+        render_core(frame, app, section_area(columns[2]), &data);
         render_divider(frame, app, columns[3]);
         render_right(frame, app, section_area(columns[4]), &data);
     } else if inner.width >= TWO_COLUMN_MIN_WIDTH {
@@ -153,15 +153,24 @@ fn collect_snapshot(app: &App) -> SnapshotData {
     data
 }
 
-fn render_left_hero(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
+/// The middle Core column: hero totals, then the Fact block. Fact rows are
+/// ordered to line up horizontally with the achievement ladders in the
+/// right column (Active Days↔streak, Data Size↔tokens, Cache Rate↔cache,
+/// Model Eated↔models, Harness Enjoyed↔harnesses).
+fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
     let active_days = app
         .data
         .daily
         .iter()
         .filter(|day| day.tokens.total() > 0)
         .count();
+    let main_sessions: usize = app
+        .session_snapshot
+        .source_summaries()
+        .iter()
+        .map(|summary| summary.main_session_count)
+        .sum();
     let lines = vec![
-        section_title(app, "Total"),
         Line::from(vec![
             Span::styled(
                 format_tokens(app.data.total_tokens),
@@ -179,54 +188,44 @@ fn render_left_hero(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDat
             Span::styled(" cost", Style::default().fg(app.theme.muted)),
         ]),
         separator_line(app, area.width as usize),
+        section_title(app, "Fact"),
+        metric_line(app, "Active Days", active_days.to_string(), Color::Cyan),
         metric_line(
             app,
-            "Source Data",
+            "Data Size",
             format_bytes(app.data.health.source_data_bytes),
             app.theme.foreground,
         ),
         metric_line(
             app,
-            "Cache Read",
+            "Cache Rate",
             format!(
                 "{:.1}%",
                 share_percent(data.tokens.cache_read, data.tokens.total())
             ),
             Color::Cyan,
         ),
-        sources_metric_line(app),
         metric_line(
             app,
-            "Sessions",
-            app.session_snapshot
-                .source_summaries()
-                .iter()
-                .map(|summary| summary.main_session_count)
-                .sum::<usize>()
-                .to_string(),
-            Color::Cyan,
-        ),
-        metric_line(app, "Active Days", active_days.to_string(), Color::Cyan),
-        metric_line(
-            app,
-            "Models Used",
+            "Model Eated",
             data.models.len().to_string(),
             Color::Cyan,
         ),
         metric_line(
             app,
-            "Harnesses Used",
+            "Harness Enjoyed",
             data.harnesses.len().to_string(),
             Color::Cyan,
         ),
+        sources_metric_line(app),
+        metric_line(app, "Sessions", main_sessions.to_string(), Color::Cyan),
     ];
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// The favorites showcase: the favorite model family's kaomoji portrait in
-/// its brand color, then every favorite field (model family, client, day of
-/// week) with its token share.
-fn render_middle_portrait(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
+/// The Fun Things column: favorite model family's slogan, portrait and
+/// stats, then the favorite model, client (with its own slogan) and day.
+fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
     let total = data.tokens.total();
 
     // Aggregate per model family: gpt-5.5 and gpt-5.6 are one family, gpt.
@@ -246,16 +245,41 @@ fn render_middle_portrait(frame: &mut Frame, app: &App, area: Rect, data: &Snaps
                 .then_with(|| left.cost.total_cmp(&right.cost))
                 .then_with(|| right_family.cmp(left_family))
         });
+    let favorite_model = data
+        .models
+        .iter()
+        .max_by(|(left_name, left), (right_name, right)| {
+            left.tokens
+                .cmp(&right.tokens)
+                .then_with(|| left.cost.total_cmp(&right.cost))
+                .then_with(|| right_name.cmp(left_name))
+        });
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut lines: Vec<Line<'static>> = vec![section_title(app, "Fun Things")];
     match favorite_family {
         Some((family, aggregate)) => {
             let color = portraits::family_color(app, *family);
+            let mut intro = vec![
+                Span::styled(
+                    "Your favorite model (family) is ".to_string(),
+                    Style::default().fg(app.theme.muted),
+                ),
+                Span::styled(
+                    portraits::display_name(*family).to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+            ];
+            if let Some((model_name, _)) = favorite_model {
+                intro.push(Span::styled(
+                    format!(" ({model_name})"),
+                    Style::default().fg(app.theme.muted),
+                ));
+            }
+            lines.push(Line::from(intro));
             lines.extend(portraits::lines(app, *family));
-            lines.push(Line::default());
             lines.push(Line::from(Span::styled(
-                portraits::display_name(*family).to_string(),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
+                portraits::slogan(*family).to_string(),
+                Style::default().fg(color),
             )));
             lines.push(Line::from(Span::styled(
                 format!(
@@ -269,56 +293,100 @@ fn render_middle_portrait(frame: &mut Frame, app: &App, area: Rect, data: &Snaps
         }
         None => {
             lines.extend(portraits::lines(app, portraits::Family::Unknown));
-            lines.push(Line::default());
             lines.push(Line::from(Span::styled(
                 "no data yet",
                 Style::default().fg(app.theme.muted),
             )));
         }
     }
-
-    let mut favorite_rows: Vec<Line<'static>> = Vec::new();
-    if let Some((name, aggregate)) =
-        data.models
-            .iter()
-            .max_by(|(left_name, left), (right_name, right)| {
-                left.tokens
-                    .cmp(&right.tokens)
-                    .then_with(|| left.cost.total_cmp(&right.cost))
-                    .then_with(|| right_name.cmp(left_name))
-            })
-    {
-        favorite_rows.push(favorite_line(
-            app,
-            "favorite model",
-            name,
-            aggregate.tokens,
-            total,
-        ));
+    if let Some((model_name, aggregate)) = favorite_model {
+        lines.push(Line::from(vec![
+            Span::styled(
+                model_name.clone(),
+                Style::default()
+                    .fg(app.model_color(model_name))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "  {} · {:.1}% · {}",
+                    format_tokens(aggregate.tokens),
+                    share_percent(aggregate.tokens, total),
+                    format_cost(aggregate.cost),
+                ),
+                Style::default().fg(app.theme.muted),
+            ),
+        ]));
     }
-    if let Some((name, aggregate)) = favorite_harness(data) {
-        favorite_rows.push(favorite_line(
-            app,
-            "favorite client",
-            &name,
-            aggregate.tokens,
-            total,
-        ));
+
+    if let Some((key, display, _)) = favorite_harness(data) {
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Your favorite client is ".to_string(),
+                Style::default().fg(app.theme.muted),
+            ),
+            Span::styled(
+                display,
+                Style::default()
+                    .fg(app.theme.foreground)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · {}", harness_slogan(&key)),
+                Style::default().fg(app.theme.accent),
+            ),
+        ]));
     }
     if let Some((weekday, tokens)) = favorite_weekday(app) {
-        favorite_rows.push(favorite_line(app, "favorite day", weekday, tokens, total));
-    }
-    if !favorite_rows.is_empty() {
-        lines.push(Line::default());
-        lines.extend(align_block(favorite_rows));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Your favorite day is ".to_string(),
+                Style::default().fg(app.theme.muted),
+            ),
+            Span::styled(
+                weekday.to_string(),
+                Style::default()
+                    .fg(app.theme.foreground)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    " · {} ({:.1}%)",
+                    format_tokens(tokens),
+                    share_percent(tokens, total)
+                ),
+                Style::default().fg(app.theme.muted),
+            ),
+        ]));
     }
 
-    let pad = area.height.saturating_sub(lines.len() as u16) as usize / 2;
-    let mut padded = vec![Line::default(); pad];
-    padded.extend(lines);
-    padded.truncate(area.height as usize);
-    let paragraph = Paragraph::new(padded).alignment(Alignment::Center);
-    frame.render_widget(paragraph, area);
+    lines.truncate(area.height as usize);
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Harness slogans, keyed off the raw harness id.
+fn harness_slogan(harness_key: &str) -> &'static str {
+    let key = harness_key.to_ascii_lowercase();
+    if key == "pi" || key.contains("claude") {
+        "夯"
+    } else if key.contains("kimi")
+        || key.contains("codex")
+        || key.contains("omp")
+        || key.contains("droid")
+    {
+        "顶级"
+    } else if key.contains("antigravity")
+        || key.contains("copilot")
+        || key.contains("kiro")
+        || key.contains("gemini")
+    {
+        "拉完了"
+    } else if key.contains("warp") {
+        "人上人"
+    } else {
+        "NPC"
+    }
 }
 
 /// Sources health as a left-column metric: a green ✓ count when everything
@@ -342,7 +410,7 @@ fn share_percent(tokens: u64, total: u64) -> f64 {
     }
 }
 
-fn favorite_harness(data: &SnapshotData) -> Option<(String, &Aggregate)> {
+fn favorite_harness(data: &SnapshotData) -> Option<(&String, String, &Aggregate)> {
     data.harnesses
         .iter()
         .max_by(|(left_name, left), (right_name, right)| {
@@ -351,7 +419,7 @@ fn favorite_harness(data: &SnapshotData) -> Option<(String, &Aggregate)> {
                 .then_with(|| left.cost.total_cmp(&right.cost))
                 .then_with(|| right_name.cmp(left_name))
         })
-        .map(|(name, aggregate)| (get_client_display_name(name).to_string(), aggregate))
+        .map(|(name, aggregate)| (name, get_client_display_name(name).to_string(), aggregate))
 }
 
 /// The weekday (Monday..Sunday) with the highest total token spend.
@@ -380,42 +448,7 @@ fn favorite_weekday(app: &App) -> Option<(&'static str, u64)> {
     Some((NAMES[index], *tokens))
 }
 
-fn favorite_line(app: &App, label: &str, name: &str, tokens: u64, total: u64) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{label:<17}"), Style::default().fg(app.theme.muted)),
-        Span::styled(
-            format!("{name:<12}"),
-            Style::default()
-                .fg(app.theme.foreground)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(
-                " {} · {:.1}%",
-                format_tokens(tokens),
-                share_percent(tokens, total)
-            ),
-            Style::default().fg(app.theme.muted),
-        ),
-    ])
-}
-
-/// Pads every row to the block's widest line so per-line centering keeps
-/// the favorites block's left edges aligned.
-fn align_block(rows: Vec<Line<'static>>) -> Vec<Line<'static>> {
-    let width = rows.iter().map(|row| row.width()).max().unwrap_or(0);
-    rows.into_iter()
-        .map(|mut row| {
-            let pad = width.saturating_sub(row.width());
-            if pad > 0 {
-                row.spans.push(Span::raw(" ".repeat(pad)));
-            }
-            row
-        })
-        .collect()
-}
-
-/// One fun fact at a time in the right column's bottom box, flipping to the
+/// One fun fact at a time in the right column's top box, flipping to the
 /// next with a one-line vertical roll every forty ticks.
 fn render_fact_box(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
     let facts = fun_facts(app, data);
@@ -602,10 +635,13 @@ fn render_middle(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) 
 }
 
 fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
+    // Roast facts sit on top so the Achievements title lines up with the
+    // Core column's Fact title row.
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(2)])
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(area);
+    render_fact_box(frame, app, rows[0], data);
 
     let items = achievements::build(
         app,
@@ -620,7 +656,7 @@ fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
     let all_clean = sources > 0 && app.data.health.clean_sources == sources;
     if !all_clean {
         // Health failures expand into the full gauge and legend; clean
-        // sources are a one-line metric in the left column instead.
+        // sources are a one-line metric in the Core column instead.
         lines.push(Line::default());
         lines.push(section_title(app, "Sources"));
         lines.push(Line::from(Span::styled(
@@ -629,13 +665,11 @@ fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
                 .fg(health_color(app))
                 .add_modifier(Modifier::BOLD),
         )));
-        lines.push(health_bar(app, rows[0].width as usize));
-        lines.extend(source_legend_rows(app, rows[0].width as usize));
+        lines.push(health_bar(app, rows[1].width as usize));
+        lines.extend(source_legend_rows(app, rows[1].width as usize));
     }
-    lines.truncate(rows[0].height as usize);
-    frame.render_widget(Paragraph::new(lines), rows[0]);
-
-    render_fact_box(frame, app, rows[1], data);
+    lines.truncate(rows[1].height as usize);
+    frame.render_widget(Paragraph::new(lines), rows[1]);
 }
 
 /// One segmented source-health bar: each non-zero source state occupies a
@@ -1169,13 +1203,19 @@ mod tests {
         let lines = buffer_lines(&terminal);
         let metric_row = lines
             .iter()
-            .find(|line| line.contains("Source Data"))
+            .find(|line| line.contains("Data Size"))
             .expect("snapshot metric row should render");
         assert_eq!(metric_row.matches('│').count(), 4, "{metric_row}");
+        // The Fact block lives in the middle column, right of the second divider.
+        let dividers: Vec<usize> = metric_row
+            .char_indices()
+            .filter(|(_, glyph)| *glyph == '│')
+            .map(|(index, _)| index)
+            .collect();
         let metric_offset = metric_row
-            .find("Source Data")
+            .find("Data Size")
             .expect("metric label should render");
-        assert_eq!(UnicodeWidthStr::width(&metric_row[..metric_offset]), 2);
+        assert!(metric_offset > dividers[1], "{metric_row}");
     }
 
     #[test]

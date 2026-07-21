@@ -337,7 +337,7 @@ mod tests {
         let screen = render_screen(&mut app, 120, 32).join("\n");
 
         assert!(
-            screen.contains("Source Data"),
+            screen.contains("Data Size"),
             "installed generation must keep the tab content visible: {screen}"
         );
         assert!(
