@@ -8,7 +8,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::source_health::{RecordRejectionReason, RejectionSummary, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary};
 use crate::{checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
@@ -191,12 +191,12 @@ pub(crate) struct CodexParseState {
 pub(crate) struct ParsedCodexFile {
     pub messages: Vec<UnifiedMessage>,
     pub rejections: RejectionSummary,
-    pub interrupted: Option<SourceFailure>,
+    pub interrupted: Option<InputFailure>,
     pub consumed_offset: u64,
     pub state: CodexParseState,
     pub content_hash: Option<[u8; 32]>,
     pub ends_with_newline: bool,
-    pub source_identity: Option<crate::message_cache::SourceFileIdentity>,
+    pub input_identity: Option<crate::message_cache::InputFileIdentity>,
 }
 
 #[derive(Clone)]
@@ -253,7 +253,7 @@ impl<R: Read> Read for HashingReader<R> {
             self.hasher.update(&buffer[..read]);
             self.last_byte = Some(buffer[read - 1]);
             #[cfg(test)]
-            crate::message_cache::record_source_bytes(&self.path, read);
+            crate::message_cache::record_input_bytes(&self.path, read);
         }
         Ok(read)
     }
@@ -268,7 +268,7 @@ fn session_id_from_path(path: &Path) -> SessionParseResult<String> {
         .ok_or_else(|| {
             SessionParseError::invalid(
                 "derive Codex session id",
-                "source filename must have a non-blank UTF-8 stem",
+                "input filename must have a non-blank UTF-8 stem",
             )
         })?;
     Ok(session_id.to_string())
@@ -327,7 +327,7 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
             Ok(bytes_read) => bytes_read,
             Err(source) => {
                 let error = SessionParseError::new("read Codex JSONL line", source);
-                interrupted = Some(SourceFailure::from(&error));
+                interrupted = Some(InputFailure::from(&error));
                 break;
             }
         };
@@ -367,7 +367,7 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                 messages.truncate(messages_len_before);
                 pending_model_messages = pending_before.clone();
                 rejections.record(reason);
-                interrupted = Some(SourceFailure::from(&error));
+                interrupted = Some(InputFailure::from(&error));
                 break 'records;
             }};
         }
@@ -478,18 +478,18 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                 }
 
                 if entry.entry_type == "session_meta" {
-                    if codex_source_is_exec(payload.source.as_ref()) {
+                    if codex_origin_is_exec(payload.source.as_ref()) {
                         state.session_is_exec = true;
                     }
                     if let Some(ref id) = payload.id {
                         state.session_id_from_meta = Some(id.clone());
                     }
-                    state.session_is_child |= codex_source_is_thread_spawn(payload.source.as_ref());
+                    state.session_is_child |= codex_origin_is_thread_spawn(payload.source.as_ref());
                     let forked_from_id = payload
                         .forked_from_id
                         .as_deref()
                         .filter(|id| !id.is_empty())
-                        .or_else(|| forked_from_id_from_source(payload.source.as_ref()));
+                        .or_else(|| forked_from_id_from_origin(payload.source.as_ref()));
                     if let Some(forked_from_id) = forked_from_id {
                         state.session_forked_from_id = Some(forked_from_id.to_string());
                         state.forked_child_session_id = payload.id.clone();
@@ -504,7 +504,7 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                     let agent_role = payload
                         .agent_role
                         .as_deref()
-                        .or_else(|| codex_source_agent_role(payload.source.as_ref()));
+                        .or_else(|| codex_origin_agent_role(payload.source.as_ref()));
                     state.session_agent = codex_agent_label(
                         payload.source.as_ref(),
                         agent_role,
@@ -576,10 +576,10 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                         );
                     }
 
-                    // Use last_token_usage as the primary increment source.
+                    // Use last_token_usage as the primary increment basis.
                     // Upstream totals are mutable snapshots (compaction, context-window
                     // capping can rewrite them), so we only use total_token_usage for
-                    // dedup and monotonicity checks — never as a direct delta source.
+                    // dedup and monotonicity checks — never as a direct delta basis.
                     let (total_usage_record, last_usage_record) =
                         match required_codex_token_usage(info) {
                             Ok(usage) => usage,
@@ -742,10 +742,10 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
     if interrupted.is_none() && !pending_model_messages.is_empty() {
         let error = SessionParseError::invalid(
             "resolve Codex token-count model",
-            "source ended with token-count rows whose model was never identified",
+            "input ended with token-count rows whose model was never identified",
         );
         rejections.record(RecordRejectionReason::MissingModel);
-        interrupted = Some(SourceFailure::from(&error));
+        interrupted = Some(InputFailure::from(&error));
     }
 
     Ok(ParsedCodexFile {
@@ -756,23 +756,23 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
         state,
         content_hash: None,
         ends_with_newline: false,
-        source_identity: None,
+        input_identity: None,
     })
 }
 
-fn codex_source_is_exec(source: Option<&Value>) -> bool {
-    source.and_then(Value::as_str) == Some("exec")
+fn codex_origin_is_exec(origin: Option<&Value>) -> bool {
+    origin.and_then(Value::as_str) == Some("exec")
 }
 
-fn codex_source_is_subagent(source: Option<&Value>) -> bool {
-    source
+fn codex_origin_is_subagent(origin: Option<&Value>) -> bool {
+    origin
         .and_then(|value| value.get("subagent"))
         .and_then(Value::as_object)
         .is_some()
 }
 
-fn codex_source_agent_role(source: Option<&Value>) -> Option<&str> {
-    source?
+fn codex_origin_agent_role(origin: Option<&Value>) -> Option<&str> {
+    origin?
         .get("subagent")?
         .get("thread_spawn")?
         .get("agent_role")
@@ -782,7 +782,7 @@ fn codex_source_agent_role(source: Option<&Value>) -> Option<&str> {
 }
 
 fn codex_agent_label(
-    source: Option<&Value>,
+    origin: Option<&Value>,
     agent_role: Option<&str>,
     agent_nickname: Option<&str>,
     is_exec: bool,
@@ -791,7 +791,7 @@ fn codex_agent_label(
         return Some("Codex Exec".to_string());
     }
 
-    if codex_source_is_subagent(source) {
+    if codex_origin_is_subagent(origin) {
         return Some(match agent_role {
             Some(role) => format!("Codex {}", super::normalize_agent_name(role)),
             None => "Codex Subagent".to_string(),
@@ -804,8 +804,8 @@ fn codex_agent_label(
         .map(|_| "Codex Agent".to_string())
 }
 
-fn forked_from_id_from_source(source: Option<&Value>) -> Option<&str> {
-    source?
+fn forked_from_id_from_origin(origin: Option<&Value>) -> Option<&str> {
+    origin?
         .get("subagent")?
         .get("thread_spawn")?
         .get("parent_thread_id")?
@@ -813,9 +813,9 @@ fn forked_from_id_from_source(source: Option<&Value>) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
-fn codex_source_is_thread_spawn(source: Option<&Value>) -> bool {
-    source
-        .and_then(|source| source.get("subagent"))
+fn codex_origin_is_thread_spawn(origin: Option<&Value>) -> bool {
+    origin
+        .and_then(|origin| origin.get("subagent"))
         .and_then(|subagent| subagent.get("thread_spawn"))
         .is_some()
 }
@@ -936,14 +936,14 @@ fn flush_pending_model_messages(
 /// Parse a Codex JSONL file with stateful tracking
 pub fn parse_codex_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
     let file = std::fs::File::open(path)
-        .map_err(|source| SessionParseError::new("open Codex JSONL source", source))?;
+        .map_err(|source| SessionParseError::new("open Codex JSONL input", source))?;
 
     let session_id = session_id_from_path(path)?;
     let mut reader = BufReader::new(file);
     let parsed = parse_codex_reader(&mut reader, &session_id, 0, CodexParseState::default())?;
     if let Some(failure) = parsed.interrupted.as_ref() {
         return Err(SessionParseError::invalid(
-            "parse Codex JSONL source",
+            "parse Codex JSONL input",
             format!("{}: {}", failure.operation, failure.message),
         ));
     }
@@ -1010,7 +1010,7 @@ pub(crate) fn parse_codex_file_incremental(
     parse_codex_file_incremental_hashed(path, start_offset, state, None)?.ok_or_else(|| {
         SessionParseError::invalid(
             "validate Codex incremental prefix",
-            "source ended before the requested start offset",
+            "input ended before the requested start offset",
         )
     })
 }
@@ -1031,12 +1031,12 @@ fn parse_codex_file_incremental_hashed(
     expected_prefix_hash: Option<[u8; 32]>,
 ) -> SessionParseResult<Option<ParsedCodexFile>> {
     let mut file = std::fs::File::open(path)
-        .map_err(|source| SessionParseError::new("open Codex JSONL source", source))?;
-    let source_identity = crate::message_cache::source_file_identity_from_open_file(&file)
-        .map_err(|source| SessionParseError::new("read Codex source file identity", source))?;
+        .map_err(|source| SessionParseError::new("open Codex JSONL input", source))?;
+    let input_identity = crate::message_cache::input_file_identity_from_open_file(&file)
+        .map_err(|source| SessionParseError::new("read Codex input file identity", source))?;
 
     #[cfg(test)]
-    crate::message_cache::record_source_hash_start(path);
+    crate::message_cache::record_input_hash_start(path);
     let mut hasher = Sha256::new();
     let mut last_byte = None;
     let mut remaining = start_offset;
@@ -1052,12 +1052,12 @@ fn parse_codex_file_incremental_hashed(
             } else {
                 Err(SessionParseError::invalid(
                     "validate Codex incremental prefix",
-                    "source ended before the requested start offset",
+                    "input ended before the requested start offset",
                 ))
             };
         }
         #[cfg(test)]
-        crate::message_cache::record_source_bytes(path, read);
+        crate::message_cache::record_input_bytes(path, read);
         hasher.update(&buffer[..read]);
         last_byte = Some(buffer[read - 1]);
         remaining -= read as u64;
@@ -1082,7 +1082,7 @@ fn parse_codex_file_incremental_hashed(
     parsed.content_hash = Some(hashing_reader.hasher.finalize().into());
     parsed.ends_with_newline =
         parsed.consumed_offset == 0 || hashing_reader.last_byte == Some(b'\n');
-    parsed.source_identity = Some(source_identity);
+    parsed.input_identity = Some(input_identity);
     Ok(Some(parsed))
 }
 
@@ -1235,13 +1235,13 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_source_returns_open_error() {
+    fn test_missing_input_returns_open_error() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("missing.jsonl");
 
-        let error = super::parse_codex_file(&path).expect_err("missing source must fail");
+        let error = super::parse_codex_file(&path).expect_err("missing input must fail");
 
-        assert!(error.to_string().contains("open Codex JSONL source"));
+        assert!(error.to_string().contains("open Codex JSONL input"));
     }
 
     #[test]
@@ -1279,7 +1279,7 @@ mod tests {
     );
 
     #[test]
-    fn structured_stdout_is_not_a_provider_session_source() {
+    fn structured_stdout_is_not_a_local_session_input() {
         let file = create_test_file(
             r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn.completed","model":"gpt-4o-mini","usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30}}"#,
         );
@@ -1847,15 +1847,15 @@ mod tests {
     }
 
     #[test]
-    fn test_only_thread_spawn_source_marks_a_child() {
+    fn test_only_thread_spawn_origin_marks_a_child() {
         let thread_spawn = serde_json::json!({
             "subagent": {"thread_spawn": {"parent_thread_id": "thread-parent"}}
         });
-        assert!(codex_source_is_thread_spawn(Some(&thread_spawn)));
-        assert!(!codex_source_is_thread_spawn(Some(&serde_json::json!({
+        assert!(codex_origin_is_thread_spawn(Some(&thread_spawn)));
+        assert!(!codex_origin_is_thread_spawn(Some(&serde_json::json!({
             "subagent": {"review": {}}
         }))));
-        assert!(!codex_source_is_thread_spawn(Some(&serde_json::json!(
+        assert!(!codex_origin_is_thread_spawn(Some(&serde_json::json!(
             "vscode"
         ))));
     }
@@ -1945,7 +1945,7 @@ mod tests {
     }
 
     #[test]
-    fn test_forked_child_detects_thread_spawn_source_without_top_level_fork_id() {
+    fn test_forked_child_detects_thread_spawn_origin_without_top_level_fork_id() {
         let file = create_test_file(concat!(
             r#"{"timestamp":"2026-05-05T21:51:57.991Z","type":"session_meta","payload":{"id":"child-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session","depth":1}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo-child"}}"#,
             "\n",

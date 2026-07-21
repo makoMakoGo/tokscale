@@ -4,27 +4,27 @@ use std::path::{Path, PathBuf};
 
 use crate::clients::ClientId;
 use crate::message_cache::ParserId;
-use crate::message_cache::{CacheLookupFailure, CacheReadFailure, SourceCacheError};
+use crate::message_cache::{CacheLookupFailure, CacheReadFailure, InputCacheError};
 use crate::sessions::error::SessionParseError;
 
-type BoxSourceError = Box<dyn Error + Send + Sync + 'static>;
+type BoxInputError = Box<dyn Error + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SourceDiscoveryErrorKind {
+pub(crate) enum InputDiscoveryErrorKind {
     Configuration,
-    Source,
+    Input,
 }
 
 #[derive(Debug)]
-pub(crate) struct SourceDiscoveryError {
-    pub(crate) kind: SourceDiscoveryErrorKind,
+pub(crate) struct InputDiscoveryError {
+    pub(crate) kind: InputDiscoveryErrorKind,
     pub(crate) client: ClientId,
     pub(crate) path: PathBuf,
     pub(crate) operation: &'static str,
-    source: BoxSourceError,
+    source: BoxInputError,
 }
 
-impl SourceDiscoveryError {
+impl InputDiscoveryError {
     pub(crate) fn new(
         client: ClientId,
         path: impl Into<PathBuf>,
@@ -32,7 +32,7 @@ impl SourceDiscoveryError {
         source: impl Error + Send + Sync + 'static,
     ) -> Self {
         Self {
-            kind: SourceDiscoveryErrorKind::Source,
+            kind: InputDiscoveryErrorKind::Input,
             client,
             path: path.into(),
             operation,
@@ -47,7 +47,7 @@ impl SourceDiscoveryError {
         source: impl Error + Send + Sync + 'static,
     ) -> Self {
         Self {
-            kind: SourceDiscoveryErrorKind::Configuration,
+            kind: InputDiscoveryErrorKind::Configuration,
             client,
             path: path.into(),
             operation,
@@ -56,11 +56,11 @@ impl SourceDiscoveryError {
     }
 }
 
-impl fmt::Display for SourceDiscoveryError {
+impl fmt::Display for InputDiscoveryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let category = match self.kind {
-            SourceDiscoveryErrorKind::Configuration => "configuration",
-            SourceDiscoveryErrorKind::Source => "source discovery",
+            InputDiscoveryErrorKind::Configuration => "configuration",
+            InputDiscoveryErrorKind::Input => "input discovery",
         };
         write!(
             formatter,
@@ -74,22 +74,22 @@ impl fmt::Display for SourceDiscoveryError {
     }
 }
 
-impl Error for SourceDiscoveryError {
+impl Error for InputDiscoveryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         Some(self.source.as_ref())
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct SourceParseError {
+pub(crate) struct InputParseError {
     pub(crate) client: ClientId,
     pub(crate) path: PathBuf,
     pub(crate) parser: ParserId,
     pub(crate) operation: &'static str,
-    source: BoxSourceError,
+    source: BoxInputError,
 }
 
-impl SourceParseError {
+impl InputParseError {
     pub(crate) fn new(
         client: ClientId,
         path: impl Into<PathBuf>,
@@ -112,16 +112,16 @@ impl SourceParseError {
         parser: ParserId,
         source: SessionParseError,
     ) -> Self {
-        let source_path = source.path().unwrap_or(path).to_path_buf();
-        Self::new(client, source_path, parser, source.operation(), source)
+        let input_path = source.path().unwrap_or(path).to_path_buf();
+        Self::new(client, input_path, parser, source.operation(), source)
     }
 }
 
-impl fmt::Display for SourceParseError {
+impl fmt::Display for InputParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{} parser `{}` failed to {} source `{}`: {}",
+            "{} parser `{}` failed to {} input `{}`: {}",
             self.client.as_str(),
             self.parser.stable_name(),
             self.operation,
@@ -131,43 +131,43 @@ impl fmt::Display for SourceParseError {
     }
 }
 
-impl Error for SourceParseError {
+impl Error for InputParseError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         Some(self.source.as_ref())
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SourcePlanningError {
+pub(crate) enum InputPlanningError {
     #[error(transparent)]
-    Snapshot(#[from] crate::message_cache::SourceSnapshotError),
+    Snapshot(#[from] crate::message_cache::InputSnapshotError),
     #[error(transparent)]
     CacheLookup(#[from] CacheLookupFailure),
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SourcePipelineError {
+pub(crate) enum InputPipelineError {
     #[error(transparent)]
-    Parse(#[from] SourceParseError),
+    Parse(#[from] InputParseError),
     #[error(transparent)]
     CacheRead(#[from] CacheReadFailure),
     #[error(transparent)]
     CacheLookup(#[from] CacheLookupFailure),
     #[error(transparent)]
-    Planning(#[from] SourcePlanningError),
+    Planning(#[from] InputPlanningError),
     #[error(transparent)]
-    CacheMaintenance(#[from] SourceCacheError),
-    #[error("local source pipeline contract violation: {detail}")]
+    CacheMaintenance(#[from] InputCacheError),
+    #[error("local input pipeline contract violation: {detail}")]
     Contract { detail: String },
     #[error("{primary}; cache finalization also failed: {finalization}")]
     Finalization {
         #[source]
-        primary: Box<SourcePipelineError>,
-        finalization: SourceCacheError,
+        primary: Box<InputPipelineError>,
+        finalization: InputCacheError,
     },
 }
 
-impl SourcePipelineError {
+impl InputPipelineError {
     pub(crate) fn contract(detail: impl Into<String>) -> Self {
         Self::Contract {
             detail: detail.into(),
@@ -175,8 +175,8 @@ impl SourcePipelineError {
     }
 
     pub(crate) fn with_finalization(
-        primary: SourcePipelineError,
-        finalization: SourceCacheError,
+        primary: InputPipelineError,
+        finalization: InputCacheError,
     ) -> Self {
         Self::Finalization {
             primary: Box::new(primary),

@@ -6,7 +6,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -154,7 +154,7 @@ fn token_breakdown(metrics: &Map<String, Value>) -> Option<TokenBreakdown> {
 fn workspace_from_manifest(
     messages_path: &Path,
     root_session_id: &str,
-) -> Result<Option<WorkspaceMetadata>, SourceFailure> {
+) -> Result<Option<WorkspaceMetadata>, InputFailure> {
     let Some(manifest_path) = cline_manifest_dependency_path(messages_path) else {
         return Ok(None);
     };
@@ -162,7 +162,7 @@ fn workspace_from_manifest(
         Ok(data) => data,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(SourceFailure::new(
+            return Err(InputFailure::new(
                 "read Cline session manifest",
                 format!("{}: {error}", manifest_path.display()),
             ));
@@ -171,25 +171,25 @@ fn workspace_from_manifest(
 
     let mut bytes = data;
     let manifest: Value = simd_json::from_slice(&mut bytes).map_err(|error| {
-        SourceFailure::new(
+        InputFailure::new(
             "decode Cline session manifest",
             format!("{}: {error}", manifest_path.display()),
         )
     })?;
     let object = manifest.as_object().ok_or_else(|| {
-        SourceFailure::new(
+        InputFailure::new(
             "validate Cline session manifest",
             format!("{}: manifest must be an object", manifest_path.display()),
         )
     })?;
     if object.get("version").and_then(Value::as_u64) != Some(1) {
-        return Err(SourceFailure::new(
+        return Err(InputFailure::new(
             "validate Cline session manifest",
             format!("{}: unsupported manifest version", manifest_path.display()),
         ));
     }
     if non_empty_string(object.get("session_id")) != Some(root_session_id) {
-        return Err(SourceFailure::new(
+        return Err(InputFailure::new(
             "validate Cline session manifest",
             format!(
                 "{}: session_id does not match messages artifact",
@@ -198,7 +198,7 @@ fn workspace_from_manifest(
         ));
     }
     let workspace_root = non_empty_string(object.get("workspace_root")).ok_or_else(|| {
-        SourceFailure::new(
+        InputFailure::new(
             "validate Cline session manifest",
             format!(
                 "{}: workspace_root is missing or blank",
@@ -209,14 +209,14 @@ fn workspace_from_manifest(
     workspace_metadata_from_key(workspace_root)
         .map(Some)
         .ok_or_else(|| {
-            SourceFailure::new(
+            InputFailure::new(
                 "validate Cline session manifest",
                 format!("{}: workspace_root is unusable", manifest_path.display()),
             )
         })
 }
 
-pub fn parse_cline_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_cline_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let data = std::fs::read(path)
         .map_err(|error| SessionParseError::at_path(path, "read Cline SDK messages", error))?;
     let mut bytes = data;
@@ -263,7 +263,7 @@ pub fn parse_cline_file(path: &Path) -> SessionParseResult<ScannedSource> {
         })?;
     let identity = artifact_identity(path, root_session_id, agent_kind)?;
 
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     let workspace = match workspace_from_manifest(path, root_session_id) {
         Ok(workspace) => workspace,
         Err(failure) => {
@@ -317,7 +317,7 @@ pub fn parse_cline_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let raw_provider = model_info
             .and_then(|info| non_empty_string(info.get("provider")))
             .unwrap_or_default();
-        let provider_id = provider_identity::source_provider_id(raw_provider, model_id);
+        let provider_id = provider_identity::observed_provider_id(raw_provider, model_id);
         let mut message = UnifiedMessage::new_with_agent(
             CLIENT_ID,
             model_id,
@@ -638,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_manifest_preserves_usage_and_marks_source_partial() {
+    fn invalid_manifest_preserves_usage_and_marks_input_partial() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = messages_path(&dir, "session-a", "session-a");
         write_json(

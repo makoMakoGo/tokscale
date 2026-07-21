@@ -4,7 +4,7 @@ Last verified: 2026-07-18
 
 This document records observed Factory Droid storage and runtime semantics, not
 Tokscale policy. The corresponding ingestion decision lives in
-[ADR 0020](../adr/0020-strict-source-identity-and-error-contract.md).
+[ADR 0020](../adr/0020-input-ingestion-and-integrity-contract.md).
 Verification used the locally installed Droid `0.174.0` Linux executable and a
 read-only snapshot of the local `~/.factory` corpus. No credentials, prompts,
 message content, or tool payloads were inspected or copied.
@@ -116,7 +116,7 @@ protocol lock, timestamp, and token totals.
 
 ## Tokscale interpretation boundary
 
-Tokscale may retain `providerLock` as a source routing label while parsing, but
+Tokscale may retain `providerLock` as a routing label while parsing, but
 must not present it as authoritative model ownership. Final report
 canonicalization can combine the normalized model ID with that label; for the
 verified `custom:glm-5.1` sessions, this yields model `glm-5.1`, provider `zai`,

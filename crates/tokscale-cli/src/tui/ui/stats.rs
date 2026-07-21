@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::tui::app::{App, ClickAction};
 use crate::tui::colors::{get_client_color, get_provider_shade};
-use crate::tui::data::{ContributionDay, DailySourceInfo, DailyUsage};
+use crate::tui::data::{ContributionDay, DailyClientInfo, DailyUsage};
 
 use super::radar::{render_radar, RadarAxis};
 use super::widgets::{
@@ -311,8 +311,8 @@ struct RankedModel {
 
 fn rank_canonical_models(daily: &DailyUsage) -> Vec<RankedModel> {
     let mut totals: BTreeMap<String, (u64, f64)> = BTreeMap::new();
-    for source in daily.source_breakdown.values() {
-        for model in source.models.values() {
+    for client_info in daily.client_breakdown.values() {
+        for model in client_info.models.values() {
             let tokens = model.tokens.total();
             if model.model_id.is_empty() || tokens == 0 {
                 continue;
@@ -341,9 +341,9 @@ fn rank_canonical_models(daily: &DailyUsage) -> Vec<RankedModel> {
     ranked
 }
 
-fn top_harness(daily: &DailyUsage) -> Option<(&str, &DailySourceInfo)> {
-    let mut sources = daily.source_breakdown.iter().collect::<Vec<_>>();
-    sources.sort_by(|(left_name, left), (right_name, right)| {
+fn top_client(daily: &DailyUsage) -> Option<(&str, &DailyClientInfo)> {
+    let mut clients = daily.client_breakdown.iter().collect::<Vec<_>>();
+    clients.sort_by(|(left_name, left), (right_name, right)| {
         right
             .tokens
             .total()
@@ -351,10 +351,10 @@ fn top_harness(daily: &DailyUsage) -> Option<(&str, &DailySourceInfo)> {
             .then_with(|| right.cost.total_cmp(&left.cost))
             .then_with(|| left_name.cmp(right_name))
     });
-    sources
+    clients
         .into_iter()
         .next()
-        .map(|(name, source)| (name.as_str(), source))
+        .map(|(name, client_info)| (name.as_str(), client_info))
 }
 
 fn selected_graph_day(app: &App) -> Option<&ContributionDay> {
@@ -421,7 +421,7 @@ fn render_day_insights(frame: &mut Frame, app: &App, area: Rect) {
     let Some(day) = selected_graph_day(app) else {
         frame.render_widget(
             Paragraph::new(
-                "Select a day in the contribution graph to inspect its harness and model usage.",
+                "Select a day in the contribution graph to inspect its client and model usage.",
             )
             .style(Style::default().fg(app.theme.muted))
             .alignment(Alignment::Center),
@@ -547,19 +547,19 @@ fn render_day_stats_lines(
         ))));
     }
 
-    if let Some((client, source)) = daily.and_then(top_harness) {
-        let harness_tokens = source.tokens.total();
-        if harness_tokens > 0 {
+    if let Some((client, client_info)) = daily.and_then(top_client) {
+        let client_tokens = client_info.tokens.total();
+        if client_tokens > 0 {
             let denominator = day.tokens.max(1);
-            let percentage = harness_tokens.saturating_mul(100) / denominator;
-            let value = format!("{} ({}%)", format_tokens(harness_tokens), percentage);
+            let percentage = client_tokens.saturating_mul(100) / denominator;
+            let value = format!("{} ({}%)", format_tokens(client_tokens), percentage);
             let display_name = get_client_display_name(client);
             let name_budget = (area.width as usize)
                 .saturating_sub(value.chars().count() + 14)
                 .max(4);
             rows.push(StatRow::KeyVal(
                 Line::from(vec![
-                    Span::styled("Top harness: ", Style::default().fg(app.theme.muted)),
+                    Span::styled("Top client: ", Style::default().fg(app.theme.muted)),
                     Span::styled(
                         truncate_model_display_name_to(&display_name, name_budget),
                         Style::default().fg(app.theme.color(get_client_color(client))),
@@ -706,7 +706,7 @@ mod tests {
     use super::*;
     use crate::tui::app::TuiConfig;
     use crate::tui::data::{
-        DailyModelInfo, DailySourceInfo, DailyUsage, GraphData, HourlyUsage, TokenBreakdown,
+        DailyClientInfo, DailyModelInfo, DailyUsage, GraphData, HourlyUsage, TokenBreakdown,
     };
     use chrono::NaiveDate;
     use ratatui::{backend::TestBackend, Terminal};
@@ -775,8 +775,8 @@ mod tests {
         }
     }
 
-    fn source_info(tokens: u64, cost: f64, models: Vec<(&str, DailyModelInfo)>) -> DailySourceInfo {
-        DailySourceInfo {
+    fn client_info(tokens: u64, cost: f64, models: Vec<(&str, DailyModelInfo)>) -> DailyClientInfo {
+        DailyClientInfo {
             tokens: token_breakdown(tokens),
             cost,
             models: models
@@ -790,15 +790,15 @@ mod tests {
         date: NaiveDate,
         tokens: u64,
         cost: f64,
-        sources: Vec<(&str, DailySourceInfo)>,
+        clients: Vec<(&str, DailyClientInfo)>,
     ) -> DailyUsage {
         DailyUsage {
             date,
             tokens: token_breakdown(tokens),
             cost,
-            source_breakdown: sources
+            client_breakdown: clients
                 .into_iter()
-                .map(|(client, source)| (client.to_string(), source))
+                .map(|(client, client_info)| (client.to_string(), client_info))
                 .collect(),
             message_count: 0,
             turn_count: 0,
@@ -858,8 +858,8 @@ mod tests {
             11_000,
             2.0,
             vec![(
-                "harnessfoo",
-                source_info(
+                "clientfoo",
+                client_info(
                     11_000,
                     2.0,
                     vec![
@@ -1247,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_ranking_merges_provider_source_and_workspace_projections() {
+    fn canonical_ranking_merges_provider_client_and_workspace_projections() {
         let date = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
         let daily = day_usage(
             date,
@@ -1255,8 +1255,8 @@ mod tests {
             6.0,
             vec![
                 (
-                    "harness-a",
-                    source_info(
+                    "client-a",
+                    client_info(
                         80,
                         3.0,
                         vec![
@@ -1278,8 +1278,8 @@ mod tests {
                     ),
                 ),
                 (
-                    "harness-b",
-                    source_info(
+                    "client-b",
+                    client_info(
                         80,
                         3.0,
                         vec![
@@ -1329,8 +1329,8 @@ mod tests {
             30,
             0.0,
             vec![(
-                "harness",
-                source_info(
+                "client",
+                client_info(
                     30,
                     0.0,
                     vec![
@@ -1361,8 +1361,8 @@ mod tests {
             100,
             2.0,
             vec![(
-                "harness",
-                source_info(
+                "client",
+                client_info(
                     100,
                     2.0,
                     vec![(
@@ -1377,8 +1377,8 @@ mod tests {
             100,
             2.0,
             vec![(
-                "harness",
-                source_info(
+                "client",
+                client_info(
                     100,
                     2.0,
                     vec![
@@ -1409,8 +1409,8 @@ mod tests {
             100,
             2.0,
             vec![(
-                "harness",
-                source_info(
+                "client",
+                client_info(
                     100,
                     2.0,
                     vec![(
@@ -1427,7 +1427,7 @@ mod tests {
             vec![
                 (
                     "codex",
-                    source_info(
+                    client_info(
                         60,
                         1.2,
                         vec![(
@@ -1438,7 +1438,7 @@ mod tests {
                 ),
                 (
                     "kimi",
-                    source_info(
+                    client_info(
                         40,
                         0.8,
                         vec![(
@@ -1469,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn day_insights_show_canonical_top_model_harness_and_active_hours() {
+    fn day_insights_show_canonical_top_model_client_and_active_hours() {
         let mut app = make_app(120);
         let date = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
         select_day(&mut app, date, 12_000, 2.5);
@@ -1479,8 +1479,8 @@ mod tests {
             2.5,
             vec![
                 (
-                    "harnessfoo",
-                    source_info(
+                    "clientfoo",
+                    client_info(
                         8_000,
                         1.5,
                         vec![
@@ -1493,8 +1493,8 @@ mod tests {
                     ),
                 ),
                 (
-                    "harnessbar",
-                    source_info(
+                    "clientbar",
+                    client_info(
                         4_000,
                         1.0,
                         vec![("other", model_info("other", "other", "other", 4_000, 1.0))],
@@ -1513,7 +1513,7 @@ mod tests {
 
         assert!(rendered.contains("Top model: gpt-5.4"));
         assert!(!rendered.contains("project-a / gpt-5.4"));
-        assert!(rendered.contains("Top harness: harnessfoo"));
+        assert!(rendered.contains("Top client: clientfoo"));
         assert!(rendered.contains("Hours: 3 active"));
         assert!(rendered.contains("······ ···█·· ··█··· ·····█"));
         let top_model_row = rendered
@@ -1581,8 +1581,8 @@ mod tests {
             5_000,
             0.0,
             vec![(
-                "harnessfoo",
-                source_info(
+                "clientfoo",
+                client_info(
                     5_000,
                     0.0,
                     vec![(

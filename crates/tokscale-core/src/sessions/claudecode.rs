@@ -5,7 +5,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{extract_i64, extract_string, parse_timestamp_value};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary, ScannedInput};
 use crate::{checked_token_add, model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
@@ -55,18 +55,6 @@ pub struct ClaudeEntry {
 struct AgentMetaFile {
     #[serde(rename = "agentType")]
     agent_type: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct CcMirrorVariantMetadata {
-    name: String,
-    provider_id: Option<String>,
-}
-
-impl CcMirrorVariantMetadata {
-    fn client_id(&self) -> String {
-        format!("cc-mirror/{}", sanitize_cc_mirror_segment(&self.name))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,26 +138,26 @@ impl ClaudeProjectResolver {
         &self,
         project_key: &str,
         candidates: &ClaudeProjectCandidates,
-        source_path: &Path,
+        input_path: &Path,
         parent_session_id: Option<&str>,
     ) -> (ClaudeProjectResolution, ClaudeProjectDependency) {
         let local_match = match_project_candidate_tiers(project_key, candidates);
         if !matches!(local_match, CandidateMatch::None) {
             return (
-                self.finish_match(project_key, local_match, source_path),
+                self.finish_match(project_key, local_match, input_path),
                 ClaudeProjectDependency::None,
             );
         }
 
         if let Some(parent_session_id) = parent_session_id {
-            match find_parent_session_path(source_path, parent_session_id) {
+            match find_parent_session_path(input_path, parent_session_id) {
                 Ok(Some(parent_path)) => {
                     let parent_candidates = self.parent_candidates(&parent_path);
                     let parent_match =
                         match_project_candidate_tiers(project_key, &parent_candidates);
                     if !matches!(parent_match, CandidateMatch::None) {
                         return (
-                            self.finish_match(project_key, parent_match, source_path),
+                            self.finish_match(project_key, parent_match, input_path),
                             ClaudeProjectDependency::ParentSession,
                         );
                     }
@@ -177,7 +165,7 @@ impl ClaudeProjectResolver {
                 Ok(None) => {}
                 Err(error) => tracing::warn!(
                     code = "claude_project_parent_unreadable",
-                    source = %source_path.display(),
+                    input = %input_path.display(),
                     error = %error,
                     "could not inspect Claude parent session while resolving project path"
                 ),
@@ -192,7 +180,7 @@ impl ClaudeProjectResolver {
                 .map(String::as_str),
         );
         (
-            self.finish_match(project_key, external_match, source_path),
+            self.finish_match(project_key, external_match, input_path),
             ClaudeProjectDependency::ExternalMetadata,
         )
     }
@@ -201,16 +189,16 @@ impl ClaudeProjectResolver {
         &self,
         project_key: &str,
         candidate_match: CandidateMatch,
-        source_path: &Path,
+        input_path: &Path,
     ) -> ClaudeProjectResolution {
         match candidate_match {
             CandidateMatch::Unique(path) => resolved_workspace(&path),
             CandidateMatch::Ambiguous => {
-                self.report_once(project_key, "claude_project_path_ambiguous", source_path);
+                self.report_once(project_key, "claude_project_path_ambiguous", input_path);
                 ClaudeProjectResolution::Ambiguous
             }
             CandidateMatch::None => {
-                self.report_once(project_key, "claude_project_path_unresolved", source_path);
+                self.report_once(project_key, "claude_project_path_unresolved", input_path);
                 ClaudeProjectResolution::Unresolved
             }
         }
@@ -230,7 +218,7 @@ impl ClaudeProjectResolver {
         let candidates = read_project_candidates_from_jsonl(parent_path).unwrap_or_else(|error| {
             tracing::warn!(
                 code = "claude_project_parent_unreadable",
-                source = %parent_path.display(),
+                    input = %parent_path.display(),
                 error = %error,
                 "could not read Claude parent session while resolving project path"
             );
@@ -254,7 +242,7 @@ impl ClaudeProjectResolver {
         })
     }
 
-    fn report_once(&self, project_key: &str, code: &'static str, source_path: &Path) {
+    fn report_once(&self, project_key: &str, code: &'static str, input_path: &Path) {
         let inserted = self
             .reported_diagnostics
             .lock()
@@ -264,7 +252,7 @@ impl ClaudeProjectResolver {
             tracing::warn!(
                 code,
                 project_key,
-                source = %source_path.display(),
+                    input = %input_path.display(),
                 "Claude project path could not be resolved uniquely; usage is retained without workspace metadata"
             );
         }
@@ -324,11 +312,8 @@ fn resolve_subagent_name(
         None => {
             return Err(SessionParseError::at_path(
                 path,
-                "validate Claude sidechain source path",
-                std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    "source file name is not valid UTF-8",
-                ),
+                "validate Claude sidechain input path",
+                std::io::Error::new(ErrorKind::InvalidData, "input file name is not valid UTF-8"),
             ));
         }
     };
@@ -701,7 +686,7 @@ fn extract_agent_id_from_text(text: &str) -> Option<String> {
 }
 
 /// Parse a Claude Code JSONL file
-pub fn parse_claude_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_claude_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let home_dir = dirs::home_dir();
     parse_claude_file_with_home(path, home_dir.as_deref())
 }
@@ -709,41 +694,29 @@ pub fn parse_claude_file(path: &Path) -> SessionParseResult<ScannedSource> {
 pub fn parse_claude_file_with_home(
     path: &Path,
     home_dir: Option<&Path>,
-) -> SessionParseResult<ScannedSource> {
+) -> SessionParseResult<ScannedInput> {
     let mut parent_cache = ParentSubagentTypeCache::new();
     let project_resolver = ClaudeProjectResolver::new(home_dir);
-    parse_claude_file_with_cache_home_and_resolver(
-        path,
-        &mut parent_cache,
-        home_dir,
-        &project_resolver,
-    )
-    .map(|(scanned, _)| scanned)
+    parse_claude_file_with_cache_home_and_resolver(path, &mut parent_cache, &project_resolver)
+        .map(|(scanned, _)| scanned)
 }
 
 pub(crate) fn parse_claude_file_with_project_resolver(
     path: &Path,
-    home_dir: Option<&Path>,
     project_resolver: &ClaudeProjectResolver,
-) -> SessionParseResult<(ScannedSource, ClaudeProjectDependency)> {
+) -> SessionParseResult<(ScannedInput, ClaudeProjectDependency)> {
     let mut parent_cache = ParentSubagentTypeCache::new();
-    parse_claude_file_with_cache_home_and_resolver(
-        path,
-        &mut parent_cache,
-        home_dir,
-        project_resolver,
-    )
+    parse_claude_file_with_cache_home_and_resolver(path, &mut parent_cache, project_resolver)
 }
 
 fn parse_claude_file_with_cache_home_and_resolver(
     path: &Path,
     parent_cache: &mut ParentSubagentTypeCache,
-    home_dir: Option<&Path>,
     project_resolver: &ClaudeProjectResolver,
-) -> SessionParseResult<(ScannedSource, ClaudeProjectDependency)> {
+) -> SessionParseResult<(ScannedInput, ClaudeProjectDependency)> {
     if is_workflow_journal(path) {
         return Ok((
-            ScannedSource::complete(Vec::new()),
+            ScannedInput::complete(Vec::new()),
             ClaudeProjectDependency::None,
         ));
     }
@@ -754,24 +727,17 @@ fn parse_claude_file_with_cache_home_and_resolver(
     let mut project_candidates = ClaudeProjectCandidates::default();
     let mut parent_session_id = None;
     let is_transcript_path = is_claude_transcripts_path(path);
-    let cc_mirror_metadata = cc_mirror_variant_metadata_from_path(path, home_dir)?;
-    let client_id = cc_mirror_metadata
-        .as_ref()
-        .map(CcMirrorVariantMetadata::client_id)
-        .unwrap_or_else(|| "claude".to_string());
-    let metadata_provider_hint = cc_mirror_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.provider_id.as_deref());
+    let client_id = "claude".to_string();
     let mut session_id = path
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| {
             SessionParseError::at_path(
                 path,
-                "validate Claude session source path",
+                "validate Claude session input path",
                 std::io::Error::new(
                     ErrorKind::InvalidData,
-                    "source file stem is missing or not valid UTF-8",
+                    "input file stem is missing or not valid UTF-8",
                 ),
             )
         })?
@@ -816,7 +782,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
                         format!("line {}: {source}", line_index + 1),
                     ),
                 );
-                interrupted = Some(SourceFailure::from(&error));
+                interrupted = Some(InputFailure::from(&error));
                 break;
             }
         };
@@ -844,7 +810,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     RecordRejectionReason::MalformedRecord,
                     &error,
                 );
-                interrupted = Some(SourceFailure::from(&error));
+                interrupted = Some(InputFailure::from(&error));
                 break;
             }
         };
@@ -965,13 +931,13 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     match extract_claude_tool_result_message(
                         trimmed,
                         ClaudeToolResultContext {
-                            source_path: path,
+                            input_path: path,
                             line_number: line_index + 1,
                             entry: &entry,
                             last_model: last_model.as_deref(),
                             last_provider_hint: last_provider_hint.as_deref(),
                             client_id: &client_id,
-                            default_provider_hint: metadata_provider_hint,
+                            default_provider_hint: None,
                             session_id: &session_id,
                             suppress_unattributed: suppress_unattributed_tool_results,
                             workspace_key: context_workspace_key,
@@ -1128,11 +1094,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     }
                 };
 
-                let provider_hint = message
-                    .provider_id
-                    .clone()
-                    .or(entry.provider_id.clone())
-                    .or_else(|| metadata_provider_hint.map(str::to_string));
+                let provider_hint = message.provider_id.clone().or(entry.provider_id.clone());
 
                 // Build dedup key for global deduplication (messageId:requestId composite).
                 // For streaming responses, merge using per-field max to capture the most
@@ -1304,7 +1266,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
     );
 
     Ok((
-        ScannedSource {
+        ScannedInput {
             messages,
             rejections,
             interrupted,
@@ -1342,12 +1304,6 @@ fn claude_project_key_from_path(path: &Path) -> Option<String> {
     for window in components.windows(3) {
         if window[0] == ".claude" && window[1] == "projects" {
             return Some(window[2].clone());
-        }
-    }
-
-    for window in components.windows(5) {
-        if window[0] == ".cc-mirror" && window[2] == "config" && window[3] == "projects" {
-            return Some(window[4].clone());
         }
     }
 
@@ -1398,7 +1354,7 @@ fn apply_resolved_project_workspace(
     resolver: &ClaudeProjectResolver,
     project_key: Option<&str>,
     candidates: &ClaudeProjectCandidates,
-    source_path: &Path,
+    input_path: &Path,
     parent_session_id: Option<&str>,
     messages: &mut [UnifiedMessage],
 ) -> ClaudeProjectDependency {
@@ -1407,7 +1363,7 @@ fn apply_resolved_project_workspace(
     };
 
     let (resolution, dependency) =
-        resolver.resolve(project_key, candidates, source_path, parent_session_id);
+        resolver.resolve(project_key, candidates, input_path, parent_session_id);
     let workspace = match resolution {
         ClaudeProjectResolution::Resolved(workspace) => Some(workspace),
         ClaudeProjectResolution::Unresolved | ClaudeProjectResolution::Ambiguous => {
@@ -1548,14 +1504,14 @@ fn unsigned_to_base36(mut value: u64) -> String {
 
 fn read_project_candidates_from_jsonl(path: &Path) -> SessionParseResult<ClaudeProjectCandidates> {
     let file = std::fs::File::open(path).map_err(|source| {
-        SessionParseError::at_path(path, "open Claude project candidate source", source)
+        SessionParseError::at_path(path, "open Claude project candidate input", source)
     })?;
     let mut candidates = ClaudeProjectCandidates::default();
     for (line_index, line) in BufReader::new(file).lines().enumerate() {
         let line = line.map_err(|source| {
             SessionParseError::at_path(
                 path,
-                "read Claude project candidate source",
+                "read Claude project candidate input",
                 std::io::Error::new(source.kind(), format!("line {}: {source}", line_index + 1)),
             )
         })?;
@@ -1565,7 +1521,7 @@ fn read_project_candidates_from_jsonl(path: &Path) -> SessionParseResult<ClaudeP
         let entry: ClaudeEntry = serde_json::from_str(&line).map_err(|source| {
             SessionParseError::at_path(
                 path,
-                "decode Claude project candidate source",
+                "decode Claude project candidate input",
                 std::io::Error::new(
                     ErrorKind::InvalidData,
                     format!("line {}: {source}", line_index + 1),
@@ -1590,12 +1546,12 @@ fn read_external_project_candidates(home_dir: &Path) -> ClaudeProjectCandidates 
                     Ok(line) => line,
                     Err(error) => {
                         tracing::warn!(
-                            code = "claude_project_history_unreadable",
-                            source = %history_path.display(),
-                            line = line_index + 1,
-                            error = %error,
-                            "could not read Claude history project metadata"
-                        );
+                                code = "claude_project_history_unreadable",
+                        input = %history_path.display(),
+                                line = line_index + 1,
+                                error = %error,
+                                "could not read Claude history project metadata"
+                            );
                         break;
                     }
                 };
@@ -1605,7 +1561,7 @@ fn read_external_project_candidates(home_dir: &Path) -> ClaudeProjectCandidates 
                     }
                     Err(error) => tracing::warn!(
                         code = "claude_project_history_invalid",
-                        source = %history_path.display(),
+                    input = %history_path.display(),
                         line = line_index + 1,
                         error = %error,
                         "could not decode Claude history project metadata"
@@ -1616,7 +1572,7 @@ fn read_external_project_candidates(home_dir: &Path) -> ClaudeProjectCandidates 
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => tracing::warn!(
             code = "claude_project_history_unreadable",
-            source = %history_path.display(),
+                    input = %history_path.display(),
             error = %error,
             "could not open Claude history project metadata"
         ),
@@ -1634,7 +1590,7 @@ fn read_external_project_candidates(home_dir: &Path) -> ClaudeProjectCandidates 
             }
             Err(error) => tracing::warn!(
                 code = "claude_project_config_invalid",
-                source = %config_path.display(),
+                    input = %config_path.display(),
                 error = %error,
                 "could not decode Claude project configuration"
             ),
@@ -1642,118 +1598,13 @@ fn read_external_project_candidates(home_dir: &Path) -> ClaudeProjectCandidates 
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => tracing::warn!(
             code = "claude_project_config_unreadable",
-            source = %config_path.display(),
+                    input = %config_path.display(),
             error = %error,
             "could not read Claude project configuration"
         ),
     }
 
     candidates
-}
-
-fn sanitize_cc_mirror_segment(raw: &str) -> String {
-    let mut segment: String = raw
-        .trim()
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-
-    while segment.contains("--") {
-        segment = segment.replace("--", "-");
-    }
-    let mut segment = segment
-        .trim_matches(|ch| matches!(ch, '-' | '_' | '.'))
-        .to_string();
-    if segment.len() > 96 {
-        segment.truncate(96);
-        segment = segment
-            .trim_matches(|ch| matches!(ch, '-' | '_' | '.'))
-            .to_string();
-    }
-    if segment.is_empty() {
-        "variant".to_string()
-    } else {
-        segment
-    }
-}
-
-fn cc_mirror_provider_id(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed.eq_ignore_ascii_case("mirror") {
-        return Some("anthropic".to_string());
-    }
-    provider_identity::canonical_provider(trimmed)
-}
-
-fn cc_mirror_variant_metadata_from_path(
-    path: &Path,
-    home_dir: Option<&Path>,
-) -> SessionParseResult<Option<CcMirrorVariantMetadata>> {
-    let Some(variant_dir) =
-        crate::cc_mirror::variant_dir_from_session_path_checked(path, home_dir)?
-    else {
-        return Ok(None);
-    };
-    let variant_name = variant_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            SessionParseError::at_path(
-                &variant_dir,
-                "validate cc-mirror variant path",
-                std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    "variant directory name is missing or not valid UTF-8",
-                ),
-            )
-        })?
-        .to_string();
-    let variant_path = crate::cc_mirror::variant_file_path(&variant_dir);
-    let metadata = crate::cc_mirror::read_variant_file_checked(&variant_path)?;
-
-    let name = match metadata
-        .as_ref()
-        .and_then(|metadata| metadata.name.as_deref())
-    {
-        Some(name) if !name.trim().is_empty() => name.to_string(),
-        Some(_) => {
-            return Err(SessionParseError::at_path(
-                &variant_path,
-                "validate cc-mirror variant metadata",
-                std::io::Error::new(ErrorKind::InvalidData, "variant name is blank"),
-            ));
-        }
-        None => variant_name,
-    };
-    let provider_id = match metadata.as_ref().and_then(|metadata| {
-        metadata
-            .provider_id
-            .as_deref()
-            .or(metadata.provider.as_deref())
-    }) {
-        Some(provider) => Some(cc_mirror_provider_id(provider).ok_or_else(|| {
-            SessionParseError::at_path(
-                &variant_path,
-                "validate cc-mirror variant metadata",
-                std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!("unsupported provider `{provider}`"),
-                ),
-            )
-        })?),
-        None => None,
-    };
-
-    Ok(Some(CcMirrorVariantMetadata { name, provider_id }))
 }
 
 fn parse_claude_entry_timestamp_checked(
@@ -1839,7 +1690,7 @@ struct ClaudeToolResultUsage {
 }
 
 struct ClaudeToolResultContext<'a> {
-    source_path: &'a Path,
+    input_path: &'a Path,
     line_number: usize,
     entry: &'a ClaudeEntry,
     last_model: Option<&'a str>,
@@ -1860,7 +1711,7 @@ fn extract_claude_tool_result_message(
 ) -> SessionParseResult<Option<UnifiedMessage>> {
     let value: Value = serde_json::from_str(line).map_err(|source| {
         SessionParseError::at_path(
-            context.source_path,
+            context.input_path,
             "decode Claude tool-result line",
             std::io::Error::new(
                 ErrorKind::InvalidData,
@@ -1884,7 +1735,7 @@ fn extract_claude_tool_result_message(
         None if context.suppress_unattributed => return Ok(None),
         None => context.last_model.map(str::to_string).ok_or_else(|| {
             SessionParseError::at_path(
-                context.source_path,
+                context.input_path,
                 "validate Claude tool-result model",
                 std::io::Error::new(
                     ErrorKind::InvalidData,
@@ -1915,19 +1766,19 @@ fn extract_claude_tool_result_message(
     let provider_choice =
         claude_provider_choice_for_models(&raw_model, &model, provider_hint.as_deref());
     let timestamp = parse_claude_entry_timestamp_checked(
-        context.source_path,
+        context.input_path,
         context.line_number,
         context.entry.timestamp.as_deref(),
     )?
     .or(extract_claude_timestamp_checked(
         &value,
-        context.source_path,
+        context.input_path,
         Some(context.line_number),
         "validate Claude tool-result timestamp",
     )?)
     .ok_or_else(|| {
         SessionParseError::at_path(
-            context.source_path,
+            context.input_path,
             "validate Claude tool-result timestamp",
             std::io::Error::new(
                 ErrorKind::InvalidData,
@@ -2150,7 +2001,7 @@ fn is_claude_synthetic_placeholder_model(model: &str) -> bool {
 }
 
 fn canonicalize_claude_model(model: &str) -> String {
-    model_aliases::canonicalize_source_model_id(model).unwrap_or_else(|| model.trim().to_string())
+    model_aliases::canonicalize_observed_model_id(model).unwrap_or_else(|| model.trim().to_string())
 }
 
 /// Internal Claude Code system/tool tags that should NOT be counted as human turns.
@@ -2372,17 +2223,17 @@ fn extract_claude_timestamp_checked(
                     ErrorKind::InvalidData,
                     format!(
                         "{}: invalid timestamp value {raw_timestamp}",
-                        claude_source_location(line_number)
+                        claude_input_location(line_number)
                     ),
                 ),
             )
         })
 }
 
-fn claude_source_location(line_number: Option<usize>) -> String {
+fn claude_input_location(line_number: Option<usize>) -> String {
     line_number
         .map(|line_number| format!("line {line_number}"))
-        .unwrap_or_else(|| "JSON source".to_string())
+        .unwrap_or_else(|| "JSON input".to_string())
 }
 
 #[cfg(test)]
@@ -2446,30 +2297,6 @@ mod tests {
         (temp_dir, path)
     }
 
-    fn create_cc_mirror_project_file(
-        content: &str,
-        variant: &str,
-        provider: &str,
-        project: &str,
-        filename: &str,
-    ) -> (TempDir, std::path::PathBuf) {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let variant_dir = temp_dir.path().join(".cc-mirror").join(variant);
-        let config_dir = variant_dir.join("config");
-        let path = config_dir.join("projects").join(project).join(filename);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            variant_dir.join("variant.json"),
-            format!(
-                r#"{{"name":"{variant}","provider":"{provider}","configDir":"{}"}}"#,
-                config_dir.display()
-            ),
-        )
-        .unwrap();
-        std::fs::write(&path, content).unwrap();
-        (temp_dir, path)
-    }
-
     fn create_transcript_file(content: &str, filename: &str) -> (TempDir, std::path::PathBuf) {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir
@@ -2483,7 +2310,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_primary_source_reports_its_path() {
+    fn missing_primary_input_reports_its_path() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("missing.jsonl");
 
@@ -2634,7 +2461,7 @@ mod tests {
         let failure = scanned
             .interrupted
             .as_ref()
-            .expect("unknown malformed event state must mark the source partial");
+            .expect("unknown malformed event state must mark the input partial");
         assert_eq!(failure.operation, "decode Claude session line");
         assert!(failure.message.contains("line 2"));
     }
@@ -2758,26 +2585,6 @@ mod tests {
     }
 
     #[test]
-    fn malformed_cc_mirror_variant_reports_variant_path() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let variant_dir = temp_dir.path().join(".cc-mirror/zai/config");
-        let path = variant_dir.join("projects/project-a/session.jsonl");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":1,"output_tokens":1}}}"#,
-        )
-        .unwrap();
-        let variant_path = temp_dir.path().join(".cc-mirror/zai/variant.json");
-        std::fs::write(&variant_path, "{not-json").unwrap();
-
-        let error = parse_claude_file_with_home(&path, Some(temp_dir.path())).unwrap_err();
-
-        assert_eq!(error.path(), Some(variant_path.as_path()));
-        assert_eq!(error.operation(), "decode cc-mirror variant metadata");
-    }
-
-    #[test]
     fn test_deduplication_skips_duplicate_entries() {
         let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
 {"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
@@ -2793,43 +2600,6 @@ mod tests {
         );
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[1].tokens.input, 200);
-    }
-
-    #[test]
-    fn test_parse_cc_mirror_claude_variant_attributes_client_provider_and_workspace() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"/Users/example/work","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}"#;
-
-        let (_temp_dir, path) = create_cc_mirror_project_file(
-            content,
-            "zai-worker",
-            "zai",
-            "-Users-example-work",
-            "session.jsonl",
-        );
-
-        let messages = parse_claude_file(&path).unwrap();
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), "cc-mirror/zai-worker");
-        assert_eq!(messages[0].provider_id.as_ref(), "zai");
-        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
-        assert_eq!(messages[0].tokens.input, 100);
-        assert_eq!(messages[0].tokens.output, 50);
-        assert_eq!(messages[0].tokens.cache_read, 10);
-        assert_eq!(messages[0].tokens.cache_write, 5);
-        assert_eq!(
-            messages[0].workspace_key.as_deref(),
-            Some("/Users/example/work")
-        );
-        assert_eq!(messages[0].workspace_label.as_deref(), Some("work"));
-    }
-
-    #[test]
-    fn test_cc_mirror_variant_client_segment_is_submit_safe() {
-        assert_eq!(sanitize_cc_mirror_segment(" zaicc "), "zaicc");
-        assert_eq!(sanitize_cc_mirror_segment("../Zai CC!"), "zai-cc");
-        assert_eq!(sanitize_cc_mirror_segment("..."), "variant");
-        assert_eq!(sanitize_cc_mirror_segment(&"a".repeat(120)).len(), 96);
     }
 
     #[test]
@@ -3186,27 +2956,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cc_mirror_tool_result_keeps_variant_client_and_provider() {
-        let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"sonnet","content":[{"type":"tool_result","tool_use_id":"toolu_cc_mirror","tool_output":{"input_tokens":7,"output":"tool output"}}]}}"#;
-
-        let (_temp_dir, path) = create_cc_mirror_project_file(
-            content,
-            "zai-worker",
-            "zai",
-            "project-one",
-            "session.jsonl",
-        );
-        let messages = parse_claude_file(&path).unwrap();
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), "cc-mirror/zai-worker");
-        assert_eq!(messages[0].provider_id.as_ref(), "zai");
-        assert_eq!(messages[0].model_id.as_ref(), "sonnet");
-        assert_eq!(messages[0].tokens.input, 7);
-        assert_eq!(messages[0].message_count, 0);
-    }
-
-    #[test]
     fn test_tool_result_duplicate_uses_max_input_tokens() {
         let content = r#"{"type":"tool_result","timestamp":"2026-05-27T10:00:00.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_stream","tool_output":{"output":"abcdefghijklmnop"}}}
 {"type":"tool_result","timestamp":"2026-05-27T10:00:00.100Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_stream","tool_output":{"output":"abcdefghijklmnopqrstuvwxyzabcd"}}}"#;
@@ -3523,13 +3272,9 @@ mod tests {
 
         let resolver = ClaudeProjectResolver::new(Some(home.path()));
         let mut parent_cache = ParentSubagentTypeCache::new();
-        let (scanned, dependency) = parse_claude_file_with_cache_home_and_resolver(
-            &path,
-            &mut parent_cache,
-            Some(home.path()),
-            &resolver,
-        )
-        .unwrap();
+        let (scanned, dependency) =
+            parse_claude_file_with_cache_home_and_resolver(&path, &mut parent_cache, &resolver)
+                .unwrap();
 
         assert_eq!(scanned.messages.len(), 1);
         assert_eq!(
@@ -3646,18 +3391,18 @@ mod tests {
     #[test]
     fn test_project_resolution_does_not_reuse_local_candidate_between_files() {
         let resolver = ClaudeProjectResolver::new(None);
-        let source = Path::new("/home/travis/.claude/projects/-home-travis-a-b/session.jsonl");
+        let input = Path::new("/home/travis/.claude/projects/-home-travis-a-b/session.jsonl");
         let mut hyphenated = ClaudeProjectCandidates::default();
         hyphenated.record(Some("/home/travis/a-b"), None);
         let mut nested = ClaudeProjectCandidates::default();
         nested.record(Some("/home/travis/a/b"), None);
 
-        let first = resolver.resolve("-home-travis-a-b", &hyphenated, source, None);
-        let second = resolver.resolve("-home-travis-a-b", &nested, source, None);
+        let first = resolver.resolve("-home-travis-a-b", &hyphenated, input, None);
+        let second = resolver.resolve("-home-travis-a-b", &nested, input, None);
         let metadata_less = resolver.resolve(
             "-home-travis-a-b",
             &ClaudeProjectCandidates::default(),
-            source,
+            input,
             None,
         );
 

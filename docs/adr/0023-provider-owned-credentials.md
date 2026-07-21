@@ -53,7 +53,7 @@ upgrading.
 
 ### Codex and ChatGPT subscription usage
 
-Codex quota lookup reads only the current provider-owned authentication source:
+Codex quota lookup reads only the current provider-owned authentication artifact:
 
 1. `$CODEX_HOME/auth.json` when `CODEX_HOME` is explicitly set;
 2. `~/.config/codex/auth.json`;

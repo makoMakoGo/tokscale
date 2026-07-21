@@ -69,7 +69,7 @@ pub struct WrappedOptions {
 
 #[derive(Debug, Clone)]
 struct WrappedData {
-    health: tokscale_core::source_health::HealthReport,
+    health: tokscale_core::input_health::HealthReport,
     year: String,
     active_days: i32,
     total_tokens: i64,
@@ -324,7 +324,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
 
 fn wrapped_health_report(
     aggregated: &tokscale_core::AggregatedViews,
-) -> tokscale_core::source_health::HealthReport {
+) -> tokscale_core::input_health::HealthReport {
     aggregated.health.to_report()
 }
 
@@ -939,7 +939,7 @@ fn measure_text_width(font: &FontArc, font_size: f32, text: &str) -> f32 {
 
 fn draw_image_rounded(
     canvas: &mut RgbaImage,
-    source: &RgbaImage,
+    image: &RgbaImage,
     x: i32,
     y: i32,
     width: i32,
@@ -951,7 +951,7 @@ fn draw_image_rounded(
     }
 
     let resized =
-        image::imageops::resize(source, width as u32, height as u32, FilterType::CatmullRom);
+        image::imageops::resize(image, width as u32, height as u32, FilterType::CatmullRom);
     for dy in 0..height {
         for dx in 0..width {
             let px = x + dx;
@@ -1101,25 +1101,26 @@ async fn ensure_fonts_loaded(client: &reqwest::Client) -> Result<FontSet> {
     let regular_path = cache_dir.join(FIGTREE_REGULAR_FILE);
     let bold_path = cache_dir.join(FIGTREE_BOLD_FILE);
 
-    let regular_source = resolve_wrapped_cache_path("fonts", FIGTREE_REGULAR_FILE, &regular_path);
-    let bold_source = resolve_wrapped_cache_path("fonts", FIGTREE_BOLD_FILE, &bold_path);
+    let regular_asset_path =
+        resolve_wrapped_cache_path("fonts", FIGTREE_REGULAR_FILE, &regular_path);
+    let bold_asset_path = resolve_wrapped_cache_path("fonts", FIGTREE_BOLD_FILE, &bold_path);
 
-    if regular_source == regular_path && !regular_path.exists() {
+    if regular_asset_path == regular_path && !regular_path.exists() {
         let _ = fetch_to_file(client, FIGTREE_REGULAR_URL, &regular_path).await;
     }
-    if bold_source == bold_path && !bold_path.exists() {
+    if bold_asset_path == bold_path && !bold_path.exists() {
         let _ = fetch_to_file(client, FIGTREE_BOLD_URL, &bold_path).await;
     }
 
-    let regular_font = if regular_source.exists() {
-        fs::read(&regular_source)
+    let regular_font = if regular_asset_path.exists() {
+        fs::read(&regular_asset_path)
             .ok()
             .and_then(|bytes| FontArc::try_from_vec(bytes).ok())
     } else {
         None
     };
-    let bold_font = if bold_source.exists() {
-        fs::read(&bold_source)
+    let bold_font = if bold_asset_path.exists() {
+        fs::read(&bold_asset_path)
             .ok()
             .and_then(|bytes| FontArc::try_from_vec(bytes).ok())
     } else {
@@ -1714,7 +1715,7 @@ mod tests {
     use serial_test::serial;
     use std::env;
     use tempfile::TempDir;
-    use tokscale_core::{DataHealth, RejectionSummary, SourceFailure, SourceHealth, SourceStatus};
+    use tokscale_core::{DataHealth, InputFailure, InputHealth, InputStatus, RejectionSummary};
 
     #[test]
     fn automatic_ranking_uses_agents_only_when_agent_data_exists() {
@@ -1750,13 +1751,13 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_health_report_preserves_failed_sources() {
+    fn wrapped_health_report_preserves_failed_inputs() {
         let mut health = DataHealth::default();
-        health.record(SourceHealth {
+        health.record(InputHealth {
             client: ClientId::OpenCode,
             path: PathBuf::from("/tmp/broken-opencode.db"),
-            status: SourceStatus::Unavailable {
-                failure: SourceFailure::new("open database", "invalid database"),
+            status: InputStatus::Unavailable {
+                failure: InputFailure::new("open database", "invalid database"),
             },
             rejections: RejectionSummary::default(),
         });
@@ -1768,9 +1769,9 @@ mod tests {
         let report = wrapped_health_report(&aggregated);
 
         assert!(!report.complete);
-        assert_eq!(report.failed_sources, 1);
-        assert_eq!(report.issues[0].source, "opencode");
-        assert_eq!(report.issues[0].issue, "source-unavailable");
+        assert_eq!(report.failed_inputs, 1);
+        assert_eq!(report.issues[0].client, "opencode");
+        assert_eq!(report.issues[0].issue, "input-unavailable");
     }
 
     // ========== format_tokens_short tests ==========

@@ -6,7 +6,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -84,7 +84,7 @@ fn invalid_at_path(
 }
 
 /// Parse a Kimi Code wire.jsonl file.
-pub fn parse_kimi_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_kimi_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
@@ -97,14 +97,14 @@ pub fn parse_kimi_file(path: &Path) -> SessionParseResult<ScannedSource> {
     // can resolve it; a later request must never rewrite historical usage.
     let mut observed_aliases = HashMap::new();
     let reader = BufReader::new(file);
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
 
     for (line_index, line) in reader.lines().enumerate() {
         let line_number = line_index + 1;
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "read JSONL line",
                     format!("{} line {line_number}: {error}", path.display()),
                 ));
@@ -264,12 +264,12 @@ fn resolve_model(
     }
 
     (
-        provider_identity::source_provider_id("", raw_model),
+        provider_identity::observed_provider_id("", raw_model),
         raw_model.to_string(),
     )
 }
 
-/// Older Kimi wires persist only a source-local alias. The current config can
+/// Older Kimi wires persist only a wire-local alias. The current config can
 /// enrich aliases that still exist, but it is neither historical nor required
 /// evidence. If it is unavailable or malformed, the raw wire label remains
 /// the authoritative model observation.
@@ -313,7 +313,7 @@ fn read_model_aliases(home: &Path) -> HashMap<String, ModelIdentity> {
         aliases.insert(
             alias.clone(),
             ModelIdentity {
-                provider: provider_identity::source_provider_id(raw_provider, model),
+                provider: provider_identity::observed_provider_id(raw_provider, model),
                 model: model.to_string(),
             },
         );

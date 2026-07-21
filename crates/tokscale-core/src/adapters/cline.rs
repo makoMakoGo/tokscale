@@ -3,8 +3,8 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourcePipelineError, SourceUnit,
+    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputPipelineError,
+    InputUnit, LocalInputAdapter, MessageSink, ParseContext, ParsedUnit,
     MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
@@ -15,7 +15,7 @@ const CLINE_SDK_V1_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 4;
 
 pub(crate) struct ClineAdapter;
 
-impl LocalSourceAdapter for ClineAdapter {
+impl LocalInputAdapter for ClineAdapter {
     fn client(&self) -> ClientId {
         ClientId::Cline
     }
@@ -23,7 +23,7 @@ impl LocalSourceAdapter for ClineAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let def = ClientId::Cline
             .local_def()
             .expect("Cline adapter must have local scan policy");
@@ -36,7 +36,7 @@ impl LocalSourceAdapter for ClineAdapter {
             ctx,
         )?);
 
-        Ok(adapter_discover::source_units_from_paths(
+        Ok(adapter_discover::input_units_from_paths(
             ClientId::Cline,
             adapter_discover::scan_roots(ClientId::Cline, roots, def.pattern)?,
             FingerprintPolicy::PlainFile,
@@ -52,7 +52,7 @@ impl LocalSourceAdapter for ClineAdapter {
         .collect())
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -63,10 +63,10 @@ impl LocalSourceAdapter for ClineAdapter {
 
     fn plan_cache_hit(
         &self,
-        unit: SourceUnit,
-        source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
-        adapter_cache::plan_cache_hit(unit, source_cache)
+        unit: InputUnit,
+        input_cache: &crate::message_cache::InputMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::InputPlanningError> {
+        adapter_cache::plan_cache_hit(unit, input_cache)
     }
 
     fn fold(
@@ -74,7 +74,7 @@ impl LocalSourceAdapter for ClineAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), SourcePipelineError> {
+    ) -> Result<(), InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
@@ -166,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_content_participates_in_the_source_fingerprint() {
+    fn manifest_content_participates_in_the_input_fingerprint() {
         let home = tempfile::TempDir::new().unwrap();
         let current = home
             .path()
@@ -180,7 +180,7 @@ mod tests {
             .discover_checked(&scan_context(home.path(), &settings))
             .unwrap()
             .remove(0)
-            .source_input_policy()
+            .input_policy()
             .fingerprint()
             .unwrap();
 
@@ -189,7 +189,7 @@ mod tests {
             .discover_checked(&scan_context(home.path(), &settings))
             .unwrap()
             .remove(0)
-            .source_input_policy()
+            .input_policy()
             .fingerprint()
             .unwrap();
 

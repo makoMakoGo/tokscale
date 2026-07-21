@@ -9,7 +9,7 @@ built from the same `personal/local-clients` HEAD.
 - Baseline: `/home/travis/.local/bin/tokscale`.
 - Candidate: `cargo build -p tokscale-cli --release` from
   `codex/cleanup-b-public-surfaces`.
-- Machine and corpus: the same WSL2 host and live local source corpus, measured
+- Machine and corpus: the same WSL2 host and live local input corpus, measured
   consecutively on 2026-07-21.
 - Each probe performs one unmeasured warm-up and three measured runs.
 - Core and DB probes use `time-metrics`; graph uses the same script's `graph`

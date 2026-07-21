@@ -16,8 +16,8 @@ use crate::tui::app::App;
 use crate::tui::session_data::SessionProjectionStatus;
 use crate::tui::view_state::ViewState;
 
-const SOURCE_MIN_WIDTH: u16 = 10;
-const SOURCE_MAX_WIDTH: u16 = 32;
+const CLIENT_MIN_WIDTH: u16 = 10;
+const CLIENT_MAX_WIDTH: u16 = 32;
 const SESSION_MIN_WIDTH: u16 = 12;
 const SESSION_MAX_WIDTH: u16 = 28;
 const WORKSPACE_MIN_WIDTH: u16 = 12;
@@ -26,8 +26,8 @@ const MODELS_MIN_WIDTH: u16 = 14;
 const MODELS_MAX_WIDTH: u16 = 34;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SourceColumn {
-    Source,
+enum ClientColumn {
+    Client,
     Main,
     Total,
     Workspaces,
@@ -47,25 +47,25 @@ enum SessionColumn {
     Active,
 }
 
-fn source_table_layout(
+fn client_table_layout(
     table_width: u16,
-    source_content_width: u16,
-) -> ResponsiveTableLayout<SourceColumn> {
+    client_content_width: u16,
+) -> ResponsiveTableLayout<ClientColumn> {
     responsive_table_layout(
         table_width,
         &[
             ResponsiveColumn::measured_required(
-                SourceColumn::Source,
+                ClientColumn::Client,
                 0,
-                SOURCE_MIN_WIDTH,
-                source_content_width.saturating_add(2),
-                SOURCE_MAX_WIDTH,
+                CLIENT_MIN_WIDTH,
+                client_content_width.saturating_add(2),
+                CLIENT_MAX_WIDTH,
             ),
-            ResponsiveColumn::fixed_required(SourceColumn::Main, 10, 6),
-            ResponsiveColumn::fixed_required(SourceColumn::Total, 20, 6),
-            ResponsiveColumn::fixed_optional(SourceColumn::Space, 10, 40, 10),
-            ResponsiveColumn::fixed_optional(SourceColumn::Active, 20, 30, 12),
-            ResponsiveColumn::fixed_optional(SourceColumn::Workspaces, 30, 20, 10),
+            ResponsiveColumn::fixed_required(ClientColumn::Main, 10, 6),
+            ResponsiveColumn::fixed_required(ClientColumn::Total, 20, 6),
+            ResponsiveColumn::fixed_optional(ClientColumn::Space, 10, 40, 10),
+            ResponsiveColumn::fixed_optional(ClientColumn::Active, 20, 30, 12),
+            ResponsiveColumn::fixed_optional(ClientColumn::Workspaces, 30, 20, 10),
         ],
     )
 }
@@ -115,14 +115,14 @@ fn right_aligned_cell(value: impl AsRef<str>, width: usize) -> Cell<'static> {
     Cell::from(format!("{:>width$}", value.as_ref()))
 }
 
-fn source_column_label(column: SourceColumn) -> &'static str {
+fn client_column_label(column: ClientColumn) -> &'static str {
     match column {
-        SourceColumn::Source => "Source",
-        SourceColumn::Main => "Main",
-        SourceColumn::Total => "Total",
-        SourceColumn::Workspaces => "Workspaces",
-        SourceColumn::Active => "Active",
-        SourceColumn::Space => "Space",
+        ClientColumn::Client => "Client",
+        ClientColumn::Main => "Main",
+        ClientColumn::Total => "Total",
+        ClientColumn::Workspaces => "Workspaces",
+        ClientColumn::Active => "Active",
+        ClientColumn::Space => "Space",
     }
 }
 
@@ -131,7 +131,7 @@ pub(crate) fn render(frame: &mut Frame, app: &App, state: &mut ViewState, area: 
     if state.session_detail_active() {
         render_session_details(frame, app, state, area, projection_status);
     } else {
-        render_sources(frame, app, state, area, projection_status);
+        render_clients(frame, app, state, area, projection_status);
     }
 }
 
@@ -143,14 +143,14 @@ fn panel_block<'a>(app: &App, title: impl Into<Line<'a>>) -> Block<'a> {
         .style(Style::default().bg(app.theme.background))
 }
 
-fn render_sources(
+fn render_clients(
     frame: &mut Frame,
     app: &App,
     state: &mut ViewState,
     area: Rect,
     projection_status: &SessionProjectionStatus,
 ) {
-    let rows = state.source_rows(app);
+    let rows = state.client_rows(app);
     let block = panel_block(
         app,
         Span::styled(
@@ -172,7 +172,7 @@ fn render_sources(
     }
 
     if rows.is_empty() {
-        state.set_source_viewport(content_area.height as usize, 0);
+        state.set_client_viewport(content_area.height as usize, 0);
         frame.render_widget(
             Paragraph::new("No session data available")
                 .style(Style::default().fg(app.theme.muted))
@@ -183,15 +183,15 @@ fn render_sources(
     }
 
     let visible = content_area.height.saturating_sub(1).max(1) as usize;
-    state.set_source_viewport(visible, rows.len());
-    let range = state.source_visible_range(rows.len());
-    let selected = state.source_selected();
-    let source_content_width = rows
+    state.set_client_viewport(visible, rows.len());
+    let range = state.client_visible_range(rows.len());
+    let selected = state.client_selected();
+    let client_content_width = rows
         .iter()
-        .map(|row| display_width(&get_client_display_name(&row.source)))
+        .map(|row| display_width(&get_client_display_name(&row.client)))
         .max()
-        .unwrap_or(SOURCE_MIN_WIDTH);
-    let layout = source_table_layout(table_area.width, source_content_width);
+        .unwrap_or(CLIENT_MIN_WIDTH);
+    let layout = client_table_layout(table_area.width, client_content_width);
     let columns = layout.columns.clone();
     let table_rows = rows[range.clone()]
         .iter()
@@ -212,27 +212,27 @@ fn render_sources(
                 .map(|column| {
                     let width = layout.width_for(*column);
                     match column {
-                        SourceColumn::Source => {
+                        ClientColumn::Client => {
                             let marker = if is_selected { "▶" } else { " " };
-                            let source = truncate_display_width(
-                                &get_client_display_name(&row.source),
+                            let client = truncate_display_width(
+                                &get_client_display_name(&row.client),
                                 width.saturating_sub(2),
                             );
-                            Cell::from(format!("{marker} {source}"))
+                            Cell::from(format!("{marker} {client}"))
                         }
-                        SourceColumn::Main => {
+                        ClientColumn::Main => {
                             right_aligned_cell(row.main_session_count.to_string(), width)
                         }
-                        SourceColumn::Total => {
+                        ClientColumn::Total => {
                             right_aligned_cell(row.session_count.to_string(), width)
                         }
-                        SourceColumn::Workspaces => {
+                        ClientColumn::Workspaces => {
                             right_aligned_cell(row.workspace_count.to_string(), width)
                         }
-                        SourceColumn::Active => {
+                        ClientColumn::Active => {
                             right_aligned_cell(format_timestamp(row.last_seen), width)
                         }
-                        SourceColumn::Space => {
+                        ClientColumn::Space => {
                             right_aligned_cell(format_bytes(row.space_bytes), width)
                         }
                     }
@@ -246,8 +246,8 @@ fn render_sources(
         columns
             .iter()
             .map(|column| {
-                let label = source_column_label(*column);
-                if *column == SourceColumn::Source {
+                let label = client_column_label(*column);
+                if *column == ClientColumn::Client {
                     Cell::from(label)
                 } else {
                     right_aligned_cell(label, layout.width_for(*column))
@@ -270,7 +270,7 @@ fn render_sources(
         scrollbar_area(area, status_area.is_some()),
         rows.len(),
         visible,
-        state.source_scroll(),
+        state.client_scroll(),
     );
 }
 
@@ -281,10 +281,10 @@ fn render_session_details(
     area: Rect,
     projection_status: &SessionProjectionStatus,
 ) {
-    let source = state.selected_session_source().unwrap_or_default();
-    let display_source = get_client_display_name(source);
+    let client = state.selected_session_client().unwrap_or_default();
+    let display_client = get_client_display_name(client);
     let title = Line::from(Span::styled(
-        format!(" Sessions / {display_source} "),
+        format!(" Sessions / {display_client} "),
         Style::default()
             .fg(app.theme.accent)
             .add_modifier(Modifier::BOLD),
@@ -305,7 +305,7 @@ fn render_session_details(
     if rows.is_empty() {
         state.set_detail_viewport(content_area.height as usize, 0);
         frame.render_widget(
-            Paragraph::new("No sessions found for this source")
+            Paragraph::new("No sessions found for this client")
                 .style(Style::default().fg(app.theme.muted))
                 .alignment(Alignment::Center),
             content_area,
@@ -573,8 +573,8 @@ mod tests {
     }
 
     #[test]
-    fn source_header_has_no_duplicate_left_padding() {
-        assert_eq!(source_column_label(SourceColumn::Source), "Source");
+    fn client_header_has_no_duplicate_left_padding() {
+        assert_eq!(client_column_label(ClientColumn::Client), "Client");
     }
 
     #[test]
@@ -606,35 +606,35 @@ mod tests {
     }
 
     #[test]
-    fn narrow_source_table_keeps_identity_and_session_counts_aligned() {
-        let layout = source_table_layout(24, 20);
+    fn narrow_client_table_keeps_identity_and_session_counts_aligned() {
+        let layout = client_table_layout(24, 20);
 
         assert_eq!(
             layout.columns,
             vec![
-                SourceColumn::Source,
-                SourceColumn::Main,
-                SourceColumn::Total
+                ClientColumn::Client,
+                ClientColumn::Main,
+                ClientColumn::Total
             ]
         );
         assert!(layout_width(&layout) <= 24);
-        assert_eq!(layout.width_for(SourceColumn::Main), 6);
-        assert_eq!(layout.width_for(SourceColumn::Total), 6);
+        assert_eq!(layout.width_for(ClientColumn::Main), 6);
+        assert_eq!(layout.width_for(ClientColumn::Total), 6);
     }
 
     #[test]
-    fn wide_source_table_restores_all_columns_in_semantic_order() {
-        let layout = source_table_layout(120, 20);
+    fn wide_client_table_restores_all_columns_in_semantic_order() {
+        let layout = client_table_layout(120, 20);
 
         assert_eq!(
             layout.columns,
             vec![
-                SourceColumn::Source,
-                SourceColumn::Main,
-                SourceColumn::Total,
-                SourceColumn::Workspaces,
-                SourceColumn::Active,
-                SourceColumn::Space,
+                ClientColumn::Client,
+                ClientColumn::Main,
+                ClientColumn::Total,
+                ClientColumn::Workspaces,
+                ClientColumn::Active,
+                ClientColumn::Space,
             ]
         );
         assert!(layout_width(&layout) <= 120);

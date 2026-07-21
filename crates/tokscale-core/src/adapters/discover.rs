@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::adapters::{AdapterScanContext, FingerprintPolicy, SourceDiscoveryError, SourceUnit};
+use crate::adapters::{AdapterScanContext, FingerprintPolicy, InputDiscoveryError, InputUnit};
 use crate::clients::ClientId;
 use crate::scanner;
 
@@ -9,7 +9,7 @@ pub(crate) fn discover_default_scanned_units(
     client: ClientId,
     ctx: &AdapterScanContext<'_>,
     fingerprint_policy: FingerprintPolicy,
-) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+) -> Result<Vec<InputUnit>, InputDiscoveryError> {
     let def = client
         .local_def()
         .expect("adapter client must have local scan policy");
@@ -21,13 +21,13 @@ pub(crate) fn discover_default_scanned_units(
         extra_roots_for_client(client, ctx)?,
         def.pattern,
     )?);
-    source_units_from_paths(client, paths, fingerprint_policy)
+    input_units_from_paths(client, paths, fingerprint_policy)
 }
 
 pub(crate) fn extra_roots_for_client(
     client: ClientId,
     ctx: &AdapterScanContext<'_>,
-) -> Result<Vec<PathBuf>, SourceDiscoveryError> {
+) -> Result<Vec<PathBuf>, InputDiscoveryError> {
     let mut roots = Vec::new();
 
     if let Some(paths) = ctx.scanner_settings.extra_scan_paths.get(client.as_str()) {
@@ -45,7 +45,7 @@ pub(crate) fn extra_roots_for_client(
             Ok(value) => value,
             Err(std::env::VarError::NotPresent) => String::new(),
             Err(source) => {
-                return Err(SourceDiscoveryError::configuration(
+                return Err(InputDiscoveryError::configuration(
                     client,
                     "TOKSCALE_EXTRA_DIRS",
                     "read environment variable",
@@ -56,7 +56,7 @@ pub(crate) fn extra_roots_for_client(
         roots.extend(
             scanner::parse_extra_dirs(&extra_dirs, &enabled)
                 .map_err(|source| {
-                    SourceDiscoveryError::configuration(
+                    InputDiscoveryError::configuration(
                         client,
                         "TOKSCALE_EXTRA_DIRS",
                         "parse environment variable",
@@ -75,31 +75,33 @@ pub(crate) fn scan_roots<I>(
     client: ClientId,
     roots: I,
     pattern: &str,
-) -> Result<Vec<PathBuf>, SourceDiscoveryError>
+) -> Result<Vec<PathBuf>, InputDiscoveryError>
 where
     I: IntoIterator<Item = PathBuf>,
 {
     let mut paths = Vec::new();
     for root in roots {
-        paths.extend(scanner::scan_directory(&root, pattern).map_err(|source| {
-            SourceDiscoveryError::new(client, &root, "walk directory", source)
-        })?);
+        paths.extend(
+            scanner::scan_directory(&root, pattern).map_err(|source| {
+                InputDiscoveryError::new(client, &root, "walk directory", source)
+            })?,
+        );
     }
     Ok(paths)
 }
 
-pub(crate) fn source_units_from_paths(
+pub(crate) fn input_units_from_paths(
     client: ClientId,
     paths: Vec<PathBuf>,
     fingerprint_policy: FingerprintPolicy,
-) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+) -> Result<Vec<InputUnit>, InputDiscoveryError> {
     let mut seen = HashSet::new();
     let mut units = Vec::new();
 
     for path in paths {
         let key = canonical_key(client, &path)?;
         if seen.insert(key) {
-            units.push(source_unit_for_policy(client, path, &fingerprint_policy)?);
+            units.push(input_unit_for_policy(client, path, &fingerprint_policy)?);
         }
     }
 
@@ -107,18 +109,18 @@ pub(crate) fn source_units_from_paths(
     Ok(units)
 }
 
-pub(crate) fn source_units_from_paths_preserving_order(
+pub(crate) fn input_units_from_paths_preserving_order(
     client: ClientId,
     paths: Vec<PathBuf>,
     fingerprint_policy: FingerprintPolicy,
-) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+) -> Result<Vec<InputUnit>, InputDiscoveryError> {
     let mut seen = HashSet::new();
     let mut units = Vec::new();
 
     for path in paths {
         let key = canonical_key(client, &path)?;
         if seen.insert(key) {
-            units.push(source_unit_for_policy(client, path, &fingerprint_policy)?);
+            units.push(input_unit_for_policy(client, path, &fingerprint_policy)?);
         }
     }
 
@@ -129,11 +131,11 @@ pub(crate) fn push_existing_file(
     client: ClientId,
     path: PathBuf,
     paths: &mut Vec<PathBuf>,
-) -> Result<(), SourceDiscoveryError> {
+) -> Result<(), InputDiscoveryError> {
     match std::fs::metadata(&path) {
         Ok(metadata) if metadata.is_file() => paths.push(path),
         Ok(_) => {
-            return Err(SourceDiscoveryError::new(
+            return Err(InputDiscoveryError::new(
                 client,
                 &path,
                 "validate file candidate",
@@ -145,7 +147,7 @@ pub(crate) fn push_existing_file(
         }
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => {
-            return Err(SourceDiscoveryError::new(
+            return Err(InputDiscoveryError::new(
                 client,
                 &path,
                 "read file candidate metadata",
@@ -156,38 +158,28 @@ pub(crate) fn push_existing_file(
     Ok(())
 }
 
-fn canonical_key(client: ClientId, path: &Path) -> Result<PathBuf, SourceDiscoveryError> {
+fn canonical_key(client: ClientId, path: &Path) -> Result<PathBuf, InputDiscoveryError> {
     std::fs::canonicalize(path).map_err(|source| {
-        SourceDiscoveryError::new(client, path, "canonicalize discovered source", source)
+        InputDiscoveryError::new(client, path, "canonicalize discovered input", source)
     })
 }
 
-fn source_unit_for_policy(
+fn input_unit_for_policy(
     client: ClientId,
     path: PathBuf,
     fingerprint_policy: &FingerprintPolicy,
-) -> Result<SourceUnit, SourceDiscoveryError> {
+) -> Result<InputUnit, InputDiscoveryError> {
     let unit = match fingerprint_policy {
-        FingerprintPolicy::PlainFile => SourceUnit::plain_file(client, path),
-        FingerprintPolicy::SqliteWithWal => SourceUnit::sqlite_with_wal(client, path),
+        FingerprintPolicy::PlainFile => InputUnit::plain_file(client, path),
+        FingerprintPolicy::SqliteWithWal => InputUnit::sqlite_with_wal(client, path),
         FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => {
-            return SourceUnit::claude_code(client, path.clone(), home_dir.clone()).map_err(
-                |source| {
-                    let error_path = source.path().unwrap_or(&path).to_path_buf();
-                    SourceDiscoveryError::new(
-                        client,
-                        error_path,
-                        "resolve cc-mirror variant metadata",
-                        source,
-                    )
-                },
-            );
+            InputUnit::claude_code(client, path, home_dir.clone())
         }
         FingerprintPolicy::PrimaryWithSiblings {
             sibling_names,
             related_failure_policy,
         } => {
-            let mut unit = SourceUnit::plain_file(client, path);
+            let mut unit = InputUnit::plain_file(client, path);
             unit.fingerprint_policy = FingerprintPolicy::PrimaryWithSiblings {
                 sibling_names,
                 related_failure_policy: *related_failure_policy,
@@ -198,15 +190,15 @@ fn source_unit_for_policy(
             dependency_path,
             related_failure_policy,
         } => match related_failure_policy {
-            crate::message_cache::RelatedInputFailurePolicy::FailSource => {
-                SourceUnit::plain_file(client, path).with_dependency(dependency_path.clone())
+            crate::message_cache::RelatedInputFailurePolicy::FailInput => {
+                InputUnit::plain_file(client, path).with_dependency(dependency_path.clone())
             }
             crate::message_cache::RelatedInputFailurePolicy::PreservePrimary => {
-                SourceUnit::plain_file(client, path)
+                InputUnit::plain_file(client, path)
                     .with_optional_dependency(dependency_path.clone())
             }
         },
-        FingerprintPolicy::NoMessageCache => SourceUnit::no_message_cache(client, path),
+        FingerprintPolicy::NoMessageCache => InputUnit::no_message_cache(client, path),
     };
     Ok(unit)
 }

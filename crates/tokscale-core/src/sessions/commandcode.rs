@@ -12,7 +12,7 @@ use super::{
     normalize_workspace_key, workspace_label_from_key, workspace_metadata_from_key, UnifiedMessage,
     WorkspaceMetadata,
 };
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -50,16 +50,16 @@ pub(crate) fn is_usage_transcript_file(path: &Path) -> bool {
         && !is_checkpoint_file(path)
 }
 
-pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedInput> {
     if is_checkpoint_file(path) {
-        return Ok(ScannedSource::default());
+        return Ok(ScannedInput::default());
     }
 
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
     let (raw_model, configured_provider) = model_from_config(path)?;
-    let provider_id = crate::provider_identity::source_provider_id(
+    let provider_id = crate::provider_identity::observed_provider_id(
         configured_provider.as_deref().unwrap_or_default(),
         &raw_model,
     );
@@ -67,7 +67,7 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> 
     let project_slug = workspace_key_from_path(path);
     let fallback_workspace_label = project_slug.as_deref().and_then(workspace_label_from_key);
 
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     let mut workspace_candidates = BTreeSet::new();
     let mut session_id: Option<String> = None;
     let mut turn_input_chars = 0usize;
@@ -79,7 +79,7 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedSource> 
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "read JSONL line",
                     format!("{} line {line_number}: {error}", path.display()),
                 ));

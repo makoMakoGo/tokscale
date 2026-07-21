@@ -5,15 +5,15 @@ use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 
 use super::app::{App, SortDirection, SortField, Tab};
 use super::interaction::{ListInteraction, MoveCommand, TextViewport, WrapMode};
-use super::session_data::{SessionEntry, SourceSummary};
+use super::session_data::{ClientSummary, SessionEntry};
 
 #[derive(Debug, Default)]
 pub(crate) struct ViewState {
     daily_profile: bool,
     daily_profile_viewport: TextViewport,
     daily_profile_total_lines: usize,
-    selected_session_source: Option<String>,
-    session_sources: ListInteraction,
+    selected_session_client: Option<String>,
+    session_clients: ListInteraction,
     session_details: ListInteraction,
 }
 
@@ -51,18 +51,18 @@ impl ViewState {
 
         match key.code {
             KeyCode::Enter if !self.session_detail_active() => {
-                if let Some(source) = self
-                    .source_rows(app)
-                    .get(self.session_sources.selected)
-                    .map(|row| row.source.clone())
+                if let Some(client) = self
+                    .client_rows(app)
+                    .get(self.session_clients.selected)
+                    .map(|row| row.client.clone())
                 {
-                    self.selected_session_source = Some(source);
+                    self.selected_session_client = Some(client);
                     self.session_details = ListInteraction::default();
                 }
                 true
             }
             KeyCode::Esc | KeyCode::Backspace if self.session_detail_active() => {
-                self.selected_session_source = None;
+                self.selected_session_client = None;
                 true
             }
             _ => false,
@@ -96,12 +96,12 @@ impl ViewState {
         let len = if detail_active {
             self.session_count(app)
         } else {
-            self.source_count(app)
+            self.client_count(app)
         };
         let interaction = if detail_active {
             &mut self.session_details
         } else {
-            &mut self.session_sources
+            &mut self.session_clients
         };
         interaction.apply_move(command, len, WrapMode::Wrap);
     }
@@ -131,40 +131,40 @@ impl ViewState {
     }
 
     pub(crate) fn session_detail_active(&self) -> bool {
-        self.selected_session_source.is_some()
+        self.selected_session_client.is_some()
     }
 
-    pub(crate) fn selected_session_source(&self) -> Option<&str> {
-        self.selected_session_source.as_deref()
+    pub(crate) fn selected_session_client(&self) -> Option<&str> {
+        self.selected_session_client.as_deref()
     }
 
     #[cfg(test)]
-    pub(crate) fn select_session_source_for_test(&mut self, source: &str) {
-        self.selected_session_source = Some(source.to_string());
+    pub(crate) fn select_session_client_for_test(&mut self, client: &str) {
+        self.selected_session_client = Some(client.to_string());
     }
 
-    pub(crate) fn source_count(&self, app: &App) -> usize {
+    pub(crate) fn client_count(&self, app: &App) -> usize {
         app.session_snapshot
-            .source_summaries()
+            .client_summaries()
             .iter()
-            .filter(|summary| app.is_source_selected(&summary.source))
+            .filter(|summary| app.is_client_selected(&summary.client))
             .count()
     }
 
     pub(crate) fn session_count(&self, app: &App) -> usize {
         let snapshot = &app.session_snapshot;
-        self.selected_session_source.as_deref().map_or_else(
+        self.selected_session_client.as_deref().map_or_else(
             || {
                 snapshot
-                    .source_summaries()
+                    .client_summaries()
                     .iter()
-                    .filter(|summary| app.is_source_selected(&summary.source))
+                    .filter(|summary| app.is_client_selected(&summary.client))
                     .map(|summary| summary.session_count)
                     .sum()
             },
-            |source| {
-                if app.is_source_selected(source) {
-                    snapshot.session_count_for_source(source)
+            |client| {
+                if app.is_client_selected(client) {
+                    snapshot.session_count_for_client(client)
                 } else {
                     0
                 }
@@ -172,12 +172,12 @@ impl ViewState {
         )
     }
 
-    pub(crate) fn source_rows(&self, app: &App) -> Vec<SourceSummary> {
+    pub(crate) fn client_rows(&self, app: &App) -> Vec<ClientSummary> {
         let mut rows = app
             .session_snapshot
-            .source_summaries()
+            .client_summaries()
             .iter()
-            .filter(|summary| app.is_source_selected(&summary.source))
+            .filter(|summary| app.is_client_selected(&summary.client))
             .cloned()
             .collect::<Vec<_>>();
         rows.sort_by(|left, right| {
@@ -187,21 +187,21 @@ impl ViewState {
                 SortField::Cost => left.space_bytes.cmp(&right.space_bytes),
             };
             apply_direction(ordering, app.sort_direction)
-                .then_with(|| left.source.cmp(&right.source))
+                .then_with(|| left.client.cmp(&right.client))
         });
         rows
     }
 
     pub(crate) fn session_rows<'a>(&self, app: &'a App) -> Vec<&'a SessionEntry> {
-        let Some(source) = self.selected_session_source.as_deref() else {
+        let Some(client) = self.selected_session_client.as_deref() else {
             return Vec::new();
         };
-        if !app.is_source_selected(source) {
+        if !app.is_client_selected(client) {
             return Vec::new();
         }
         let mut rows = app
             .session_snapshot
-            .session_refs_for_source(source)
+            .session_refs_for_client(client)
             .collect::<Vec<_>>();
         rows.sort_by(|left, right| {
             let ordering = match app.sort_field {
@@ -217,50 +217,50 @@ impl ViewState {
 
     pub(crate) fn reconcile_session_snapshot(&mut self, app: &App) {
         if self
-            .selected_session_source
+            .selected_session_client
             .as_deref()
             .is_some_and(|selected| {
                 !app.session_snapshot
-                    .source_summaries()
+                    .client_summaries()
                     .iter()
-                    .any(|summary| summary.source == selected)
-                    || !app.is_source_selected(selected)
+                    .any(|summary| summary.client == selected)
+                    || !app.is_client_selected(selected)
             })
         {
-            self.selected_session_source = None;
+            self.selected_session_client = None;
             self.session_details = ListInteraction::default();
         }
 
-        self.session_sources.clamp(self.source_count(app));
+        self.session_clients.clamp(self.client_count(app));
         self.session_details.clamp(self.session_count(app));
     }
 
-    pub(crate) fn set_source_viewport(&mut self, visible: usize, len: usize) {
-        self.session_sources.set_visible(visible, len);
+    pub(crate) fn set_client_viewport(&mut self, visible: usize, len: usize) {
+        self.session_clients.set_visible(visible, len);
     }
 
     pub(crate) fn set_detail_viewport(&mut self, visible: usize, len: usize) {
         self.session_details.set_visible(visible, len);
     }
 
-    pub(crate) fn source_selected(&self) -> usize {
-        self.session_sources.selected
+    pub(crate) fn client_selected(&self) -> usize {
+        self.session_clients.selected
     }
 
     pub(crate) fn detail_selected(&self) -> usize {
         self.session_details.selected
     }
 
-    pub(crate) fn source_scroll(&self) -> usize {
-        self.session_sources.scroll
+    pub(crate) fn client_scroll(&self) -> usize {
+        self.session_clients.scroll
     }
 
     pub(crate) fn detail_scroll(&self) -> usize {
         self.session_details.scroll
     }
 
-    pub(crate) fn source_visible_range(&self, len: usize) -> Range<usize> {
-        self.session_sources.visible_range(len)
+    pub(crate) fn client_visible_range(&self, len: usize) -> Range<usize> {
+        self.session_clients.visible_range(len)
     }
 
     pub(crate) fn detail_visible_range(&self, len: usize) -> Range<usize> {

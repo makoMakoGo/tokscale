@@ -4,10 +4,10 @@
 
 use super::error::SessionParseResult;
 use super::roocode::parse_roo_kilo_file;
-use crate::source_health::ScannedSource;
+use crate::input_health::ScannedInput;
 use std::path::Path;
 
-pub fn parse_kilocode_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_kilocode_file(path: &Path) -> SessionParseResult<ScannedInput> {
     parse_roo_kilo_file(path, "kilocode")
 }
 

@@ -17,19 +17,19 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use tokscale_core::{
-    sessions, GroupBy, ModelPerformance, SourceInventorySignature, TuiAcc, TuiSessionEntry,
+    sessions, GroupBy, InputInventorySignature, ModelPerformance, TuiAcc, TuiSessionEntry,
 };
 
 use tokscale_core::ClientId;
 
 use super::data::{
-    AgentUsage, ContributionDay, DailyModelInfo, DailySourceInfo, DailyUsage, GraphData,
+    AgentUsage, ContributionDay, DailyClientInfo, DailyModelInfo, DailyUsage, GraphData,
     HourlyModelInfo, HourlyUsage, ModelUsage, TokenBreakdown, UsageData,
 };
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 41;
+const CACHE_SCHEMA_VERSION: u32 = 43;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -100,7 +100,7 @@ mod bundle_tests {
         let clients = HashSet::from([ClientId::Claude]);
         let scope = CacheReportScope::new("/test/home".into(), false, None, None, None);
         let sessions = vec![TuiSessionEntry {
-            source: "claude".into(),
+            client: "claude".into(),
             session_id: "session-1".into(),
             is_main_session: true,
             workspace_key: Some("/workspace".into()),
@@ -119,12 +119,12 @@ mod bundle_tests {
             first_seen: 100,
             last_seen: 200,
         }];
-        let source_space = BTreeMap::from([("claude".into(), 4096)]);
-        (temp, guard, clients, scope, sessions, source_space)
+        let client_space = BTreeMap::from([("claude".into(), 4096)]);
+        (temp, guard, clients, scope, sessions, client_space)
     }
 
-    fn signature() -> SourceInventorySignature {
-        SourceInventorySignature::from_bytes([0x39; 32])
+    fn signature() -> InputInventorySignature {
+        InputInventorySignature::from_bytes([0x39; 32])
     }
 
     fn nonempty_accumulator(home: &std::path::Path) -> TuiAcc {
@@ -194,20 +194,20 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn schema_41_bundle_round_trips_sessions_and_metadata() {
-        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
+    fn schema_43_bundle_round_trips_sessions_and_metadata() {
+        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
         let accumulator = TuiAcc::new();
         let expected_signature = signature();
-        let health = tokscale_core::source_health::HealthReport {
-            clean_sources: 1,
-            source_data_bytes: 4096,
+        let health = tokscale_core::input_health::HealthReport {
+            clean_inputs: 1,
+            input_data_bytes: 4096,
             ..Default::default()
         };
 
         let store = save_tui_bundle_cache(
             &accumulator,
             &sessions,
-            &source_space,
+            &client_space,
             &health,
             &clients,
             &scope,
@@ -218,37 +218,43 @@ mod bundle_tests {
             .load_snapshot(&clients, &GroupBy::Model, &scope)
             .unwrap();
         assert_eq!(saved.sessions, sessions);
-        assert_eq!(saved.source_space, source_space);
+        assert_eq!(saved.client_space, client_space);
         assert_eq!(saved.data.health, health);
         assert_eq!(
-            saved.source_inventory_signature.process_digest(),
+            saved.input_inventory_signature.process_digest(),
             expected_signature.process_digest()
         );
         let raw: serde_json::Value =
             serde_json::from_reader(File::open(cache_file().unwrap()).unwrap()).unwrap();
-        assert_eq!(raw["health"]["sourceDataBytes"], 4096);
+        assert_eq!(raw["clientUniverse"], serde_json::json!(["claude"]));
+        assert_eq!(raw["clientSpace"], serde_json::json!({"claude": 4096}));
+        assert_eq!(raw["sessions"][0]["client"], "claude");
+        assert!(raw.get("sourceUniverse").is_none());
+        assert!(raw.get("sourceSpace").is_none());
+        assert!(raw["sessions"][0].get("source").is_none());
+        assert_eq!(raw["health"]["inputDataBytes"], 4096);
         assert_eq!(raw["canonicalDigest"].as_str().unwrap().len(), 64);
         assert!(raw["projections"]["model"].get("health").is_none());
 
         let CacheResult::Fresh(loaded) = load_cache(&clients, &GroupBy::Model, &scope) else {
-            panic!("expected a fresh schema-41 bundle");
+            panic!("expected a fresh schema-43 bundle");
         };
         assert_eq!(loaded.sessions, sessions);
-        assert_eq!(loaded.source_space, source_space);
+        assert_eq!(loaded.client_space, client_space);
         assert_eq!(loaded.data.health, health);
         assert!(!loaded.data.loading);
     }
 
     #[test]
     #[serial]
-    fn schema_41_nonempty_bundle_round_trips_all_four_public_groupings() {
-        let (temp, _guard, _clients, scope, _sessions, _source_space) = fixture();
+    fn schema_43_nonempty_bundle_round_trips_all_four_public_groupings() {
+        let (temp, _guard, _clients, scope, _sessions, _client_space) = fixture();
         let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
         let accumulator = nonempty_accumulator(temp.path());
         let clients = HashSet::from([ClientId::Claude, ClientId::OpenCode]);
         let sessions = vec![
             TuiSessionEntry {
-                source: "claude".into(),
+                client: "claude".into(),
                 session_id: "claude-session".into(),
                 workspace_key: Some("/work/alpha".into()),
                 workspace_label: Some("alpha".into()),
@@ -257,7 +263,7 @@ mod bundle_tests {
                 ..Default::default()
             },
             TuiSessionEntry {
-                source: "opencode".into(),
+                client: "opencode".into(),
                 session_id: "open-session".into(),
                 workspace_key: Some("/work/gamma".into()),
                 workspace_label: Some("gamma".into()),
@@ -266,14 +272,14 @@ mod bundle_tests {
                 ..Default::default()
             },
         ];
-        let source_space =
+        let client_space =
             BTreeMap::from([("claude".to_string(), 8192), ("opencode".to_string(), 4096)]);
-        let mut health = tokscale_core::source_health::HealthReport {
-            clean_sources: 2,
-            source_data_bytes: 12_288,
+        let mut health = tokscale_core::input_health::HealthReport {
+            clean_inputs: 2,
+            input_data_bytes: 12_288,
             ..Default::default()
         };
-        health.record_unavailable_source("unrelated-test-source");
+        health.record_unavailable_input("unrelated-test-client");
 
         let model_projection = accumulator.project(&GroupBy::Model);
         assert!(model_projection.models.len() >= 3);
@@ -304,13 +310,18 @@ mod bundle_tests {
         let mut store = save_tui_bundle_cache(
             &accumulator,
             &sessions,
-            &source_space,
+            &client_space,
             &health,
             &clients,
             &scope,
             signature(),
         )
         .unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_reader(File::open(cache_file().unwrap()).unwrap()).unwrap();
+        let cached_day = &raw["projections"]["model"]["daily"][0];
+        assert!(cached_day.get("clientBreakdown").is_some());
+        assert!(cached_day.get("sourceBreakdown").is_none());
 
         for group_by in [
             GroupBy::Model,
@@ -321,12 +332,12 @@ mod bundle_tests {
             let expected = accumulator.project(&group_by);
             let loaded = match load_cache(&clients, &group_by, &scope) {
                 CacheResult::Fresh(loaded) | CacheResult::Stale(loaded) => loaded,
-                CacheResult::Miss => panic!("schema-41 bundle must load for {group_by}"),
+                CacheResult::Miss => panic!("schema-43 bundle must load for {group_by}"),
             };
             assert_projection_eq(&loaded.data, &expected);
             assert_eq!(loaded.data.health, health);
             assert_eq!(loaded.sessions, sessions);
-            assert_eq!(loaded.source_space, source_space);
+            assert_eq!(loaded.client_space, client_space);
             assert!(!loaded.data.loading);
             assert!(loaded.data.error.is_none());
         }
@@ -351,12 +362,12 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn legacy_schema_versions_are_explicit_misses() {
-        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
-        for schema_version in [38, 40] {
+        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
+        for schema_version in [38, 39, 40, 41, 42] {
             save_tui_bundle_cache(
                 &TuiAcc::new(),
                 &sessions,
-                &source_space,
+                &client_space,
                 &Default::default(),
                 &clients,
                 &scope,
@@ -381,14 +392,14 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn missing_or_incomplete_canonical_state_is_an_explicit_miss() {
-        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
+        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
         let path = cache_file().unwrap();
 
         for replacement in [None, Some(serde_json::json!({ "model_map": [] }))] {
             save_tui_bundle_cache(
                 &TuiAcc::new(),
                 &sessions,
-                &source_space,
+                &client_space,
                 &Default::default(),
                 &clients,
                 &scope,
@@ -415,7 +426,7 @@ mod bundle_tests {
         save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &source_space,
+            &client_space,
             &Default::default(),
             &clients,
             &scope,
@@ -436,11 +447,11 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn canonical_content_corruption_is_an_explicit_miss() {
-        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
+        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
         save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &source_space,
+            &client_space,
             &Default::default(),
             &clients,
             &scope,
@@ -462,14 +473,14 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn partial_or_foreign_source_membership_is_a_miss() {
-        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
+    fn partial_or_foreign_client_membership_is_a_miss() {
+        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
         let path = cache_file().unwrap();
 
         save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &source_space,
+            &client_space,
             &Default::default(),
             &clients,
             &scope,
@@ -478,7 +489,7 @@ mod bundle_tests {
         .unwrap();
         let mut value: serde_json::Value =
             serde_json::from_reader(File::open(&path).unwrap()).unwrap();
-        value["sourceSpace"] = serde_json::json!({"codex": 4096});
+        value["clientSpace"] = serde_json::json!({"codex": 4096});
         refresh_canonical_digest(&mut value);
         tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
             .unwrap();
@@ -490,7 +501,7 @@ mod bundle_tests {
         save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &source_space,
+            &client_space,
             &Default::default(),
             &clients,
             &scope,
@@ -499,7 +510,7 @@ mod bundle_tests {
         .unwrap();
         let mut value: serde_json::Value =
             serde_json::from_reader(File::open(&path).unwrap()).unwrap();
-        value["sessions"][0]["source"] = serde_json::Value::from("codex");
+        value["sessions"][0]["client"] = serde_json::Value::from("codex");
         refresh_canonical_digest(&mut value);
         tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
             .unwrap();
@@ -512,11 +523,11 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn writer_is_atomic_and_projection_store_pins_the_old_inode() {
-        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
+        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
         let mut store = save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &source_space,
+            &client_space,
             &Default::default(),
             &clients,
             &scope,
@@ -539,11 +550,11 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn fresh_and_stale_are_derived_from_the_bundle_timestamp() {
-        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
+        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
         save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &source_space,
+            &client_space,
             &Default::default(),
             &clients,
             &scope,
@@ -613,9 +624,9 @@ impl CacheReportScope {
     }
 }
 
-/// Default usage projection selected when the TUI starts. Schema 41 stores all
-/// four public projections plus canonical source-aware state, so Group By and
-/// Sources are presentation state rather than cache keys.
+/// Default usage projection selected when the TUI starts. Schema 43 stores all
+/// four public projections plus canonical client-aware state, so Group By and
+/// Clients are presentation state rather than cache keys.
 pub const TUI_DEFAULT_GROUP_BY: GroupBy = GroupBy::Model;
 
 /// Get the cache directory path
@@ -702,7 +713,7 @@ struct CachedDailyModelInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CachedDailySourceInfo {
+struct CachedDailyClientInfo {
     tokens: CachedTokenBreakdown,
     cost: f64,
     models: Vec<(String, CachedDailyModelInfo)>,
@@ -714,7 +725,7 @@ struct CachedDailyUsage {
     date: String, // NaiveDate serialized as string
     tokens: CachedTokenBreakdown,
     cost: f64,
-    source_breakdown: Vec<(String, CachedDailySourceInfo)>,
+    client_breakdown: Vec<(String, CachedDailyClientInfo)>,
     message_count: u32,
     turn_count: u32,
 }
@@ -907,25 +918,25 @@ impl Serialize for CachedDailyModelsRef<'_> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CachedDailySourceInfoRef<'a> {
+struct CachedDailyClientInfoRef<'a> {
     tokens: CachedTokenBreakdownRef,
     cost: f64,
     models: CachedDailyModelsRef<'a>,
 }
 
-impl<'a> From<&'a DailySourceInfo> for CachedDailySourceInfoRef<'a> {
-    fn from(source: &'a DailySourceInfo) -> Self {
+impl<'a> From<&'a DailyClientInfo> for CachedDailyClientInfoRef<'a> {
+    fn from(value: &'a DailyClientInfo) -> Self {
         Self {
-            tokens: (&source.tokens).into(),
-            cost: source.cost,
-            models: CachedDailyModelsRef(&source.models),
+            tokens: (&value.tokens).into(),
+            cost: value.cost,
+            models: CachedDailyModelsRef(&value.models),
         }
     }
 }
 
-struct CachedDailySourceBreakdownRef<'a>(&'a BTreeMap<String, DailySourceInfo>);
+struct CachedDailyClientBreakdownRef<'a>(&'a BTreeMap<String, DailyClientInfo>);
 
-impl Serialize for CachedDailySourceBreakdownRef<'_> {
+impl Serialize for CachedDailyClientBreakdownRef<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -933,7 +944,7 @@ impl Serialize for CachedDailySourceBreakdownRef<'_> {
         serializer.collect_seq(
             self.0
                 .iter()
-                .map(|(key, value)| (key, CachedDailySourceInfoRef::from(value))),
+                .map(|(key, value)| (key, CachedDailyClientInfoRef::from(value))),
         )
     }
 }
@@ -955,7 +966,7 @@ struct CachedDailyUsageRef<'a> {
     date: CachedDateRef<'a>,
     tokens: CachedTokenBreakdownRef,
     cost: f64,
-    source_breakdown: CachedDailySourceBreakdownRef<'a>,
+    client_breakdown: CachedDailyClientBreakdownRef<'a>,
     message_count: u32,
     turn_count: u32,
 }
@@ -966,7 +977,7 @@ impl<'a> From<&'a DailyUsage> for CachedDailyUsageRef<'a> {
             date: CachedDateRef(&daily.date),
             tokens: (&daily.tokens).into(),
             cost: daily.cost,
-            source_breakdown: CachedDailySourceBreakdownRef(&daily.source_breakdown),
+            client_breakdown: CachedDailyClientBreakdownRef(&daily.client_breakdown),
             message_count: daily.message_count,
             turn_count: daily.turn_count,
         }
@@ -1187,12 +1198,12 @@ fn daily_model_info_from_cached(value: CachedDailyModelInfo) -> DailyModelInfo {
     }
 }
 
-impl From<CachedDailySourceInfo> for DailySourceInfo {
-    fn from(source: CachedDailySourceInfo) -> Self {
+impl From<CachedDailyClientInfo> for DailyClientInfo {
+    fn from(value: CachedDailyClientInfo) -> Self {
         Self {
-            tokens: source.tokens.into(),
-            cost: source.cost,
-            models: source
+            tokens: value.tokens.into(),
+            cost: value.cost,
+            models: value
                 .models
                 .into_iter()
                 .map(|(key, value)| {
@@ -1249,8 +1260,8 @@ impl TryFrom<CachedDailyUsage> for DailyUsage {
             date: NaiveDate::parse_from_str(&d.date, "%Y-%m-%d")?,
             tokens: d.tokens.into(),
             cost: d.cost,
-            source_breakdown: d
-                .source_breakdown
+            client_breakdown: d
+                .client_breakdown
                 .into_iter()
                 .map(|(key, value)| (key, value.into()))
                 .collect(),
@@ -1407,8 +1418,8 @@ fn normalize_cached_agent_name(agent: &str, clients: &str) -> String {
 fn cached_models_missing_identity(data: &UsageData) -> bool {
     data.daily
         .iter()
-        .flat_map(|day| day.source_breakdown.values())
-        .flat_map(|source| source.models.values())
+        .flat_map(|day| day.client_breakdown.values())
+        .flat_map(|client| client.models.values())
         .any(|model| model.model_id.is_empty())
         || data
             .hourly
@@ -1419,10 +1430,10 @@ fn cached_models_missing_identity(data: &UsageData) -> bool {
 
 /// Determine whether the cached client key exactly matches the current TUI request.
 fn cache_clients_match_exact(
-    source_universe: &HashSet<ClientId>,
+    client_universe: &HashSet<ClientId>,
     cached_clients: &[String],
 ) -> bool {
-    let enabled: HashSet<&str> = source_universe
+    let enabled: HashSet<&str> = client_universe
         .iter()
         .map(|client| client.as_str())
         .collect();
@@ -1431,26 +1442,24 @@ fn cache_clients_match_exact(
     cached.len() == cached_clients.len() && enabled == cached
 }
 
-fn cache_source_space_matches_exact(
-    source_universe: &HashSet<ClientId>,
-    source_space: &BTreeMap<String, u64>,
+fn cache_client_space_matches_exact(
+    client_universe: &HashSet<ClientId>,
+    client_space: &BTreeMap<String, u64>,
 ) -> bool {
-    source_space.len() == source_universe.len()
-        && source_universe
+    client_space.len() == client_universe.len()
+        && client_universe
             .iter()
-            .all(|client| source_space.contains_key(client.as_str()))
+            .all(|client| client_space.contains_key(client.as_str()))
 }
 
-fn cache_session_sources_are_enabled(
-    source_universe: &HashSet<ClientId>,
+fn cache_session_clients_are_enabled(
+    client_universe: &HashSet<ClientId>,
     sessions: &[TuiSessionEntry],
 ) -> bool {
     sessions.iter().all(|session| {
-        source_universe
+        client_universe
             .iter()
-            .any(|client| client.as_str() == session.source.as_str())
-            || (session.source.starts_with("cc-mirror/")
-                && source_universe.contains(&ClientId::Claude))
+            .any(|client| client.as_str() == session.client.as_str())
     })
 }
 
@@ -1463,12 +1472,12 @@ fn cache_session_sources_are_enabled(
 pub struct LoadedTuiCache {
     pub data: UsageData,
     pub sessions: Vec<TuiSessionEntry>,
-    pub source_space: BTreeMap<String, u64>,
+    pub client_space: BTreeMap<String, u64>,
     pub projection_store: ProjectionStore,
-    pub source_inventory_signature: SourceInventorySignature,
+    pub input_inventory_signature: InputInventorySignature,
 }
 
-/// Result of loading the schema-41 TUI bundle.
+/// Result of loading the schema-43 TUI bundle.
 pub enum CacheResult {
     Fresh(LoadedTuiCache),
     Stale(LoadedTuiCache),
@@ -1482,7 +1491,7 @@ pub enum CacheResult {
 /// subtrees without materializing them.
 pub struct ProjectionStore {
     file: File,
-    health: tokscale_core::source_health::HealthReport,
+    health: tokscale_core::input_health::HealthReport,
     universe: HashSet<ClientId>,
     canonical: Option<TuiAcc>,
 }
@@ -1506,7 +1515,7 @@ impl ProjectionStore {
     ) -> anyhow::Result<UsageData> {
         projection_field(group_by)?;
         if !selected_clients.is_subset(&self.universe) {
-            anyhow::bail!("TUI source selection is outside the cached source universe");
+            anyhow::bail!("TUI client selection is outside the cached client universe");
         }
         if selected_clients != &self.universe {
             if self.canonical.is_none() {
@@ -1547,7 +1556,7 @@ impl ProjectionStore {
 
     pub fn load_snapshot(
         self,
-        source_universe: &HashSet<ClientId>,
+        client_universe: &HashSet<ClientId>,
         group_by: &GroupBy,
         report_scope: &CacheReportScope,
     ) -> anyhow::Result<LoadedTuiCache> {
@@ -1557,7 +1566,7 @@ impl ProjectionStore {
             universe: _,
             canonical: _,
         } = self;
-        load_bundle_from_file(file, source_universe, group_by, report_scope)
+        load_bundle_from_file(file, client_universe, group_by, report_scope)
             .map(|parsed| parsed.loaded)
     }
 }
@@ -1567,12 +1576,12 @@ impl ProjectionStore {
 struct CachedTuiBundleRef<'a> {
     schema_version: u32,
     timestamp: u64,
-    source_universe: &'a [&'a str],
+    client_universe: &'a [&'a str],
     report_scope: &'a CacheReportScope,
-    source_inventory_signature: &'a SourceInventorySignature,
-    health: &'a tokscale_core::source_health::HealthReport,
+    input_inventory_signature: &'a InputInventorySignature,
+    health: &'a tokscale_core::input_health::HealthReport,
     sessions: &'a [TuiSessionEntry],
-    source_space: &'a BTreeMap<String, u64>,
+    client_space: &'a BTreeMap<String, u64>,
     canonical_digest: &'a str,
     canonical: &'a RawValue,
     projections: CachedProjectionSetRef<'a>,
@@ -1734,12 +1743,12 @@ impl<'de> Visitor<'de> for ProjectionSetVisitor {
 struct ParsedTuiBundle {
     schema_version: u32,
     timestamp: u64,
-    source_universe: Vec<String>,
+    client_universe: Vec<String>,
     report_scope: CacheReportScope,
-    source_inventory_signature: SourceInventorySignature,
-    health: tokscale_core::source_health::HealthReport,
+    input_inventory_signature: InputInventorySignature,
+    health: tokscale_core::input_health::HealthReport,
     sessions: Vec<TuiSessionEntry>,
-    source_space: BTreeMap<String, u64>,
+    client_space: BTreeMap<String, u64>,
     data: CachedUsageData,
 }
 
@@ -1836,7 +1845,7 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
     type Value = ParsedTuiBundle;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-41 TUI cache bundle")
+        formatter.write_str("a schema-43 TUI cache bundle")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -1845,12 +1854,12 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
     {
         let mut schema_version: Option<u32> = None;
         let mut timestamp = None;
-        let mut source_universe = None;
+        let mut client_universe = None;
         let mut report_scope = None;
-        let mut source_inventory_signature = None;
+        let mut input_inventory_signature = None;
         let mut health = None;
         let mut sessions = None;
-        let mut source_space = None;
+        let mut client_space = None;
         let mut expected_canonical_digest: Option<String> = None;
         let mut actual_canonical_digest: Option<String> = None;
         let mut data = None;
@@ -1861,18 +1870,18 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
                     set_once(&mut schema_version, map.next_value()?, "schemaVersion")?
                 }
                 "timestamp" => set_once(&mut timestamp, map.next_value()?, "timestamp")?,
-                "sourceUniverse" => {
-                    set_once(&mut source_universe, map.next_value()?, "sourceUniverse")?
+                "clientUniverse" => {
+                    set_once(&mut client_universe, map.next_value()?, "clientUniverse")?
                 }
                 "reportScope" => set_once(&mut report_scope, map.next_value()?, "reportScope")?,
-                "sourceInventorySignature" => set_once(
-                    &mut source_inventory_signature,
+                "inputInventorySignature" => set_once(
+                    &mut input_inventory_signature,
                     map.next_value()?,
-                    "sourceInventorySignature",
+                    "inputInventorySignature",
                 )?,
                 "health" => set_once(&mut health, map.next_value()?, "health")?,
                 "sessions" => set_once(&mut sessions, map.next_value()?, "sessions")?,
-                "sourceSpace" => set_once(&mut source_space, map.next_value()?, "sourceSpace")?,
+                "clientSpace" => set_once(&mut client_space, map.next_value()?, "clientSpace")?,
                 "canonicalDigest" => set_once(
                     &mut expected_canonical_digest,
                     map.next_value()?,
@@ -1910,15 +1919,15 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
         Ok(ParsedTuiBundle {
             schema_version: required(schema_version, "schemaVersion")?,
             timestamp: required(timestamp, "timestamp")?,
-            source_universe: required(source_universe, "sourceUniverse")?,
+            client_universe: required(client_universe, "clientUniverse")?,
             report_scope: required(report_scope, "reportScope")?,
-            source_inventory_signature: required(
-                source_inventory_signature,
-                "sourceInventorySignature",
+            input_inventory_signature: required(
+                input_inventory_signature,
+                "inputInventorySignature",
             )?,
             health: required(health, "health")?,
             sessions: required(sessions, "sessions")?,
-            source_space: required(source_space, "sourceSpace")?,
+            client_space: required(client_space, "clientSpace")?,
             data: required(data, "projections")?,
         })
     }
@@ -1966,7 +1975,7 @@ impl<'de> Visitor<'de> for ProjectionBundleVisitor<'_> {
     type Value = CachedUsageData;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-41 TUI cache bundle")
+        formatter.write_str("a schema-43 TUI cache bundle")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -2023,7 +2032,7 @@ impl<'de> Visitor<'de> for CanonicalBundleVisitor {
     type Value = TuiAcc;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-41 TUI cache bundle with canonical projection state")
+        formatter.write_str("a schema-43 TUI cache bundle with canonical projection state")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -2061,7 +2070,7 @@ struct ParsedLoad {
 
 fn load_bundle_from_file(
     mut file: File,
-    source_universe: &HashSet<ClientId>,
+    client_universe: &HashSet<ClientId>,
     group_by: &GroupBy,
     report_scope: &CacheReportScope,
 ) -> anyhow::Result<ParsedLoad> {
@@ -2080,14 +2089,14 @@ fn load_bundle_from_file(
     if &parsed.report_scope != report_scope {
         anyhow::bail!("cached TUI report scope does not match the request");
     }
-    if !cache_clients_match_exact(source_universe, &parsed.source_universe) {
-        anyhow::bail!("cached TUI source universe does not match the request");
+    if !cache_clients_match_exact(client_universe, &parsed.client_universe) {
+        anyhow::bail!("cached TUI client universe does not match the request");
     }
-    if !cache_source_space_matches_exact(source_universe, &parsed.source_space) {
-        anyhow::bail!("cached TUI source-space keys do not match the source universe");
+    if !cache_client_space_matches_exact(client_universe, &parsed.client_space) {
+        anyhow::bail!("cached TUI client-space keys do not match the client universe");
     }
-    if !cache_session_sources_are_enabled(source_universe, &parsed.sessions) {
-        anyhow::bail!("cached TUI Sessions contain a source outside the source universe");
+    if !cache_session_clients_are_enabled(client_universe, &parsed.sessions) {
+        anyhow::bail!("cached TUI Sessions contain a client outside the client universe");
     }
 
     let mut data: UsageData = parsed.data.try_into()?;
@@ -2101,14 +2110,14 @@ fn load_bundle_from_file(
         loaded: LoadedTuiCache {
             data,
             sessions: parsed.sessions,
-            source_space: parsed.source_space,
+            client_space: parsed.client_space,
             projection_store: ProjectionStore {
                 file,
                 health: parsed.health,
-                universe: source_universe.clone(),
+                universe: client_universe.clone(),
                 canonical: None,
             },
-            source_inventory_signature: parsed.source_inventory_signature,
+            input_inventory_signature: parsed.input_inventory_signature,
         },
         timestamp: parsed.timestamp,
     })
@@ -2118,7 +2127,7 @@ fn load_bundle_from_file(
 /// projection plus Sessions. Unsupported/legacy/corrupt files are explicit
 /// misses; the caller remains responsible for reporting a refresh failure.
 pub fn load_cache(
-    source_universe: &HashSet<ClientId>,
+    client_universe: &HashSet<ClientId>,
     group_by: &GroupBy,
     report_scope: &CacheReportScope,
 ) -> CacheResult {
@@ -2130,12 +2139,12 @@ pub fn load_cache(
         Ok(file) => file,
         Err(_) => return CacheResult::Miss,
     };
-    let parsed = match load_bundle_from_file(file, source_universe, group_by, report_scope) {
+    let parsed = match load_bundle_from_file(file, client_universe, group_by, report_scope) {
         Ok(parsed) => parsed,
         Err(_) => return CacheResult::Miss,
     };
 
-    if parsed.loaded.data.health.requires_source_retry() {
+    if parsed.loaded.data.health.requires_input_retry() {
         return CacheResult::Stale(parsed.loaded);
     }
 
@@ -2149,7 +2158,7 @@ pub fn load_cache(
     }
 }
 
-/// Atomically persist one complete schema-41 TUI bundle.
+/// Atomically persist one complete schema-43 TUI bundle.
 ///
 /// Projection serialization borrows the canonical accumulator and materializes
 /// one grouping at a time, so the four projections never coexist in memory.
@@ -2158,22 +2167,22 @@ pub fn load_cache(
 pub fn save_tui_bundle_cache(
     accumulator: &TuiAcc,
     sessions: &[TuiSessionEntry],
-    source_space: &BTreeMap<String, u64>,
-    health: &tokscale_core::source_health::HealthReport,
-    source_universe: &HashSet<ClientId>,
+    client_space: &BTreeMap<String, u64>,
+    health: &tokscale_core::input_health::HealthReport,
+    client_universe: &HashSet<ClientId>,
     report_scope: &CacheReportScope,
-    source_inventory_signature: SourceInventorySignature,
+    input_inventory_signature: InputInventorySignature,
 ) -> anyhow::Result<ProjectionStore> {
-    if !cache_source_space_matches_exact(source_universe, source_space) {
-        anyhow::bail!("TUI source-space keys do not match the source universe");
+    if !cache_client_space_matches_exact(client_universe, client_space) {
+        anyhow::bail!("TUI client-space keys do not match the client universe");
     }
-    if !cache_session_sources_are_enabled(source_universe, sessions) {
-        anyhow::bail!("TUI Sessions contain a source outside the source universe");
+    if !cache_session_clients_are_enabled(client_universe, sessions) {
+        anyhow::bail!("TUI Sessions contain a client outside the client universe");
     }
 
     let cache_path = cache_file()?;
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-    let mut clients_vec: Vec<&str> = source_universe
+    let mut clients_vec: Vec<&str> = client_universe
         .iter()
         .map(|client| client.as_str())
         .collect();
@@ -2185,12 +2194,12 @@ pub fn save_tui_bundle_cache(
     let cached = CachedTuiBundleRef {
         schema_version: CACHE_SCHEMA_VERSION,
         timestamp,
-        source_universe: &clients_vec,
+        client_universe: &clients_vec,
         report_scope,
-        source_inventory_signature: &source_inventory_signature,
+        input_inventory_signature: &input_inventory_signature,
         health,
         sessions,
-        source_space,
+        client_space,
         canonical_digest: &canonical_digest,
         canonical: canonical.as_ref(),
         projections: CachedProjectionSetRef(accumulator),
@@ -2213,7 +2222,7 @@ pub fn save_tui_bundle_cache(
     Ok(ProjectionStore {
         file,
         health: health.clone(),
-        universe: source_universe.clone(),
+        universe: client_universe.clone(),
         canonical: None,
     })
 }

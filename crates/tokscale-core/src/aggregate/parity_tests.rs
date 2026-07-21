@@ -885,12 +885,12 @@ fn contract_tui_workspace_provider_daily_and_streaks() {
     assert_eq!(today_usage.message_count, 1);
     assert_eq!(today_usage.turn_count, 1);
 
-    let claude_source = today_usage
-        .source_breakdown
+    let claude_client = today_usage
+        .client_breakdown
         .get("claude")
-        .expect("claude daily source");
-    assert_eq!(claude_source.cost, 2.0);
-    let daily_model = claude_source
+        .expect("claude daily client");
+    assert_eq!(claude_client.cost, 2.0);
+    let daily_model = claude_client
         .models
         .values()
         .find(|model| model.model_id == "claude-sonnet-4")

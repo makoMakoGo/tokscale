@@ -28,10 +28,10 @@ The most important behavioral differences are:
   for normal local reports.
 - Rows without positive token buckets are not treated as usage rows.
 - `Pi` and `OMP` are separate clients.
-- Claude placeholder cleanup is not represented as a synthetic client/source.
+- Claude placeholder cleanup is not represented as a synthetic client.
 - Client identity is catalog-based instead of being repeated through scattered
   switch statements.
-- Total-only token sources with accepted local attribution, such as Grok and
+- Total-only clients with accepted local attribution, such as Grok and
   local Warp SQLite usage, use the fixed bucket allocation from ADR 0017.
 - Subscription quota data is a separate explicit surface, not part of local
   token reports.

@@ -541,7 +541,7 @@ mod tests {
         let mut app = make_app(140);
         app.data.health.complete = false;
         app.data.health.rejected_records = 2;
-        app.data.health.failed_sources = 1;
+        app.data.health.failed_inputs = 1;
 
         assert_eq!(
             tab_label(&app, Tab::Sessions, TabLabelMode::Full),

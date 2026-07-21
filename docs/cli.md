@@ -62,12 +62,12 @@ projections, not an ADR-frozen TUI or JSON layout:
   "data": {},
   "health": {
     "complete": true,
-    "cleanSources": 0,
-    "degradedSources": 0,
+    "cleanInputs": 0,
+    "degradedInputs": 0,
     "rejectedRecords": 0,
-    "partialSources": 0,
-    "failedSources": 0,
-    "sourceDataBytes": 0,
+    "partialInputs": 0,
+    "failedInputs": 0,
+    "inputDataBytes": 0,
     "issues": []
   },
   "metadata": {
@@ -79,11 +79,11 @@ projections, not an ADR-frozen TUI or JSON layout:
 Stdout contains only the table or JSON document. Progress, `--benchmark`
 timing, health summaries, warnings, and errors go to stderr. A degraded report
 still exits `0` when its payload was produced; inspect `health` when automation
-must react to rejected records or unavailable sources.
+must react to rejected records or unavailable inputs.
 
-## Source and date scope
+## Client and date scope
 
-Local commands that read usage share the same source scope:
+Local commands that read usage share the same client scope:
 
 ```bash
 tokscale models --client opencode
@@ -93,20 +93,21 @@ tokscale models --home /tmp/test-home --no-spinner
 tokscale tui --client codex --home /tmp/test-home
 ```
 
-Repeated client ids are deduplicated. Source scope resolves once: an explicit
+Repeated client ids are deduplicated. Client scope resolves once: an explicit
 `--client` list wins, otherwise `defaultClients` applies, and without either
 Tokscale uses every accepted local client. Unknown clients are errors. `--home`
 must be an existing directory and is authoritative; discovery does not fall
 back to the process home or client-specific environment roots.
 
 Report commands scan the resolved scope for that invocation. The TUI fixes it
-as the process-wide source universe: its Sources picker initially checks every
-member and can apply only a session-local, non-persisted subset. Picker and
-Group By changes reproject the installed generation without scanning, writing
-the cache, or resetting automatic refresh. Manual and automatic refresh scan
-the original universe. Usage and Sessions follow the selected subset, while
-scanner-health diagnostics continue to describe the complete universe so a
-view filter cannot conceal an acquisition failure.
+as the process-wide client universe: its Clients picker initially checks every
+member and can apply only a session-local, non-persisted subset. Space toggles
+the draft selection, Enter applies it, and Esc cancels it. Picker and Group By
+changes reproject the installed generation without scanning, writing the cache,
+or resetting automatic refresh. Manual and automatic refresh scan the original
+universe. Usage and Sessions follow the selected subset, while Data Health
+diagnostics continue to describe the complete universe so a view filter cannot
+conceal an acquisition failure.
 
 Date boundaries are inclusive and use the local timezone:
 
@@ -141,7 +142,7 @@ tokscale models --json --group-by model
 tokscale models --json --group-by client,provider,model
 ```
 
-## Graph and source inspection
+## Graph and client inspection
 
 `graph` always produces JSON:
 
@@ -154,8 +155,8 @@ Without `--output`, the JSON document is stdout. With an output file, stdout
 contains only the final path and operational details use stderr.
 
 Graph usage does not depend on pricing availability. Pricing data is loaded
-once per process; on-disk source caches are valid for one hour, so `graph` does
-not contact pricing sources on every invocation. Missing or expired caches may
+once per process; on-disk pricing caches are valid for one hour, so `graph` does
+not contact Pricing Sources on every invocation. Missing or expired caches may
 trigger a refresh. If that refresh fails, Tokscale uses an older cache when one
 exists; without any usable pricing, it still emits every token and leaves
 unpriceable cost at `0.0`.
@@ -172,7 +173,7 @@ The JSON field `data.meta.pricingStatus` makes that outcome explicit:
 When diagnostics exist, `data.meta.pricingDiagnostics` contains them and the
 same messages are written to stderr.
 
-Inspect source locations and counts with:
+Inspect client input locations and counts with:
 
 ```bash
 tokscale clients
@@ -202,11 +203,11 @@ tokscale cache warm --client codex
 tokscale cache prune
 ```
 
-`cache warm` explicitly builds the TUI aggregate cache for its source scope.
-Report commands never modify that aggregate cache. Source-message shards remain
-an internal derived cache and are written automatically while parsing.
+`cache warm` explicitly builds the TUI aggregate cache for its client scope.
+Report commands never modify that aggregate cache. Scan-input message shards
+remain an internal derived cache and are written automatically while parsing.
 
-`cache prune` traverses source-message shards, removes orphaned sources and
+`cache prune` traverses scan-input message shards, removes orphaned inputs and
 superseded parser revisions, and prints scanned, removed, and retained counts.
 Unreadable or unclassifiable shards make the explicit maintenance command fail
 instead of reporting partial success.
@@ -215,15 +216,15 @@ instead of reporting partial success.
 
 ```bash
 tokscale pricing lookup claude-sonnet-4-5 --no-spinner
-tokscale pricing lookup grok-code --source openrouter --no-spinner
+tokscale pricing lookup grok-code --pricing-source openrouter --no-spinner
 tokscale pricing lookup claude-sonnet-4-5 --json
 tokscale pricing overrides
 tokscale pricing overrides --json
 ```
 
-`--source` selects a pricing catalog and is distinct from a model's provider.
-Standalone lookup is a catalog query; it does not replay arbitrary cleanup from
-a local source parser.
+`--pricing-source` selects a pricing catalog and is distinct from a model's
+provider. Standalone lookup is a catalog query; it does not replay arbitrary
+cleanup from a local input parser.
 
 ## Integration and usage commands
 
@@ -243,7 +244,7 @@ tokscale usage
 tokscale usage --json
 ```
 
-Antigravity is an ordinary local report source, not a command namespace:
+Antigravity is an ordinary local report client, not a command namespace:
 
 ```bash
 tokscale clients --client antigravity

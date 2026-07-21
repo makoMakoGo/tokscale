@@ -112,12 +112,12 @@ mod tests {
     #[test]
     fn typed_invalid_configuration_survives_anyhow_context() {
         let error = anyhow::Error::new(InvalidConfiguration::new("bad settings value"))
-            .context("resolve source scope");
+            .context("resolve client scope");
         let failure = CliFailure::from(error);
 
         assert_eq!(failure.class(), FailureClass::InvalidInvocation);
         assert_eq!(failure.exit_code(), 2);
-        assert!(failure.to_string().contains("resolve source scope"));
+        assert!(failure.to_string().contains("resolve client scope"));
         assert!(failure.to_string().contains("bad settings value"));
     }
 
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn typed_operational_local_report_error_remains_operational() {
-        let error = LocalReportError::from("source cache unavailable".to_string());
+        let error = LocalReportError::from("input cache unavailable".to_string());
         let failure =
             CliFailure::from(anyhow::Error::new(error).context("generate local model report"));
 
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(failure.exit_code(), 1);
         assert_eq!(
             failure.to_string(),
-            "generate local model report: source cache unavailable"
+            "generate local model report: input cache unavailable"
         );
     }
 }

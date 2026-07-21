@@ -8,7 +8,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{model_aliases, provider_identity, token_imputation};
 use chrono::TimeZone;
 use rusqlite::Connection;
@@ -36,12 +36,12 @@ struct PendingWarpMessage {
     dedup_key: u64,
 }
 
-pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
     let conn = open_readonly_sqlite(db_path).map_err(|source| {
         SessionParseError::at_path(db_path, "open Warp database read-only", source)
     })?;
 
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     let query_metadata = load_query_metadata(&conn, db_path, &mut scanned);
     let query = r#"
         SELECT conversation_id, conversation_data, last_modified_at
@@ -68,7 +68,7 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
                 let error =
                     SessionParseError::at_path(db_path, "iterate Warp conversation rows", error);
                 if scanned.interrupted.is_none() {
-                    scanned.interrupted = Some(SourceFailure::from(&error));
+                    scanned.interrupted = Some(InputFailure::from(&error));
                 }
                 break;
             }
@@ -160,9 +160,9 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
                     continue;
                 }
             };
-            let model_id = model_aliases::canonicalize_source_model_id(raw_model_id)
+            let model_id = model_aliases::canonicalize_observed_model_id(raw_model_id)
                 .unwrap_or_else(|| raw_model_id.to_string());
-            let provider_id = provider_identity::source_provider_id("", &model_id);
+            let provider_id = provider_identity::observed_provider_id("", &model_id);
             let dedup_key =
                 super::dedup_hash_str(&format!("warp:{conversation_id}:{index}:{model_id}"));
             let Some(next_row_total) = row_total.checked_add(total) else {
@@ -228,7 +228,7 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
 fn load_query_metadata(
     conn: &Connection,
     db_path: &Path,
-    scanned: &mut ScannedSource,
+    scanned: &mut ScannedInput,
 ) -> HashMap<String, ConversationMeta> {
     let mut stmt = match conn.prepare(
         r#"
@@ -243,7 +243,7 @@ fn load_query_metadata(
         Err(error) => {
             let error =
                 SessionParseError::at_path(db_path, "prepare Warp query metadata query", error);
-            scanned.interrupted = Some(SourceFailure::from(&error));
+            scanned.interrupted = Some(InputFailure::from(&error));
             return HashMap::new();
         }
     };
@@ -253,7 +253,7 @@ fn load_query_metadata(
         Err(error) => {
             let error =
                 SessionParseError::at_path(db_path, "execute Warp query metadata query", error);
-            scanned.interrupted = Some(SourceFailure::from(&error));
+            scanned.interrupted = Some(InputFailure::from(&error));
             return HashMap::new();
         }
     };
@@ -266,7 +266,7 @@ fn load_query_metadata(
             Err(error) => {
                 let error =
                     SessionParseError::at_path(db_path, "iterate Warp query metadata rows", error);
-                scanned.interrupted = Some(SourceFailure::from(&error));
+                scanned.interrupted = Some(InputFailure::from(&error));
                 break;
             }
         };
@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_warp_sqlite_reports_missing_conversation_schema_as_source_error() {
+    fn parse_warp_sqlite_reports_missing_conversation_schema_as_input_error() {
         let temp = tempfile::TempDir::new().unwrap();
         let db_path = temp.path().join("warp.sqlite");
         drop(Connection::open(&db_path).unwrap());

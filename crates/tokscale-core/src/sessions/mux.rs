@@ -4,7 +4,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
-use crate::source_health::{RecordRejectionReason, ScannedSource};
+use crate::input_health::{RecordRejectionReason, ScannedInput};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -43,7 +43,7 @@ pub struct MuxLastRequest {
 
 /// Parse a mux session-usage.json file.
 /// Returns one UnifiedMessage per model entry in byModel.
-pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let data = std::fs::read(path)
         .map_err(|error| SessionParseError::at_path(path, "read file", error))?;
 
@@ -61,8 +61,8 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedSource> {
     if path.file_name().and_then(|name| name.to_str()) != Some("session-usage.json") {
         return Err(invalid_at_path(
             path,
-            "validate Mux source path",
-            "expected a `session-usage.json` source file",
+            "validate Mux input path",
+            "expected a `session-usage.json` input file",
         ));
     }
 
@@ -76,13 +76,13 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedSource> {
             invalid_at_path(
                 path,
                 "derive session identifier",
-                "mux source path has no non-empty parent session directory",
+                "mux input path has no non-empty parent session directory",
             )
         })?;
 
     let by_model = match usage.by_model {
         Some(m) => m,
-        None => return Ok(ScannedSource::default()),
+        None => return Ok(ScannedInput::default()),
     };
 
     let mut by_model = by_model.into_iter().collect::<Vec<_>>();
@@ -93,7 +93,7 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedSource> {
         .as_ref()
         .and_then(|request| request.timestamp)
         .filter(|timestamp| *timestamp > 0);
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     for (model_key, model_value) in by_model {
         let model_usage = match serde_json::from_value::<MuxModelUsage>(model_value) {
             Ok(model_usage) => model_usage,
@@ -157,9 +157,9 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedSource> {
                 .record(RecordRejectionReason::MissingModel);
             continue;
         }
-        let model_id = model_aliases::canonicalize_source_model_id(raw_model_id)
+        let model_id = model_aliases::canonicalize_observed_model_id(raw_model_id)
             .unwrap_or_else(|| raw_model_id.to_string());
-        let provider = provider_identity::source_provider_id(raw_provider, &model_id);
+        let provider = provider_identity::observed_provider_id(raw_provider, &model_id);
 
         scanned.messages.push(UnifiedMessage::new_with_dedup(
             "mux",
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn test_source_cost_ignored() {
+    fn test_record_cost_ignored() {
         let json = r#"{
             "version": 1,
             "byModel": {

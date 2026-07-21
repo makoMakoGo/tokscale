@@ -46,7 +46,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use rusqlite::Connection;
 use std::collections::HashSet;
@@ -56,7 +56,7 @@ pub(crate) fn response_dedup_key(response_id: &str) -> u64 {
     crate::sessions::dedup_hash_str(&format!("antigravity:{response_id}"))
 }
 
-pub fn parse_antigravity_cli_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_antigravity_cli_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let conn = open_readonly_sqlite(path)?;
     let session_id = path
         .file_stem()
@@ -78,7 +78,7 @@ pub fn parse_antigravity_cli_file(path: &Path) -> SessionParseResult<ScannedSour
         .query([])
         .map_err(|error| SessionParseError::new("execute Antigravity CLI usage query", error))?;
 
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     let mut seen_response_ids = HashSet::new();
     let mut row_index = 0usize;
     loop {
@@ -86,7 +86,7 @@ pub fn parse_antigravity_cli_file(path: &Path) -> SessionParseResult<ScannedSour
             Ok(Some(row)) => row,
             Ok(None) => break,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "step Antigravity CLI usage query",
                     format!("{} after row {row_index}: {error}", path.display()),
                 ));
@@ -217,7 +217,7 @@ fn parse_gen_metadata(
         .display_model
         .and_then(canonical_antigravity_display_model)
         .unwrap_or_else(|| raw_model.to_string());
-    let provider_id = provider_identity::source_provider_id("", &model_id);
+    let provider_id = provider_identity::observed_provider_id("", &model_id);
 
     if let Some(response_id) = &response_id {
         seen_response_ids.insert(response_id.clone());
@@ -1047,11 +1047,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_database_remains_a_source_error() {
+    fn missing_database_remains_a_input_error() {
         let dir = tempfile::tempdir().unwrap();
         let error = super::parse_antigravity_cli_file(&dir.path().join("missing.db")).unwrap_err();
 
-        assert_eq!(error.operation(), "open SQLite source read-only");
+        assert_eq!(error.operation(), "open SQLite input read-only");
     }
 
     #[test]

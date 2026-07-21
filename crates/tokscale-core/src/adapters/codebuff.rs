@@ -5,8 +5,8 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit,
+    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
+    LocalInputAdapter, MessageSink, ParseContext, ParsedUnit,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -18,7 +18,7 @@ pub(crate) struct CodebuffAdapter;
 const CODEBUFF_RECORD_REJECTION_REVISION: u32 =
     crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 2;
 
-impl LocalSourceAdapter for CodebuffAdapter {
+impl LocalInputAdapter for CodebuffAdapter {
     fn client(&self) -> ClientId {
         ClientId::Codebuff
     }
@@ -26,7 +26,7 @@ impl LocalSourceAdapter for CodebuffAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let def = ClientId::Codebuff
             .local_def()
             .expect("Codebuff adapter must have local scan policy");
@@ -40,7 +40,7 @@ impl LocalSourceAdapter for CodebuffAdapter {
             )?);
         }
 
-        Ok(adapter_discover::source_units_from_paths(
+        Ok(adapter_discover::input_units_from_paths(
             ClientId::Codebuff,
             adapter_discover::scan_roots(ClientId::Codebuff, roots, def.pattern)?,
             FingerprintPolicy::PlainFile,
@@ -55,7 +55,7 @@ impl LocalSourceAdapter for CodebuffAdapter {
         .collect())
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -68,10 +68,10 @@ impl LocalSourceAdapter for CodebuffAdapter {
 
     fn plan_cache_hit(
         &self,
-        unit: SourceUnit,
-        source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
-        adapter_cache::plan_cache_hit(unit, source_cache)
+        unit: InputUnit,
+        input_cache: &crate::message_cache::InputMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::InputPlanningError> {
+        adapter_cache::plan_cache_hit(unit, input_cache)
     }
 
     fn fold(
@@ -79,7 +79,7 @@ impl LocalSourceAdapter for CodebuffAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), crate::adapters::SourcePipelineError> {
+    ) -> Result<(), crate::adapters::InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
@@ -87,7 +87,7 @@ impl LocalSourceAdapter for CodebuffAdapter {
 fn codebuff_roots(
     home_dir: &str,
     use_env_roots: bool,
-) -> Result<(Vec<PathBuf>, bool), SourceDiscoveryError> {
+) -> Result<(Vec<PathBuf>, bool), InputDiscoveryError> {
     if use_env_roots {
         if let Some(root) = configured_path_env("CODEBUFF_DATA_DIR") {
             return Ok((vec![root.join("projects")], true));

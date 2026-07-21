@@ -16,7 +16,7 @@ pub(crate) struct GraphTokenBreakdown {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GraphSourceContribution {
+pub(crate) struct GraphClientContribution {
     client: String,
     model_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -41,7 +41,7 @@ pub(crate) struct GraphDailyContribution {
     totals: GraphDailyTotals,
     intensity: u8,
     token_breakdown: GraphTokenBreakdown,
-    clients: Vec<GraphSourceContribution>,
+    clients: Vec<GraphClientContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     active_time_ms: Option<i64>,
 }
@@ -162,23 +162,23 @@ pub(crate) fn to_graph_export_data(graph: &tokscale_core::GraphResult) -> GraphE
                 clients: d
                     .clients
                     .iter()
-                    .map(|s| GraphSourceContribution {
-                        client: s.client.clone(),
-                        model_id: s.model_id.clone(),
-                        provider_id: if s.provider_id.is_empty() {
+                    .map(|client| GraphClientContribution {
+                        client: client.client.clone(),
+                        model_id: client.model_id.clone(),
+                        provider_id: if client.provider_id.is_empty() {
                             None
                         } else {
-                            Some(s.provider_id.clone())
+                            Some(client.provider_id.clone())
                         },
                         tokens: GraphTokenBreakdown {
-                            input: s.tokens.input,
-                            output: s.tokens.output,
-                            cache_read: s.tokens.cache_read,
-                            cache_write: s.tokens.cache_write,
-                            reasoning: s.tokens.reasoning,
+                            input: client.tokens.input,
+                            output: client.tokens.output,
+                            cache_read: client.tokens.cache_read,
+                            cache_write: client.tokens.cache_write,
+                            reasoning: client.tokens.reasoning,
                         },
-                        cost: s.cost,
-                        messages: s.messages,
+                        cost: client.cost,
+                        messages: client.messages,
                     })
                     .collect(),
                 active_time_ms: d.active_time_ms,
@@ -319,14 +319,14 @@ mod tests {
             years: Vec::new(),
             contributions: Vec::new(),
             time_metrics: None,
-            health: tokscale_core::source_health::HealthReport {
+            health: tokscale_core::input_health::HealthReport {
                 complete: false,
-                clean_sources: 4,
-                degraded_sources: 1,
+                clean_inputs: 4,
+                degraded_inputs: 1,
                 rejected_records: 2,
-                partial_sources: 1,
-                failed_sources: 0,
-                source_data_bytes: 12_345,
+                partial_inputs: 1,
+                failed_inputs: 0,
+                input_data_bytes: 12_345,
                 issues: Vec::new(),
             },
         };
@@ -339,11 +339,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(json["health"]["complete"], false);
-        assert_eq!(json["health"]["cleanSources"], 4);
-        assert_eq!(json["health"]["degradedSources"], 1);
+        assert_eq!(json["health"]["cleanInputs"], 4);
+        assert_eq!(json["health"]["degradedInputs"], 1);
         assert_eq!(json["health"]["rejectedRecords"], 2);
-        assert_eq!(json["health"]["partialSources"], 1);
-        assert_eq!(json["health"]["sourceDataBytes"], 12_345);
+        assert_eq!(json["health"]["partialInputs"], 1);
+        assert_eq!(json["health"]["inputDataBytes"], 12_345);
         assert_eq!(
             json["data"]["meta"]["pricingStatus"],
             serde_json::json!("cachedFallback")

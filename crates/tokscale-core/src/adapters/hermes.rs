@@ -5,9 +5,8 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceUnit,
-    UnitMessageSource,
+    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
+    LocalInputAdapter, MessageSink, ParseContext, ParsedBatchInput, ParsedUnit, UnitMessagePayload,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -17,7 +16,7 @@ const HERMES_RECORD_REJECTION_REVISION: u32 = 5;
 
 pub(crate) struct HermesAdapter;
 
-impl LocalSourceAdapter for HermesAdapter {
+impl LocalInputAdapter for HermesAdapter {
     fn client(&self) -> ClientId {
         ClientId::Hermes
     }
@@ -25,7 +24,7 @@ impl LocalSourceAdapter for HermesAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let def = ClientId::Hermes
             .local_def()
             .expect("Hermes adapter must have local scan policy");
@@ -42,7 +41,7 @@ impl LocalSourceAdapter for HermesAdapter {
             def.pattern,
         )?);
 
-        let units = adapter_discover::source_units_from_paths_preserving_order(
+        let units = adapter_discover::input_units_from_paths_preserving_order(
             ClientId::Hermes,
             paths,
             FingerprintPolicy::SqliteWithWal,
@@ -58,7 +57,7 @@ impl LocalSourceAdapter for HermesAdapter {
             .collect())
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -72,7 +71,7 @@ impl LocalSourceAdapter for HermesAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), crate::adapters::SourcePipelineError> {
+    ) -> Result<(), crate::adapters::InputPipelineError> {
         let mut seen = HashSet::new();
         fold_hermes_units(parsed, ctx, sink, &mut seen);
         Ok(())
@@ -80,10 +79,10 @@ impl LocalSourceAdapter for HermesAdapter {
 
     fn fold_batches(
         &self,
-        batches: &mut ParsedBatchSource<'_>,
+        batches: &mut ParsedBatchInput<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), crate::adapters::SourcePipelineError> {
+    ) -> Result<(), crate::adapters::InputPipelineError> {
         let mut seen = HashSet::new();
         while let Some(parsed) = batches.next(ctx)? {
             fold_hermes_units(parsed, ctx, sink, &mut seen);
@@ -99,8 +98,8 @@ fn fold_hermes_units(
     seen: &mut HashSet<u64>,
 ) {
     for unit in parsed {
-        ctx.health.record(unit.source_health());
-        if let UnitMessageSource::Fresh(messages) = unit.messages {
+        ctx.health.record(unit.input_health());
+        if let UnitMessagePayload::Fresh(messages) = unit.messages {
             sink.extend_messages(
                 messages
                     .into_iter()
@@ -118,18 +117,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hermes_direct_parser_ignores_seeded_source_message_shard() {
+    fn hermes_direct_parser_ignores_seeded_input_message_shard() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("state.db");
-        std::fs::write(&path, b"direct parser source").unwrap();
-        let unit = SourceUnit::sqlite_with_wal(ClientId::Hermes, path.clone())
+        std::fs::write(&path, b"direct parser input").unwrap();
+        let unit = InputUnit::sqlite_with_wal(ClientId::Hermes, path.clone())
             .prepare_snapshot()
             .unwrap();
-        let mut cache = crate::message_cache::SourceMessageCache::default();
-        cache.insert(crate::message_cache::CachedSourceEntry::new_with_version(
+        let mut cache = crate::message_cache::InputMessageCache::default();
+        cache.insert(crate::message_cache::CachedInputEntry::new_with_version(
             &path,
             unit.parser_version,
-            unit.source_input_policy().fingerprint().unwrap(),
+            unit.input_policy().fingerprint().unwrap(),
             vec![crate::UnifiedMessage::new(
                 "hermes",
                 "model",

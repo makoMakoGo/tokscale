@@ -39,7 +39,7 @@ The active maintained branch is `personal/local-clients`.
 - **Shared aggregation semantics.** CLI and TUI reports should describe the
   same local usage, not separate interpretations of the same transcript set.
 - **Lower memory overhead.** The message pipeline avoids unnecessary clones and
-  skips full reloads when source files have not changed.
+  skips full reloads when input files have not changed.
 - **Curated upstream adoption.** Upstream fixes are reviewed and ported
   selectively. This fork does not automatically adopt every upstream client,
   hosted workflow, or release policy.
@@ -114,12 +114,12 @@ When running from source, replace `tokscale` with `bun run cli --`.
 ## Supported clients
 
 The canonical client identity list lives in
-`crates/tokscale-core/client-catalog.json`. Full local source details are in
+`crates/tokscale-core/client-catalog.json`. Full local input details are in
 [supported clients](docs/clients.md).
 
 Current catalog entries include:
 
-OpenCode, Claude Code, Codex CLI, Gemini CLI, Amp, Droid, OpenClaw,
+OpenCode, Claude, Codex CLI, Gemini CLI, Amp, Droid, OpenClaw,
 Pi, OMP, Kimi, Qwen CLI, Roo Code, KiloCode, Mux, Kilo CLI,
 Hermes Agent, Copilot, Goose, Codebuff, CodeBuddy, Antigravity, Zed Agent,
 ZCode, Kiro, Junie, Warp, Cline, Command Code, and Grok Build.
@@ -141,14 +141,14 @@ normal local reports because they can represent subscriptions, credits, bundle
 balances, reseller markup, rounded UI totals, or aggregate spend.
 
 Local reports canonicalize model ids before grouping and pricing, stripping
-release, date, free-channel, and source decorations that this fork does not
+release, date, free-channel, and route decorations that this fork does not
 preserve as model identity.
 
 Exact custom overrides from `custom-pricing.json` are checked first. Otherwise,
 Tokscale searches LiteLLM, OpenRouter, and models.dev using provider-aware exact
 and deterministic normalized matching. Those public catalogs do not have a
 simple global precedence order, and normalization is a matching strategy rather
-than a separate price source.
+than a separate Pricing Source.
 
 If a model cannot be priced, its derived cost remains `$0.00` instead of using
 a private guessed price. Details: [pricing semantics](docs/pricing.md).

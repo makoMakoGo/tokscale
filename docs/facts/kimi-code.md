@@ -4,7 +4,7 @@ Last verified: 2026-07-18
 
 This document records observed upstream storage facts, not Tokscale policy. The
 corresponding ingestion decision lives in
-[ADR 0020](../adr/0020-strict-source-identity-and-error-contract.md). Verification
+[ADR 0020](../adr/0020-input-ingestion-and-integrity-contract.md). Verification
 used `MoonshotAI/kimi-code` at commit
 `3086e4703992fbbe7a41379405ee243713ad9ced` and a read-only snapshot of a real
 local `~/.kimi-code` corpus. No credentials, prompts, message content, or tool
@@ -30,7 +30,7 @@ Current Kimi Code sessions use one ordered wire per agent:
 `session_index.jsonl` is append-only. A normal entry contains `sessionId`, an
 absolute `sessionDir`, and `workDir`; deletion is represented by a later
 `{"sessionId":"...","deleted":true}` tombstone. `state.json` contains session
-metadata and the agent tree, but it is not an ordered model-identity source. In
+metadata and the agent tree, but it is not an ordered model-identity authority. In
 the verified corpus its top-level fields contained title/workdir/time/agent
 metadata and no model field.
 

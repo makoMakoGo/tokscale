@@ -1,4 +1,4 @@
-# ADR 0025: Antigravity CLI is the only supported local source
+# ADR 0025: AGY CLI databases are the only supported Antigravity inputs
 
 Status: Accepted
 
@@ -38,17 +38,13 @@ databases.
 - Do not discover or ingest Antigravity IDE, retained IDE, backup, or
   Antigravity 2.0 Agent Manager data roots.
 - Do not inspect Antigravity processes, extract transient credentials, connect
-  to private language-server RPCs, or create a shadow JSONL usage source.
+  to private language-server RPCs, or create a shadow JSONL usage input.
 - Remove the `tokscale antigravity sync`, `status`, and `purge-cache` command
-  surface. Local-source visibility belongs to
+  surface. Client input visibility belongs to
   `tokscale clients --client antigravity`; reports and the TUI scan AGY CLI
   databases directly.
 - Keep the canonical `antigravity` client identity and the persisted
   `antigravity-cli` identity migration owned by ADR 0007.
-
-Retired parser-id tags may remain as non-constructible cache-format tombstones
-when required to preserve serialized discriminants. They are not accepted
-sources and do not constitute compatibility support.
 
 ## Consequences
 

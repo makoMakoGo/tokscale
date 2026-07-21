@@ -6,19 +6,18 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, CacheHitPlan, FingerprintPolicy, FoldContext, LocalSourceAdapter,
-    MessageSink, ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError,
-    SourceParseError, SourcePipelineError, SourcePlanningError, SourceUnit, SourceUnitMeta,
-    UnitMessageSource,
+    AdapterScanContext, CacheHitPlan, FingerprintPolicy, FoldContext, InputDiscoveryError,
+    InputParseError, InputPipelineError, InputPlanningError, InputUnit, InputUnitMeta,
+    LocalInputAdapter, MessageSink, ParseContext, ParsedBatchInput, ParsedUnit, UnitMessagePayload,
 };
 use crate::clients::ClientId;
-use crate::source_health::SourceStatus;
+use crate::input_health::InputStatus;
 use crate::{message_cache, pricing, sessions, UnifiedMessage};
 
 pub(crate) struct CodexAdapter;
 
 #[derive(Debug)]
-pub(crate) struct CodexAppendSource {
+pub(crate) struct CodexAppendInput {
     path: PathBuf,
     read_plan: message_cache::CacheReadPlan,
     parser_version: message_cache::ParserVersion,
@@ -26,7 +25,7 @@ pub(crate) struct CodexAppendSource {
     cache_write: Option<Box<message_cache::CacheWritePlan>>,
 }
 
-impl LocalSourceAdapter for CodexAdapter {
+impl LocalInputAdapter for CodexAdapter {
     fn client(&self) -> ClientId {
         ClientId::Codex
     }
@@ -34,7 +33,7 @@ impl LocalSourceAdapter for CodexAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let def = ClientId::Codex
             .local_def()
             .expect("Codex adapter must have local scan policy");
@@ -48,18 +47,18 @@ impl LocalSourceAdapter for CodexAdapter {
             ctx,
         )?);
 
-        let units = adapter_discover::source_units_from_paths_preserving_order(
+        let units = adapter_discover::input_units_from_paths_preserving_order(
             ClientId::Codex,
             adapter_discover::scan_roots(ClientId::Codex, roots, def.pattern)?,
             FingerprintPolicy::PlainFile,
         )?
         .into_iter()
-        .map(|unit| unit.with_meta(SourceUnitMeta::Codex))
+        .map(|unit| unit.with_meta(InputUnitMeta::Codex))
         .collect();
         Ok(units)
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, _ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, _ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -68,7 +67,7 @@ impl LocalSourceAdapter for CodexAdapter {
                     Ok(parsed) => parsed,
                     Err(source) => ParsedUnit::unavailable(
                         unit_identity,
-                        crate::source_health::SourceFailure::from(&source),
+                        crate::input_health::InputFailure::from(&source),
                     ),
                 }
             })
@@ -77,10 +76,10 @@ impl LocalSourceAdapter for CodexAdapter {
 
     fn plan_cache_hit(
         &self,
-        unit: SourceUnit,
-        source_cache: &message_cache::SourceMessageCache,
-    ) -> Result<CacheHitPlan, SourcePlanningError> {
-        plan_exact_codex_cache_hit(unit, source_cache)
+        unit: InputUnit,
+        input_cache: &message_cache::InputMessageCache,
+    ) -> Result<CacheHitPlan, InputPlanningError> {
+        plan_exact_codex_cache_hit(unit, input_cache)
     }
 
     fn fold(
@@ -88,17 +87,17 @@ impl LocalSourceAdapter for CodexAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), SourcePipelineError> {
+    ) -> Result<(), InputPipelineError> {
         let mut seen = HashSet::new();
         fold_codex_units(parsed, ctx, sink, &mut seen)
     }
 
     fn fold_batches(
         &self,
-        batches: &mut ParsedBatchSource<'_>,
+        batches: &mut ParsedBatchInput<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), SourcePipelineError> {
+    ) -> Result<(), InputPipelineError> {
         let mut seen = HashSet::new();
         while let Some(parsed) = batches.next(ctx)? {
             fold_codex_units(parsed, ctx, sink, &mut seen)?;
@@ -108,11 +107,11 @@ impl LocalSourceAdapter for CodexAdapter {
 }
 
 fn plan_exact_codex_cache_hit(
-    mut unit: SourceUnit,
-    source_cache: &message_cache::SourceMessageCache,
-) -> Result<CacheHitPlan, SourcePlanningError> {
+    mut unit: InputUnit,
+    input_cache: &message_cache::InputMessageCache,
+) -> Result<CacheHitPlan, InputPlanningError> {
     unit.revalidate_snapshot_for_cache_decision()?;
-    let cached = match source_cache.get_meta(&unit.path, unit.parser_version) {
+    let cached = match input_cache.get_meta(&unit.path, unit.parser_version) {
         Ok(Some(cached)) => cached,
         Ok(None) => {
             unit.mark_cache_lookup_completed_no_hit();
@@ -123,14 +122,13 @@ fn plan_exact_codex_cache_hit(
             return Ok(CacheHitPlan::Miss(unit));
         }
     };
-    let snapshot = unit.prepared_source_input_snapshot().ok_or_else(|| {
-        message_cache::SourceSnapshotError::InvalidSnapshot {
+    let snapshot = unit.prepared_input_snapshot().ok_or_else(|| {
+        message_cache::InputSnapshotError::InvalidSnapshot {
             path: unit.path.clone(),
             detail: "Codex cache planner lost its freshly validated snapshot".to_string(),
         }
     })?;
-    let stamp =
-        message_cache::SourceInputPolicy::plain(&unit.path).stamp_from_snapshot(snapshot)?;
+    let stamp = message_cache::InputPolicy::plain(&unit.path).stamp_from_snapshot(snapshot)?;
     if cached.fingerprint.stamp != stamp || !message_cache::codex_cache_meta_is_consistent(&cached)
     {
         unit.set_planned_cache_meta(cached);
@@ -142,7 +140,7 @@ fn plan_exact_codex_cache_hit(
     unit.release_prepared_snapshot();
     let mut parsed = ParsedUnit::healthy(
         unit,
-        UnitMessageSource::CodexCacheHit(read_plan),
+        UnitMessagePayload::CodexCacheHit(read_plan),
         None,
         false,
     );
@@ -155,12 +153,12 @@ fn fold_codex_units(
     ctx: &mut FoldContext<'_>,
     sink: &mut dyn MessageSink,
     seen: &mut HashSet<u64>,
-) -> Result<(), SourcePipelineError> {
+) -> Result<(), InputPipelineError> {
     for parsed in parsed {
         let path = parsed.unit.path.clone();
         let client = parsed.unit.client;
         let parser_version = parsed.unit.parser_version;
-        let mut source_health = parsed.source_health();
+        let mut input_health = parsed.input_health();
         let CodexResolvedMessages {
             mut messages,
             cache_write: extra_write,
@@ -170,23 +168,23 @@ fn fold_codex_units(
         } = match resolve_codex_messages(parsed.messages, ctx) {
             Ok(resolved) => resolved,
             Err(error) => {
-                let Some(failure) = codex_recovery_source_failure(&error) else {
+                let Some(failure) = codex_recovery_input_failure(&error) else {
                     return Err(error);
                 };
-                ctx.health.record(crate::source_health::SourceHealth {
+                ctx.health.record(crate::input_health::InputHealth {
                     client,
                     path,
-                    status: crate::source_health::SourceStatus::Unavailable { failure },
+                    status: crate::input_health::InputStatus::Unavailable { failure },
                     rejections: Default::default(),
                 });
                 continue;
             }
         };
         if let Some(health) = health_override {
-            source_health.status = health.status;
-            source_health.rejections = health.rejections;
+            input_health.status = health.status;
+            input_health.rejections = health.rejections;
         }
-        ctx.health.record(source_health);
+        ctx.health.record(input_health);
         write_codex_cache_and_apply_recovery(
             &path,
             parser_version,
@@ -209,17 +207,17 @@ fn fold_codex_units(
     Ok(())
 }
 
-fn codex_recovery_source_failure(
-    error: &SourcePipelineError,
-) -> Option<crate::source_health::SourceFailure> {
+fn codex_recovery_input_failure(
+    error: &InputPipelineError,
+) -> Option<crate::input_health::InputFailure> {
     match error {
-        SourcePipelineError::Parse(source) => Some(crate::source_health::SourceFailure::new(
+        InputPipelineError::Parse(source) => Some(crate::input_health::InputFailure::new(
             source.operation,
             source.to_string(),
         )),
-        SourcePipelineError::Planning(SourcePlanningError::Snapshot(source)) => {
-            Some(crate::source_health::SourceFailure::new(
-                "snapshot Codex source for cache recovery",
+        InputPipelineError::Planning(InputPlanningError::Snapshot(source)) => {
+            Some(crate::input_health::InputFailure::new(
+                "snapshot Codex input for cache recovery",
                 source.to_string(),
             ))
         }
@@ -235,11 +233,11 @@ fn write_codex_cache_and_apply_recovery(
     invalidate_cache: bool,
     recovery_requires_removal: bool,
     ctx: &mut FoldContext<'_>,
-) -> Result<adapter_cache::CacheWriteOutcome, SourcePipelineError> {
+) -> Result<adapter_cache::CacheWriteOutcome, InputPipelineError> {
     let write_result = adapter_cache::write_cache(cache_write, ctx, messages);
     let should_remove = invalidate_cache || recovery_requires_removal;
     if should_remove && !matches!(&write_result, Ok(adapter_cache::CacheWriteOutcome::Written)) {
-        ctx.source_cache.remove(path, parser_version);
+        ctx.input_cache.remove(path, parser_version);
     }
     write_result.map_err(Into::into)
 }
@@ -263,9 +261,9 @@ fn codex_home(home_dir: &str, use_env_roots: bool) -> PathBuf {
     }
 }
 
-fn parse_full_log_source(
-    unit: SourceUnit,
-    source_snapshot: message_cache::SourceInputSnapshot,
+fn parse_full_log_input(
+    unit: InputUnit,
+    input_snapshot: message_cache::InputSnapshot,
 ) -> crate::sessions::error::SessionParseResult<ParsedUnit> {
     let path = unit.path.clone();
     let sessions::codex::ParsedCodexFile {
@@ -276,7 +274,7 @@ fn parse_full_log_source(
         state,
         content_hash,
         ends_with_newline,
-        source_identity,
+        input_identity,
     } = sessions::codex::parse_codex_file_incremental(
         &path,
         0,
@@ -289,7 +287,7 @@ fn parse_full_log_source(
                 "full incremental parse did not produce a content hash",
             )
         })?;
-        let source_identity = source_identity.ok_or_else(|| {
+        let input_identity = input_identity.ok_or_else(|| {
             sessions::error::SessionParseError::invalid(
                 "validate Codex cache fingerprint",
                 "full incremental parse did not produce a file identity",
@@ -303,8 +301,8 @@ fn parse_full_log_source(
                 state,
                 ends_with_newline,
                 content_hash,
-                source_snapshot,
-                source_identity,
+                input_snapshot,
+                input_identity,
             },
         )
         .map_err(|source| {
@@ -322,13 +320,13 @@ fn parse_full_log_source(
     let invalidate_cache = interrupted.is_some();
     let mut parsed = ParsedUnit::healthy(
         unit,
-        UnitMessageSource::CodexFresh(messages),
+        UnitMessagePayload::CodexFresh(messages),
         cache_write,
         invalidate_cache,
     );
     parsed.health.rejections = rejections;
     if let Some(failure) = interrupted {
-        parsed.health.status = SourceStatus::Partial { failure };
+        parsed.health.status = InputStatus::Partial { failure };
     }
     Ok(parsed)
 }
@@ -345,15 +343,15 @@ struct CodexCacheMaterial {
     state: sessions::codex::CodexParseState,
     ends_with_newline: bool,
     content_hash: [u8; 32],
-    source_snapshot: message_cache::SourceInputSnapshot,
-    source_identity: message_cache::SourceFileIdentity,
+    input_snapshot: message_cache::InputSnapshot,
+    input_identity: message_cache::InputFileIdentity,
 }
 
 fn build_codex_cache_plan(
     path: &Path,
     parser_version: message_cache::ParserVersion,
     material: CodexCacheMaterial,
-) -> Result<Option<message_cache::CacheWritePlan>, message_cache::SourceSnapshotError> {
+) -> Result<Option<message_cache::CacheWritePlan>, message_cache::InputSnapshotError> {
     let Some((fingerprint, codex_incremental)) = build_codex_cache_metadata(path, material)? else {
         return Ok(None);
     };
@@ -371,20 +369,20 @@ fn build_codex_cache_metadata(
     material: CodexCacheMaterial,
 ) -> Result<
     Option<(
-        message_cache::SourceFingerprint,
+        message_cache::InputFingerprint,
         message_cache::CodexIncrementalCache,
     )>,
-    message_cache::SourceSnapshotError,
+    message_cache::InputSnapshotError,
 > {
-    let input_policy = message_cache::SourceInputPolicy::plain(path);
-    if material.source_snapshot.primary_identity() != Some(material.source_identity)
-        || input_policy.snapshot()? != material.source_snapshot
+    let input_policy = message_cache::InputPolicy::plain(path);
+    if material.input_snapshot.primary_identity() != Some(material.input_identity)
+        || input_policy.snapshot()? != material.input_snapshot
     {
         return Ok(None);
     }
-    let stamp = input_policy.stamp_from_snapshot(&material.source_snapshot)?;
+    let stamp = input_policy.stamp_from_snapshot(&material.input_snapshot)?;
     let fingerprint =
-        message_cache::SourceFingerprint::from_main_digest(stamp, material.content_hash)?;
+        message_cache::InputFingerprint::from_main_digest(stamp, material.content_hash)?;
     if fingerprint.size != material.consumed_offset {
         return Ok(None);
     }
@@ -400,7 +398,7 @@ fn build_codex_cache_metadata(
 }
 
 fn load_or_parse_codex_unit(
-    mut unit: SourceUnit,
+    mut unit: InputUnit,
 ) -> crate::sessions::error::SessionParseResult<ParsedUnit> {
     let path = unit.path.clone();
     let cache_lookup_completed_no_hit = unit.take_cache_lookup_completed_no_hit();
@@ -409,30 +407,30 @@ fn load_or_parse_codex_unit(
             .map_err(|source| {
                 sessions::error::SessionParseError::at_path(
                     &path,
-                    "refresh Codex source snapshot",
+                    "refresh Codex input snapshot",
                     source,
                 )
             })?;
     }
     let cached = unit.take_planned_cache_meta();
-    let source_snapshot = unit.take_source_input_snapshot().map_err(|source| {
-        sessions::error::SessionParseError::at_path(&path, "read Codex source snapshot", source)
+    let input_snapshot = unit.take_input_snapshot().map_err(|source| {
+        sessions::error::SessionParseError::at_path(&path, "read Codex input snapshot", source)
     })?;
 
     if let Some(cached) = cached {
-        let reparse_snapshot = source_snapshot.clone();
+        let reparse_snapshot = input_snapshot.clone();
         let reparse_from_start = |invalidate_cache: bool| {
-            let mut parsed = parse_full_log_source(unit.clone(), reparse_snapshot.clone())?;
+            let mut parsed = parse_full_log_input(unit.clone(), reparse_snapshot.clone())?;
             parsed.invalidate_cache = invalidate_cache;
             Ok(parsed)
         };
-        let snapshot = source_snapshot;
-        let stamp = message_cache::SourceInputPolicy::plain(&path)
+        let snapshot = input_snapshot;
+        let stamp = message_cache::InputPolicy::plain(&path)
             .stamp_from_snapshot(&snapshot)
             .map_err(|source| {
                 sessions::error::SessionParseError::at_path(
                     &path,
-                    "validate Codex source snapshot",
+                    "validate Codex input snapshot",
                     source,
                 )
             })?;
@@ -446,7 +444,7 @@ fn load_or_parse_codex_unit(
                 );
                 let mut parsed = ParsedUnit::healthy(
                     unit,
-                    UnitMessageSource::CodexCacheHit(read_plan),
+                    UnitMessagePayload::CodexCacheHit(read_plan),
                     None,
                     false,
                 );
@@ -472,8 +470,8 @@ fn load_or_parse_codex_unit(
                     rejections.merge(&parsed.rejections);
                     let interrupted = parsed.interrupted;
                     let cache_write = if interrupted.is_none() {
-                        let cache_metadata = match (parsed.content_hash, parsed.source_identity) {
-                            (Some(content_hash), Some(source_identity)) => {
+                        let cache_metadata = match (parsed.content_hash, parsed.input_identity) {
+                            (Some(content_hash), Some(input_identity)) => {
                                 build_codex_cache_metadata(
                                     &path,
                                     CodexCacheMaterial {
@@ -481,8 +479,8 @@ fn load_or_parse_codex_unit(
                                         state: parsed.state.clone(),
                                         ends_with_newline: parsed.ends_with_newline,
                                         content_hash,
-                                        source_snapshot: snapshot.clone(),
-                                        source_identity,
+                                        input_snapshot: snapshot.clone(),
+                                        input_identity,
                                     },
                                 )
                                 .map_err(|source| {
@@ -524,7 +522,7 @@ fn load_or_parse_codex_unit(
                     let invalidate_cache = interrupted.is_some();
                     let mut parsed_unit = ParsedUnit::healthy(
                         unit,
-                        UnitMessageSource::CodexAppend(Box::new(CodexAppendSource {
+                        UnitMessagePayload::CodexAppend(Box::new(CodexAppendInput {
                             path,
                             read_plan,
                             parser_version,
@@ -536,7 +534,7 @@ fn load_or_parse_codex_unit(
                     );
                     parsed_unit.health.rejections = rejections;
                     if let Some(failure) = interrupted {
-                        parsed_unit.health.status = SourceStatus::Partial { failure };
+                        parsed_unit.health.status = InputStatus::Partial { failure };
                     }
                     return Ok(parsed_unit);
                 }
@@ -546,30 +544,30 @@ fn load_or_parse_codex_unit(
         return reparse_from_start(true);
     }
 
-    parse_full_log_source(unit, source_snapshot)
+    parse_full_log_input(unit, input_snapshot)
 }
 
 fn resolve_codex_messages(
-    source: UnitMessageSource,
+    payload: UnitMessagePayload,
     ctx: &mut FoldContext<'_>,
-) -> Result<CodexResolvedMessages, SourcePipelineError> {
-    match source {
-        UnitMessageSource::Fresh(messages) => Ok(CodexResolvedMessages {
+) -> Result<CodexResolvedMessages, InputPipelineError> {
+    match payload {
+        UnitMessagePayload::Fresh(messages) => Ok(CodexResolvedMessages {
             messages,
             cache_write: None,
             finalization: false,
             recovery_requires_removal: false,
             health_override: None,
         }),
-        UnitMessageSource::CodexFresh(messages) => Ok(CodexResolvedMessages {
+        UnitMessagePayload::CodexFresh(messages) => Ok(CodexResolvedMessages {
             messages,
             cache_write: None,
             finalization: true,
             recovery_requires_removal: false,
             health_override: None,
         }),
-        UnitMessageSource::CodexCacheHit(read_plan) => {
-            match ctx.source_cache.take_messages(&read_plan) {
+        UnitMessagePayload::CodexCacheHit(read_plan) => {
+            match ctx.input_cache.take_messages(&read_plan) {
                 Ok(messages) => Ok(CodexResolvedMessages {
                     messages,
                     cache_write: None,
@@ -578,15 +576,15 @@ fn resolve_codex_messages(
                     health_override: None,
                 }),
                 Err(failure) => {
-                    if !failure.can_reparse_source() {
+                    if !failure.can_reparse_input() {
                         return Err(failure.into());
                     }
                     let recovery_requires_removal = failure.requires_shard_removal();
                     if recovery_requires_removal {
-                        ctx.source_cache
+                        ctx.input_cache
                             .remove(&read_plan.path(), read_plan.parser_version());
                     } else {
-                        ctx.source_cache
+                        ctx.input_cache
                             .invalidate_read(&read_plan.path(), read_plan.parser_version());
                     }
                     reparse_full_codex_messages(
@@ -597,25 +595,25 @@ fn resolve_codex_messages(
                 }
             }
         }
-        UnitMessageSource::CodexAppend(append) => {
-            let CodexAppendSource {
+        UnitMessagePayload::CodexAppend(append) => {
+            let CodexAppendInput {
                 path,
                 read_plan,
                 parser_version,
                 tail_messages,
                 cache_write,
             } = *append;
-            let mut raw_messages = match ctx.source_cache.take_messages(&read_plan) {
+            let mut raw_messages = match ctx.input_cache.take_messages(&read_plan) {
                 Ok(cached) => cached,
                 Err(failure) => {
-                    if !failure.can_reparse_source() {
+                    if !failure.can_reparse_input() {
                         return Err(failure.into());
                     }
                     let recovery_requires_removal = failure.requires_shard_removal();
                     if recovery_requires_removal {
-                        ctx.source_cache.remove(&path, parser_version);
+                        ctx.input_cache.remove(&path, parser_version);
                     } else {
-                        ctx.source_cache.invalidate_read(&path, parser_version);
+                        ctx.input_cache.invalidate_read(&path, parser_version);
                     }
                     return reparse_full_codex_messages(
                         &path,
@@ -633,7 +631,7 @@ fn resolve_codex_messages(
                 health_override: None,
             })
         }
-        UnitMessageSource::CacheHit(_) => unreachable!("codex does not use generic cache hits"),
+        UnitMessagePayload::CacheHit(_) => unreachable!("codex does not use generic cache hits"),
     }
 }
 
@@ -641,10 +639,10 @@ fn reparse_full_codex_messages(
     path: &Path,
     parser_version: message_cache::ParserVersion,
     recovery_requires_removal: bool,
-) -> Result<CodexResolvedMessages, SourcePipelineError> {
-    let source_snapshot = message_cache::SourceInputPolicy::plain(path)
+) -> Result<CodexResolvedMessages, InputPipelineError> {
+    let input_snapshot = message_cache::InputPolicy::plain(path)
         .snapshot()
-        .map_err(SourcePlanningError::from)?;
+        .map_err(InputPlanningError::from)?;
     let sessions::codex::ParsedCodexFile {
         messages,
         rejections,
@@ -653,21 +651,21 @@ fn reparse_full_codex_messages(
         state,
         content_hash,
         ends_with_newline,
-        source_identity,
+        input_identity,
     } = sessions::codex::parse_codex_file_incremental(
         path,
         0,
         sessions::codex::CodexParseState::default(),
     )
     .map_err(|source| {
-        SourceParseError::from_session(ClientId::Codex, path, parser_version.parser_id, source)
+        InputParseError::from_session(ClientId::Codex, path, parser_version.parser_id, source)
     })?;
     let cache_write = if interrupted.is_none() {
         let content_hash = content_hash.ok_or_else(|| {
-            SourcePipelineError::contract("Codex full reparse did not produce a content hash")
+            InputPipelineError::contract("Codex full reparse did not produce a content hash")
         })?;
-        let source_identity = source_identity.ok_or_else(|| {
-            SourcePipelineError::contract("Codex full reparse did not produce a file identity")
+        let input_identity = input_identity.ok_or_else(|| {
+            InputPipelineError::contract("Codex full reparse did not produce a file identity")
         })?;
         build_codex_cache_plan(
             path,
@@ -677,18 +675,18 @@ fn reparse_full_codex_messages(
                 state,
                 ends_with_newline,
                 content_hash,
-                source_snapshot,
-                source_identity,
+                input_snapshot,
+                input_identity,
             },
         )
-        .map_err(SourcePlanningError::from)?
+        .map_err(InputPlanningError::from)?
         .map(|plan| Box::new(plan.with_rejections(rejections.clone())))
     } else {
         None
     };
     let status = match interrupted {
-        Some(failure) => SourceStatus::Partial { failure },
-        None => SourceStatus::Complete,
+        Some(failure) => InputStatus::Partial { failure },
+        None => InputStatus::Complete,
     };
 
     Ok(CodexResolvedMessages {
@@ -790,18 +788,18 @@ mod tests {
         assert_eq!(codex_home("/unused-home", true), path);
     }
 
-    fn codex_unit(path: &Path) -> SourceUnit {
-        SourceUnit::plain_file(ClientId::Codex, path.to_path_buf()).with_meta(SourceUnitMeta::Codex)
+    fn codex_unit(path: &Path) -> InputUnit {
+        InputUnit::plain_file(ClientId::Codex, path.to_path_buf()).with_meta(InputUnitMeta::Codex)
     }
 
-    fn prepared_codex_unit(path: &Path) -> SourceUnit {
+    fn prepared_codex_unit(path: &Path) -> InputUnit {
         codex_unit(path)
             .prepare_snapshot()
             .expect("Codex fixture snapshot must succeed")
     }
 
     fn expect_codex_hit(
-        result: Result<CacheHitPlan, SourcePlanningError>,
+        result: Result<CacheHitPlan, InputPlanningError>,
         message: &str,
     ) -> ParsedUnit {
         match result.expect(message) {
@@ -811,9 +809,9 @@ mod tests {
     }
 
     fn expect_codex_miss(
-        result: Result<CacheHitPlan, SourcePlanningError>,
+        result: Result<CacheHitPlan, InputPlanningError>,
         message: &str,
-    ) -> SourceUnit {
+    ) -> InputUnit {
         match result.expect(message) {
             CacheHitPlan::Miss(unit) => unit,
             CacheHitPlan::Hit(_) => panic!("{message}"),
@@ -821,16 +819,16 @@ mod tests {
     }
 
     fn parse_and_fold(
-        units: Vec<SourceUnit>,
-        cache: &mut message_cache::SourceMessageCache,
+        units: Vec<InputUnit>,
+        cache: &mut message_cache::InputMessageCache,
     ) -> Vec<UnifiedMessage> {
         let parsed = plan_and_parse(units, cache, None);
         fold_parsed(parsed, cache)
     }
 
     fn parse_and_fold_with_pricing(
-        units: Vec<SourceUnit>,
-        cache: &mut message_cache::SourceMessageCache,
+        units: Vec<InputUnit>,
+        cache: &mut message_cache::InputMessageCache,
         pricing: &PricingService,
     ) -> Vec<UnifiedMessage> {
         let parsed = plan_and_parse(units, cache, Some(pricing));
@@ -846,8 +844,8 @@ mod tests {
     }
 
     fn plan_and_parse(
-        units: Vec<SourceUnit>,
-        cache: &message_cache::SourceMessageCache,
+        units: Vec<InputUnit>,
+        cache: &message_cache::InputMessageCache,
         pricing: Option<&PricingService>,
     ) -> Vec<ParsedUnit> {
         let mut parsed = Vec::with_capacity(units.len());
@@ -883,11 +881,11 @@ mod tests {
     }
 
     fn parse_and_fold_batched(
-        units: Vec<SourceUnit>,
-        cache: &mut message_cache::SourceMessageCache,
+        units: Vec<InputUnit>,
+        cache: &mut message_cache::InputMessageCache,
     ) -> Vec<UnifiedMessage> {
         let mut sink = Vec::new();
-        let mut batches = crate::adapters::ParsedBatchSource::new(&CODEX_ADAPTER, units);
+        let mut batches = crate::adapters::ParsedBatchInput::new(&CODEX_ADAPTER, units);
         CODEX_ADAPTER
             .fold_batches(&mut batches, &mut FoldContext::new(cache, None), &mut sink)
             .unwrap();
@@ -896,7 +894,7 @@ mod tests {
 
     fn fold_parsed(
         parsed: Vec<ParsedUnit>,
-        cache: &mut message_cache::SourceMessageCache,
+        cache: &mut message_cache::InputMessageCache,
     ) -> Vec<UnifiedMessage> {
         let mut sink = Vec::new();
         CODEX_ADAPTER
@@ -924,7 +922,7 @@ mod tests {
             message_cache::ParserId::Codex,
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home);
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_home);
         let meta = cache
             .get_meta(path, parser_version)
             .expect("Codex cache lookup must succeed")
@@ -977,7 +975,7 @@ mod tests {
             .all(|unit| unit.fingerprint_policy == FingerprintPolicy::PlainFile));
         assert!(units
             .iter()
-            .all(|unit| matches!(unit.meta, SourceUnitMeta::Codex)));
+            .all(|unit| matches!(unit.meta, InputUnitMeta::Codex)));
     }
 
     #[test]
@@ -1030,7 +1028,7 @@ mod tests {
             .build()
             .unwrap()
             .install(|| {
-                let mut cache = message_cache::SourceMessageCache::default();
+                let mut cache = message_cache::InputMessageCache::default();
                 parse_and_fold_batched(units, &mut cache)
             });
 
@@ -1045,12 +1043,12 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
 
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
-        message_cache::reset_source_read_stats(&path);
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
+        message_cache::reset_input_read_stats(&path);
         let actual = parse_and_fold(vec![codex_unit(&path)], &mut cache);
         assert_eq!(
-            message_cache::get_source_read_stats(&path),
-            message_cache::SourceReadStats {
+            message_cache::get_input_read_stats(&path),
+            message_cache::InputReadStats {
                 bytes: std::fs::metadata(&path).unwrap().len(),
                 hash_passes: 1,
             },
@@ -1073,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_adapter_reports_malformed_record_without_losing_source() {
+    fn codex_adapter_reports_malformed_record_without_losing_input() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("malformed.jsonl");
         write_file(&path, r#"{"type":7,"payload":{}}"#);
@@ -1082,12 +1080,12 @@ mod tests {
             CODEX_ADAPTER.parse_checked(vec![codex_unit(&path)], &ParseContext { pricing: None });
 
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].source_health();
+        let health = parsed[0].input_health();
         assert_eq!(health.client, ClientId::Codex);
         assert_eq!(health.path, path);
         assert!(matches!(
             health.status,
-            crate::source_health::SourceStatus::Complete
+            crate::input_health::InputStatus::Complete
         ));
         assert_eq!(health.rejections.total(), 1);
         assert_eq!(
@@ -1119,12 +1117,12 @@ mod tests {
             ),
         );
 
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let parsed = plan_and_parse(vec![codex_unit(&path)], &cache, None);
-        let health = parsed[0].source_health();
+        let health = parsed[0].input_health();
         assert!(matches!(
             health.status,
-            crate::source_health::SourceStatus::Complete
+            crate::input_health::InputStatus::Complete
         ));
         assert_eq!(health.rejections.total(), 1);
 
@@ -1136,13 +1134,13 @@ mod tests {
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
         assert_eq!(messages[1].model_id.as_ref(), "gpt-5.5");
         assert_eq!(ctx.health.rejected_records(), 1);
-        assert_eq!(ctx.health.partial_sources(), 0);
+        assert_eq!(ctx.health.partial_inputs(), 0);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
         let cached = ctx
-            .source_cache
+            .input_cache
             .get_meta(&path, parser_version)
             .unwrap()
             .expect("a complete Codex scan with rejections must remain cacheable");
@@ -1162,12 +1160,12 @@ mod tests {
             ),
         );
 
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let parsed = plan_and_parse(vec![codex_unit(&path)], &cache, None);
-        let health = parsed[0].source_health();
+        let health = parsed[0].input_health();
         assert!(matches!(
             health.status,
-            crate::source_health::SourceStatus::Partial { .. }
+            crate::input_health::InputStatus::Partial { .. }
         ));
         assert_eq!(health.rejections.total(), 1);
 
@@ -1177,13 +1175,13 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 8);
-        assert_eq!(ctx.health.partial_sources(), 1);
+        assert_eq!(ctx.health.partial_inputs(), 1);
         let parser_version = message_cache::ParserVersion::new(
             message_cache::ParserId::Codex,
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
         assert!(ctx
-            .source_cache
+            .input_cache
             .get_meta(&path, parser_version)
             .unwrap()
             .is_none());
@@ -1202,10 +1200,10 @@ mod tests {
             ),
         );
 
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let parsed = plan_and_parse(vec![codex_unit(&path)], &cache, None);
-        let health = parsed[0].source_health();
-        assert!(matches!(health.status, SourceStatus::Partial { .. }));
+        let health = parsed[0].input_health();
+        assert!(matches!(health.status, InputStatus::Partial { .. }));
         assert_eq!(health.rejections.total(), 1);
         assert_eq!(
             health.rejections.entries().next().unwrap().key,
@@ -1227,7 +1225,7 @@ mod tests {
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
         assert!(ctx
-            .source_cache
+            .input_cache
             .get_meta(&path, parser_version)
             .unwrap()
             .is_none());
@@ -1240,26 +1238,26 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
 
-        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut seed_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let fresh = parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
         assert_cached_raw_messages_match_parser(cache_home.path(), &path);
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
-        message_cache::reset_source_read_stats(&path);
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
+        message_cache::reset_input_read_stats(&path);
         let parsed = vec![expect_codex_hit(
             CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path), &cache),
             "exact Codex stamp should plan a cache hit",
         )];
         assert!(matches!(
             parsed[0].messages,
-            UnitMessageSource::CodexCacheHit(_)
+            UnitMessagePayload::CodexCacheHit(_)
         ));
 
         let cached = fold_parsed(parsed, &mut cache);
         assert_eq!(cached, fresh);
         assert_eq!(
-            message_cache::get_source_read_stats(&path),
-            message_cache::SourceReadStats::default(),
-            "exact Codex cache hits must not read or hash source bytes"
+            message_cache::get_input_read_stats(&path),
+            message_cache::InputReadStats::default(),
+            "exact Codex cache hits must not read or hash input bytes"
         );
     }
 
@@ -1273,7 +1271,7 @@ mod tests {
             message_cache::ParserId::Codex,
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
-        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut seed_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let expected = parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
         message_cache::truncate_shard_after_header_for_test(
             cache_home.path(),
@@ -1281,7 +1279,7 @@ mod tests {
             parser_version,
         );
 
-        let mut repair_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut repair_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let planned = expect_codex_hit(
             CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path), &repair_cache),
             "valid header must still plan a Codex hit",
@@ -1289,8 +1287,8 @@ mod tests {
         let repaired = fold_parsed(vec![planned], &mut repair_cache);
         assert_eq!(repaired, expected);
 
-        let mut warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
-        message_cache::reset_source_read_stats(&path);
+        let mut warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
+        message_cache::reset_input_read_stats(&path);
         let warm = expect_codex_hit(
             CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path), &warm_cache),
             "successful repair must produce a readable warm shard",
@@ -1298,9 +1296,9 @@ mod tests {
         let warm_messages = fold_parsed(vec![warm], &mut warm_cache);
         assert_eq!(warm_messages, expected);
         assert_eq!(
-            message_cache::get_source_read_stats(&path),
-            message_cache::SourceReadStats::default(),
-            "the second read after repair must not reparse source bytes"
+            message_cache::get_input_read_stats(&path),
+            message_cache::InputReadStats::default(),
+            "the second read after repair must not reparse input bytes"
         );
     }
 
@@ -1314,7 +1312,7 @@ mod tests {
             message_cache::ParserId::Codex,
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
-        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut seed_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
         let meta = seed_cache.get_meta(&path, parser_version).unwrap().unwrap();
         let raw_messages = seed_cache
@@ -1324,7 +1322,7 @@ mod tests {
                 meta.fingerprint.clone(),
             ))
             .unwrap();
-        let mut entry = message_cache::CachedSourceEntry::new_with_version(
+        let mut entry = message_cache::CachedInputEntry::new_with_version(
             &path,
             parser_version,
             meta.fingerprint,
@@ -1333,14 +1331,14 @@ mod tests {
         );
         entry
             .rejections
-            .record(crate::source_health::RecordRejectionReason::MalformedRecord);
+            .record(crate::input_health::RecordRejectionReason::MalformedRecord);
         seed_cache.insert(entry);
         seed_cache.save_if_dirty().unwrap();
 
-        let mut warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let hit = expect_codex_hit(
             CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path), &warm_cache),
-            "unchanged Codex source must plan an exact warm hit",
+            "unchanged Codex input must plan an exact warm hit",
         );
         let mut sink = Vec::new();
         let mut ctx = FoldContext::new(&mut warm_cache, None);
@@ -1348,7 +1346,7 @@ mod tests {
 
         assert!(!sink.is_empty());
         assert_eq!(ctx.health.rejected_records(), 1);
-        assert_eq!(ctx.health.sources()[0].path, path);
+        assert_eq!(ctx.health.inputs()[0].path, path);
     }
 
     #[test]
@@ -1361,7 +1359,7 @@ mod tests {
             message_cache::ParserId::Codex,
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
-        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut seed_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
         let meta = seed_cache.get_meta(&path, parser_version).unwrap().unwrap();
         let raw_messages = seed_cache
@@ -1371,7 +1369,7 @@ mod tests {
                 meta.fingerprint.clone(),
             ))
             .unwrap();
-        let mut entry = message_cache::CachedSourceEntry::new_with_version(
+        let mut entry = message_cache::CachedInputEntry::new_with_version(
             &path,
             parser_version,
             meta.fingerprint,
@@ -1380,12 +1378,12 @@ mod tests {
         );
         entry
             .rejections
-            .record(crate::source_health::RecordRejectionReason::MalformedRecord);
+            .record(crate::input_health::RecordRejectionReason::MalformedRecord);
         seed_cache.insert(entry);
         seed_cache.save_if_dirty().unwrap();
         append_file(&path, APPENDED_CODEX_ENTRY);
 
-        let mut append_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut append_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let parsed = plan_and_parse(vec![codex_unit(&path)], &append_cache, None);
         let mut appended_messages = Vec::new();
         let mut append_ctx = FoldContext::new(&mut append_cache, None);
@@ -1393,12 +1391,12 @@ mod tests {
             .fold(parsed, &mut append_ctx, &mut appended_messages)
             .unwrap();
         assert_eq!(append_ctx.health.rejected_records(), 1);
-        append_ctx.source_cache.save_if_dirty().unwrap();
+        append_ctx.input_cache.save_if_dirty().unwrap();
 
-        let mut warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let hit = expect_codex_hit(
             CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path), &warm_cache),
-            "appended Codex source must be rewritten as an exact warm shard",
+            "appended Codex input must be rewritten as an exact warm shard",
         );
         let mut warm_messages = Vec::new();
         let mut warm_ctx = FoldContext::new(&mut warm_cache, None);
@@ -1420,7 +1418,7 @@ mod tests {
             message_cache::ParserId::Codex,
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
-        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut seed_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
         seed_cache.save_if_dirty().unwrap();
         append_file(
@@ -1428,10 +1426,10 @@ mod tests {
             &format!("{}\n{APPENDED_CODEX_ENTRY}", r#"{"type":7,"payload":{}}"#),
         );
 
-        let mut append_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut append_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let parsed = plan_and_parse(vec![codex_unit(&path)], &append_cache, None);
-        let health = parsed[0].source_health();
-        assert!(matches!(health.status, SourceStatus::Complete));
+        let health = parsed[0].input_health();
+        assert!(matches!(health.status, InputStatus::Complete));
         assert_eq!(health.rejections.total(), 1);
 
         let mut messages = Vec::new();
@@ -1441,7 +1439,7 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(ctx.health.rejected_records(), 1);
         let cached = ctx
-            .source_cache
+            .input_cache
             .get_meta(&path, parser_version)
             .unwrap()
             .expect("complete appended scan must replace the shard");
@@ -1458,7 +1456,7 @@ mod tests {
             message_cache::ParserId::Codex,
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
-        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut seed_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
         seed_cache.save_if_dirty().unwrap();
         append_file(
@@ -1469,10 +1467,10 @@ mod tests {
             ),
         );
 
-        let mut append_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut append_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let parsed = plan_and_parse(vec![codex_unit(&path)], &append_cache, None);
-        let health = parsed[0].source_health();
-        assert!(matches!(health.status, SourceStatus::Partial { .. }));
+        let health = parsed[0].input_health();
+        assert!(matches!(health.status, InputStatus::Partial { .. }));
         assert_eq!(health.rejections.total(), 1);
         assert_eq!(
             health.rejections.entries().next().unwrap().key,
@@ -1484,10 +1482,10 @@ mod tests {
         CODEX_ADAPTER.fold(parsed, &mut ctx, &mut messages).unwrap();
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(ctx.health.partial_sources(), 1);
+        assert_eq!(ctx.health.partial_inputs(), 1);
         assert_eq!(ctx.health.rejected_records(), 1);
         assert!(ctx
-            .source_cache
+            .input_cache
             .get_meta(&path, parser_version)
             .unwrap()
             .is_none());
@@ -1503,7 +1501,7 @@ mod tests {
             message_cache::ParserId::Codex,
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
-        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut seed_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
         seed_cache.save_if_dirty().unwrap();
         append_file(
@@ -1514,10 +1512,10 @@ mod tests {
             ),
         );
 
-        let mut append_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut append_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let parsed = plan_and_parse(vec![codex_unit(&path)], &append_cache, None);
-        let health = parsed[0].source_health();
-        assert!(matches!(health.status, SourceStatus::Partial { .. }));
+        let health = parsed[0].input_health();
+        assert!(matches!(health.status, InputStatus::Partial { .. }));
         assert_eq!(health.rejections.total(), 1);
         assert_eq!(
             health.rejections.entries().next().unwrap().key,
@@ -1531,7 +1529,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
         assert!(ctx
-            .source_cache
+            .input_cache
             .get_meta(&path, parser_version)
             .unwrap()
             .is_none());
@@ -1547,7 +1545,7 @@ mod tests {
             message_cache::ParserId::Codex,
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
-        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut seed_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let expected = parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
         message_cache::replace_shard_message_count_for_test(
             cache_home.path(),
@@ -1556,7 +1554,7 @@ mod tests {
             2,
         );
 
-        let mut repair_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut repair_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let planned = expect_codex_hit(
             CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path), &repair_cache),
             "message-count corruption retains a valid planning header",
@@ -1575,7 +1573,7 @@ mod tests {
             message_cache::ParserId::Codex,
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
-        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut seed_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
         let shard_path = message_cache::truncate_shard_after_header_for_test(
             cache_home.path(),
@@ -1583,7 +1581,7 @@ mod tests {
             parser_version,
         );
 
-        let mut repair_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut repair_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let planned = expect_codex_hit(
             CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path), &repair_cache),
             "valid header must still plan a Codex hit",
@@ -1593,17 +1591,17 @@ mod tests {
         let mut ctx = FoldContext::new(&mut repair_cache, None);
         CODEX_ADAPTER
             .fold(vec![planned], &mut ctx, &mut sink)
-            .expect("an interrupted Codex recovery scan must stay inside its source domain");
+            .expect("an interrupted Codex recovery scan must stay inside its input domain");
         assert!(sink.is_empty());
-        assert_eq!(ctx.health.partial_sources(), 1);
+        assert_eq!(ctx.health.partial_inputs(), 1);
         assert_eq!(ctx.health.rejected_records(), 1);
-        assert!(ctx.health.sources()[0]
+        assert!(ctx.health.inputs()[0]
             .status
             .failure()
             .unwrap()
             .message
             .contains("timestamp is missing"));
-        ctx.source_cache.save_if_dirty().unwrap();
+        ctx.input_cache.save_if_dirty().unwrap();
 
         assert!(
             !shard_path.exists(),
@@ -1621,12 +1619,12 @@ mod tests {
             message_cache::ParserId::Codex,
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
-        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut seed_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
         let shard_path =
             message_cache::shard_path_for_test(cache_home.path(), &path, parser_version);
 
-        let mut repair_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut repair_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let planned = expect_codex_hit(
             CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path), &repair_cache),
             "the original v4 header must plan a Codex hit",
@@ -1638,17 +1636,17 @@ mod tests {
         let mut ctx = FoldContext::new(&mut repair_cache, None);
         CODEX_ADAPTER
             .fold(vec![planned], &mut ctx, &mut sink)
-            .expect("an interrupted Codex recovery scan must stay inside its source domain");
+            .expect("an interrupted Codex recovery scan must stay inside its input domain");
         assert!(sink.is_empty());
-        assert_eq!(ctx.health.partial_sources(), 1);
+        assert_eq!(ctx.health.partial_inputs(), 1);
         assert_eq!(ctx.health.rejected_records(), 1);
-        assert!(ctx.health.sources()[0]
+        assert!(ctx.health.inputs()[0]
             .status
             .failure()
             .unwrap()
             .message
             .contains("timestamp is missing"));
-        ctx.source_cache.save_if_dirty().unwrap();
+        ctx.input_cache.save_if_dirty().unwrap();
 
         assert_eq!(
             std::fs::read(shard_path).unwrap(),
@@ -1667,21 +1665,21 @@ mod tests {
             message_cache::ParserId::Codex,
             crate::adapters::CODEX_EXEC_IDENTITY_REVISION,
         );
-        let mut seed_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut seed_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
         let shard_path = message_cache::truncate_shard_after_header_for_test(
             cache_home.path(),
             &path,
             parser_version,
         );
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let planned = expect_codex_hit(
             CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path), &cache),
             "valid header must still plan a Codex hit",
         );
         let resolved =
             resolve_codex_messages(planned.messages, &mut FoldContext::new(&mut cache, None))
-                .expect("valid source must repair the corrupt cache body");
+                .expect("valid input must repair the corrupt cache body");
         assert!(resolved.recovery_requires_removal);
         assert!(resolved.cache_write.is_some());
 
@@ -1714,27 +1712,27 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
 
         let miss = expect_codex_miss(
             CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path), &cache),
             "empty cache must plan a Codex miss",
         );
         assert!(miss.cache_lookup_completed_no_hit);
-        assert!(miss.prepared_source_input_snapshot().is_some());
+        assert!(miss.prepared_input_snapshot().is_some());
         assert_eq!(parse_and_fold(vec![codex_unit(&path)], &mut cache).len(), 1);
-        message_cache::reset_source_read_stats(&path);
+        message_cache::reset_input_read_stats(&path);
 
         let parsed = CODEX_ADAPTER.parse_checked(vec![miss], &ParseContext { pricing: None });
 
         assert!(matches!(
             parsed[0].messages,
-            UnitMessageSource::CodexFresh(_)
+            UnitMessagePayload::CodexFresh(_)
         ));
         assert!(!parsed[0].unit.cache_lookup_completed_no_hit);
         assert_eq!(
-            message_cache::get_source_read_stats(&path),
-            message_cache::SourceReadStats {
+            message_cache::get_input_read_stats(&path),
+            message_cache::InputReadStats {
                 bytes: std::fs::metadata(&path).unwrap().len(),
                 hash_passes: 1,
             }
@@ -1748,7 +1746,7 @@ mod tests {
         let path = dir.path().join("empty-session.jsonl");
         write_file(&path, EMPTY_CODEX_ENTRY);
 
-        let mut cold_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut cold_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         assert!(parse_and_fold(vec![codex_unit(&path)], &mut cold_cache).is_empty());
 
         let parser_version = message_cache::ParserVersion::new(
@@ -1761,18 +1759,18 @@ mod tests {
             .expect("an empty Codex parse is still a valid cache result");
         assert!(meta.codex_incremental.is_some());
 
-        let mut warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
-        message_cache::reset_source_read_stats(&path);
+        let mut warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
+        message_cache::reset_input_read_stats(&path);
         let parsed = plan_and_parse(vec![codex_unit(&path)], &warm_cache, None);
         assert!(matches!(
             parsed[0].messages,
-            UnitMessageSource::CodexCacheHit(_)
+            UnitMessagePayload::CodexCacheHit(_)
         ));
         assert!(fold_parsed(parsed, &mut warm_cache).is_empty());
         assert_eq!(
-            message_cache::get_source_read_stats(&path),
-            message_cache::SourceReadStats::default(),
-            "a valid empty Codex shard must avoid reparsing source bytes"
+            message_cache::get_input_read_stats(&path),
+            message_cache::InputReadStats::default(),
+            "a valid empty Codex shard must avoid reparsing input bytes"
         );
     }
 
@@ -1783,7 +1781,7 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
 
-        let mut cold_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut cold_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let cold = parse_and_fold_with_pricing(
             vec![codex_unit(&path)],
             &mut cold_cache,
@@ -1792,7 +1790,7 @@ mod tests {
         assert!(cold[0].cost > 0.0);
         assert_cached_raw_messages_match_parser(cache_home.path(), &path);
 
-        let mut warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let warm = parse_and_fold_with_pricing(
             vec![codex_unit(&path)],
             &mut warm_cache,
@@ -1808,29 +1806,29 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
 
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let initial = parse_and_fold(vec![codex_unit(&path)], &mut cache);
         assert_eq!(initial.len(), 1);
 
         append_file(&path, APPENDED_CODEX_ENTRY);
-        message_cache::reset_source_read_stats(&path);
+        message_cache::reset_input_read_stats(&path);
         let miss = expect_codex_miss(
             CODEX_ADAPTER.plan_cache_hit(prepared_codex_unit(&path), &cache),
-            "an appended Codex source must remain a parse miss",
+            "an appended Codex input must remain a parse miss",
         );
-        assert!(miss.prepared_source_input_snapshot().is_some());
+        assert!(miss.prepared_input_snapshot().is_some());
         let parsed = CODEX_ADAPTER.parse_checked(vec![miss], &ParseContext { pricing: None });
 
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
             parsed[0].messages,
-            UnitMessageSource::CodexAppend(_)
+            UnitMessagePayload::CodexAppend(_)
         ));
 
         let actual = fold_parsed(parsed, &mut cache);
         assert_eq!(
-            message_cache::get_source_read_stats(&path),
-            message_cache::SourceReadStats {
+            message_cache::get_input_read_stats(&path),
+            message_cache::InputReadStats {
                 bytes: std::fs::metadata(&path).unwrap().len(),
                 hash_passes: 1,
             },
@@ -1847,7 +1845,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
-        let input_policy = message_cache::SourceInputPolicy::plain(&path);
+        let input_policy = message_cache::InputPolicy::plain(&path);
         let before = input_policy.snapshot().unwrap();
         let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
         let parsed = sessions::codex::parse_codex_file_incremental(
@@ -1881,8 +1879,8 @@ mod tests {
                 state: parsed.state,
                 ends_with_newline: parsed.ends_with_newline,
                 content_hash: parsed.content_hash.unwrap(),
-                source_snapshot: before,
-                source_identity: parsed.source_identity.unwrap(),
+                input_snapshot: before,
+                input_identity: parsed.input_identity.unwrap(),
             },
         )
         .unwrap()
@@ -1897,7 +1895,7 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
         let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         let initial = parse_and_fold(vec![codex_unit(&path)], &mut cache);
         assert_eq!(initial[0].tokens.input, 8);
         let prepared = prepared_codex_unit(&path);
@@ -1915,7 +1913,7 @@ mod tests {
 
         let miss = expect_codex_miss(
             CODEX_ADAPTER.plan_cache_hit(prepared, &cache),
-            "persisted file identity must reject the replaced source",
+            "persisted file identity must reject the replaced input",
         );
         let reparsed = parse_and_fold(vec![miss], &mut cache);
         assert_eq!(reparsed[0].tokens.input, 9);
@@ -1931,7 +1929,7 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
 
-        let mut seed_cache = message_cache::SourceMessageCache::load().unwrap();
+        let mut seed_cache = message_cache::InputMessageCache::load().unwrap();
         let initial = parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
         assert_eq!(initial.len(), 1);
         seed_cache.save_if_dirty().unwrap();
@@ -1939,18 +1937,18 @@ mod tests {
         append_file(&path, APPENDED_CODEX_ENTRY);
         let expected = parser_messages(&path);
 
-        let mut cache_a = message_cache::SourceMessageCache::load().unwrap();
+        let mut cache_a = message_cache::InputMessageCache::load().unwrap();
         let parsed_a = plan_and_parse(vec![codex_unit(&path)], &cache_a, None);
         assert!(matches!(
             parsed_a[0].messages,
-            UnitMessageSource::CodexAppend(_)
+            UnitMessagePayload::CodexAppend(_)
         ));
 
-        let mut cache_b = message_cache::SourceMessageCache::load().unwrap();
+        let mut cache_b = message_cache::InputMessageCache::load().unwrap();
         let parsed_b = plan_and_parse(vec![codex_unit(&path)], &cache_b, None);
         assert!(matches!(
             parsed_b[0].messages,
-            UnitMessageSource::CodexAppend(_)
+            UnitMessagePayload::CodexAppend(_)
         ));
 
         let messages_b = fold_parsed(parsed_b, &mut cache_b);
@@ -1961,7 +1959,7 @@ mod tests {
         assert_eq!(messages_a, expected);
         cache_a.save_if_dirty().unwrap();
 
-        let mut warm_cache = message_cache::SourceMessageCache::load().unwrap();
+        let mut warm_cache = message_cache::InputMessageCache::load().unwrap();
         let warm_messages = parse_and_fold(vec![codex_unit(&path)], &mut warm_cache);
         assert_eq!(warm_messages, expected);
     }
@@ -1976,7 +1974,7 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
 
-        let mut seed_cache = message_cache::SourceMessageCache::load().unwrap();
+        let mut seed_cache = message_cache::InputMessageCache::load().unwrap();
         let initial = parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
         assert_eq!(initial.len(), 1);
         seed_cache.save_if_dirty().unwrap();
@@ -1984,14 +1982,14 @@ mod tests {
         append_file(&path, APPENDED_CODEX_ENTRY);
         let expected = parser_messages(&path);
 
-        let mut cache = message_cache::SourceMessageCache::load().unwrap();
+        let mut cache = message_cache::InputMessageCache::load().unwrap();
         let parsed = plan_and_parse(vec![codex_unit(&path)], &cache, None);
         assert!(matches!(
             parsed[0].messages,
-            UnitMessageSource::CodexAppend(_)
+            UnitMessagePayload::CodexAppend(_)
         ));
 
-        let mut remover = message_cache::SourceMessageCache::load().unwrap();
+        let mut remover = message_cache::InputMessageCache::load().unwrap();
         remover.remove(
             &path,
             message_cache::ParserVersion::new(
@@ -2006,7 +2004,7 @@ mod tests {
         cache.save_if_dirty().unwrap();
         assert_cached_raw_messages_match_parser(&cache_home.path().join("cache"), &path);
 
-        let mut warm_cache = message_cache::SourceMessageCache::load().unwrap();
+        let mut warm_cache = message_cache::InputMessageCache::load().unwrap();
         let warm_messages = parse_and_fold(vec![codex_unit(&path)], &mut warm_cache);
         assert_eq!(warm_messages, expected);
     }

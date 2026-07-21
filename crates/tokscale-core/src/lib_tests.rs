@@ -28,10 +28,10 @@ fn load_local_messages_for_test(
     options: LocalParseOptions,
 ) -> Result<LocalMessagesForTest, super::LocalReportError> {
     let counts = super::count_local_client_messages(options.clone())?.counts;
-    let prepared = super::prepare_local_sources(options.clone())?;
+    let prepared = super::prepare_local_inputs(options.clone())?;
     let mut messages = Vec::new();
     let health =
-        super::fold_prepared_local_sources_with_pricing(prepared, None, &mut messages)?.health;
+        super::fold_prepared_local_inputs_with_pricing(prepared, None, &mut messages)?.health;
     let messages = super::filter_unified_messages(messages, &options);
     Ok(LocalMessagesForTest {
         messages,
@@ -313,11 +313,11 @@ fn cache_only_pricing_diagnostics_append_missing_cache_in_order() {
 #[serial_test::serial]
 fn test_batched_model_monthly_hourly_views_match_single_view_runs() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
-    write_streaming_fold_fixture(source_home.path());
-    let options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+    write_streaming_fold_fixture(input_home.path());
+    let options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
 
     let batched = streaming_views(
         &options,
@@ -351,11 +351,11 @@ fn test_batched_model_monthly_hourly_views_match_single_view_runs() {
 #[serial_test::serial]
 fn test_batched_graph_and_time_metrics_views_match_single_view_runs() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
-    write_streaming_fold_fixture(source_home.path());
-    let options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+    write_streaming_fold_fixture(input_home.path());
+    let options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
 
     let batched = streaming_views(&options, ViewSet::GRAPH | ViewSet::TIME_METRICS);
     let graph = streaming_views(&options, ViewSet::GRAPH).graph.unwrap();
@@ -377,13 +377,13 @@ fn test_batched_graph_and_time_metrics_views_match_single_view_runs() {
 #[serial_test::serial]
 fn test_batched_tui_and_model_views_match_individual_outputs() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
-    write_streaming_fold_fixture(source_home.path());
-    let report_options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+    write_streaming_fold_fixture(input_home.path());
+    let report_options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
     let local_options = LocalParseOptions {
-        home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+        home_dir: Some(input_home.path().to_string_lossy().into_owned()),
         use_env_roots: false,
         clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
         since: None,
@@ -419,11 +419,11 @@ fn test_batched_tui_and_model_views_match_individual_outputs() {
 #[serial_test::serial]
 fn test_batched_requested_client_filter_matches_single_view_run() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
-    write_streaming_fold_fixture(source_home.path());
-    let options = streaming_report_options(source_home.path(), vec!["codex"]);
+    write_streaming_fold_fixture(input_home.path());
+    let options = streaming_report_options(input_home.path(), vec!["codex"]);
 
     let batched = streaming_views(&options, ViewSet::MODEL | ViewSet::MONTHLY);
     let model = streaming_views(&options, ViewSet::MODEL)
@@ -440,11 +440,11 @@ fn test_batched_requested_client_filter_matches_single_view_run() {
 #[serial_test::serial]
 fn test_streaming_model_monthly_hourly_reports_match_vec_compat() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
-    write_streaming_fold_fixture(source_home.path());
-    let options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+    write_streaming_fold_fixture(input_home.path());
+    let options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
 
     let streaming = streaming_views(
         &options,
@@ -473,11 +473,11 @@ fn test_streaming_model_monthly_hourly_reports_match_vec_compat() {
 #[serial_test::serial]
 fn test_streaming_graph_and_time_metrics_match_vec_compat() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
-    write_streaming_fold_fixture(source_home.path());
-    let options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+    write_streaming_fold_fixture(input_home.path());
+    let options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
 
     let streaming = streaming_views(&options, ViewSet::GRAPH | ViewSet::TIME_METRICS);
     let compat = vec_compat_views(&options, ViewSet::GRAPH | ViewSet::TIME_METRICS);
@@ -496,12 +496,12 @@ fn test_streaming_graph_and_time_metrics_match_vec_compat() {
 #[serial_test::serial]
 fn test_streaming_tui_usage_matches_vec_compat() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
-    write_streaming_fold_fixture(source_home.path());
+    write_streaming_fold_fixture(input_home.path());
     let options = LocalParseOptions {
-        home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+        home_dir: Some(input_home.path().to_string_lossy().into_owned()),
         use_env_roots: false,
         clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
         since: None,
@@ -509,7 +509,7 @@ fn test_streaming_tui_usage_matches_vec_compat() {
         year: None,
         scanner_settings: scanner::ScannerSettings::default(),
     };
-    let report_options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+    let report_options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
 
     let mut streaming = load_usage_data_with_pricing(options, GroupBy::ClientModel, None).unwrap();
     let mut compat = vec_compat_views(&report_options, ViewSet::TUI)
@@ -517,7 +517,7 @@ fn test_streaming_tui_usage_matches_vec_compat() {
         .unwrap();
 
     // The vec-compat harness exercises aggregation from a bare message list,
-    // which intentionally has no source-health envelope. Health propagation
+    // which intentionally has no data-health envelope. Health propagation
     // is covered by the local loader; normalize it out for payload parity.
     assert!(streaming.health.complete);
     streaming.health = Default::default();
@@ -530,14 +530,14 @@ fn test_streaming_tui_usage_matches_vec_compat() {
 #[serial_test::serial]
 fn test_streaming_tui_usage_applies_date_range() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
-    write_streaming_fold_fixture(source_home.path());
+    write_streaming_fold_fixture(input_home.path());
 
     let included = load_usage_data_with_pricing(
         LocalParseOptions {
-            home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+            home_dir: Some(input_home.path().to_string_lossy().into_owned()),
             use_env_roots: false,
             clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
             since: Some("2024-12-01".to_string()),
@@ -551,7 +551,7 @@ fn test_streaming_tui_usage_applies_date_range() {
     .unwrap();
     let excluded = load_usage_data_with_pricing(
         LocalParseOptions {
-            home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+            home_dir: Some(input_home.path().to_string_lossy().into_owned()),
             use_env_roots: false,
             clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
             since: Some("2024-12-02".to_string()),
@@ -576,11 +576,11 @@ fn test_streaming_tui_usage_applies_date_range() {
 #[serial_test::serial]
 fn test_streaming_requested_client_filter_matches_vec_compat() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
-    write_streaming_fold_fixture(source_home.path());
-    let options = streaming_report_options(source_home.path(), vec!["codex"]);
+    write_streaming_fold_fixture(input_home.path());
+    let options = streaming_report_options(input_home.path(), vec!["codex"]);
 
     let streaming = streaming_views(&options, ViewSet::MODEL);
     let compat = vec_compat_views(&options, ViewSet::MODEL);
@@ -598,11 +598,11 @@ fn test_streaming_requested_client_filter_matches_vec_compat() {
 #[serial_test::serial]
 fn test_streaming_warm_cache_matches_cold_streaming_report() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
-    write_streaming_fold_fixture(source_home.path());
-    let options = streaming_report_options(source_home.path(), vec!["opencode", "codex"]);
+    write_streaming_fold_fixture(input_home.path());
+    let options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
 
     let cold = streaming_views(&options, ViewSet::MODEL)
         .model_report
@@ -1903,31 +1903,6 @@ fn test_retain_for_requested_clients_keeps_original_client_matches() {
 }
 
 #[test]
-fn test_client_count_sink_attributes_cc_mirror_variants_to_claude() {
-    let mut sink = super::ClientCountSink::new(DateRange::none());
-    let mut message = UnifiedMessage::new(
-        "cc-mirror/zai-worker",
-        "claude-sonnet-4",
-        "zai",
-        "mirror-session",
-        1_717_977_600_000,
-        TokenBreakdown {
-            input: 10,
-            output: 5,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-        },
-        0.01,
-    );
-    message.message_count = 3;
-
-    super::adapters::MessageSink::push_message(&mut sink, message);
-
-    assert_eq!(sink.counts.get(ClientId::Claude), 3);
-}
-
-#[test]
 fn test_retain_for_requested_clients_preserves_kilo_split() {
     let kilocode_only: HashSet<&str> = HashSet::from(["kilocode"]);
     assert!(retain_for_requested_clients(
@@ -1952,8 +1927,8 @@ fn test_retain_for_requested_clients_preserves_kilo_split() {
     ));
 }
 
-fn write_kimi_code_usage_fixture(source_home: &std::path::Path) {
-    let kimi_home = source_home.join(".kimi-code");
+fn write_kimi_code_usage_fixture(input_home: &std::path::Path) {
+    let kimi_home = input_home.join(".kimi-code");
     std::fs::create_dir_all(&kimi_home).unwrap();
     std::fs::write(
         kimi_home.join("config.toml"),
@@ -1982,15 +1957,15 @@ max_context_size = 128000
 #[serial_test::serial]
 fn test_parse_all_messages_with_pricing_kimi_code_usage_records() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        write_kimi_code_usage_fixture(source_home.path());
+        write_kimi_code_usage_fixture(input_home.path());
 
         let messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["kimi".to_string()],
             None,
         )
@@ -2014,15 +1989,15 @@ fn test_parse_all_messages_with_pricing_kimi_code_usage_records() {
 #[serial_test::serial]
 fn test_local_message_loader_kimi_code_usage_records() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        write_kimi_code_usage_fixture(source_home.path());
+        write_kimi_code_usage_fixture(input_home.path());
 
         let parsed = load_local_messages_for_test(LocalParseOptions {
-            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            home_dir: Some(input_home.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["kimi".to_string()]),
             since: None,
@@ -2064,40 +2039,40 @@ fn test_local_message_loader_kimi_code_usage_records() {
 #[serial_test::serial]
 fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_pipeline() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
-    write_kimi_code_usage_fixture(source_home.path());
+    write_kimi_code_usage_fixture(input_home.path());
 
-    let options = inventory_options(source_home.path(), &["kimi"]);
-    let prepared = super::prepare_local_sources(options.clone()).unwrap();
-    let wire_path = source_home
+    let options = inventory_options(input_home.path(), &["kimi"]);
+    let prepared = super::prepare_local_inputs(options.clone()).unwrap();
+    let wire_path = input_home
         .path()
         .join(".kimi-code/sessions/wd-project/session_1/agents/main/wire.jsonl");
     let parser_version = prepared.groups[0].units[0].parser_version;
     let mut cold_messages = Vec::new();
     let cold_health =
-        super::fold_prepared_local_sources_with_pricing(prepared, None, &mut cold_messages)
+        super::fold_prepared_local_inputs_with_pricing(prepared, None, &mut cold_messages)
             .unwrap()
             .health;
     assert_eq!(cold_messages.len(), 2);
     assert_eq!(cold_health.issue_count(), 0);
-    assert!(message_cache::SourceMessageCache::load()
+    assert!(message_cache::InputMessageCache::load()
         .unwrap()
         .get_meta(&wire_path, parser_version)
         .unwrap()
         .is_some());
 
-    let mut prepared = super::prepare_local_sources(options).unwrap();
-    let regular_config_signature = prepared.source_inventory_signature();
-    let config_path = source_home.path().join(".kimi-code/config.toml");
+    let mut prepared = super::prepare_local_inputs(options).unwrap();
+    let regular_config_signature = prepared.input_inventory_signature();
+    let config_path = input_home.path().join(".kimi-code/config.toml");
     std::fs::remove_file(&config_path).unwrap();
     std::fs::create_dir(&config_path).unwrap();
-    let unavailable_config_signature = prepared.refresh_source_inventory_signature().unwrap();
+    let unavailable_config_signature = prepared.refresh_input_inventory_signature().unwrap();
     assert_ne!(regular_config_signature, unavailable_config_signature);
-    assert_eq!(prepared.health.failed_sources(), 0);
+    assert_eq!(prepared.health.failed_inputs(), 0);
 
     let mut messages = Vec::new();
-    let health = super::fold_prepared_local_sources_with_pricing(prepared, None, &mut messages)
+    let health = super::fold_prepared_local_inputs_with_pricing(prepared, None, &mut messages)
         .unwrap()
         .health;
     assert_eq!(messages.len(), 2);
@@ -2128,9 +2103,9 @@ fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_p
             .sum::<i64>(),
         5
     );
-    assert_eq!(health.partial_sources(), 1);
-    assert_eq!(health.failed_sources(), 0);
-    assert!(message_cache::SourceMessageCache::load()
+    assert_eq!(health.partial_inputs(), 1);
+    assert_eq!(health.failed_inputs(), 0);
+    assert!(message_cache::InputMessageCache::load()
         .unwrap()
         .get_meta(&wire_path, parser_version)
         .unwrap()
@@ -2139,14 +2114,14 @@ fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_p
 
 #[test]
 #[serial_test::serial]
-fn test_source_cache_refreshes_stale_provider_on_cache_hit() {
+fn test_input_cache_refreshes_stale_provider_on_cache_hit() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let path = source_home.path().join(".local/share/opencode/opencode.db");
+        let path = input_home.path().join(".local/share/opencode/opencode.db");
         let conn = create_opencode_sqlite_db(&path);
         insert_opencode_sqlite_message(
             &conn,
@@ -2157,9 +2132,9 @@ fn test_source_cache_refreshes_stale_provider_on_cache_hit() {
         );
         drop(conn);
 
-        let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
-            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
-        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
+        let unit = crate::adapters::InputUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
+            .with_meta(crate::adapters::InputUnitMeta::OpenCodeSqlite);
+        let fingerprint = unit.input_policy().fingerprint().unwrap();
         // Provider deliberately wrong for the model: the cache-hit path
         // must re-run refresh_derived_fields (dates are derived from
         // timestamps since schema v24, so provider identity is the
@@ -2180,8 +2155,8 @@ fn test_source_cache_refreshes_stale_provider_on_cache_hit() {
             0.0,
         );
 
-        let mut cache = message_cache::SourceMessageCache::load().unwrap();
-        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+        let mut cache = message_cache::InputMessageCache::load().unwrap();
+        cache.insert(message_cache::CachedInputEntry::new_with_version(
             &path,
             unit.parser_version,
             fingerprint,
@@ -2191,7 +2166,7 @@ fn test_source_cache_refreshes_stale_provider_on_cache_hit() {
         cache.save_if_dirty().unwrap();
 
         let messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
         )
@@ -2223,15 +2198,15 @@ fn inventory_options(home: &Path, clients: &[&str]) -> LocalParseOptions {
 
 #[test]
 #[serial_test::serial]
-fn prepare_local_sources_rejects_invalid_extra_dirs_configuration() {
+fn prepare_local_inputs_rejects_invalid_extra_dirs_configuration() {
     let home = tempfile::TempDir::new().unwrap();
     let _extra_dirs_guard = TestEnvGuard::set("TOKSCALE_EXTRA_DIRS", "missing-separator");
     let mut options = inventory_options(home.path(), &["amp"]);
     options.use_env_roots = true;
 
-    let error = super::prepare_local_sources(options)
+    let error = super::prepare_local_inputs(options)
         .err()
-        .expect("invalid extra-dir syntax must fail source preparation");
+        .expect("invalid extra-dir syntax must fail input preparation");
 
     assert_eq!(
         error.kind(),
@@ -2245,7 +2220,7 @@ fn prepare_local_sources_rejects_invalid_extra_dirs_configuration() {
 #[cfg(unix)]
 #[test]
 #[serial_test::serial]
-fn prepare_local_sources_rejects_non_utf8_extra_dirs_configuration() {
+fn prepare_local_inputs_rejects_non_utf8_extra_dirs_configuration() {
     use std::os::unix::ffi::OsStringExt;
 
     let home = tempfile::TempDir::new().unwrap();
@@ -2254,9 +2229,9 @@ fn prepare_local_sources_rejects_non_utf8_extra_dirs_configuration() {
     let mut options = inventory_options(home.path(), &["amp"]);
     options.use_env_roots = true;
 
-    let error = super::prepare_local_sources(options)
+    let error = super::prepare_local_inputs(options)
         .err()
-        .expect("non-UTF-8 extra-dir configuration must fail source preparation");
+        .expect("non-UTF-8 extra-dir configuration must fail input preparation");
 
     assert_eq!(
         error.kind(),
@@ -2269,7 +2244,7 @@ fn prepare_local_sources_rejects_non_utf8_extra_dirs_configuration() {
 
 #[test]
 #[serial_test::serial]
-fn prepare_local_sources_isolates_ordinary_discovery_source_failure() {
+fn prepare_local_inputs_isolates_ordinary_discovery_input_failure() {
     let home = tempfile::TempDir::new().unwrap();
     let goose_root = home.path().join("configured-goose-root");
     let invalid_db_candidate = goose_root.join("data/sessions/sessions.db");
@@ -2278,37 +2253,37 @@ fn prepare_local_sources_isolates_ordinary_discovery_source_failure() {
     let mut options = inventory_options(home.path(), &["goose"]);
     options.use_env_roots = true;
 
-    let prepared = super::prepare_local_sources(options)
-        .expect("a source discovery failure must remain isolated as health");
+    let prepared = super::prepare_local_inputs(options)
+        .expect("an input discovery failure must remain isolated as health");
 
-    assert_eq!(prepared.health.failed_sources(), 1);
-    let failure = &prepared.health.sources()[0];
+    assert_eq!(prepared.health.failed_inputs(), 1);
+    let failure = &prepared.health.inputs()[0];
     assert_eq!(failure.client, ClientId::Goose);
     assert_eq!(failure.path, invalid_db_candidate);
     assert!(matches!(
         failure.status,
-        crate::source_health::SourceStatus::Unavailable { .. }
+        crate::input_health::InputStatus::Unavailable { .. }
     ));
 }
 
 fn signature_for_test_units(
     requested_clients: &[String],
     client: ClientId,
-    units: Vec<crate::adapters::SourceUnit>,
-) -> super::SourceInventorySignature {
+    units: Vec<crate::adapters::InputUnit>,
+) -> super::InputInventorySignature {
     let group = prepared_test_group(client, units);
-    super::source_inventory_signature(requested_clients, &[group])
+    super::input_inventory_signature(requested_clients, &[group])
 }
 
 fn prepared_test_group(
     client: ClientId,
-    units: Vec<crate::adapters::SourceUnit>,
-) -> crate::adapters::PreparedAdapterSources {
-    crate::adapters::PreparedAdapterSources {
+    units: Vec<crate::adapters::InputUnit>,
+) -> crate::adapters::PreparedAdapterInputs {
+    crate::adapters::PreparedAdapterInputs {
         adapter: crate::adapters::adapter_for(client).unwrap(),
         units: units
             .into_iter()
-            .map(crate::adapters::SourceUnit::prepare_snapshot)
+            .map(crate::adapters::InputUnit::prepare_snapshot)
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
     }
@@ -2316,21 +2291,21 @@ fn prepared_test_group(
 
 fn confirmed_test_group(
     client: ClientId,
-    units: Vec<crate::adapters::SourceUnit>,
-) -> crate::adapters::ConfirmedAdapterSources {
+    units: Vec<crate::adapters::InputUnit>,
+) -> crate::adapters::ConfirmedAdapterInputs {
     let prepared = prepared_test_group(client, units);
     let mut present_files = Vec::new();
     let unit_digests = prepared
         .units
         .iter()
         .map(|unit| {
-            unit.prepared_source_input_snapshot()
+            unit.prepared_input_snapshot()
                 .expect("test unit must carry a prepared snapshot")
                 .visit_present_files(|identity, size| present_files.push((identity, size)));
             unit.inventory_signature_digest()
         })
         .collect();
-    crate::adapters::ConfirmedAdapterSources {
+    crate::adapters::ConfirmedAdapterInputs {
         client,
         unit_digests,
         present_files,
@@ -2338,26 +2313,26 @@ fn confirmed_test_group(
 }
 
 #[test]
-fn source_data_size_counts_related_inputs_once_by_file_identity() {
+fn input_data_size_counts_related_inputs_once_by_file_identity() {
     let dir = tempfile::TempDir::new().unwrap();
-    let source = dir.path().join("source.jsonl");
+    let input = dir.path().join("input.jsonl");
     let dependency = dir.path().join("dependency.json");
-    std::fs::write(&source, b"12345678").unwrap();
+    std::fs::write(&input, b"12345678").unwrap();
     std::fs::write(&dependency, b"12345").unwrap();
 
-    let with_dependency = crate::adapters::SourceUnit::plain_file(ClientId::Amp, source.clone())
+    let with_dependency = crate::adapters::InputUnit::plain_file(ClientId::Amp, input.clone())
         .with_dependency(dependency)
         .prepare_snapshot()
         .unwrap();
-    let duplicate = crate::adapters::SourceUnit::plain_file(ClientId::Amp, source)
+    let duplicate = crate::adapters::InputUnit::plain_file(ClientId::Amp, input)
         .prepare_snapshot()
         .unwrap();
 
-    assert_eq!(super::source_data_bytes([&with_dependency, &duplicate]), 13);
+    assert_eq!(super::input_data_bytes([&with_dependency, &duplicate]), 13);
 }
 
 #[test]
-fn source_data_size_by_client_deduplicates_within_each_client() {
+fn input_data_size_by_client_deduplicates_within_each_client() {
     let dir = tempfile::TempDir::new().unwrap();
     let shared = dir.path().join("shared.jsonl");
     let amp_only = dir.path().join("amp.jsonl");
@@ -2367,14 +2342,14 @@ fn source_data_size_by_client_deduplicates_within_each_client() {
     let amp = confirmed_test_group(
         ClientId::Amp,
         vec![
-            crate::adapters::SourceUnit::plain_file(ClientId::Amp, shared.clone()),
-            crate::adapters::SourceUnit::plain_file(ClientId::Amp, shared.clone()),
-            crate::adapters::SourceUnit::plain_file(ClientId::Amp, amp_only),
+            crate::adapters::InputUnit::plain_file(ClientId::Amp, shared.clone()),
+            crate::adapters::InputUnit::plain_file(ClientId::Amp, shared.clone()),
+            crate::adapters::InputUnit::plain_file(ClientId::Amp, amp_only),
         ],
     );
     let codebuddy = confirmed_test_group(
         ClientId::CodeBuddy,
-        vec![crate::adapters::SourceUnit::plain_file(
+        vec![crate::adapters::InputUnit::plain_file(
             ClientId::CodeBuddy,
             shared,
         )],
@@ -2385,7 +2360,7 @@ fn source_data_size_by_client_deduplicates_within_each_client() {
         "codex".to_string(),
     ];
 
-    let (by_client, global) = super::confirmed_source_data_bytes(&requested, &[amp, codebuddy]);
+    let (by_client, global) = super::confirmed_input_data_bytes(&requested, &[amp, codebuddy]);
     assert_eq!(
         by_client,
         std::collections::BTreeMap::from([
@@ -2398,59 +2373,59 @@ fn source_data_size_by_client_deduplicates_within_each_client() {
 }
 
 #[test]
-fn inventory_probe_refreshes_source_data_size_from_metadata() {
+fn inventory_probe_refreshes_input_data_size_from_metadata() {
     let home = tempfile::TempDir::new().unwrap();
     let amp_dir = home.path().join(".local/share/amp/threads");
     std::fs::create_dir_all(&amp_dir).unwrap();
-    let source = amp_dir.join("T-first.json");
-    std::fs::write(&source, b"12345678").unwrap();
+    let input = amp_dir.join("T-first.json");
+    std::fs::write(&input, b"12345678").unwrap();
 
     let mut prepared =
-        super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
-    assert_eq!(prepared.health.source_data_bytes(), 8);
+        super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
+    assert_eq!(prepared.health.input_data_bytes(), 8);
 
-    std::fs::write(&source, b"1234567890123").unwrap();
-    prepared.refresh_source_inventory_signature().unwrap();
-    assert_eq!(prepared.health.source_data_bytes(), 13);
+    std::fs::write(&input, b"1234567890123").unwrap();
+    prepared.refresh_input_inventory_signature().unwrap();
+    assert_eq!(prepared.health.input_data_bytes(), 13);
 }
 
 #[test]
-fn prepared_inventory_is_stable_sensitive_and_reads_no_source_bytes() {
+fn prepared_inventory_is_stable_sensitive_and_reads_no_input_bytes() {
     let home = tempfile::TempDir::new().unwrap();
     let amp_dir = home.path().join(".local/share/amp/threads");
     std::fs::create_dir_all(&amp_dir).unwrap();
     let first = amp_dir.join("T-first.json");
     std::fs::write(&first, r#"{"id":"amp-first"}"#).unwrap();
-    message_cache::reset_source_read_stats(&first);
+    message_cache::reset_input_read_stats(&first);
 
     let first_inventory =
-        super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
-    let first_signature = first_inventory.source_inventory_signature();
-    let second_signature = super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+        super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
+    let first_signature = first_inventory.input_inventory_signature();
+    let second_signature = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
         .unwrap()
-        .source_inventory_signature();
+        .input_inventory_signature();
     assert_eq!(first_signature, second_signature);
     assert_eq!(
-        message_cache::get_source_read_stats(&first),
-        message_cache::SourceReadStats::default(),
+        message_cache::get_input_read_stats(&first),
+        message_cache::InputReadStats::default(),
         "inventory signatures must use metadata only"
     );
 
     std::fs::write(&first, r#"{"id":"amp-first","grew":true}"#).unwrap();
-    let changed = super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+    let changed = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
         .unwrap()
-        .source_inventory_signature();
+        .input_inventory_signature();
     assert_ne!(first_signature, changed);
 
     std::fs::write(amp_dir.join("T-second.json"), r#"{"id":"amp-second"}"#).unwrap();
-    let added = super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+    let added = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
         .unwrap()
-        .source_inventory_signature();
+        .input_inventory_signature();
     assert_ne!(changed, added);
 
-    let other_client = super::prepare_local_sources(inventory_options(home.path(), &["claude"]))
+    let other_client = super::prepare_local_inputs(inventory_options(home.path(), &["claude"]))
         .unwrap()
-        .source_inventory_signature();
+        .input_inventory_signature();
     assert_ne!(added, other_client);
 }
 
@@ -2459,13 +2434,13 @@ fn inventory_signature_changes_for_same_size_same_mtime_atomic_replacement() {
     let home = tempfile::TempDir::new().unwrap();
     let amp_dir = home.path().join(".local/share/amp/threads");
     std::fs::create_dir_all(&amp_dir).unwrap();
-    let source = amp_dir.join("T-first.json");
+    let input = amp_dir.join("T-first.json");
     let replacement = amp_dir.join("replacement.json");
-    std::fs::write(&source, b"aaaaaaaa").unwrap();
-    let original_mtime = std::fs::metadata(&source).unwrap().modified().unwrap();
-    let before = super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+    std::fs::write(&input, b"aaaaaaaa").unwrap();
+    let original_mtime = std::fs::metadata(&input).unwrap().modified().unwrap();
+    let before = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
         .unwrap()
-        .source_inventory_signature();
+        .input_inventory_signature();
 
     std::fs::write(&replacement, b"bbbbbbbb").unwrap();
     std::fs::File::open(&replacement)
@@ -2473,31 +2448,31 @@ fn inventory_signature_changes_for_same_size_same_mtime_atomic_replacement() {
         .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
         .unwrap();
     #[cfg(windows)]
-    std::fs::remove_file(&source).unwrap();
-    std::fs::rename(&replacement, &source).unwrap();
+    std::fs::remove_file(&input).unwrap();
+    std::fs::rename(&replacement, &input).unwrap();
 
-    let after = super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
+    let after = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
         .unwrap()
-        .source_inventory_signature();
+        .input_inventory_signature();
     assert_ne!(before, after);
 }
 
 #[test]
-fn inventory_probe_revalidates_identity_without_rediscovery_or_source_reads() {
+fn inventory_probe_revalidates_identity_without_rediscovery_or_input_reads() {
     let home = tempfile::TempDir::new().unwrap();
     let amp_dir = home.path().join(".local/share/amp/threads");
     std::fs::create_dir_all(&amp_dir).unwrap();
-    let source = amp_dir.join("T-first.json");
+    let input = amp_dir.join("T-first.json");
     let replacement = amp_dir.join("replacement.json");
-    std::fs::write(&source, b"aaaaaaaa").unwrap();
-    let original_mtime = std::fs::metadata(&source).unwrap().modified().unwrap();
+    std::fs::write(&input, b"aaaaaaaa").unwrap();
+    let original_mtime = std::fs::metadata(&input).unwrap().modified().unwrap();
 
     super::reset_prepare_discovery_count();
     let mut prepared =
-        super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
-    let stale = prepared.source_inventory_signature();
+        super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
+    let stale = prepared.input_inventory_signature();
     assert_eq!(super::prepare_discovery_count(), 1);
-    message_cache::reset_source_read_stats(&source);
+    message_cache::reset_input_read_stats(&input);
 
     std::fs::write(&replacement, b"bbbbbbbb").unwrap();
     std::fs::File::open(&replacement)
@@ -2505,51 +2480,51 @@ fn inventory_probe_revalidates_identity_without_rediscovery_or_source_reads() {
         .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
         .unwrap();
     #[cfg(windows)]
-    std::fs::remove_file(&source).unwrap();
-    std::fs::rename(&replacement, &source).unwrap();
+    std::fs::remove_file(&input).unwrap();
+    std::fs::rename(&replacement, &input).unwrap();
 
-    let refreshed = prepared.refresh_source_inventory_signature().unwrap();
+    let refreshed = prepared.refresh_input_inventory_signature().unwrap();
     assert_ne!(stale, refreshed);
     assert_eq!(super::prepare_discovery_count(), 1);
     assert_eq!(
-        message_cache::get_source_read_stats(&source),
-        message_cache::SourceReadStats::default(),
-        "inventory revalidation must not read or hash source bodies"
+        message_cache::get_input_read_stats(&input),
+        message_cache::InputReadStats::default(),
+        "inventory revalidation must not read or hash input bodies"
     );
 }
 
 #[test]
 #[serial_test::serial]
-fn inventory_probe_isolates_a_source_that_disappears_after_prepare() {
+fn inventory_probe_isolates_an_input_that_disappears_after_prepare() {
     let home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(home.path());
     let amp_dir = home.path().join(".local/share/amp/threads");
     std::fs::create_dir_all(&amp_dir).unwrap();
     let retained = amp_dir.join("T-retained.json");
     let removed = amp_dir.join("T-removed.json");
-    let source = |session: &str, input: u64| {
+    let input = |session: &str, input: u64| {
         format!(
             r#"{{"id":"{session}","created":1747800000000,"messages":[{{"role":"assistant","messageId":1,"usage":{{"timestamp":"2026-05-21T04:00:00Z","model":"gpt-5","inputTokens":{input},"outputTokens":2}}}}]}}"#
         )
     };
-    std::fs::write(&retained, source("retained", 10)).unwrap();
-    std::fs::write(&removed, source("removed", 20)).unwrap();
+    std::fs::write(&retained, input("retained", 10)).unwrap();
+    std::fs::write(&removed, input("removed", 20)).unwrap();
 
     let mut prepared =
-        super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+        super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
     std::fs::remove_file(&removed).unwrap();
 
     prepared
-        .refresh_source_inventory_signature()
-        .expect("a vanished third-party source must not abort the inventory probe");
+        .refresh_input_inventory_signature()
+        .expect("a vanished third-party input must not abort the inventory probe");
     let result = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(super::load_prepared_tui_bundle_with_diagnostics(prepared))
         .unwrap();
 
     assert_eq!(result.accumulator.project(&GroupBy::Model).total_tokens, 12);
-    assert_eq!(result.health.failed_sources(), 1);
-    assert_eq!(result.health.sources()[0].path, removed);
+    assert_eq!(result.health.failed_inputs(), 1);
+    assert_eq!(result.health.inputs()[0].path, removed);
 }
 
 #[test]
@@ -2560,17 +2535,17 @@ fn prepared_diagnostics_returns_signature_revalidated_after_pricing_boundary() {
     let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
     let amp_dir = home.path().join(".local/share/amp/threads");
     std::fs::create_dir_all(&amp_dir).unwrap();
-    let source = amp_dir.join("T-first.json");
+    let input = amp_dir.join("T-first.json");
     let replacement = amp_dir.join("replacement.json");
     let original = r#"{"id":"session-a","created":1747800000000,"messages":[{"role":"assistant","messageId":1,"usage":{"timestamp":"2026-05-21T04:00:00Z","model":"gpt-5","inputTokens":10,"outputTokens":2}}]}"#;
     let changed = original
         .replace("session-a", "session-b")
         .replace("10", "11");
     assert_eq!(original.len(), changed.len());
-    std::fs::write(&source, original).unwrap();
-    let original_mtime = std::fs::metadata(&source).unwrap().modified().unwrap();
-    let prepared = super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
-    let stale_signature = prepared.source_inventory_signature();
+    std::fs::write(&input, original).unwrap();
+    let original_mtime = std::fs::metadata(&input).unwrap().modified().unwrap();
+    let prepared = super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
+    let stale_signature = prepared.input_inventory_signature();
 
     std::fs::write(&replacement, changed).unwrap();
     std::fs::File::open(&replacement)
@@ -2578,39 +2553,38 @@ fn prepared_diagnostics_returns_signature_revalidated_after_pricing_boundary() {
         .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
         .unwrap();
     #[cfg(windows)]
-    std::fs::remove_file(&source).unwrap();
-    std::fs::rename(&replacement, &source).unwrap();
+    std::fs::remove_file(&input).unwrap();
+    std::fs::rename(&replacement, &input).unwrap();
 
     let result = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(super::load_prepared_tui_bundle_with_diagnostics(prepared))
         .unwrap();
-    let confirmed_signature =
-        super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
-            .unwrap()
-            .source_inventory_signature();
-    assert_ne!(stale_signature, result.source_inventory_signature);
-    assert_eq!(confirmed_signature, result.source_inventory_signature);
+    let confirmed_signature = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .input_inventory_signature();
+    assert_ne!(stale_signature, result.input_inventory_signature);
+    assert_eq!(confirmed_signature, result.input_inventory_signature);
     assert_eq!(result.accumulator.project(&GroupBy::Model).total_tokens, 13);
 }
 
 #[test]
 #[serial_test::serial]
-fn prepared_tui_bundle_source_space_uses_confirmed_inventory() {
+fn prepared_tui_bundle_client_space_uses_confirmed_inventory() {
     let home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(home.path());
     let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
     let amp_dir = home.path().join(".local/share/amp/threads");
     std::fs::create_dir_all(&amp_dir).unwrap();
-    let source = amp_dir.join("T-first.json");
+    let input = amp_dir.join("T-first.json");
     let replacement = amp_dir.join("replacement.json");
     let original = r#"{"id":"session-a","created":1747800000000,"messages":[{"role":"assistant","messageId":1,"usage":{"timestamp":"2026-05-21T04:00:00Z","model":"gpt-5","inputTokens":10,"outputTokens":2}}]}"#;
     let changed = r#"{"id":"session-confirmed-after-prepare","created":1747800000000,"messages":[{"role":"assistant","messageId":1,"usage":{"timestamp":"2026-05-21T04:00:00Z","model":"gpt-5","inputTokens":111,"outputTokens":2}}]}"#;
     assert!(changed.len() > original.len());
-    std::fs::write(&source, original).unwrap();
-    let original_mtime = std::fs::metadata(&source).unwrap().modified().unwrap();
-    let prepared = super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
-    let stale_signature = prepared.source_inventory_signature();
+    std::fs::write(&input, original).unwrap();
+    let original_mtime = std::fs::metadata(&input).unwrap().modified().unwrap();
+    let prepared = super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
+    let stale_signature = prepared.input_inventory_signature();
 
     std::fs::write(&replacement, changed).unwrap();
     std::fs::File::open(&replacement)
@@ -2618,23 +2592,22 @@ fn prepared_tui_bundle_source_space_uses_confirmed_inventory() {
         .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
         .unwrap();
     #[cfg(windows)]
-    std::fs::remove_file(&source).unwrap();
-    std::fs::rename(&replacement, &source).unwrap();
-    let confirmed_bytes = std::fs::metadata(&source).unwrap().len();
+    std::fs::remove_file(&input).unwrap();
+    std::fs::rename(&replacement, &input).unwrap();
+    let confirmed_bytes = std::fs::metadata(&input).unwrap().len();
 
     let result = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(super::load_prepared_tui_bundle_with_diagnostics(prepared))
         .unwrap();
-    let confirmed_signature =
-        super::prepare_local_sources(inventory_options(home.path(), &["amp"]))
-            .unwrap()
-            .source_inventory_signature();
+    let confirmed_signature = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .input_inventory_signature();
 
-    assert_ne!(stale_signature, result.source_inventory_signature);
-    assert_eq!(confirmed_signature, result.source_inventory_signature);
-    assert_eq!(result.source_space.get("amp"), Some(&confirmed_bytes));
-    assert_eq!(result.health.source_data_bytes(), confirmed_bytes);
+    assert_ne!(stale_signature, result.input_inventory_signature);
+    assert_eq!(confirmed_signature, result.input_inventory_signature);
+    assert_eq!(result.client_space.get("amp"), Some(&confirmed_bytes));
+    assert_eq!(result.health.input_data_bytes(), confirmed_bytes);
     assert_eq!(
         result.accumulator.project(&GroupBy::Model).total_tokens,
         113
@@ -2661,16 +2634,16 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
         &clients,
         ClientId::Amp,
         vec![
-            crate::adapters::SourceUnit::plain_file(ClientId::Amp, first.clone()),
-            crate::adapters::SourceUnit::plain_file(ClientId::Amp, second.clone()),
+            crate::adapters::InputUnit::plain_file(ClientId::Amp, first.clone()),
+            crate::adapters::InputUnit::plain_file(ClientId::Amp, second.clone()),
         ],
     );
     let reordered = signature_for_test_units(
         &clients,
         ClientId::Amp,
         vec![
-            crate::adapters::SourceUnit::plain_file(ClientId::Amp, second),
-            crate::adapters::SourceUnit::plain_file(ClientId::Amp, first.clone()),
+            crate::adapters::InputUnit::plain_file(ClientId::Amp, second),
+            crate::adapters::InputUnit::plain_file(ClientId::Amp, first.clone()),
         ],
     );
     assert_ne!(ordered, reordered, "unit discovery order is significant");
@@ -2678,7 +2651,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     let canonical_clients = signature_for_test_units(
         &["amp".to_string(), "zed".to_string()],
         ClientId::Amp,
-        vec![crate::adapters::SourceUnit::plain_file(
+        vec![crate::adapters::InputUnit::plain_file(
             ClientId::Amp,
             first.clone(),
         )],
@@ -2686,7 +2659,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     let reversed_clients = signature_for_test_units(
         &["zed".to_string(), "amp".to_string()],
         ClientId::Amp,
-        vec![crate::adapters::SourceUnit::plain_file(
+        vec![crate::adapters::InputUnit::plain_file(
             ClientId::Amp,
             first.clone(),
         )],
@@ -2696,7 +2669,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     let sqlite_before = signature_for_test_units(
         &["zed".to_string()],
         ClientId::Zed,
-        vec![crate::adapters::SourceUnit::sqlite_with_wal(
+        vec![crate::adapters::InputUnit::sqlite_with_wal(
             ClientId::Zed,
             first.clone(),
         )],
@@ -2705,7 +2678,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     let sqlite_after = signature_for_test_units(
         &["zed".to_string()],
         ClientId::Zed,
-        vec![crate::adapters::SourceUnit::sqlite_with_wal(
+        vec![crate::adapters::InputUnit::sqlite_with_wal(
             ClientId::Zed,
             first.clone(),
         )],
@@ -2719,7 +2692,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
         &["amp".to_string()],
         ClientId::Amp,
         vec![
-            crate::adapters::SourceUnit::plain_file(ClientId::Amp, first).with_parser_version(
+            crate::adapters::InputUnit::plain_file(ClientId::Amp, first).with_parser_version(
                 message_cache::ParserVersion::new(message_cache::ParserId::Amp, 999),
             ),
         ],
@@ -2732,17 +2705,17 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
         &["codebuddy".to_string()],
         ClientId::CodeBuddy,
         vec![
-            crate::adapters::SourceUnit::plain_file(ClientId::CodeBuddy, codebuddy_path.clone())
-                .with_meta(crate::adapters::SourceUnitMeta::CodeBuddyJsonl),
+            crate::adapters::InputUnit::plain_file(ClientId::CodeBuddy, codebuddy_path.clone())
+                .with_meta(crate::adapters::InputUnitMeta::CodeBuddyJsonl),
         ],
     );
     let extension_meta = signature_for_test_units(
         &["codebuddy".to_string()],
         ClientId::CodeBuddy,
         vec![
-            crate::adapters::SourceUnit::plain_file(ClientId::CodeBuddy, codebuddy_path.clone())
-                .with_meta(crate::adapters::SourceUnitMeta::CodeBuddyExtensionLog {
-                    source: crate::adapters::CodeBuddyLogSource::Extension,
+            crate::adapters::InputUnit::plain_file(ClientId::CodeBuddy, codebuddy_path.clone())
+                .with_meta(crate::adapters::InputUnitMeta::CodeBuddyExtensionLog {
+                    origin: crate::adapters::CodeBuddyLogOrigin::Extension,
                 }),
         ],
     );
@@ -2751,7 +2724,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     let plain_policy = signature_for_test_units(
         &["codebuddy".to_string()],
         ClientId::CodeBuddy,
-        vec![crate::adapters::SourceUnit::plain_file(
+        vec![crate::adapters::InputUnit::plain_file(
             ClientId::CodeBuddy,
             codebuddy_path.clone(),
         )],
@@ -2759,7 +2732,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     let no_cache_policy = signature_for_test_units(
         &["codebuddy".to_string()],
         ClientId::CodeBuddy,
-        vec![crate::adapters::SourceUnit::no_message_cache(
+        vec![crate::adapters::InputUnit::no_message_cache(
             ClientId::CodeBuddy,
             codebuddy_path,
         )],
@@ -2773,7 +2746,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     let amp_group = || {
         prepared_test_group(
             ClientId::Amp,
-            vec![crate::adapters::SourceUnit::plain_file(
+            vec![crate::adapters::InputUnit::plain_file(
                 ClientId::Amp,
                 amp_group_path.clone(),
             )],
@@ -2782,17 +2755,17 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     let codebuddy_group = || {
         prepared_test_group(
             ClientId::CodeBuddy,
-            vec![crate::adapters::SourceUnit::plain_file(
+            vec![crate::adapters::InputUnit::plain_file(
                 ClientId::CodeBuddy,
                 codebuddy_group_path.clone(),
             )],
         )
     };
-    let group_order = super::source_inventory_signature(
+    let group_order = super::input_inventory_signature(
         &["amp".to_string(), "codebuddy".to_string()],
         &[amp_group(), codebuddy_group()],
     );
-    let reversed_group_order = super::source_inventory_signature(
+    let reversed_group_order = super::input_inventory_signature(
         &["amp".to_string(), "codebuddy".to_string()],
         &[codebuddy_group(), amp_group()],
     );
@@ -2806,7 +2779,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
 fn inventory_preparation_rejects_unavailable_primary_snapshots() {
     let dir = tempfile::TempDir::new().unwrap();
     let missing_a = dir.path().join("missing-a.json");
-    let error = crate::adapters::SourceUnit::plain_file(ClientId::Amp, missing_a.clone())
+    let error = crate::adapters::InputUnit::plain_file(ClientId::Amp, missing_a.clone())
         .prepare_snapshot()
         .expect_err("missing primary inputs must fail before inventory hashing");
     assert!(error.to_string().contains(missing_a.to_str().unwrap()));
@@ -2820,10 +2793,10 @@ fn inventory_signature_hashes_native_non_utf8_paths() {
     let dir = tempfile::TempDir::new().unwrap();
     let first = dir
         .path()
-        .join(std::ffi::OsString::from_vec(b"source-\x80.json".to_vec()));
+        .join(std::ffi::OsString::from_vec(b"input-\x80.json".to_vec()));
     let second = dir
         .path()
-        .join(std::ffi::OsString::from_vec(b"source-\x81.json".to_vec()));
+        .join(std::ffi::OsString::from_vec(b"input-\x81.json".to_vec()));
     assert_eq!(first.to_string_lossy(), second.to_string_lossy());
     std::fs::write(&first, b"same").unwrap();
     std::fs::write(&second, b"same").unwrap();
@@ -2831,15 +2804,12 @@ fn inventory_signature_hashes_native_non_utf8_paths() {
     let first_signature = signature_for_test_units(
         &["amp".to_string()],
         ClientId::Amp,
-        vec![crate::adapters::SourceUnit::plain_file(
-            ClientId::Amp,
-            first,
-        )],
+        vec![crate::adapters::InputUnit::plain_file(ClientId::Amp, first)],
     );
     let second_signature = signature_for_test_units(
         &["amp".to_string()],
         ClientId::Amp,
-        vec![crate::adapters::SourceUnit::plain_file(
+        vec![crate::adapters::InputUnit::plain_file(
             ClientId::Amp,
             second,
         )],
@@ -2854,7 +2824,7 @@ fn prepare_discovers_once_and_execute_consumes_the_same_inventory() {
     std::fs::create_dir_all(&amp_dir).unwrap();
     super::reset_prepare_discovery_count();
 
-    let prepared = super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    let prepared = super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
     assert_eq!(super::prepare_discovery_count(), 1);
 
     std::fs::write(
@@ -2896,7 +2866,7 @@ fn ordinary_and_explicit_prepare_usage_loads_match() {
     let options = inventory_options(home.path(), &["amp"]);
     let ordinary =
         super::load_usage_data_with_pricing(options.clone(), GroupBy::Model, None).unwrap();
-    let prepared = super::prepare_local_sources(options).unwrap();
+    let prepared = super::prepare_local_inputs(options).unwrap();
     let explicit =
         super::load_prepared_usage_data_with_pricing(prepared, GroupBy::Model, None).unwrap();
 
@@ -2935,7 +2905,7 @@ fn prepared_aggregation_reclaims_dead_interner_indices_after_materialization() {
 
     let externally_live = crate::sessions::intern::intern("c5-production-lifecycle-live");
     let prune_before = crate::sessions::intern::prune_count();
-    let prepared = super::prepare_local_sources(inventory_options(home.path(), &["amp"])).unwrap();
+    let prepared = super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
     let usage =
         super::load_prepared_usage_data_with_pricing(prepared, GroupBy::Model, None).unwrap();
 
@@ -2956,12 +2926,12 @@ fn prepared_aggregation_reclaims_dead_interner_indices_after_materialization() {
 #[serial_test::serial]
 fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let path = source_home.path().join(".local/share/opencode/opencode.db");
+        let path = input_home.path().join(".local/share/opencode/opencode.db");
         let conn = create_opencode_sqlite_db(&path);
         insert_opencode_sqlite_message(
             &conn,
@@ -2971,10 +2941,10 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
             r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
         );
         drop(conn);
-        let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
-            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
+        let unit = crate::adapters::InputUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
+            .with_meta(crate::adapters::InputUnitMeta::OpenCodeSqlite);
 
-        let home = source_home.path().to_str().unwrap();
+        let home = input_home.path().to_str().unwrap();
         let clients = ["opencode".to_string()];
 
         // Cold parse populates the cache; the two warm parses exercise the
@@ -2988,8 +2958,8 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
         assert_eq!(cold, warm_first);
         assert_eq!(warm_first, warm_second);
 
-        let mut cache = message_cache::SourceMessageCache::load().unwrap();
-        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
+        let mut cache = message_cache::InputMessageCache::load().unwrap();
+        let fingerprint = unit.input_policy().fingerprint().unwrap();
         assert_eq!(
             cache
                 .take_messages(&message_cache::CacheReadPlan::new(
@@ -3025,22 +2995,22 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
 #[serial_test::serial]
 fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let path = source_home.path().join(".local/share/opencode/opencode.db");
+        let path = input_home.path().join(".local/share/opencode/opencode.db");
         std::fs::create_dir_all(&path).unwrap();
-        let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
-            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
+        let unit = crate::adapters::InputUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
+            .with_meta(crate::adapters::InputUnitMeta::OpenCodeSqlite);
         let scanner_settings = scanner::ScannerSettings {
             opencode_db_paths: vec![path.clone()],
             ..scanner::ScannerSettings::default()
         };
 
         let (first_messages, first_health) = parse_all_messages_with_health_with_env_strategy(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
             false,
@@ -3048,26 +3018,26 @@ fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
         )
         .unwrap();
         assert!(first_messages.is_empty());
-        assert_eq!(first_health.failed_sources(), 1);
-        let source = &first_health.sources()[0];
-        assert_eq!(source.path, path);
-        let failure = source.status.failure().unwrap();
+        assert_eq!(first_health.failed_inputs(), 1);
+        let input = &first_health.inputs()[0];
+        assert_eq!(input.path, path);
+        let failure = input.status.failure().unwrap();
         assert!(
-            failure.message.contains("snapshot source metadata")
+            failure.message.contains("snapshot input metadata")
                 || failure
                     .message
-                    .contains("read source metadata and file identity")
+                    .contains("read input metadata and file identity")
                 || failure
                     .message
                     .contains("open current OpenCode SQLite database")
-                || failure.operation.contains("snapshot source metadata")
+                || failure.operation.contains("snapshot input metadata")
                 || failure
                     .operation
                     .contains("open current OpenCode SQLite database"),
-            "failure must identify the failed source operation: {failure:?}"
+            "failure must identify the failed input operation: {failure:?}"
         );
 
-        let cache = message_cache::SourceMessageCache::load().unwrap();
+        let cache = message_cache::InputMessageCache::load().unwrap();
         assert!(cache
             .get_meta(&path, unit.parser_version)
             .unwrap()
@@ -3085,7 +3055,7 @@ fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
         drop(conn);
 
         let second_messages = parse_all_messages_with_pricing_with_env_strategy(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
             false,
@@ -3105,43 +3075,43 @@ fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
 #[serial_test::serial]
 fn test_clean_empty_opencode_scan_result_is_not_cached() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let path = source_home.path().join(".local/share/opencode/opencode.db");
+        let path = input_home.path().join(".local/share/opencode/opencode.db");
         let conn = create_opencode_sqlite_db(&path);
         drop(conn);
 
-        let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
-            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
+        let unit = crate::adapters::InputUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
+            .with_meta(crate::adapters::InputUnitMeta::OpenCodeSqlite);
 
         let first_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
         )
         .unwrap();
         assert!(first_messages.is_empty());
 
-        let cache = message_cache::SourceMessageCache::load().unwrap();
+        let cache = message_cache::InputMessageCache::load().unwrap();
         assert!(cache
             .get_meta(&path, unit.parser_version)
             .unwrap()
             .is_none());
 
-        message_cache::reset_source_read_stats(&path);
+        message_cache::reset_input_read_stats(&path);
         let second_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
         )
         .unwrap();
         assert!(second_messages.is_empty());
         assert!(
-            message_cache::get_source_read_stats(&path).hash_passes > 0,
-            "a clean empty source has no shard and must be scanned again"
+            message_cache::get_input_read_stats(&path).hash_passes > 0,
+            "a clean empty input has no shard and must be scanned again"
         );
     }
 
@@ -3153,14 +3123,14 @@ fn test_clean_empty_opencode_scan_result_is_not_cached() {
 
 #[test]
 #[serial_test::serial]
-fn test_sqlite_source_cache_invalidates_on_wal_change() {
+fn test_sqlite_input_cache_invalidates_on_wal_change() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let db_dir = source_home.path().join(".local/share/opencode");
+        let db_dir = input_home.path().join(".local/share/opencode");
         std::fs::create_dir_all(&db_dir).unwrap();
         let db_path = db_dir.join("opencode.db");
 
@@ -3202,7 +3172,7 @@ fn test_sqlite_source_cache_invalidates_on_wal_change() {
         .unwrap();
 
         let first_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
         )
@@ -3217,7 +3187,7 @@ fn test_sqlite_source_cache_invalidates_on_wal_change() {
         assert!(db_path.with_extension("db-wal").exists());
 
         let refreshed_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
         )
@@ -3238,12 +3208,12 @@ fn test_parse_all_messages_dedups_across_channel_suffixed_opencode_dbs() {
     // `opencode-<channel>.db` (e.g. the user switches channels mid-session)
     // must only be counted once.
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let db_dir = source_home.path().join(".local/share/opencode");
+        let db_dir = input_home.path().join(".local/share/opencode");
         std::fs::create_dir_all(&db_dir).unwrap();
 
         let schema = "PRAGMA journal_mode=WAL;
@@ -3313,7 +3283,7 @@ fn test_parse_all_messages_dedups_across_channel_suffixed_opencode_dbs() {
         drop(conn);
 
         let messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
         )
@@ -3334,7 +3304,7 @@ fn test_parse_all_messages_dedups_across_channel_suffixed_opencode_dbs() {
         assert_eq!(ids, expected);
 
         let messages_warm = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
         )
@@ -3356,12 +3326,12 @@ fn test_parse_all_messages_dedups_across_channel_suffixed_opencode_dbs() {
 #[serial_test::serial]
 fn test_parse_all_messages_with_pricing_opencode_sqlite_deduplicates_forked_history() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let db_dir = source_home.path().join(".local/share/opencode");
+        let db_dir = input_home.path().join(".local/share/opencode");
         std::fs::create_dir_all(&db_dir).unwrap();
         let db_path = db_dir.join("opencode.db");
         let conn = create_opencode_sqlite_db(&db_path);
@@ -3413,7 +3383,7 @@ fn test_parse_all_messages_with_pricing_opencode_sqlite_deduplicates_forked_hist
         drop(conn);
 
         let messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
         )
@@ -3435,12 +3405,12 @@ fn test_parse_all_messages_with_pricing_opencode_sqlite_deduplicates_forked_hist
 #[serial_test::serial]
 fn test_local_message_loader_opencode_sqlite_counts_deduplicated_forked_history() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let db_dir = source_home.path().join(".local/share/opencode");
+        let db_dir = input_home.path().join(".local/share/opencode");
         std::fs::create_dir_all(&db_dir).unwrap();
         let db_path = db_dir.join("opencode.db");
         let conn = create_opencode_sqlite_db(&db_path);
@@ -3492,7 +3462,7 @@ fn test_local_message_loader_opencode_sqlite_counts_deduplicated_forked_history(
         drop(conn);
 
         let parsed = load_local_messages_for_test(LocalParseOptions {
-            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            home_dir: Some(input_home.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["opencode".to_string()]),
             since: None,
@@ -3520,8 +3490,8 @@ fn test_local_message_loader_opencode_sqlite_counts_deduplicated_forked_history(
     }
 }
 
-fn write_codex_forked_history_fixture(source_home: &std::path::Path) {
-    let codex_dir = source_home.join(".codex/sessions");
+fn write_codex_forked_history_fixture(input_home: &std::path::Path) {
+    let codex_dir = input_home.join(".codex/sessions");
     std::fs::create_dir_all(&codex_dir).unwrap();
     std::fs::write(
         codex_dir.join("parent.jsonl"),
@@ -3557,8 +3527,8 @@ fn write_codex_forked_history_fixture(source_home: &std::path::Path) {
     .unwrap();
 }
 
-fn write_codex_parent_replay_fixture(source_home: &std::path::Path) {
-    let codex_dir = source_home.join(".codex/sessions");
+fn write_codex_parent_replay_fixture(input_home: &std::path::Path) {
+    let codex_dir = input_home.join(".codex/sessions");
     std::fs::create_dir_all(&codex_dir).unwrap();
     std::fs::write(
         codex_dir.join("parent.jsonl"),
@@ -3623,15 +3593,15 @@ fn write_codex_parent_replay_fixture(source_home: &std::path::Path) {
 #[serial_test::serial]
 fn test_parse_all_messages_with_pricing_codex_deduplicates_forked_history() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        write_codex_forked_history_fixture(source_home.path());
+        write_codex_forked_history_fixture(input_home.path());
 
         let messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
@@ -3671,15 +3641,15 @@ fn test_parse_all_messages_with_pricing_codex_deduplicates_forked_history() {
 #[serial_test::serial]
 fn test_parse_all_messages_with_pricing_codex_deduplicates_parent_replay_across_forks() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        write_codex_parent_replay_fixture(source_home.path());
+        write_codex_parent_replay_fixture(input_home.path());
 
         let messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
@@ -3705,13 +3675,13 @@ fn test_parse_all_messages_with_pricing_codex_deduplicates_parent_replay_across_
     }
 }
 
-fn write_codex_twin_token_count_fixture(source_home: &std::path::Path) {
+fn write_codex_twin_token_count_fixture(input_home: &std::path::Path) {
     // Single session with two turns whose `last_token_usage` deltas are
     // byte-identical but emitted at different timestamps. The fork-dedup
     // key includes the cumulative total, so both turns must survive even
     // when a user happens to send two turns producing the same per-turn
     // delta.
-    let codex_dir = source_home.join(".codex/sessions");
+    let codex_dir = input_home.join(".codex/sessions");
     std::fs::create_dir_all(&codex_dir).unwrap();
     std::fs::write(
         codex_dir.join("twin-deltas.jsonl"),
@@ -3733,15 +3703,15 @@ fn write_codex_twin_token_count_fixture(source_home: &std::path::Path) {
 #[serial_test::serial]
 fn test_parse_all_messages_with_pricing_codex_keeps_twin_token_counts_at_distinct_timestamps() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        write_codex_twin_token_count_fixture(source_home.path());
+        write_codex_twin_token_count_fixture(input_home.path());
 
         let messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
@@ -3786,15 +3756,15 @@ fn test_parse_all_messages_with_pricing_codex_keeps_twin_token_counts_at_distinc
 #[serial_test::serial]
 fn test_local_message_loader_codex_counts_deduplicated_forked_history() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        write_codex_forked_history_fixture(source_home.path());
+        write_codex_forked_history_fixture(input_home.path());
 
         let parsed = load_local_messages_for_test(LocalParseOptions {
-            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            home_dir: Some(input_home.path().to_str().unwrap().to_string()),
             use_env_roots: false,
             clients: Some(vec!["codex".to_string()]),
             since: None,
@@ -3843,12 +3813,12 @@ fn test_local_message_loader_codex_counts_deduplicated_forked_history() {
 fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let fresh_cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let codex_dir = source_home.path().join(".codex/sessions");
+        let codex_dir = input_home.path().join(".codex/sessions");
         std::fs::create_dir_all(&codex_dir).unwrap();
         let path = codex_dir.join("session.jsonl");
         std::fs::write(
@@ -3863,14 +3833,14 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
         .unwrap();
 
         let initial_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
         .unwrap();
         assert_eq!(initial_messages.len(), 1);
         assert_eq!(initial_messages[0].model_id.as_ref(), "gpt-5.4");
-        assert!(message_cache::SourceMessageCache::load()
+        assert!(message_cache::InputMessageCache::load()
             .unwrap()
             .get_meta(
                 &path,
@@ -3897,14 +3867,14 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
         .unwrap();
 
         let warm_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
         .unwrap();
         std::env::set_var("HOME", fresh_cache_home.path());
         let fresh_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
@@ -3927,12 +3897,12 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
 #[serial_test::serial]
 fn test_codex_untimestamped_token_row_is_partial_without_cache_shard() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let codex_dir = source_home.path().join(".codex/sessions");
+        let codex_dir = input_home.path().join(".codex/sessions");
         std::fs::create_dir_all(&codex_dir).unwrap();
         let path = codex_dir.join("session.jsonl");
         std::fs::write(
@@ -3947,33 +3917,33 @@ fn test_codex_untimestamped_token_row_is_partial_without_cache_shard() {
         .unwrap();
 
         let (messages, health) = parse_all_messages_with_health(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
         .unwrap();
         assert!(messages.is_empty());
-        assert_eq!(health.partial_sources(), 1);
-        assert_eq!(health.failed_sources(), 0);
+        assert_eq!(health.partial_inputs(), 1);
+        assert_eq!(health.failed_inputs(), 0);
         assert_eq!(health.rejected_records(), 1);
-        let source = &health.sources()[0];
-        assert_eq!(source.path, path);
+        let input = &health.inputs()[0];
+        assert_eq!(input.path, path);
         assert!(matches!(
-            source.status,
-            crate::source_health::SourceStatus::Partial { .. }
+            input.status,
+            crate::input_health::InputStatus::Partial { .. }
         ));
         assert_eq!(
-            source.rejections.entries().next().unwrap().key,
+            input.rejections.entries().next().unwrap().key,
             "missing-timestamp"
         );
-        let failure = source.status.failure().unwrap();
+        let failure = input.status.failure().unwrap();
         assert_eq!(failure.operation, "validate Codex token-count event");
         assert!(
             failure.message.contains("timestamp is missing"),
             "{failure:?}"
         );
 
-        assert!(message_cache::SourceMessageCache::load()
+        assert!(message_cache::InputMessageCache::load()
             .unwrap()
             .get_meta(
                 &path,
@@ -3996,12 +3966,12 @@ fn test_codex_untimestamped_token_row_is_partial_without_cache_shard() {
 #[serial_test::serial]
 fn test_codex_malformed_json_suffix_keeps_prefix_without_cache_shard() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let codex_dir = source_home.path().join(".codex/sessions");
+        let codex_dir = input_home.path().join(".codex/sessions");
         std::fs::create_dir_all(&codex_dir).unwrap();
         let path = codex_dir.join("session.jsonl");
         std::fs::write(
@@ -4018,7 +3988,7 @@ fn test_codex_malformed_json_suffix_keeps_prefix_without_cache_shard() {
         .unwrap();
 
         let (messages, health) = parse_all_messages_with_health(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
@@ -4026,22 +3996,22 @@ fn test_codex_malformed_json_suffix_keeps_prefix_without_cache_shard() {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
         assert_eq!(messages[0].tokens.input, 8);
-        assert_eq!(health.partial_sources(), 1);
-        assert_eq!(health.failed_sources(), 0);
+        assert_eq!(health.partial_inputs(), 1);
+        assert_eq!(health.failed_inputs(), 0);
         assert_eq!(health.rejected_records(), 1);
-        let source = &health.sources()[0];
-        assert_eq!(source.path, path);
+        let input = &health.inputs()[0];
+        assert_eq!(input.path, path);
         assert!(matches!(
-            source.status,
-            crate::source_health::SourceStatus::Partial { .. }
+            input.status,
+            crate::input_health::InputStatus::Partial { .. }
         ));
         assert_eq!(
-            source.rejections.entries().next().unwrap().key,
+            input.rejections.entries().next().unwrap().key,
             "malformed-record"
         );
-        let failure = source.status.failure().unwrap();
+        let failure = input.status.failure().unwrap();
         assert_eq!(failure.operation, "decode Codex JSONL entry");
-        assert!(message_cache::SourceMessageCache::load()
+        assert!(message_cache::InputMessageCache::load()
             .unwrap()
             .get_meta(
                 &path,
@@ -4064,12 +4034,12 @@ fn test_codex_malformed_json_suffix_keeps_prefix_without_cache_shard() {
 #[serial_test::serial]
 fn test_codex_invalid_utf8_suffix_keeps_prefix_without_cache_shard() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let session_dir = source_home.path().join(".codex/sessions");
+        let session_dir = input_home.path().join(".codex/sessions");
         std::fs::create_dir_all(&session_dir).unwrap();
         let path = session_dir.join("session.jsonl");
 
@@ -4088,7 +4058,7 @@ fn test_codex_invalid_utf8_suffix_keeps_prefix_without_cache_shard() {
         file.flush().unwrap();
 
         let (messages, health) = parse_all_messages_with_health(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
@@ -4096,20 +4066,20 @@ fn test_codex_invalid_utf8_suffix_keeps_prefix_without_cache_shard() {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
         assert_eq!(messages[0].tokens.input, 8);
-        assert_eq!(health.partial_sources(), 1);
-        assert_eq!(health.failed_sources(), 0);
+        assert_eq!(health.partial_inputs(), 1);
+        assert_eq!(health.failed_inputs(), 0);
         assert_eq!(health.rejected_records(), 0);
-        let source = &health.sources()[0];
-        assert_eq!(source.path, path);
+        let input = &health.inputs()[0];
+        assert_eq!(input.path, path);
         assert!(matches!(
-            source.status,
-            crate::source_health::SourceStatus::Partial { .. }
+            input.status,
+            crate::input_health::InputStatus::Partial { .. }
         ));
-        assert!(source.rejections.is_empty());
-        let failure = source.status.failure().unwrap();
+        assert!(input.rejections.is_empty());
+        let failure = input.status.failure().unwrap();
         assert_eq!(failure.operation, "read Codex JSONL line");
 
-        let cache = message_cache::SourceMessageCache::load().unwrap();
+        let cache = message_cache::InputMessageCache::load().unwrap();
         assert!(cache
             .get_meta(
                 &path,
@@ -4133,12 +4103,12 @@ fn test_codex_invalid_utf8_suffix_keeps_prefix_without_cache_shard() {
 fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let fresh_cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let session_dir = source_home.path().join(".codex/sessions");
+        let session_dir = input_home.path().join(".codex/sessions");
         std::fs::create_dir_all(&session_dir).unwrap();
         let path = session_dir.join("session.jsonl");
         std::fs::write(
@@ -4153,32 +4123,32 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
         .unwrap();
 
         let (initial_messages, initial_health) = parse_all_messages_with_health(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
         .unwrap();
         assert!(initial_messages.is_empty());
-        assert_eq!(initial_health.partial_sources(), 1);
-        assert_eq!(initial_health.failed_sources(), 0);
+        assert_eq!(initial_health.partial_inputs(), 1);
+        assert_eq!(initial_health.failed_inputs(), 0);
         assert_eq!(initial_health.rejected_records(), 1);
-        let source = &initial_health.sources()[0];
-        assert_eq!(source.path, path);
+        let input = &initial_health.inputs()[0];
+        assert_eq!(input.path, path);
         assert!(matches!(
-            source.status,
-            crate::source_health::SourceStatus::Partial { .. }
+            input.status,
+            crate::input_health::InputStatus::Partial { .. }
         ));
         assert_eq!(
-            source.rejections.entries().next().unwrap().key,
+            input.rejections.entries().next().unwrap().key,
             "missing-model"
         );
-        let failure = source.status.failure().unwrap();
+        let failure = input.status.failure().unwrap();
         assert_eq!(failure.operation, "resolve Codex token-count model");
         assert!(
             failure.message.contains("model was never identified"),
             "{failure:?}"
         );
-        assert!(message_cache::SourceMessageCache::load()
+        assert!(message_cache::InputMessageCache::load()
             .unwrap()
             .get_meta(
                 &path,
@@ -4205,7 +4175,7 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
         file.flush().unwrap();
 
         let resumed_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
@@ -4213,7 +4183,7 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
 
         std::env::set_var("HOME", fresh_cache_home.path());
         let fresh_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
@@ -4224,7 +4194,7 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
         assert_eq!(resumed_messages[0].model_id.as_ref(), "gpt-5.5");
 
         std::env::set_var("HOME", cache_home.path());
-        assert!(message_cache::SourceMessageCache::load()
+        assert!(message_cache::InputMessageCache::load()
             .unwrap()
             .get_meta(
                 &path,
@@ -4248,12 +4218,12 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
 fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let fresh_cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", cache_home.path());
 
     {
-        let session_dir = source_home.path().join(".codex/sessions");
+        let session_dir = input_home.path().join(".codex/sessions");
         std::fs::create_dir_all(&session_dir).unwrap();
         let path = session_dir.join("session.jsonl");
         std::fs::write(
@@ -4267,13 +4237,13 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
         .unwrap();
 
         let initial_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
         .unwrap();
         assert_eq!(initial_messages.len(), 1);
-        assert!(message_cache::SourceMessageCache::load()
+        assert!(message_cache::InputMessageCache::load()
             .unwrap()
             .get_meta(
                 &path,
@@ -4301,7 +4271,7 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
         file.flush().unwrap();
 
         let warm_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
@@ -4309,7 +4279,7 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
 
         std::env::set_var("HOME", fresh_cache_home.path());
         let fresh_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["codex".to_string()],
             None,
         )
@@ -4327,13 +4297,13 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
 
 #[test]
 #[serial_test::serial]
-fn test_source_cache_does_not_reuse_priced_cost_without_pricing_service() {
+fn test_input_cache_does_not_reuse_priced_cost_without_pricing_service() {
     let temp_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let original_home = std::env::var("HOME").ok();
     std::env::set_var("HOME", temp_home.path());
     {
-        write_kimi_code_usage_fixture(source_home.path());
+        write_kimi_code_usage_fixture(input_home.path());
 
         let mut litellm = HashMap::new();
         litellm.insert(
@@ -4348,7 +4318,7 @@ fn test_source_cache_does_not_reuse_priced_cost_without_pricing_service() {
         let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
         let repriced_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["kimi".to_string()],
             Some(&pricing),
         )
@@ -4357,7 +4327,7 @@ fn test_source_cache_does_not_reuse_priced_cost_without_pricing_service() {
         assert!(repriced_messages.iter().all(|message| message.cost > 0.0));
 
         let cached_messages = parse_all_messages_with_pricing(
-            source_home.path().to_str().unwrap(),
+            input_home.path().to_str().unwrap(),
             &["kimi".to_string()],
             None,
         )
@@ -4401,9 +4371,9 @@ fn test_apply_token_pricing_clears_existing_cost_without_pricing() {
 #[serial_test::serial]
 fn test_parse_all_messages_with_pricing_prices_canonical_gpt_5_6_factory_model() {
     let cache_home = tempfile::TempDir::new().unwrap();
-    let source_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
-    let session_dir = source_home.path().join(".factory/sessions/workspace");
+    let session_dir = input_home.path().join(".factory/sessions/workspace");
     std::fs::create_dir_all(&session_dir).unwrap();
     std::fs::write(
         session_dir.join("factory-session.settings.json"),
@@ -4447,13 +4417,13 @@ fn test_parse_all_messages_with_pricing_prices_canonical_gpt_5_6_factory_model()
     );
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
     let cold_messages = parse_all_messages_with_pricing(
-        source_home.path().to_str().unwrap(),
+        input_home.path().to_str().unwrap(),
         &["droid".to_string()],
         Some(&pricing),
     )
     .unwrap();
     let warm_messages = parse_all_messages_with_pricing(
-        source_home.path().to_str().unwrap(),
+        input_home.path().to_str().unwrap(),
         &["droid".to_string()],
         Some(&pricing),
     )
@@ -5754,7 +5724,9 @@ fn test_select_local_parse_pricing_falls_back_to_stale_cache_on_fetch_error() {
     let selected =
         select_local_parse_pricing(Err("network failed".to_string()), || Some(stale)).unwrap();
 
-    assert!(selected.lookup_with_source("gpt-5.2", None).is_some());
+    assert!(selected
+        .lookup_with_pricing_source("gpt-5.2", None)
+        .is_some());
 }
 
 #[test]
@@ -5939,24 +5911,24 @@ fn test_missing_configured_opencode_database_is_an_explicit_error() {
     .unwrap();
 
     assert!(loaded.messages.is_empty());
-    assert_eq!(loaded.health.failed_sources(), 1);
-    let source = &loaded.health.sources()[0];
-    assert_eq!(source.path, missing_db);
-    let failure = source.status.failure().unwrap();
+    assert_eq!(loaded.health.failed_inputs(), 1);
+    let input = &loaded.health.inputs()[0];
+    assert_eq!(input.path, missing_db);
+    let failure = input.status.failure().unwrap();
     assert!(
         failure
             .message
-            .contains("read source metadata and file identity")
+            .contains("read input metadata and file identity")
             || failure
                 .message
                 .contains("open current OpenCode SQLite database")
-            || failure.operation.contains("snapshot source metadata"),
-        "failure must identify the failed source operation: {failure:?}"
+            || failure.operation.contains("snapshot input metadata"),
+        "failure must identify the failed input operation: {failure:?}"
     );
 
-    let unit = crate::adapters::SourceUnit::sqlite_with_wal(ClientId::OpenCode, missing_db.clone())
-        .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
-    assert!(message_cache::SourceMessageCache::load()
+    let unit = crate::adapters::InputUnit::sqlite_with_wal(ClientId::OpenCode, missing_db.clone())
+        .with_meta(crate::adapters::InputUnitMeta::OpenCodeSqlite);
+    assert!(message_cache::InputMessageCache::load()
         .unwrap()
         .get_meta(&missing_db, unit.parser_version)
         .unwrap()
@@ -5965,7 +5937,7 @@ fn test_missing_configured_opencode_database_is_an_explicit_error() {
 
 #[test]
 #[serial_test::serial]
-fn time_metrics_report_preserves_source_health() {
+fn time_metrics_report_preserves_input_health() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(temp_dir.path());
     let missing_db = temp_dir.path().join("missing/custom-current.db");
@@ -5982,18 +5954,18 @@ fn time_metrics_report_preserves_source_health() {
             },
             ..ReportOptions::default()
         }))
-        .expect("a broken third-party source must not abort time-metrics");
+        .expect("a broken third-party input must not abort time-metrics");
 
     assert_eq!(report.metrics.session_count, 0);
     assert!(!report.health.complete);
-    assert_eq!(report.health.failed_sources, 1);
-    assert_eq!(report.health.issues[0].source, "opencode");
-    assert_eq!(report.health.issues[0].issue, "source-unavailable");
+    assert_eq!(report.health.failed_inputs, 1);
+    assert_eq!(report.health.issues[0].client, "opencode");
+    assert_eq!(report.health.issues[0].issue, "input-unavailable");
 }
 
 #[test]
 #[serial_test::serial]
-fn local_client_counts_preserve_source_health() {
+fn local_client_counts_preserve_input_health() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(temp_dir.path());
     let missing_db = temp_dir.path().join("missing/client-counts.db");
@@ -6008,18 +5980,18 @@ fn local_client_counts_preserve_source_health() {
         },
         ..LocalParseOptions::default()
     })
-    .expect("a broken third-party source must not abort client counts");
+    .expect("a broken third-party input must not abort client counts");
 
     assert_eq!(report.counts.get(ClientId::OpenCode), 0);
     assert!(!report.health.complete);
-    assert_eq!(report.health.failed_sources, 1);
-    assert_eq!(report.health.issues[0].source, "opencode");
-    assert_eq!(report.health.issues[0].issue, "source-unavailable");
+    assert_eq!(report.health.failed_inputs, 1);
+    assert_eq!(report.health.issues[0].client, "opencode");
+    assert_eq!(report.health.issues[0].issue, "input-unavailable");
 }
 
 #[test]
 #[serial_test::serial]
-fn public_raw_message_report_preserves_source_health_and_metadata() {
+fn public_raw_message_report_preserves_input_health_and_metadata() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(temp_dir.path());
     let missing_db = temp_dir.path().join("missing/raw-report.db");
@@ -6039,15 +6011,15 @@ fn public_raw_message_report_preserves_source_health_and_metadata() {
             },
             None,
         ))
-        .expect("a broken source must produce a degraded raw-message report");
+        .expect("a broken input must produce a degraded raw-message report");
 
     assert!(report.data.is_empty());
     assert!(!report.health.complete);
-    assert_eq!(report.health.failed_sources, 1);
-    assert_eq!(report.health.issues[0].source, "opencode");
-    assert_eq!(report.health.issues[0].issue, "source-unavailable");
+    assert_eq!(report.health.failed_inputs, 1);
+    assert_eq!(report.health.issues[0].client, "opencode");
+    assert_eq!(report.health.issues[0].issue, "input-unavailable");
     assert_ne!(
-        report.metadata.source_inventory_signature.as_bytes(),
+        report.metadata.input_inventory_signature.as_bytes(),
         &[0_u8; 32]
     );
 }
@@ -6069,8 +6041,8 @@ fn test_opencode_auto_discovery_error_reaches_public_loader() {
     .unwrap();
 
     assert!(loaded.messages.is_empty());
-    assert_eq!(loaded.health.failed_sources(), 1);
-    let failure = loaded.health.sources()[0].status.failure().unwrap();
+    assert_eq!(loaded.health.failed_inputs(), 1);
+    let failure = loaded.health.inputs()[0].status.failure().unwrap();
     assert!(
         failure
             .message

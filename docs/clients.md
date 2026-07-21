@@ -1,7 +1,7 @@
 # Supported clients and data locations
 
 The canonical identity list is `crates/tokscale-core/client-catalog.json`. It is
-used to generate Rust client identity data. This page summarizes scan sources
+used to generate Rust client identity data. This page summarizes scan inputs
 and semantic boundaries for users.
 
 Run this command from a built checkout to inspect what Tokscale sees on the
@@ -16,10 +16,10 @@ When using an installed binary, use `tokscale clients` instead.
 
 ## Client table
 
-| ID | Display name | Local source | Notes |
+| ID | Display name | Local inputs | Notes |
 | --- | --- | --- | --- |
 | `opencode` | OpenCode | `~/.local/share/opencode/opencode*.db` | Reads only current-format SQLite databases and combines multiple release channels when present. |
-| `claude` | Claude Code | `~/.claude/projects/**/*.jsonl`, `~/.claude/transcripts/**/*.jsonl` | Claude Desktop chat history is not treated as Claude Code token accounting. |
+| `claude` | Claude | `~/.claude/projects/**/*.jsonl`, `~/.claude/transcripts/**/*.jsonl` | Claude Desktop chat history is not treated as Claude Code token accounting. |
 | `codex` | Codex CLI | `$CODEX_HOME/sessions/**/*.jsonl`, fallback `~/.codex/sessions/` | Includes provider-owned interactive and `codex exec` sessions. |
 | `gemini` | Gemini CLI | `$GEMINI_CLI_HOME/tmp/**/chats/*`, fallback `~/.gemini/tmp/` | Reads local chat files. |
 | `amp` | Amp | `~/.local/share/amp/threads/T-*.json` | Reads local thread files. |
@@ -41,7 +41,7 @@ When using an installed binary, use `tokscale clients` instead.
 | `antigravity` | Antigravity | `$GEMINI_CLI_HOME/antigravity-cli/conversations/*.db`, fallback `~/.gemini/antigravity-cli/conversations/*.db` | Reads current AGY CLI SQLite/WAL data directly. Antigravity IDE and Antigravity 2.0 Agent Manager are intentionally unsupported; see ADR 0025. |
 | `zed` | Zed Agent | `~/.local/share/zed/threads/threads.db` | Hosted Zed model usage only; external ACP agents are not included. |
 | `zcode` | ZCode | `~/.zcode/projects/**/*.jsonl` | Reads Z.ai ADE JSONL sessions. |
-| `kiro` | Kiro | `~/.kiro/sessions/cli/`, `~/.local/share/kiro-cli/data.sqlite3`, and Kiro IDE globalStorage snapshots | Combines CLI and IDE local sources when present. |
+| `kiro` | Kiro | `~/.kiro/sessions/cli/`, `~/.local/share/kiro-cli/data.sqlite3`, and Kiro IDE globalStorage snapshots | Combines CLI and IDE local inputs when present. |
 | `junie` | Junie | `~/.junie/sessions/**/events.jsonl` | Reads JetBrains Junie session events. |
 | `cline` | Cline | `$CLINE_SESSION_DATA_DIR/**/*.messages.json`, then `$CLINE_DATA_DIR/sessions`, `$CLINE_DIR/data/sessions`, or `~/.cline/data/sessions` | Reads the shared SDK v1 artifacts written by VS Code 4.0+ and CLI 3.x. Retired VS Code globalStorage task logs are unsupported. |
 | `commandcode` | Command Code | `~/.commandcode/projects/**/*.jsonl` | Estimated from transcripts. |
@@ -92,12 +92,12 @@ not recursive scan roots:
 `scanner.opencodeDbPaths` is the only persistent custom OpenCode input.
 `scanner.extraScanPaths.opencode` and `TOKSCALE_EXTRA_DIRS` entries for
 OpenCode are ignored. Its configured file paths are authoritative, so missing
-or unreadable paths appear as `source-unavailable` in report health. Legacy
+or unreadable paths appear as `input-unavailable` in report health. Legacy
 `storage/message/**/*.json` data is not read. `NotFound` during automatic
 discovery is treated as absent; every other discovery I/O failure remains
 visible in health. Databases without the current session schema, or with
 malformed current message payloads, likewise produce incomplete/degraded input
-rather than a clean empty source, without aborting unrelated clients. Current
+rather than a clean empty input, without aborting unrelated clients. Current
 payloads must include role, model, timestamp, token, and cache-token fields.
 Provider is optional identity metadata: a missing or blank value is inferred
 from the model when possible and otherwise becomes `unknown`. Blank model or
@@ -124,7 +124,7 @@ then infers a provider or records `unknown`. Request transport is not treated as
 model ownership. The
 older root-level Kimi CLI session format is not supported. See
 [the verified Kimi storage facts](facts/kimi-code.md) and
-[ADR 0020](adr/0020-strict-source-identity-and-error-contract.md).
+[ADR 0020](adr/0020-input-ingestion-and-integrity-contract.md).
 
 Antigravity is not a cache-backed integration. Reports and the TUI read current
 AGY CLI databases directly; there is no sync command. Historical
@@ -148,7 +148,7 @@ tokscale usage
 ## Retention notes
 
 Some upstream tools delete old sessions automatically. If complete local
-history matters, configure retention in the source client before data expires.
+history matters, configure retention in the originating client before data expires.
 
 Claude Code defaults to a finite cleanup period in some configurations. Gemini
 CLI, Codex CLI, and OpenCode generally keep local sessions unless the user or

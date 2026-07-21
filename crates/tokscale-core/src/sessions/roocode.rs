@@ -7,16 +7,16 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
 use super::UnifiedMessage;
-use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource};
+use crate::input_health::{RecordRejectionReason, RejectionSummary, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-pub fn parse_roocode_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_roocode_file(path: &Path) -> SessionParseResult<ScannedInput> {
     parse_roo_kilo_file(path, "roocode")
 }
 
-pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> SessionParseResult<ScannedSource> {
+pub(crate) fn parse_roo_kilo_file(path: &Path, client: &str) -> SessionParseResult<ScannedInput> {
     let data = std::fs::read(path)
         .map_err(|error| SessionParseError::at_path(path, "read Roo Code UI messages", error))?;
 
@@ -83,7 +83,7 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> SessionParseResu
     }
 
     if usage_events.is_empty() {
-        return Ok(ScannedSource {
+        return Ok(ScannedInput {
             messages: Vec::new(),
             rejections,
             interrupted: None,
@@ -96,7 +96,7 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> SessionParseResu
         for _ in 0..usage_events.len() {
             rejections.record(RecordRejectionReason::MissingModel);
         }
-        return Ok(ScannedSource {
+        return Ok(ScannedInput {
             messages: Vec::new(),
             rejections,
             interrupted: None,
@@ -104,12 +104,12 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> SessionParseResu
     };
     let mut messages = Vec::with_capacity(usage_events.len());
     for (timestamp, token_breakdown, provider) in usage_events {
-        let provider = provider_identity::source_provider_id(
+        let provider = provider_identity::observed_provider_id(
             provider.as_deref().unwrap_or_default(),
             &model_id,
         );
         messages.push(UnifiedMessage::new_with_agent(
-            source,
+            client,
             model_id.clone(),
             provider,
             session_id.clone(),
@@ -120,7 +120,7 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> SessionParseResu
         ));
     }
 
-    Ok(ScannedSource {
+    Ok(ScannedInput {
         messages,
         rejections,
         interrupted: None,
@@ -473,7 +473,7 @@ after"#;
     }
 
     #[test]
-    fn source_io_errors_remain_source_errors_while_bad_usage_fields_are_rejections() {
+    fn input_io_errors_remain_input_errors_while_bad_usage_fields_are_rejections() {
         let dir = TempDir::new().unwrap();
         let missing_metadata = setup_task(
             &dir,

@@ -9,7 +9,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{extract_string, parse_timestamp_value};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary, ScannedInput};
 use crate::{model_aliases, token_imputation};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
@@ -30,7 +30,7 @@ struct GrokMetadata {
 struct GrokMetadataScan {
     metadata: GrokMetadata,
     rejections: RejectionSummary,
-    interrupted: Option<SourceFailure>,
+    interrupted: Option<InputFailure>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,9 +103,9 @@ impl ActiveTurn {
     }
 }
 
-pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedInput> {
     if path.file_name().and_then(|name| name.to_str()) != Some("updates.jsonl") {
-        return Ok(ScannedSource::default());
+        return Ok(ScannedInput::default());
     }
 
     let metadata_scan = read_metadata(path);
@@ -121,9 +121,9 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
     let mut last_total_timestamp: Option<i64> = None;
     let mut active_turn: Option<ActiveTurn> = None;
     let mut turn_index = 0usize;
-    let mut scanned = ScannedSource {
+    let mut scanned = ScannedInput {
         rejections: metadata_scan.rejections,
-        ..ScannedSource::default()
+        ..ScannedInput::default()
     };
     let mut aggregate_replay_allowed = true;
 
@@ -132,7 +132,7 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "read JSONL line",
                     format!("{} line {line_number}: {error}", path.display()),
                 ));
@@ -146,7 +146,7 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
         let value = match serde_json::from_str::<Value>(&line) {
             Ok(value) => value,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "decode JSONL line",
                     format!("{} line {line_number}: {error}", path.display()),
                 ));
@@ -163,7 +163,7 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
                 scanned
                     .rejections
                     .record(RecordRejectionReason::MalformedRecord);
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     error.operation(),
                     format!("{} line {line_number}: {error}", path.display()),
                 ));
@@ -178,7 +178,7 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
             scanned
                 .rejections
                 .record(RecordRejectionReason::MissingTimestamp);
-            scanned.interrupted = Some(SourceFailure::new(
+            scanned.interrupted = Some(InputFailure::new(
                 "validate usage timestamp",
                 format!(
                     "{} line {line_number}: Grok state-bearing update is missing a timestamp",
@@ -213,7 +213,7 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
                             scanned
                                 .rejections
                                 .record(RecordRejectionReason::MalformedRecord);
-                            scanned.interrupted = Some(SourceFailure::new(
+                            scanned.interrupted = Some(InputFailure::new(
                                 error.operation(),
                                 format!("{} line {line_number}: {error}", path.display()),
                             ));
@@ -243,7 +243,7 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
             scanned
                 .rejections
                 .record(RecordRejectionReason::MalformedRecord);
-            scanned.interrupted = Some(SourceFailure::new("validate total tokens", detail));
+            scanned.interrupted = Some(InputFailure::new("validate total tokens", detail));
             break;
         }
 
@@ -297,7 +297,7 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
                         scanned
                             .rejections
                             .record(RecordRejectionReason::MalformedRecord);
-                        scanned.interrupted = Some(SourceFailure::new(
+                        scanned.interrupted = Some(InputFailure::new(
                             error.operation(),
                             format!("{}: {error}", path.display()),
                         ));
@@ -334,7 +334,7 @@ pub fn parse_grok_updates_file(path: &Path) -> SessionParseResult<ScannedSource>
                         scanned
                             .rejections
                             .record(RecordRejectionReason::MalformedRecord);
-                        scanned.interrupted = Some(SourceFailure::new(
+                        scanned.interrupted = Some(InputFailure::new(
                             error.operation(),
                             format!("{}: {error}", path.display()),
                         ));
@@ -486,14 +486,14 @@ fn read_events_metadata(
     path: &Path,
     metadata: &mut GrokMetadata,
     rejections: &mut RejectionSummary,
-) -> Option<SourceFailure> {
+) -> Option<InputFailure> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => {
             let detail = format!("{}: open related events failed: {error}", path.display());
             rejections.record(RecordRejectionReason::MalformedRecord);
-            return Some(SourceFailure::new("open related events", detail));
+            return Some(InputFailure::new("open related events", detail));
         }
     };
 
@@ -507,7 +507,7 @@ fn read_events_metadata(
                     path.display()
                 );
                 rejections.record(RecordRejectionReason::MalformedRecord);
-                return Some(SourceFailure::new("read related events line", detail));
+                return Some(InputFailure::new("read related events line", detail));
             }
         };
         if line.trim().is_empty() {
@@ -576,7 +576,7 @@ fn extract_session_id(value: &Value) -> Option<String> {
 }
 
 fn canonicalize_grok_model(model: &str) -> String {
-    model_aliases::canonicalize_source_model_id(model).unwrap_or_else(|| model.trim().to_string())
+    model_aliases::canonicalize_observed_model_id(model).unwrap_or_else(|| model.trim().to_string())
 }
 
 fn extract_total_tokens(value: &Value) -> SessionParseResult<Option<i64>> {
@@ -870,7 +870,7 @@ not-json
     }
 
     #[test]
-    fn batch_imputes_grok_turns_with_source_file_aggregate_rounding() {
+    fn batch_imputes_grok_turns_with_input_file_aggregate_rounding() {
         let (_temp, path) = write_fixture(
             r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","_meta":{"modelId":"grok-composer-2.5-fast"}},"_meta":{"agentTimestampMs":1700000000000}}}
 {"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":1,"agentTimestampMs":1700000001000}}}

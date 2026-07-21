@@ -2,10 +2,10 @@ use crate::commands::shared::parse_client_id_set;
 use anyhow::Result;
 use tokscale_core::ClientId;
 
-pub(crate) fn run_source_cache_prune() -> Result<()> {
-    let stats = tokscale_core::prune_source_message_cache()?;
+pub(crate) fn run_input_cache_prune() -> Result<()> {
+    let stats = tokscale_core::prune_input_message_cache()?;
     println!(
-        "Source cache prune: scanned {}, removed {}, retained {}.",
+        "Input cache prune: scanned {}, removed {}, retained {}.",
         stats.scanned, stats.removed, stats.retained
     );
     Ok(())
@@ -36,11 +36,11 @@ pub(crate) fn run_warm_tui_cache(
     let _ = save_tui_bundle_cache(
         &result.accumulator,
         &result.sessions,
-        &result.source_space,
+        &result.client_space,
         &health,
         &enabled_set,
         &report_scope,
-        result.source_inventory_signature,
+        result.input_inventory_signature,
     )?;
     println!("TUI cache warmed.");
     Ok(())

@@ -3,7 +3,7 @@ use anyhow::Result;
 pub(crate) fn run_pricing_lookup(
     model_id: &str,
     json: bool,
-    source: Option<&str>,
+    pricing_source: Option<&str>,
     no_spinner: bool,
 ) -> Result<()> {
     use colored::Colorize;
@@ -12,12 +12,12 @@ pub(crate) fn run_pricing_lookup(
     use tokio::runtime::Runtime;
     use tokscale_core::pricing::PricingService;
 
-    let source_normalized = source.map(|value| value.to_lowercase());
+    let pricing_source_normalized = pricing_source.map(|value| value.to_lowercase());
 
     let spinner = if no_spinner {
         None
     } else {
-        let provider_label = source
+        let provider_label = pricing_source
             .map(|value| format!(" from {}", value))
             .unwrap_or_default();
         let pb = ProgressBar::new_spinner();
@@ -30,7 +30,9 @@ pub(crate) fn run_pricing_lookup(
     let rt = Runtime::new()?;
     let result = match rt.block_on(async {
         let svc = PricingService::get_or_init().await?;
-        Ok::<_, String>(svc.lookup_with_source(model_id, source_normalized.as_deref()))
+        Ok::<_, String>(
+            svc.lookup_with_pricing_source(model_id, pricing_source_normalized.as_deref()),
+        )
     }) {
         Ok(result) => result,
         Err(err) => {
@@ -64,14 +66,14 @@ pub(crate) fn run_pricing_lookup(
                 struct PricingOutput {
                     model_id: String,
                     matched_key: String,
-                    source: String,
+                    pricing_source: String,
                     pricing: PricingValues,
                 }
 
                 let output = PricingOutput {
                     model_id: model_id.to_string(),
                     matched_key: pricing.matched_key,
-                    source: pricing.source,
+                    pricing_source: pricing.pricing_source,
                     pricing: PricingValues {
                         input_cost_per_token: pricing.pricing.input_cost_per_token.unwrap_or(0.0),
                         output_cost_per_token: pricing.pricing.output_cost_per_token.unwrap_or(0.0),
@@ -93,14 +95,14 @@ pub(crate) fn run_pricing_lookup(
             Some(pricing) => {
                 println!("\n  Pricing for: {}", model_id.bold());
                 println!("  Matched key: {}", pricing.matched_key);
-                let source_label = match pricing.source.to_lowercase().as_str() {
+                let pricing_source_label = match pricing.pricing_source.to_lowercase().as_str() {
                     "custom" => "Custom",
                     "litellm" => "LiteLLM",
                     "openrouter" => "OpenRouter",
                     "models.dev" => "Models.dev",
-                    _ => pricing.source.as_str(),
+                    _ => pricing.pricing_source.as_str(),
                 };
-                println!("  Source: {}", source_label);
+                println!("  Pricing Source: {}", pricing_source_label);
                 println!();
                 let input = pricing.pricing.input_cost_per_token.unwrap_or(0.0);
                 let output = pricing.pricing.output_cost_per_token.unwrap_or(0.0);

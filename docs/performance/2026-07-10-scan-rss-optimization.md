@@ -16,7 +16,7 @@ keeps the prior rows so later improvements cannot quietly replace the baseline.
 - Command: `tokscale time-metrics --json --no-spinner -c <clients>`; this path
   does not load pricing, so network and pricing-cache latency are excluded.
 - Reported values in the cumulative table are medians. Raw samples remain below.
-- The source corpus is live local data. Each stage records cache/source facts,
+- The input corpus is live local data. Each stage records cache/input facts,
   and comparisons must call out material corpus drift.
 
 The fixed probe is automated by:
@@ -41,7 +41,7 @@ Baseline commit: `1c7bb2ed99b0`
 
 | Input | Size / count |
 | --- | ---: |
-| source-message cache | 35,789 shards / 391 MiB |
+| input-message cache | 35,789 shards / 391 MiB |
 | Claude projects | 647 MiB |
 | Codex sessions | 706 MiB |
 | OpenCode data | 429 MiB |
@@ -50,7 +50,7 @@ Baseline commit: `1c7bb2ed99b0`
 ## Cumulative real-corpus results
 
 `zero` is a zero-session Qwen request and exposes fixed startup/cache overhead.
-`core` scans warm Claude, Codex, and OpenCode sources together.
+`core` scans warm Claude, Codex, and OpenCode inputs together.
 
 | Stage | Commit | Candidate | zero processing ms | zero wall s | zero RSS KiB | core processing ms | core wall s | core RSS KiB | Aggregation wall s | Aggregation RSS KiB |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -58,7 +58,7 @@ Baseline commit: `1c7bb2ed99b0`
 | C1 | `3cce3edb` | Explicit cache GC | 0 | 0.00 | 9,760 | 4,354 | 4.36 | 34,832 | 0.16 | 35,040 |
 | C2 | `37c7c865` | Metadata-stamp warm hits | 0 | 0.00 | 9,920 | 3,624 | 3.94 | 37,512 | 0.15 | 35,040 |
 | C3 | `b9d5dae2` | Single prepared TUI inventory | 0 | 0.00 | 9,760 | 4,534 | 4.54 | 39,288 | 0.15 | 35,040 |
-| C4 | `5f50b6f2` | Bounded single-copy source fold | 0 | 0.00 | 9,920 | 4,290 | 4.29 | 38,700 | 0.15 | 35,040 |
+| C4 | `5f50b6f2` | Bounded single-copy input fold | 0 | 0.00 | 9,920 | 4,290 | 4.29 | 38,700 | 0.15 | 35,040 |
 | C5 | `061d5b18` | Structured aggregation identities | 0 | 0.00 | 9,760 | 3,353 | 3.35 | 37,096 | 0.10 | 32,764 |
 | C6 | `e5da96e6` | Explicit planned-read recovery | 0 | 0.00 | 9,760 | 4,139 | 4.14 | 37,304 | 0.11 | 32,920 |
 | C7 | `6e499ecd` | Streamed TUI cache persistence | 1 | 0.00 | 9,920 | 3,387 | 3.39 | 35,760 | 0.11 | 32,760 |
@@ -107,9 +107,9 @@ run  wall_s  user_s  sys_s  max_rss_kib
 5    0.17    0.17    0.01   34924
 ```
 
-### C1 — explicit source-cache garbage collection
+### C1 — explicit input-cache garbage collection
 
-Candidate: remove source-cache garbage collection from ordinary report loads
+Candidate: remove input-cache garbage collection from ordinary report loads
 and expose it as the observable `tokscale cache prune` maintenance command.
 The cumulative table records its exact commit as `3cce3edb`.
 
@@ -124,7 +124,7 @@ Corpus at measurement time:
 
 | Input | Size / count | Change from baseline |
 | --- | ---: | ---: |
-| source-message cache | 35,793 shards / 391 MiB | +4 shards / unchanged size |
+| input-message cache | 35,793 shards / 391 MiB | +4 shards / unchanged size |
 | Claude projects | 647 MiB | unchanged |
 | Codex sessions | 710 MiB | +4 MiB |
 | OpenCode data | 429 MiB | unchanged |
@@ -185,8 +185,8 @@ without deleting the bad file. Core/CLI all-target Clippy with `-D warnings`,
 
 ### C2 — metadata-stamp warm cache hits
 
-Candidate: read the shard header first and compare a persisted source metadata
-stamp before reading source bytes. Main files and parser-declared related inputs
+Candidate: read the shard header first and compare a persisted input metadata
+stamp before reading input bytes. Main files and parser-declared related inputs
 share one policy; Codex computes its digest in the parser's single read pass.
 The cumulative table records its exact commit as `37c7c865`.
 
@@ -201,7 +201,7 @@ Corpus at measurement time:
 
 | Input | Size / count | Change from C1 |
 | --- | ---: | ---: |
-| source-message cache | 35,815 shards / 391 MiB | +22 shards / unchanged size |
+| input-message cache | 35,815 shards / 391 MiB | +22 shards / unchanged size |
 | Claude projects | 647 MiB | unchanged |
 | Codex sessions | 715 MiB | +5 MiB |
 | OpenCode data | 429 MiB | unchanged |
@@ -247,7 +247,7 @@ retains a whole client's plans until fold. That observed regression is not
 hidden; C4 is responsible for bounding that lifetime. Aggregation remained
 effectively unchanged.
 
-Candidate-specific verification instruments actual source reads under tests:
+Candidate-specific verification instruments actual input reads under tests:
 
 ```text
 cargo test -p tokscale-core
@@ -255,19 +255,19 @@ cargo test -p tokscale-core
 ```
 
 Plain, SQLite/WAL, Claude-related, and Codex exact warm hits recorded zero
-source bytes and zero hash passes. Codex cold and append paths each recorded one
+input bytes and zero hash passes. Codex cold and append paths each recorded one
 continuous hash pass. Additional cases cover related-input add/delete/mtime
 changes, generic main/WAL parse races, Codex path replacement, a real v1 shard
 prune, and malformed current-envelope preservation. The deliberately accepted
 blind spot is a non-concurrent content rewrite that restores the exact path,
-size, and mtime; detecting that would require reading source bytes on every
+size, and mtime; detecting that would require reading input bytes on every
 warm hit. Core all-target Clippy with `-D warnings`, the CLI build, rustfmt, and
 diff checks passed.
 
-### C3 — single prepared TUI source inventory
+### C3 — single prepared TUI input inventory
 
 Candidate: split local loading into a prepare step and a consuming execute
-step. Preparation discovers every adapter source once, records a stable
+step. Preparation discovers every adapter input once, records a stable
 SHA-256 inventory signature, and attaches each unit's pre-parse metadata
 snapshot. Execution consumes that exact inventory instead of discovering the
 filesystem again. The TUI persists the signature in mandatory cache schema 25:
@@ -282,14 +282,14 @@ cargo build -p tokscale-cli --release
 Finished release profile [optimized] target(s) in 2m 51s.
 ```
 
-The shared source cache could not provide a valid C2/C3 comparison. During the
+The shared input cache could not provide a valid C2/C3 comparison. During the
 first C3 probes, an older installed TUI had remained alive for almost four
 hours and was still writing pre-v2 shards into the same cache. Inspection found
 3,427 v2 shards and 32,404 older shards while that process was active. Its
 binary hash differed from the measured binary and its embedded shard magic
 identified the old format. The process was stopped, and all C2/C3 differential
 probes below use the same isolated config and cache with the real settings and
-real source directories. The earlier shared-cache C2 row is retained rather
+real input directories. The earlier shared-cache C2 row is retained rather
 than silently replacing historical measurements, so the C3 cumulative row is
 not directly comparable with it.
 
@@ -297,7 +297,7 @@ Corpus at isolated measurement time:
 
 | Input | Size / count |
 | --- | ---: |
-| isolated source-message cache after TUI verification | 9,224 shards / 88 MiB |
+| isolated input-message cache after TUI verification | 9,224 shards / 88 MiB |
 | Claude projects | 647 MiB |
 | Codex sessions | 718 MiB |
 | OpenCode data | 429 MiB |
@@ -343,7 +343,7 @@ C2 core:  processing_ms 3519/4099/3497; wall_s 4.58/4.10/3.50;
           max_rss_kib 35688/37388/35356
 ```
 
-Because live-source filesystem latency dominated processing-time variance, a
+Because live-input filesystem latency dominated processing-time variance, a
 second control alternated C2 and C3 rather than running each version in one
 block:
 
@@ -371,7 +371,7 @@ path. `prepare_discovers_once_and_execute_consumes_the_same_inventory` records
 one discovery after prepare and still one after execute; the old TUI sequence
 performed two. Signature tests cover adapter and unit order, canonical clients,
 native non-UTF-8 paths, related inputs, parser revisions, missing snapshots,
-and zero source-byte reads. CLI cache tests prove schema 25 round-trips the
+and zero input-byte reads. CLI cache tests prove schema 25 round-trips the
 32-byte signature and schema 24 or a missing signature is an explicit miss.
 
 ```text
@@ -388,7 +388,7 @@ status 0. Its 1m54s process duration includes deliberate interactive idle time
 and is excluded from load timing. Core/CLI all-target Clippy with `-D warnings`,
 the release build, rustfmt, and diff checks passed.
 
-### C4 — bounded single-copy source fold
+### C4 — bounded single-copy input fold
 
 Candidate: plan exact cache hits once, parse only cache misses in ordered
 Rayon-width batches, and fold each message-owning batch before parsing the next.
@@ -411,14 +411,14 @@ Corpus at final measurement time:
 
 | Input | Size / count | Change from C3 |
 | --- | ---: | ---: |
-| shared isolated source-message cache | 9,227 shards / 88 MiB | +3 shards |
+| shared isolated input-message cache | 9,227 shards / 88 MiB | +3 shards |
 | selected cold-cache result | 4,405 shards / 49 MiB | same in C3/C4 controls |
 | Claude projects | 647 MiB | unchanged |
 | Codex sessions | 725 MiB | +7 MiB |
 | OpenCode data | 429 MiB | unchanged |
 
 The fixed warm probe continued to use the isolated config introduced for C3.
-Its source directories grew, while the cache format and selected clients stayed
+Its input directories grew, while the cache format and selected clients stayed
 unchanged.
 
 Zero-session probe:
@@ -451,14 +451,14 @@ run  wall_s  user_s  sys_s  max_rss_kib
 ```
 
 Against the C3 fixed medians, warm processing and wall time fell 5.4% and 5.5%
-despite the larger source corpus; RSS fell 1.5%. The aggregation path is
+despite the larger input corpus; RSS fell 1.5%. The aggregation path is
 unchanged and remained flat. Alternating the exact C3 and final C4 binaries on
 the later 2,615-session corpus produced noisy wall readings but no systematic
 warm regression: median processing was 4,932 ms for C3 and 4,797 ms for C4,
 while median RSS moved from 39,248 KiB to 36,864 KiB.
 
 The candidate-specific cold probe used separate empty config/cache directories,
-the same real settings, and the same 4,405 selected source files. Three exact
+the same real settings, and the same 4,405 selected input files. Three exact
 C3 controls and five C4 runs were retained because cold filesystem latency had
 material variance:
 
@@ -484,10 +484,10 @@ The medians were:
 Cold peak RSS fell 38.6%, and total measured CPU time fell 25.4%. Processing
 time rose 4.0% and wall time rose 2.7%, so this result is an RSS/CPU improvement,
 not a cold scan-speed claim. The C4 output contained one additional live session
-but the selected source count and resulting shard count were identical.
+but the selected input count and resulting shard count were identical.
 
 A Codex-only cold probe isolates removal of the raw/finalized vector clone. The
-source corpus grew from 1,490 to 1,491 sessions during the controls; all final
+input corpus grew from 1,490 to 1,491 sessions during the controls; all final
 runs wrote about 640 valid shards, including valid empty-session shards.
 
 ```text
@@ -512,7 +512,7 @@ Measurement also caught an invalid intermediate result: the first borrowed
 writer skipped 68 valid empty Codex shards and therefore made later warm work
 disappear. The shard-count mismatch led to a regression test and a fix; the
 recorded samples above all persist empty Codex results and prove their warm hit
-reads zero source bytes.
+reads zero input bytes.
 
 Candidate-specific verification covers one-pass ordered hit planning, unchanged
 prepared snapshots on indeterminate misses, no repeated header lookup after a
@@ -573,7 +573,7 @@ Corpus at final measurement time:
 
 | Input | Size / count | Change from the recorded C4 corpus |
 | --- | ---: | ---: |
-| isolated source-message cache after verification | 9,237 shards / 88 MiB | +10 shards / unchanged size |
+| isolated input-message cache after verification | 9,237 shards / 88 MiB | +10 shards / unchanged size |
 | Claude projects | 647 MiB | unchanged |
 | Codex sessions | 735 MiB | +10 MiB |
 | OpenCode data | 429 MiB | unchanged |
@@ -715,8 +715,8 @@ Candidate: remove the generic adapter path that converted a planned cache hit's
 body-read failure into an empty message list. A planned hit is now successful
 only after its shard body is opened, identity-checked, decoded, and matched to
 the header message count. Failures retain their I/O or decode cause and identify
-the source, parser revision, and shard in an always-visible stderr diagnostic.
-The failed plan is discarded and the current source is reparsed in the same
+the input, parser revision, and shard in an always-visible stderr diagnostic.
+The failed plan is discarded and the current input is reparsed in the same
 scan; this is observable recovery, not a silent fallback.
 
 The repair policy distinguishes evidence. Structurally malformed, truncated,
@@ -724,7 +724,7 @@ undecodable, identity-invalid, or message-count-invalid derived shards are
 deleted if an atomic replacement cannot be written. Transient open/metadata
 I/O failures and atomic-replacement fingerprint races do not delete a possibly
 valid replacement. Internal pipeline states such as double consumption remain
-explicit failures instead of being reinterpreted as source misses. OMP gathers
+explicit failures instead of being reinterpreted as input misses. OMP gathers
 all failed planned hits into its complete miss set before building the parent
 task index, and OpenCode preserves SQLite precedence while recovering a failed
 hit. Codex remains on its existing incremental cache path.
@@ -743,7 +743,7 @@ Corpus at measurement time:
 
 | Input | Size / count | Change from C5 |
 | --- | ---: | ---: |
-| isolated source-message cache | 9,240 shards / 88 MiB | +3 shards / unchanged size |
+| isolated input-message cache | 9,240 shards / 88 MiB | +3 shards / unchanged size |
 | Claude projects | 647 MiB | unchanged |
 | Codex sessions | 742 MiB | +7 MiB |
 | OpenCode data | 429 MiB | unchanged |
@@ -766,7 +766,7 @@ run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
 3    5026           5.03    0.88    1.35   37304
 ```
 
-Exact-C5 controls bracketed the C6 samples on the same cache and live sources:
+Exact-C5 controls bracketed the C6 samples on the same cache and live inputs:
 
 ```text
 control  run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
@@ -798,20 +798,20 @@ The aggregation path is unchanged; its one-centisecond wall difference and
 156 KiB RSS difference from C5 are measurement resolution/noise, not an
 attributed regression.
 
-The deciding candidate-specific probe used one valid AMP source and one v2
+The deciding candidate-specific probe used one valid AMP input and one v2
 shard with a complete 264-byte header but a body truncated to zero bytes. The
-source stayed byte-identical throughout:
+input stayed byte-identical throughout:
 
 ```text
-source SHA-256: cd1c5ef067863a41142d9b792c816eb666826e22a2576c0619eb35c2c6ebb184
+input SHA-256: cd1c5ef067863a41142d9b792c816eb666826e22a2576c0619eb35c2c6ebb184
 corrupt shard:  284 bytes; SHA-256 514cf5453776fad03dba69cbebbdea2c56dd6574ed58859abb7a57b3a0421fb5
 valid shard:    358 bytes; SHA-256 4a06d4a380b03c9011559232c38c42e71aeb968a9ea15cc19c028058b633a6e0
 ```
 
 Exact C5 exited zero with empty stderr, returned no entries and zero token and
 message totals, and left the corrupt shard unchanged. C6 emitted exactly one
-warning containing the source, `Amp` parser revision, shard path, retained
-`UnexpectedEof` decode cause, discarded planned read, and current-source
+warning containing the input, `Amp` parser revision, shard path, retained
+`UnexpectedEof` decode cause, discarded planned read, and current-input
 reparse. It returned the same normalized JSON as an exact-C5 valid warm control
 and atomically restored the valid shard:
 
@@ -825,7 +825,7 @@ C6 second warm: wall 0.00s; RSS 10,560 KiB
 
 The second C6 run had empty stderr, the same normalized output hash, and the
 same repaired shard hash. Focused instrumentation also proves that this normal
-second warm hit reads and hashes zero source bytes; the repair is persistent,
+second warm hit reads and hashes zero input bytes; the repair is persistent,
 not a one-run in-memory success.
 
 Candidate-specific tests cover truncated and undecodable bodies, declared/body
@@ -854,7 +854,7 @@ Candidate: serialize the live `UsageData` aggregate through borrowed schema-25
 views directly into the atomic temp file. The previous writer first cloned the
 aggregate into a complete owned `CachedUsageData`, then allocated a second
 complete `Vec<u8>` with `serde_json::to_vec`; both copies remained live beside
-the source aggregate until the write finished. The new writer keeps only a
+the input aggregate until the write finished. The new writer keeps only a
 sorted `Vec<&str>` for the bounded client key and an 8 KiB `BufWriter`, streams
 with `serde_json::to_writer`, explicitly flushes, and retains the existing file
 fsync, rename, and parent-directory fsync contract.
@@ -879,7 +879,7 @@ Corpus at measurement time:
 
 | Input | Size / count | Change from C6 |
 | --- | ---: | ---: |
-| isolated source-message cache | 9,243 shards / 88 MiB | +3 shards / unchanged size |
+| isolated input-message cache | 9,243 shards / 88 MiB | +3 shards / unchanged size |
 | Claude projects | 647 MiB | unchanged |
 | Codex sessions | 745 MiB | +3 MiB |
 | OpenCode data | 429 MiB | unchanged |
@@ -903,7 +903,7 @@ run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
 ```
 
 Exact-C6 controls bracketed the final C7 binary on the same isolated cache and
-live sources:
+live inputs:
 
 ```text
 control  run  processing_ms  wall_s  user_s  sys_s  max_rss_kib
@@ -933,7 +933,7 @@ run  wall_s  user_s  sys_s  max_rss_kib
 
 The candidate-specific real-corpus writer probe ran
 `--light --write-cache --no-spinner -c claude,opencode` after one unmeasured
-warm-up. C6 and C7 used hard-linked copies of the same source cache and stable
+warm-up. C6 and C7 used hard-linked copies of the same input cache and stable
 Claude/OpenCode inputs. Five default `model` samples were:
 
 ```text
@@ -968,7 +968,7 @@ C7       1-5  5.23 5.44 4.94 5.07 4.49 44252 41984 42600 42632 41268
 normalized SHA-256: a38b87088ca01beb9c6935b1da5fcb0d8021cfbb5a46aca16180d273e88e0108
 ```
 
-These real payloads are under 0.5 MiB, and the command includes two source
+These real payloads are under 0.5 MiB, and the command includes two input
 scans. Their median peak RSS is effectively unchanged; their wall change is not
 isolated enough to attribute to serialization.
 
@@ -1039,9 +1039,9 @@ OpenCode now discovers and reads only current SQLite databases. Legacy message
 JSON, migration bookkeeping, JSON/SQLite precedence, and the SQL query for
 databases without the current `session.directory` schema are gone. Database
 discovery, open, schema, query, row, payload, and semantic failures propagate
-through the public report path instead of becoming successful empty sources.
+through the public report path instead of becoming successful empty inputs.
 
-The source-message envelope advances to v3. Shard filenames hash the native
+The input-message envelope advances to v3. Shard filenames hash the native
 path bytes, an explicit stable parser name, and the parser revision instead of
 a serialized enum ordinal. Ordinary reads have one v3 decoder. They do not
 locate, decode, migrate, or delete v2 files; explicit `cache prune` classifies
@@ -1082,8 +1082,8 @@ Corpus at measurement time:
 
 | Input | Size / count | Change from C7 measurement |
 | --- | ---: | ---: |
-| isolated pre-C8 source cache | 9,243 v2 shards / 70,833,913 logical bytes (88 MiB allocated) | unchanged prepared snapshot |
-| settled C8 source cache | 9,243 retained v2 + 4,382 v3 shards / 112,283,638 logical bytes | one-time v3 rebuild; no implicit v2 deletion |
+| isolated pre-C8 input cache | 9,243 v2 shards / 70,833,913 logical bytes (88 MiB allocated) | unchanged prepared snapshot |
+| settled C8 input cache | 9,243 retained v2 + 4,382 v3 shards / 112,283,638 logical bytes | one-time v3 rebuild; no implicit v2 deletion |
 | Claude projects | 647 MiB | unchanged |
 | Codex sessions | 759 MiB | +14 MiB |
 | OpenCode data | 429 MiB | unchanged |
@@ -1162,7 +1162,7 @@ C8       3    152            0.15    0.12    0.02   26988
 
 Median processing time falls from 368 to 152 ms (58.7%), median wall time
 from 0.37 to 0.15 s (59.5%), and peak RSS from 40,080 to 27,468 KiB
-(31.5%, or 12,612 KiB). C7 wrote 50 source shards using the database plus
+(31.5%, or 12,612 KiB). C7 wrote 50 input shards using the database plus
 positive legacy JSON; C8 writes one 513,882-byte SQLite shard.
 
 Three alternating warm runs retained exact output and showed the smaller
@@ -1203,7 +1203,7 @@ MiB user-payload test locks the classification boundary.
 
 The JSON-only fixture contains one positive legacy message. Exact C7 reports
 one message with 10,170 input, 2 output, 2,176 cache-read, and 168 reasoning
-tokens. C8 intentionally reports zero messages, writes no source shard, and
+tokens. C8 intentionally reports zero messages, writes no input shard, and
 emits no error because retired JSON is outside the accepted input format.
 
 The old-schema fixture has a `message` table but no current `session` table.
@@ -1221,7 +1221,7 @@ after an ordinary C8 scan. The scan reported the same one message and wrote a
 separate stable-key v3 shard. On a copied cache, explicit prune produced:
 
 ```text
-Source cache prune: scanned 2, removed 1, retained 1.
+Input cache prune: scanned 2, removed 1, retained 1.
 ```
 
 Only the v3 shard remained. Focused tests separately prove that unknown magic,
@@ -1260,7 +1260,7 @@ passed
 ```
 
 Rustfmt, `git diff --check`, the final release and benchmark builds, focused
-OpenCode/source-cache/Codex/CLI/TUI tests, and independent reviews of both
+OpenCode/input-cache/Codex/CLI/TUI tests, and independent reviews of both
 storage chains also passed. `bun run build:cli`, the generator's help path, and
 a generated-fixture scan also passed. The ignored OpenCode test requires a
 developer's live database; the fixed real database above exercises the same
@@ -1288,16 +1288,16 @@ ADR 0020 replaces those contracts; the historical measurements above remain
 unchanged and must not be read as validation of the corrected formats.
 
 The corrected implementation persists Unix or Windows file identity in every
-source stamp, uses shard format v4 and inventory-signature domain v2, and
+input stamp, uses shard format v4 and inventory-signature domain v2, and
 revalidates prepared snapshots at the cache-hit boundary after asynchronous
 pricing initialization. TUI schema 27 stores the final confirmed inventory.
 Exact unchanged warm hits still perform metadata/identity queries without
-reading source bodies. Explicit cache pruning recognizes frozen v1, v2, and v3
+reading input bodies. Explicit cache pruning recognizes frozen v1, v2, and v3
 envelopes for deletion; ordinary reads accept only v4.
 
 Local adapters now expose only fallible discovery and parse seams. Parser,
 cache lookup/write/finalization, and settings errors carry their operation,
-path, underlying source, and client/parser context. A failed recovery parse no
+path, underlying input, and client/parser context. A failed recovery parse no
 longer prevents a corrupt-shard removal from being finalized. Legacy
 delimiter-key coalescing and the retired local-format branches listed in ADR
 0020 were removed instead of retained as compatibility tables.

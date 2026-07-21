@@ -51,7 +51,7 @@ const MODELS: TierSet = TierSet {
         (200, "满汉全席", "200"),
     ],
 };
-const HARNESSES: TierSet = TierSet {
+const CLIENTS: TierSet = TierSet {
     roast: "光杆司令",
     tiers: [
         (1, "牧马人", "1"),
@@ -95,7 +95,7 @@ pub(super) fn build(
     total_tokens: u64,
     cache_read: u64,
     models: usize,
-    harnesses: usize,
+    clients: usize,
 ) -> Vec<Achievement> {
     let cache_pct = cache_read
         .saturating_mul(100)
@@ -106,7 +106,7 @@ pub(super) fn build(
         rank(&TOKENS, total_tokens),
         rank(&CACHE, cache_pct),
         rank(&MODELS, models as u64),
-        rank(&HARNESSES, harnesses as u64),
+        rank(&CLIENTS, clients as u64),
     ]
 }
 
@@ -186,8 +186,8 @@ mod tests {
         assert_eq!(rank(&TOKENS, 12_000_000_000).title, "大胃袋");
         assert_eq!(rank(&MODELS, 67).title, "赤石大王");
         assert_eq!(rank(&CACHE, 91).title, "持家有道");
-        assert_eq!(rank(&HARNESSES, 15).title, "御马监");
-        assert_eq!(rank(&HARNESSES, 20).title, "齐天大圣");
+        assert_eq!(rank(&CLIENTS, 15).title, "御马监");
+        assert_eq!(rank(&CLIENTS, 20).title, "齐天大圣");
     }
 
     #[test]

@@ -43,9 +43,9 @@ Tokscale stores most local settings under the platform config directory:
 | --- | --- | --- |
 | `colorPalette` | string | TUI color theme. Known values include `green`, `halloween`, `teal`, `blue`, `pink`, `purple`, `orange`, `monochrome`, `ylgnbu`, `graphite`, `lagoon`, and `dusk`. An explicit `--theme` overrides this saved value. |
 | `includeUnusedModels` | boolean | Show zero-token models in reports. |
-| `autoRefreshEnabled` | boolean | Enable background TUI refresh of the fixed startup source universe. |
+| `autoRefreshEnabled` | boolean | Enable background TUI refresh of the fixed startup client universe. |
 | `autoRefreshMs` | number | Background TUI refresh interval in milliseconds. View changes do not reset it. |
-| `defaultClients` | string[] | Default scan scope when no `--client/-c` flag is passed. Reports use it for that invocation; the TUI fixes it as the startup source universe, never as persisted picker selection. |
+| `defaultClients` | string[] | Default scan scope when no `--client/-c` flag is passed. Reports use it for that invocation; the TUI fixes it as the startup client universe, never as persisted picker selection. |
 | `usageTabEnabled` | boolean | Show the subscription quota Usage tab in the TUI. |
 | `usageProviders` | string[] | Explicit allowlist of subscription providers the TUI may fetch. Empty means cache-display mode. |
 | `scanner.opencodeDbPaths` | string[] | Authoritative additional current-format OpenCode SQLite database files. Missing, unreadable, or obsolete entries fail explicitly. This is the only custom OpenCode scan setting. |
@@ -94,22 +94,20 @@ default config root. The files listed in this section can be deleted when you
 want a fresh local rebuild:
 
 - `tui-data-cache.json`
-- `shards/` (source-message cache)
+- `shards/` (scan-input message cache)
 - `pricing-litellm.json`
 - `pricing-openrouter.json`
 - `pricing-models-dev.json`
 - `fonts/`
 - `images/`
 
-Source-message cache writes use the v7 shard envelope and stable explicit
-parser keys. Ordinary reports read and write current v7 shards without
-traversing, migrating, or deleting legacy v1 through v6 shards. Run `tokscale
+Scan-input message cache writes use the v8 shard envelope and stable explicit
+parser keys. Ordinary reports read and write current v8 shards without
+traversing, migrating, or deleting legacy v1 through v7 shards. Run `tokscale
 cache prune` when you explicitly want a full traversal that removes classified
-legacy shards; there is no automatic migration. Retired
-`source-message-cache.bin` and `source-message-cache.lock` files are not current
-cache inputs.
+legacy shards; there is no automatic migration.
 
-The TUI aggregate cache is separate from source-message shards. Reports never
+The TUI aggregate cache is separate from scan-input message shards. Reports never
 write it; use `tokscale cache warm` when you intentionally want to prebuild it.
 
 Integration roots are mixed state, not all disposable caches:

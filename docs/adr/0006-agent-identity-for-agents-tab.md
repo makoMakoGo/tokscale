@@ -35,7 +35,7 @@ Group `Agents` rows by stable agent identity only.
 - Messages without a recognized stable agent identity should not create an
   `Agents` row.
 
-Changing parsed agent identity semantics must bump both source-message cache and
+Changing parsed agent identity semantics must bump both input-message cache and
 TUI cache schema versions so stale labels are rebuilt.
 
 ## Consequences

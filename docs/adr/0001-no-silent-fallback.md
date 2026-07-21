@@ -5,11 +5,11 @@ Status: Accepted
 ## Context
 
 This branch is used for local accounting and agentic maintenance. A silent
-fallback can turn invalid or unreadable source data into a plausible report,
+fallback can turn invalid or unreadable input data into a plausible report,
 making a defect look like success.
 
 The phrase "no fallback" can also be applied too broadly. Tokscale contains
-intentional source decoding, normalization, reconciliation, migration, and
+intentional input decoding, normalization, reconciliation, migration, and
 report projection rules. Removing those rules merely because they choose
 between representations destroys established semantics instead of exposing a
 failure.
@@ -30,16 +30,16 @@ A behavior is a prohibited silent fallback when all of the following are true:
 
 The following are not fallbacks merely because they select or transform data:
 
-- deterministic decoding selected by an explicit source identity or format;
+- deterministic decoding selected by an explicit input identity or format;
 - documented normalization, reconciliation, token imputation, and report
   projection rules;
-- ordered source selection whose authority conditions are explicit;
-- absence or record skipping defined by the source contract;
+- ordered input selection whose authority conditions are explicit;
+- absence or record skipping defined by the input contract;
 - versioned migrations that either complete or return an error; and
 - bounded reconciliation of non-authoritative detail against an authoritative
   total when the rule is documented and preserves that exact total.
 
-Retaining a valid source model label and token breakdown when optional provider
+Retaining a valid observed model label and token breakdown when optional provider
 attribution cannot be resolved is also not a prohibited fallback. The record's
 quantitative facts remain authoritative; provider inference or `unknown` is a
 documented identity projection. Kimi Code's alias-only historical wire format
@@ -57,8 +57,8 @@ Required boundary behavior should be visible:
 Visibility does not imply a global failure domain. "No silent fallback" is
 satisfied by recording and surfacing the failure where it happened; it does
 not require aborting unrelated work, and it never justifies discarding data
-that other sources produced correctly. ADR 0020 defines the failure-domain
-boundaries for local source ingestion.
+that other inputs produced correctly. ADR 0020 defines the failure-domain
+boundaries for local input ingestion.
 
 Before removing existing behavior under this ADR, a change must identify the
 hidden failure it masks and add a focused regression case. If the behavior is a

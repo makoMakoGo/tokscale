@@ -125,22 +125,22 @@ fn shard_identity(path: &Path) -> ShardIdentity {
     }
 }
 
-fn source_cache_shards(home: &Path) -> Vec<PathBuf> {
+fn input_cache_shards(home: &Path) -> Vec<PathBuf> {
     let root = home.join(".config/tokscale/cache/shards");
     let mut shards = Vec::new();
-    collect_source_cache_shards(&root, &mut shards);
+    collect_input_cache_shards(&root, &mut shards);
     shards.sort_unstable();
     shards
 }
 
-fn collect_source_cache_shards(path: &Path, shards: &mut Vec<PathBuf>) {
+fn collect_input_cache_shards(path: &Path, shards: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(path) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_source_cache_shards(&path, shards);
+            collect_input_cache_shards(&path, shards);
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("bin") {
             shards.push(path);
         }
@@ -196,7 +196,7 @@ fn run_copilot_report(home: &Path) -> (Vec<u8>, u64) {
 }
 
 #[test]
-fn copilot_large_otel_cold_and_warm_source_cache_stay_below_memory_limit() {
+fn copilot_large_otel_cold_and_warm_input_cache_stay_below_memory_limit() {
     assert!(
         Path::new("/usr/bin/time").is_file(),
         "Linux memory regression test requires /usr/bin/time"
@@ -207,35 +207,35 @@ fn copilot_large_otel_cold_and_warm_source_cache_stay_below_memory_limit() {
     write_large_copilot_fixture(home.path());
 
     let (cold_stdout, cold_rss_kb) = run_copilot_report(home.path());
-    let cold_shards = source_cache_shards(home.path());
+    let cold_shards = input_cache_shards(home.path());
     assert_eq!(
         cold_shards.len(),
         1,
-        "cold Copilot run should write exactly one source-cache shard"
+        "cold Copilot run should write exactly one input-cache shard"
     );
     let shard_path = cold_shards[0].clone();
     let cold_shard_identity = shard_identity(&shard_path);
 
     let (warm_stdout, warm_rss_kb) = run_copilot_report(home.path());
-    let warm_shards = source_cache_shards(home.path());
+    let warm_shards = input_cache_shards(home.path());
 
     assert_eq!(warm_stdout, cold_stdout);
     assert_eq!(
         warm_shards,
         vec![shard_path.clone()],
-        "warm Copilot run should reuse the same source-cache shard"
+        "warm Copilot run should reuse the same input-cache shard"
     );
     assert_eq!(
         shard_identity(&shard_path),
         cold_shard_identity,
-        "warm Copilot source-cache hit rewrote or replaced the shard"
+        "warm Copilot input-cache hit rewrote or replaced the shard"
     );
     assert!(
         cold_rss_kb < MAX_COPILOT_RSS_KB,
-        "cold source-cache Copilot run used {cold_rss_kb} KB RSS"
+        "cold input-cache Copilot run used {cold_rss_kb} KB RSS"
     );
     assert!(
         warm_rss_kb < MAX_COPILOT_RSS_KB,
-        "warm source-cache Copilot run used {warm_rss_kb} KB RSS"
+        "warm input-cache Copilot run used {warm_rss_kb} KB RSS"
     );
 }

@@ -9,8 +9,8 @@ use chrono::NaiveDate;
 #[cfg(test)]
 use tokscale_core::GroupBy;
 use tokscale_core::{
-    load_prepared_tui_bundle_with_diagnostics, prepare_local_sources, ClientId, DataHealth,
-    LocalParseOptions, PreparedLocalSources, SourceInventorySignature, TuiAcc, TuiSessionEntry,
+    load_prepared_tui_bundle_with_diagnostics, prepare_local_inputs, ClientId, DataHealth,
+    InputInventorySignature, LocalParseOptions, PreparedLocalInputs, TuiAcc, TuiSessionEntry,
 };
 
 // The TUI view types live in core (`tokscale_core::usage_views`) so the
@@ -18,7 +18,7 @@ use tokscale_core::{
 // historical names this crate already uses, so downstream modules keep their
 // existing imports.
 pub use tokscale_core::usage_views::{
-    AgentEntry as AgentUsage, ContributionDay, DailyModelInfo, DailySourceInfo, DailyUsage,
+    AgentEntry as AgentUsage, ContributionDay, DailyClientInfo, DailyModelInfo, DailyUsage,
     HourlyModelInfo, HourlyUsage, PeriodKind, PeriodUsage, UsageData, UsageGraphData as GraphData,
     UsageModelEntry as ModelUsage, UsageTokenBreakdown as TokenBreakdown,
 };
@@ -79,21 +79,21 @@ pub struct DataLoader {
 pub struct TuiBundleLoadResult {
     pub accumulator: TuiAcc,
     pub sessions: Vec<TuiSessionEntry>,
-    pub source_space: std::collections::BTreeMap<String, u64>,
+    pub client_space: std::collections::BTreeMap<String, u64>,
     pub pricing_diagnostics: Vec<String>,
-    pub source_inventory_signature: SourceInventorySignature,
-    pub source_digest: u64,
+    pub input_inventory_signature: InputInventorySignature,
+    pub input_digest: u64,
     pub health: DataHealth,
 }
 
 pub struct PreparedDataLoad {
-    sources: PreparedLocalSources,
+    inputs: PreparedLocalInputs,
 }
 
 impl PreparedDataLoad {
-    pub fn refresh_source_inventory_signature(&mut self) -> Result<SourceInventorySignature> {
-        self.sources
-            .refresh_source_inventory_signature()
+    pub fn refresh_input_inventory_signature(&mut self) -> Result<InputInventorySignature> {
+        self.inputs
+            .refresh_input_inventory_signature()
             .map_err(anyhow::Error::msg)
     }
 }
@@ -125,7 +125,7 @@ impl DataLoader {
             ),
         };
 
-        let sources: Vec<String> = enabled_clients
+        let clients: Vec<String> = enabled_clients
             .iter()
             .map(|client| client.as_str().to_string())
             .collect();
@@ -133,15 +133,15 @@ impl DataLoader {
         let opts = LocalParseOptions {
             home_dir: Some(home),
             use_env_roots,
-            clients: Some(sources),
+            clients: Some(clients),
             since: self.since.clone(),
             until: self.until.clone(),
             year: self.year.clone(),
             scanner_settings: data_loader_scanner_settings(&self.home_dir)?,
         };
 
-        prepare_local_sources(opts)
-            .map(|sources| PreparedDataLoad { sources })
+        prepare_local_inputs(opts)
+            .map(|inputs| PreparedDataLoad { inputs })
             .map_err(anyhow::Error::new)
     }
 
@@ -153,7 +153,7 @@ impl DataLoader {
             std::thread::scope(|s| {
                 s.spawn(move || -> Result<_> {
                     let rt = Runtime::new()?;
-                    rt.block_on(load_prepared_tui_bundle_with_diagnostics(prepared.sources))
+                    rt.block_on(load_prepared_tui_bundle_with_diagnostics(prepared.inputs))
                         .map_err(anyhow::Error::new)
                 })
                 .join()
@@ -161,7 +161,7 @@ impl DataLoader {
             })
         } else {
             Runtime::new()?
-                .block_on(load_prepared_tui_bundle_with_diagnostics(prepared.sources))
+                .block_on(load_prepared_tui_bundle_with_diagnostics(prepared.inputs))
                 .map_err(anyhow::Error::new)
         };
 
@@ -169,10 +169,10 @@ impl DataLoader {
         bundle.map(|result| TuiBundleLoadResult {
             accumulator: result.accumulator,
             sessions: result.sessions,
-            source_space: result.source_space,
+            client_space: result.client_space,
             pricing_diagnostics: result.pricing_diagnostics,
-            source_inventory_signature: result.source_inventory_signature,
-            source_digest: result.source_inventory_signature.process_digest(),
+            input_inventory_signature: result.input_inventory_signature,
+            input_digest: result.input_inventory_signature.process_digest(),
             health: result.health,
         })
     }
@@ -241,7 +241,7 @@ mod tests {
             ),
         };
 
-        let sources: Vec<String> = enabled_clients
+        let clients: Vec<String> = enabled_clients
             .iter()
             .map(|client| client.as_str().to_string())
             .collect();
@@ -249,7 +249,7 @@ mod tests {
         let opts = LocalParseOptions {
             home_dir: Some(home),
             use_env_roots,
-            clients: Some(sources),
+            clients: Some(clients),
             since: loader.since.clone(),
             until: loader.until.clone(),
             year: loader.year.clone(),
@@ -470,7 +470,7 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2026, 3, 2).unwrap(),
             tokens: TokenBreakdown::default(),
             cost: 0.0,
-            source_breakdown: BTreeMap::new(),
+            client_breakdown: BTreeMap::new(),
             message_count: 0,
             turn_count: 0,
         }];
@@ -712,7 +712,7 @@ after"#,
                 date: NaiveDate::from_ymd_opt(2026, 3, 2).unwrap(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
-                source_breakdown: BTreeMap::new(),
+                client_breakdown: BTreeMap::new(),
                 message_count: 0,
                 turn_count: 0,
             },
@@ -720,7 +720,7 @@ after"#,
                 date: NaiveDate::from_ymd_opt(2026, 3, 3).unwrap(),
                 tokens: TokenBreakdown::default(),
                 cost: 0.0,
-                source_breakdown: BTreeMap::new(),
+                client_breakdown: BTreeMap::new(),
                 message_count: 0,
                 turn_count: 0,
             },
@@ -751,10 +751,10 @@ after"#,
             },
         );
 
-        let mut source_breakdown = BTreeMap::new();
-        source_breakdown.insert(
+        let mut client_breakdown = BTreeMap::new();
+        client_breakdown.insert(
             "claude".to_string(),
-            DailySourceInfo {
+            DailyClientInfo {
                 tokens: tokens.clone(),
                 cost,
                 models,
@@ -765,7 +765,7 @@ after"#,
             date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
             tokens,
             cost,
-            source_breakdown,
+            client_breakdown,
             message_count: 1,
             turn_count: 1,
         }
@@ -792,7 +792,7 @@ after"#,
         assert_eq!(periods[0].tokens.input, 30);
         assert_eq!(periods[0].cost, 3.0);
         assert_eq!(
-            periods[0].source_breakdown["claude"].models["claude-sonnet-4"].messages,
+            periods[0].client_breakdown["claude"].models["claude-sonnet-4"].messages,
             2
         );
     }

@@ -1,10 +1,10 @@
 #![deny(clippy::all)]
 
 mod adapters;
-mod cc_mirror;
 mod client_catalog;
 pub mod clients;
 pub mod fs_atomic;
+pub mod input_health;
 mod local_clients;
 mod local_report_error;
 mod message_cache;
@@ -15,7 +15,6 @@ mod provider_identity;
 pub mod scanner;
 pub mod sessionize;
 pub mod sessions;
-pub mod source_health;
 mod token_imputation;
 
 mod aggregate;
@@ -31,18 +30,18 @@ pub use clients::{
     cline_session_data_dir_with_env_strategy, warp_sqlite_roots_with_env_strategy, ClientCounts,
     ClientId, ClientIdentity, LocalClientDef, PathRoot,
 };
+pub use input_health::{
+    DataHealth, InputFailure, InputHealth, InputStatus, RecordRejectionReason, RejectionEntry,
+    RejectionSummary, ScannedInput,
+};
 pub use local_report_error::{LocalReportError, LocalReportErrorKind};
-pub use message_cache::{prune_source_message_cache, SourceCachePruneError, SourceCachePruneStats};
+pub use message_cache::{prune_input_message_cache, InputCachePruneError, InputCachePruneStats};
 pub use provider_identity::{inferred_provider_from_model, normalize_provider_for_grouping};
 pub use sessionize::{
     compute_daily_active_time, compute_time_metrics, sessionize, sessionize_time_intervals,
     SessionInterval, TimeMetrics, TimeSessionInterval, DEFAULT_IDLE_GAP_MS,
 };
 pub use sessions::UnifiedMessage;
-pub use source_health::{
-    DataHealth, RecordRejectionReason, RejectionEntry, RejectionSummary, ScannedSource,
-    SourceFailure, SourceHealth, SourceStatus,
-};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hasher;
@@ -98,19 +97,14 @@ fn retain_for_requested_clients(
 }
 
 pub(crate) fn requested_clients_include(client: &str, requested: &HashSet<&str>) -> bool {
-    requested.contains(client) || (requested.contains("claude") && client.starts_with("cc-mirror/"))
+    requested.contains(client)
 }
 
 pub(crate) fn selected_client_ids_include(client: &str, selected: &HashSet<ClientId>) -> bool {
     ClientId::from_str(client).is_some_and(|client_id| selected.contains(&client_id))
-        || (selected.contains(&ClientId::Claude) && client.starts_with("cc-mirror/"))
 }
 
 fn client_count_bucket(client: &str) -> Option<ClientId> {
-    if client.starts_with("cc-mirror/") {
-        return Some(ClientId::Claude);
-    }
-
     ClientId::from_str(client)
 }
 
@@ -303,18 +297,18 @@ impl ModelPerformance {
 pub struct LocalClientMessageCounts {
     pub counts: ClientCounts,
     pub processing_time_ms: u32,
-    pub health: source_health::HealthReport,
+    pub health: input_health::HealthReport,
 }
 
 #[derive(Debug, Clone)]
 pub struct LocalLoadMetadata {
-    pub source_inventory_signature: SourceInventorySignature,
+    pub input_inventory_signature: InputInventorySignature,
 }
 
 #[derive(Debug)]
 pub struct LocalReport<T> {
     pub data: T,
-    pub health: source_health::HealthReport,
+    pub health: input_health::HealthReport,
     pub metadata: LocalLoadMetadata,
 }
 
@@ -339,9 +333,9 @@ pub struct LocalParseOptions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct SourceInventorySignature([u8; 32]);
+pub struct InputInventorySignature([u8; 32]);
 
-impl SourceInventorySignature {
+impl InputInventorySignature {
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
@@ -351,7 +345,7 @@ impl SourceInventorySignature {
     }
 
     /// Compact comparison key for the lifetime of one process. The persisted
-    /// SHA-256 signature remains the cross-process source of truth.
+    /// SHA-256 signature remains the cross-process authority.
     pub fn process_digest(self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         hasher.write(&self.0);
@@ -359,32 +353,30 @@ impl SourceInventorySignature {
     }
 }
 
-/// A one-shot inventory of discovered local sources and their pre-parse
+/// A one-shot inventory of discovered local inputs and their pre-parse
 /// metadata snapshots. It is intentionally non-`Clone`: execution consumes
 /// the exact units whose signature was compared by the caller.
-pub struct PreparedLocalSources {
+pub struct PreparedLocalInputs {
     options: LocalParseOptions,
     clients: Vec<String>,
-    groups: Vec<adapters::PreparedAdapterSources>,
-    signature: SourceInventorySignature,
+    groups: Vec<adapters::PreparedAdapterInputs>,
+    signature: InputInventorySignature,
     health: DataHealth,
 }
 
-impl PreparedLocalSources {
-    pub fn source_inventory_signature(&self) -> SourceInventorySignature {
+impl PreparedLocalInputs {
+    pub fn input_inventory_signature(&self) -> InputInventorySignature {
         self.signature
     }
 
-    pub fn source_digest(&self) -> u64 {
+    pub fn input_digest(&self) -> u64 {
         self.signature.process_digest()
     }
 
-    /// Refresh metadata and stable identity without rediscovering sources or
+    /// Refresh metadata and stable identity without rediscovering inputs or
     /// reading their bodies. This is the narrow probe used by TUI auto-refresh
     /// before it decides that a prepared inventory is unchanged.
-    pub fn refresh_source_inventory_signature(
-        &mut self,
-    ) -> Result<SourceInventorySignature, String> {
+    pub fn refresh_input_inventory_signature(&mut self) -> Result<InputInventorySignature, String> {
         let mut unavailable = Vec::new();
         for group in &mut self.groups {
             group.units.retain_mut(|unit| {
@@ -393,12 +385,12 @@ impl PreparedLocalSources {
                 match unit.refresh_prepared_snapshot_for_inventory_probe() {
                     Ok(()) => true,
                     Err(source) => {
-                        unavailable.push(SourceHealth {
+                        unavailable.push(InputHealth {
                             client,
                             path,
-                            status: SourceStatus::Unavailable {
-                                failure: SourceFailure::new(
-                                    "refresh source inventory metadata and identity",
+                            status: InputStatus::Unavailable {
+                                failure: InputFailure::new(
+                                    "refresh input inventory metadata and identity",
                                     source.to_string(),
                                 ),
                             },
@@ -412,35 +404,35 @@ impl PreparedLocalSources {
         for health in unavailable {
             self.health.record(health);
         }
-        self.health.set_source_data_bytes(source_data_bytes(
+        self.health.set_input_data_bytes(input_data_bytes(
             self.groups.iter().flat_map(|group| group.units.iter()),
         ));
-        self.signature = source_inventory_signature(&self.clients, &self.groups);
+        self.signature = input_inventory_signature(&self.clients, &self.groups);
         Ok(self.signature)
     }
 }
 
-fn source_data_bytes<'a>(units: impl IntoIterator<Item = &'a adapters::SourceUnit>) -> u64 {
+fn input_data_bytes<'a>(units: impl IntoIterator<Item = &'a adapters::InputUnit>) -> u64 {
     let mut seen = HashSet::new();
     let mut total = 0_u64;
     for unit in units {
         let snapshot = unit
-            .prepared_source_input_snapshot()
-            .expect("prepared source unit must carry an inventory snapshot");
+            .prepared_input_snapshot()
+            .expect("prepared input unit must carry an inventory snapshot");
         snapshot.visit_present_files(|identity, size| {
             if seen.insert(identity) {
                 total = total
                     .checked_add(size)
-                    .expect("source data size must fit in u64");
+                    .expect("input data size must fit in u64");
             }
         });
     }
     total
 }
 
-fn confirmed_source_data_bytes(
+fn confirmed_input_data_bytes(
     clients: &[String],
-    groups: &[adapters::ConfirmedAdapterSources],
+    groups: &[adapters::ConfirmedAdapterInputs],
 ) -> (BTreeMap<String, u64>, u64) {
     let mut totals = clients
         .iter()
@@ -459,12 +451,12 @@ fn confirmed_source_data_bytes(
             if seen.insert(identity) {
                 *total = total
                     .checked_add(size)
-                    .expect("per-client source data size must fit in u64");
+                    .expect("per-client input data size must fit in u64");
             }
             if seen_globally.insert(identity) {
                 global_total = global_total
                     .checked_add(size)
-                    .expect("source data size must fit in u64");
+                    .expect("input data size must fit in u64");
             }
         }
     }
@@ -560,7 +552,7 @@ pub struct GraphResult {
     pub contributions: Vec<DailyContribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_metrics: Option<sessionize::TimeMetrics>,
-    pub health: source_health::HealthReport,
+    pub health: input_health::HealthReport,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -619,7 +611,7 @@ pub struct ModelReport {
     pub total_messages: i32,
     pub total_cost: f64,
     pub processing_time_ms: u32,
-    pub health: source_health::HealthReport,
+    pub health: input_health::HealthReport,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -627,7 +619,7 @@ pub struct MonthlyReport {
     pub entries: Vec<MonthlyUsage>,
     pub total_cost: f64,
     pub processing_time_ms: u32,
-    pub health: source_health::HealthReport,
+    pub health: input_health::HealthReport,
 }
 
 /// Hourly usage entry for a single hour slot (e.g. "03-23 14:00")
@@ -652,7 +644,7 @@ pub struct HourlyReport {
     pub entries: Vec<HourlyUsage>,
     pub total_cost: f64,
     pub processing_time_ms: u32,
-    pub health: source_health::HealthReport,
+    pub health: input_health::HealthReport,
 }
 
 pub fn get_home_dir_string(home_dir_option: &Option<String>) -> Result<String, String> {
@@ -723,7 +715,7 @@ fn parse_all_messages_with_health_with_env_strategy(
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
 ) -> Result<(Vec<UnifiedMessage>, DataHealth), LocalReportError> {
-    let prepared = prepare_local_sources(LocalParseOptions {
+    let prepared = prepare_local_inputs(LocalParseOptions {
         home_dir: Some(home_dir.to_string()),
         use_env_roots,
         clients: Some(clients.to_vec()),
@@ -731,35 +723,35 @@ fn parse_all_messages_with_health_with_env_strategy(
         ..LocalParseOptions::default()
     })?;
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
-    let outcome = fold_prepared_local_sources_with_pricing(prepared, pricing, &mut all_messages)?;
+    let outcome = fold_prepared_local_inputs_with_pricing(prepared, pricing, &mut all_messages)?;
     Ok((all_messages, outcome.health))
 }
 
 struct FoldOutcome {
-    source_inventory_signature: SourceInventorySignature,
-    source_space: BTreeMap<String, u64>,
+    input_inventory_signature: InputInventorySignature,
+    client_space: BTreeMap<String, u64>,
     health: DataHealth,
 }
 
-fn fold_prepared_local_sources_with_pricing(
-    prepared: PreparedLocalSources,
+fn fold_prepared_local_inputs_with_pricing(
+    prepared: PreparedLocalInputs,
     pricing: Option<&pricing::PricingService>,
     sink: &mut dyn adapters::MessageSink,
 ) -> Result<FoldOutcome, LocalReportError> {
-    let PreparedLocalSources {
+    let PreparedLocalInputs {
         clients,
         groups,
         mut health,
         ..
     } = prepared;
-    let mut source_cache = message_cache::SourceMessageCache::load()
-        .map_err(adapters::SourcePipelineError::from)
+    let mut input_cache = message_cache::InputMessageCache::load()
+        .map_err(adapters::InputPipelineError::from)
         .map_err(LocalReportError::operational)?;
 
     let parse_result = if clients.is_empty() {
-        adapters::run_prepared_local_source_adapters(
+        adapters::run_prepared_local_input_adapters(
             groups,
-            &mut source_cache,
+            &mut input_cache,
             pricing,
             sink,
             &mut health,
@@ -770,34 +762,33 @@ fn fold_prepared_local_sources_with_pricing(
             requested: &requested,
             inner: sink,
         };
-        adapters::run_prepared_local_source_adapters(
+        adapters::run_prepared_local_input_adapters(
             groups,
-            &mut source_cache,
+            &mut input_cache,
             pricing,
             &mut filtered_sink,
             &mut health,
         )
     };
 
-    let cache_result = source_cache.save_if_dirty();
+    let cache_result = input_cache.save_if_dirty();
     let result = match (parse_result, cache_result) {
         (Ok(confirmed), Ok(())) => Ok(confirmed),
         (Err(parse_error), Ok(())) => Err(parse_error),
         (Ok(_), Err(cache_error)) => Err(cache_error.into()),
         (Err(parse_error), Err(cache_error)) => Err(
-            adapters::SourcePipelineError::with_finalization(parse_error, cache_error),
+            adapters::InputPipelineError::with_finalization(parse_error, cache_error),
         ),
     };
     result
         .map(|confirmed| {
-            let source_inventory_signature =
-                confirmed_source_inventory_signature(&clients, &confirmed);
-            let (source_space, source_data_bytes) =
-                confirmed_source_data_bytes(&clients, &confirmed);
-            health.set_source_data_bytes(source_data_bytes);
+            let input_inventory_signature =
+                confirmed_input_inventory_signature(&clients, &confirmed);
+            let (client_space, input_data_bytes) = confirmed_input_data_bytes(&clients, &confirmed);
+            health.set_input_data_bytes(input_data_bytes);
             FoldOutcome {
-                source_inventory_signature,
-                source_space,
+                input_inventory_signature,
+                client_space,
                 health,
             }
         })
@@ -857,18 +848,18 @@ impl adapters::MessageSink for ClientCountSink {
     }
 }
 
-fn stream_local_sources_into_engine(
-    prepared: PreparedLocalSources,
+fn stream_local_inputs_into_engine(
+    prepared: PreparedLocalInputs,
     pricing: Option<&pricing::PricingService>,
     engine: &mut crate::aggregate::AggregationEngine,
 ) -> Result<FoldOutcome, LocalReportError> {
     let mut sink = AggregationSink(engine);
-    fold_prepared_local_sources_with_pricing(prepared, pricing, &mut sink)
+    fold_prepared_local_inputs_with_pricing(prepared, pricing, &mut sink)
 }
 
-pub fn prepare_local_sources(
+pub fn prepare_local_inputs(
     options: LocalParseOptions,
-) -> Result<PreparedLocalSources, LocalReportError> {
+) -> Result<PreparedLocalInputs, LocalReportError> {
     let (home_dir, clients) = resolve_local_parse_request(&options)?;
     options
         .scanner_settings
@@ -887,26 +878,26 @@ pub fn prepare_local_sources(
         .map(|adapter| -> Result<_, LocalReportError> {
             #[cfg(test)]
             PREPARE_DISCOVERY_COUNT.with(|count| count.set(count.get() + 1));
-            // Third-party source and snapshot failures stay inside their
-            // source's failure domain. Configuration failures belong to the
+            // Third-party input and snapshot failures stay inside their
+            // input's failure domain. Configuration failures belong to the
             // outer pipeline and must abort preparation.
             let units = match adapter.discover_checked(&scan_ctx) {
                 Ok(units) => units,
                 Err(error)
-                    if error.kind == adapters::error::SourceDiscoveryErrorKind::Configuration =>
+                    if error.kind == adapters::error::InputDiscoveryErrorKind::Configuration =>
                 {
                     return Err(LocalReportError::invalid_environment(error));
                 }
                 Err(error) => {
-                    health.record(SourceHealth {
+                    health.record(InputHealth {
                         client: error.client,
                         path: error.path.clone(),
-                        status: SourceStatus::Unavailable {
-                            failure: SourceFailure::new(error.operation, error.to_string()),
+                        status: InputStatus::Unavailable {
+                            failure: InputFailure::new(error.operation, error.to_string()),
                         },
                         rejections: RejectionSummary::default(),
                     });
-                    return Ok(adapters::PreparedAdapterSources {
+                    return Ok(adapters::PreparedAdapterInputs {
                         adapter,
                         units: Vec::new(),
                     });
@@ -920,12 +911,12 @@ pub fn prepare_local_sources(
                     match unit.prepare_snapshot() {
                         Ok(unit) => Some(unit),
                         Err(source) => {
-                            health.record(SourceHealth {
+                            health.record(InputHealth {
                                 client,
                                 path,
-                                status: SourceStatus::Unavailable {
-                                    failure: SourceFailure::new(
-                                        "snapshot source metadata and identity",
+                                status: InputStatus::Unavailable {
+                                    failure: InputFailure::new(
+                                        "snapshot input metadata and identity",
                                         source.to_string(),
                                     ),
                                 },
@@ -936,14 +927,14 @@ pub fn prepare_local_sources(
                     }
                 })
                 .collect();
-            Ok(adapters::PreparedAdapterSources { adapter, units })
+            Ok(adapters::PreparedAdapterInputs { adapter, units })
         })
         .collect::<Result<_, _>>()?;
-    health.set_source_data_bytes(source_data_bytes(
+    health.set_input_data_bytes(input_data_bytes(
         groups.iter().flat_map(|group| group.units.iter()),
     ));
-    let signature = source_inventory_signature(&clients, &groups);
-    Ok(PreparedLocalSources {
+    let signature = input_inventory_signature(&clients, &groups);
+    Ok(PreparedLocalInputs {
         options,
         clients,
         groups,
@@ -967,12 +958,12 @@ fn prepare_discovery_count() -> usize {
     PREPARE_DISCOVERY_COUNT.with(std::cell::Cell::get)
 }
 
-fn source_inventory_signature(
+fn input_inventory_signature(
     clients: &[String],
-    groups: &[adapters::PreparedAdapterSources],
-) -> SourceInventorySignature {
+    groups: &[adapters::PreparedAdapterInputs],
+) -> InputInventorySignature {
     let mut hasher = Sha256::new();
-    message_cache::hash_inventory_bytes(&mut hasher, b"tokscale/local-source-inventory");
+    message_cache::hash_inventory_bytes(&mut hasher, b"tokscale/local-input-inventory");
     hasher.update(2_u32.to_le_bytes());
     let mut sorted_clients: Vec<&str> = clients.iter().map(String::as_str).collect();
     sorted_clients.sort_unstable();
@@ -992,15 +983,15 @@ fn source_inventory_signature(
             hasher.update(unit.inventory_signature_digest());
         }
     }
-    SourceInventorySignature(hasher.finalize().into())
+    InputInventorySignature(hasher.finalize().into())
 }
 
-fn confirmed_source_inventory_signature(
+fn confirmed_input_inventory_signature(
     clients: &[String],
-    groups: &[adapters::ConfirmedAdapterSources],
-) -> SourceInventorySignature {
+    groups: &[adapters::ConfirmedAdapterInputs],
+) -> InputInventorySignature {
     let mut hasher = Sha256::new();
-    message_cache::hash_inventory_bytes(&mut hasher, b"tokscale/local-source-inventory");
+    message_cache::hash_inventory_bytes(&mut hasher, b"tokscale/local-input-inventory");
     hasher.update(2_u32.to_le_bytes());
     let mut sorted_clients: Vec<&str> = clients.iter().map(String::as_str).collect();
     sorted_clients.sort_unstable();
@@ -1017,7 +1008,7 @@ fn confirmed_source_inventory_signature(
             hasher.update(digest);
         }
     }
-    SourceInventorySignature(hasher.finalize().into())
+    InputInventorySignature(hasher.finalize().into())
 }
 
 /// Date-range retain shared by the report and local-parse filters. One
@@ -1063,7 +1054,7 @@ fn aggregate_model_usage_entries(
     messages: Vec<UnifiedMessage>,
     group_by: &GroupBy,
 ) -> Vec<ModelUsage> {
-    // Delegate to the aggregation engine (the single source of truth for the
+    // Delegate to the aggregation engine (the single authority for the
     // model fold). The old inline implementation is gone (#33: one copy).
     let mut engine =
         crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
@@ -1137,7 +1128,7 @@ struct ResolvedAggregationRequest<'a> {
 fn load_aggregated_views_resolved(
     request: ResolvedAggregationRequest<'_>,
 ) -> Result<AggregatedViews, LocalReportError> {
-    let prepared = prepare_local_sources(LocalParseOptions {
+    let prepared = prepare_local_inputs(LocalParseOptions {
         home_dir: Some(request.home_dir.to_string()),
         use_env_roots: request.use_env_roots,
         clients: Some(request.clients.to_vec()),
@@ -1157,22 +1148,22 @@ fn load_aggregated_views_resolved(
 }
 
 fn load_prepared_aggregated_views(
-    prepared: PreparedLocalSources,
+    prepared: PreparedLocalInputs,
     group_by: GroupBy,
     date_range: DateRange,
     views: ViewSet,
     pricing: Option<&pricing::PricingService>,
-) -> Result<(AggregatedViews, SourceInventorySignature), LocalReportError> {
+) -> Result<(AggregatedViews, InputInventorySignature), LocalReportError> {
     let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
         group_by,
         date_range,
         views,
     });
     let FoldOutcome {
-        source_inventory_signature,
+        input_inventory_signature,
         health,
         ..
-    } = match stream_local_sources_into_engine(prepared, pricing, &mut engine) {
+    } = match stream_local_inputs_into_engine(prepared, pricing, &mut engine) {
         Ok(outcome) => outcome,
         Err(error) => {
             drop(engine);
@@ -1182,12 +1173,12 @@ fn load_prepared_aggregated_views(
     };
     let mut views = engine.finish();
     views.health = health;
-    // The streaming sink has dropped every source message and `finish` has
+    // The streaming sink has dropped every input message and `finish` has
     // consumed all Arc-backed accumulators. Public views own Strings, so this
     // is the narrow lifecycle seam where dead weak identity indices can be
     // reclaimed without sweeping caller-owned generic message slices.
     sessions::intern::prune_dead();
-    Ok((views, source_inventory_signature))
+    Ok((views, input_inventory_signature))
 }
 
 fn load_aggregated_views_for_resolved_report(
@@ -1213,7 +1204,7 @@ fn load_aggregated_views_for_resolved_report(
 ///
 /// This is the canonical local-report aggregation path for callers that need
 /// multiple views in one process. It intentionally does not reuse a mutable
-/// `SourceMessageCache` across independent runs; cache message bodies remain
+/// `InputMessageCache` across independent runs; cache message bodies remain
 /// consumptive within each fold.
 #[doc(hidden)]
 pub fn load_aggregated_views_with_pricing(
@@ -1303,7 +1294,7 @@ async fn generate_graph_with_loaded_pricing(
 pub struct TimeMetricsReport {
     pub metrics: sessionize::TimeMetrics,
     pub processing_time_ms: u32,
-    pub health: source_health::HealthReport,
+    pub health: input_health::HealthReport,
 }
 
 pub async fn get_time_metrics_report(
@@ -1352,7 +1343,7 @@ pub(crate) fn aggregate_model_usage_entries_pub(
 
 #[cfg(test)]
 pub(crate) fn monthly_report_from_messages_pub(messages: Vec<UnifiedMessage>) -> MonthlyReport {
-    // Delegate to the engine (single source of truth). The parity harness uses
+    // Delegate to the engine (single authority). The parity harness uses
     // this message-list entry point to confirm the engine is deterministic and
     // matches what the async production path produces.
     let mut engine =
@@ -1560,21 +1551,21 @@ fn resolve_local_parse_request(
 }
 
 fn parse_prepared_local_unified_messages(
-    prepared: PreparedLocalSources,
+    prepared: PreparedLocalInputs,
     pricing: Option<&pricing::PricingService>,
 ) -> Result<LocalReport<Vec<UnifiedMessage>>, LocalReportError> {
     let filters = prepared.options.clone();
     let mut messages = Vec::new();
     let FoldOutcome {
-        source_inventory_signature,
+        input_inventory_signature,
         health,
         ..
-    } = fold_prepared_local_sources_with_pricing(prepared, pricing, &mut messages)?;
+    } = fold_prepared_local_inputs_with_pricing(prepared, pricing, &mut messages)?;
     Ok(LocalReport {
         data: filter_unified_messages(messages, &filters),
         health: health.to_report(),
         metadata: LocalLoadMetadata {
-            source_inventory_signature,
+            input_inventory_signature,
         },
     })
 }
@@ -1583,13 +1574,13 @@ pub fn count_local_client_messages(
     options: LocalParseOptions,
 ) -> Result<LocalClientMessageCounts, LocalReportError> {
     let start = Instant::now();
-    let prepared = prepare_local_sources(options)?;
+    let prepared = prepare_local_inputs(options)?;
     let mut sink = ClientCountSink::new(DateRange {
         since: prepared.options.since.clone(),
         until: prepared.options.until.clone(),
         year: prepared.options.year.clone(),
     });
-    let health = fold_prepared_local_sources_with_pricing(prepared, None, &mut sink)?.health;
+    let health = fold_prepared_local_inputs_with_pricing(prepared, None, &mut sink)?.health;
     Ok(LocalClientMessageCounts {
         counts: sink.counts,
         processing_time_ms: start.elapsed().as_millis() as u32,
@@ -1602,14 +1593,14 @@ pub async fn parse_local_unified_messages_with_pricing(
     options: LocalParseOptions,
     pricing: Option<&pricing::PricingService>,
 ) -> Result<LocalReport<Vec<UnifiedMessage>>, LocalReportError> {
-    let prepared = prepare_local_sources(options)?;
+    let prepared = prepare_local_inputs(options)?;
     parse_prepared_local_unified_messages(prepared, pricing)
 }
 
 pub async fn parse_local_unified_messages(
     options: LocalParseOptions,
 ) -> Result<LocalReport<Vec<UnifiedMessage>>, LocalReportError> {
-    let prepared = prepare_local_sources(options)?;
+    let prepared = prepare_local_inputs(options)?;
     let pricing = load_pricing_for_local_parse().await;
     parse_prepared_local_unified_messages(prepared, pricing.as_deref())
 }
@@ -1617,7 +1608,7 @@ pub async fn parse_local_unified_messages(
 pub async fn parse_local_unified_messages_with_diagnostics(
     options: LocalParseOptions,
 ) -> Result<LocalReportWithPricingDiagnostics<Vec<UnifiedMessage>>, LocalReportError> {
-    let prepared = prepare_local_sources(options)?;
+    let prepared = prepare_local_inputs(options)?;
     let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
     let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
     let report = parse_prepared_local_unified_messages(prepared, pricing.as_deref())?;
@@ -1633,13 +1624,13 @@ pub fn load_usage_data_with_pricing(
     group_by: GroupBy,
     pricing: Option<&pricing::PricingService>,
 ) -> Result<usage_views::UsageData, LocalReportError> {
-    let prepared = prepare_local_sources(options)?;
+    let prepared = prepare_local_inputs(options)?;
     load_prepared_usage_data_with_pricing(prepared, group_by, pricing)
 }
 
 #[doc(hidden)]
 pub fn load_prepared_usage_data_with_pricing(
-    prepared: PreparedLocalSources,
+    prepared: PreparedLocalInputs,
     group_by: GroupBy,
     pricing: Option<&pricing::PricingService>,
 ) -> Result<usage_views::UsageData, LocalReportError> {
@@ -1655,22 +1646,22 @@ pub fn load_prepared_usage_data_with_pricing(
     Ok(data)
 }
 
-/// The complete TUI-local projection produced by one source fold. Usage
-/// groupings are projected lazily from `accumulator`; Sessions data and source
+/// The complete TUI-local projection produced by one input fold. Usage
+/// groupings are projected lazily from `accumulator`; Sessions data and input
 /// sizes are materialized alongside it without retaining raw messages or
 /// running a second scanner.
 pub struct TuiBundleWithDiagnostics {
     pub accumulator: TuiAcc,
     pub sessions: Vec<TuiSessionEntry>,
-    /// Confirmed source bytes keyed by canonical local client id.
-    pub source_space: BTreeMap<String, u64>,
+    /// Confirmed input bytes keyed by canonical local client id.
+    pub client_space: BTreeMap<String, u64>,
     pub pricing_diagnostics: pricing::PricingDiagnostics,
-    pub source_inventory_signature: SourceInventorySignature,
+    pub input_inventory_signature: InputInventorySignature,
     pub health: DataHealth,
 }
 
 pub async fn load_prepared_tui_bundle_with_diagnostics(
-    prepared: PreparedLocalSources,
+    prepared: PreparedLocalInputs,
 ) -> Result<TuiBundleWithDiagnostics, LocalReportError> {
     let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
     let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
@@ -1687,10 +1678,10 @@ pub async fn load_prepared_tui_bundle_with_diagnostics(
         views: ViewSet::TUI | ViewSet::TUI_SESSIONS,
     });
     let FoldOutcome {
-        source_inventory_signature,
-        source_space,
+        input_inventory_signature,
+        client_space,
         health,
-    } = match stream_local_sources_into_engine(prepared, pricing.as_deref(), &mut engine) {
+    } = match stream_local_inputs_into_engine(prepared, pricing.as_deref(), &mut engine) {
         Ok(outcome) => outcome,
         Err(error) => {
             drop(engine);
@@ -1703,9 +1694,9 @@ pub async fn load_prepared_tui_bundle_with_diagnostics(
     Ok(TuiBundleWithDiagnostics {
         accumulator: accumulator.expect("tui usage view requested"),
         sessions: sessions.expect("tui sessions view requested"),
-        source_space,
+        client_space,
         pricing_diagnostics,
-        source_inventory_signature,
+        input_inventory_signature,
         health,
     })
 }

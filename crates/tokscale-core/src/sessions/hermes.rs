@@ -10,17 +10,20 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{open_readonly_sqlite, parse_epoch_f64_millis};
 use super::UnifiedMessage;
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use std::path::Path;
 
 const HERMES_AGENT_NAME: &str = "Hermes Agent";
 
 fn resolved_provider(billing_provider: Option<String>, model_id: &str) -> String {
-    provider_identity::source_provider_id(billing_provider.as_deref().unwrap_or_default(), model_id)
+    provider_identity::observed_provider_id(
+        billing_provider.as_deref().unwrap_or_default(),
+        model_id,
+    )
 }
 
-pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
     let conn = open_readonly_sqlite(db_path)?;
 
     let query = r#"
@@ -46,14 +49,14 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> 
         .query([])
         .map_err(|error| SessionParseError::new("execute Hermes session query", error))?;
 
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     loop {
         let row = match rows.next() {
             Ok(Some(row)) => row,
             Ok(None) => break,
             Err(error) => {
                 let error = SessionParseError::new("iterate Hermes session rows", error);
-                scanned.interrupted = Some(SourceFailure::from(&error));
+                scanned.interrupted = Some(InputFailure::from(&error));
                 break;
             }
         };
@@ -167,7 +170,7 @@ mod tests {
     use rusqlite::{params, Connection};
 
     #[test]
-    fn parse_hermes_sqlite_reports_missing_schema_as_source_error() {
+    fn parse_hermes_sqlite_reports_missing_schema_as_input_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
         drop(Connection::open(&path).unwrap());

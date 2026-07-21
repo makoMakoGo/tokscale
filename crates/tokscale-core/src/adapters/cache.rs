@@ -1,21 +1,21 @@
 use std::path::Path;
 
 use crate::adapters::{
-    CacheHitPlan, FingerprintPolicy, FoldContext, MessageSink, ParseContext, ParsedUnit,
-    SourcePipelineError, SourcePlanningError, SourceUnit, UnitMessageSource, UnitScanHealth,
+    CacheHitPlan, FingerprintPolicy, FoldContext, InputPipelineError, InputPlanningError,
+    InputUnit, MessageSink, ParseContext, ParsedUnit, UnitMessagePayload, UnitScanHealth,
 };
-use crate::source_health::{ScannedSource, SourceFailure, SourceHealth, SourceStatus};
+use crate::input_health::{InputFailure, InputHealth, InputStatus, ScannedInput};
 use crate::{message_cache, UnifiedMessage};
 
 pub(crate) fn plan_cache_hit(
-    mut unit: SourceUnit,
-    source_cache: &message_cache::SourceMessageCache,
-) -> Result<CacheHitPlan, SourcePlanningError> {
+    mut unit: InputUnit,
+    input_cache: &message_cache::InputMessageCache,
+) -> Result<CacheHitPlan, InputPlanningError> {
     if matches!(unit.fingerprint_policy, FingerprintPolicy::NoMessageCache) {
         return Ok(CacheHitPlan::Miss(unit));
     }
     unit.revalidate_snapshot_for_cache_decision()?;
-    let cached = match source_cache.get_meta(&unit.path, unit.parser_version) {
+    let cached = match input_cache.get_meta(&unit.path, unit.parser_version) {
         Ok(Some(cached)) => cached,
         Ok(None) => {
             unit.mark_cache_lookup_completed_no_hit();
@@ -26,13 +26,13 @@ pub(crate) fn plan_cache_hit(
             return Ok(CacheHitPlan::Miss(unit));
         }
     };
-    let snapshot = unit.prepared_source_input_snapshot().ok_or_else(|| {
-        message_cache::SourceSnapshotError::InvalidSnapshot {
+    let snapshot = unit.prepared_input_snapshot().ok_or_else(|| {
+        message_cache::InputSnapshotError::InvalidSnapshot {
             path: unit.path.clone(),
             detail: "cache planner lost its freshly validated snapshot".to_string(),
         }
     })?;
-    let stamp = match unit.source_input_policy().stamp_from_snapshot(snapshot) {
+    let stamp = match unit.input_policy().stamp_from_snapshot(snapshot) {
         Ok(stamp) => stamp,
         Err(source) if preserves_primary_on_related_failure(&unit, &source) => {
             unit.mark_cache_lookup_completed_no_hit();
@@ -48,22 +48,23 @@ pub(crate) fn plan_cache_hit(
 
     let read_plan =
         message_cache::CacheReadPlan::new(&unit.path, unit.parser_version, cached.fingerprint);
-    let mut parsed = ParsedUnit::healthy(unit, UnitMessageSource::CacheHit(read_plan), None, false);
+    let mut parsed =
+        ParsedUnit::healthy(unit, UnitMessagePayload::CacheHit(read_plan), None, false);
     parsed.health.rejections = cached.rejections;
     Ok(CacheHitPlan::Hit(parsed))
 }
 
-/// Seam for migrated parsers returning `ScannedSource`: record rejections
+/// Seam for migrated parsers returning `ScannedInput`: record rejections
 /// are carried alongside the messages, an interrupted scan keeps its
-/// confirmed records but is never cached, and a source-level `Err` is
+/// confirmed records but is never cached, and an input-level `Err` is
 /// isolated to this unit.
 pub(crate) fn load_or_scan_unit_with<F>(
-    unit: SourceUnit,
+    unit: InputUnit,
     ctx: &ParseContext<'_>,
     scan: F,
 ) -> ParsedUnit
 where
-    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedSource>,
+    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedInput>,
 {
     load_or_scan_unit_cacheable(unit, ctx, ScanCacheOptions::default(), |path| {
         scan(path).map(|scanned| (scanned, true))
@@ -71,25 +72,25 @@ where
 }
 
 pub(crate) fn load_or_scan_unit_with_cacheability<F>(
-    unit: SourceUnit,
+    unit: InputUnit,
     ctx: &ParseContext<'_>,
     scan: F,
 ) -> ParsedUnit
 where
-    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<(ScannedSource, bool)>,
+    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<(ScannedInput, bool)>,
 {
     load_or_scan_unit_cacheable(unit, ctx, ScanCacheOptions::default(), scan)
 }
 
 pub(crate) fn load_or_scan_empty_sentinel_with_primary_hash<F>(
-    unit: SourceUnit,
+    unit: InputUnit,
     ctx: &ParseContext<'_>,
     primary_hash: [u8; 32],
-    primary_snapshot: message_cache::SourceInputSnapshot,
+    primary_snapshot: message_cache::InputSnapshot,
     scan: F,
 ) -> ParsedUnit
 where
-    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedSource>,
+    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedInput>,
 {
     load_or_scan_unit_cacheable(
         unit,
@@ -106,14 +107,14 @@ where
 }
 
 pub(crate) fn load_or_scan_unit_with_dependency_hash<F>(
-    unit: SourceUnit,
+    unit: InputUnit,
     ctx: &ParseContext<'_>,
     dependency_hash: [u8; 32],
-    dependency_snapshot: message_cache::SourceInputSnapshot,
+    dependency_snapshot: message_cache::InputSnapshot,
     scan: F,
 ) -> ParsedUnit
 where
-    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedSource>,
+    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedInput>,
 {
     load_or_scan_unit_cacheable(
         unit,
@@ -132,11 +133,11 @@ where
 enum PrecomputedContentHash {
     Primary {
         hash: [u8; 32],
-        snapshot: message_cache::SourceInputSnapshot,
+        snapshot: message_cache::InputSnapshot,
     },
     Dependency {
         hash: [u8; 32],
-        snapshot: message_cache::SourceInputSnapshot,
+        snapshot: message_cache::InputSnapshot,
     },
 }
 
@@ -147,24 +148,24 @@ struct ScanCacheOptions {
 }
 
 fn load_or_scan_unit_cacheable<F>(
-    mut unit: SourceUnit,
+    mut unit: InputUnit,
     ctx: &ParseContext<'_>,
     options: ScanCacheOptions,
     scan: F,
 ) -> ParsedUnit
 where
-    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<(ScannedSource, bool)>,
+    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<(ScannedInput, bool)>,
 {
     let ScanCacheOptions {
         cache_clean_empty,
         precomputed_content_hash,
     } = options;
-    let scan_source = |path: &Path| scan(path);
+    let scan_input = |path: &Path| scan(path);
     if matches!(unit.fingerprint_policy, FingerprintPolicy::NoMessageCache) {
         unit.release_prepared_snapshot();
-        let (scanned, _) = match scan_source(&unit.path) {
+        let (scanned, _) = match scan_input(&unit.path) {
             Ok(scanned) => scanned,
-            Err(error) => return ParsedUnit::unavailable(unit, SourceFailure::from(&error)),
+            Err(error) => return ParsedUnit::unavailable(unit, InputFailure::from(&error)),
         };
         return finalize_uncached_scan(unit, scanned, ctx);
     }
@@ -175,8 +176,8 @@ where
             return ParsedUnit::unavailable(unit, snapshot_failure(source));
         }
     }
-    let input_policy = unit.source_input_policy();
-    let snapshot = match unit.take_source_input_snapshot() {
+    let input_policy = unit.input_policy();
+    let snapshot = match unit.take_input_snapshot() {
         Ok(snapshot) => snapshot,
         Err(source) => return ParsedUnit::unavailable(unit, snapshot_failure(source)),
     };
@@ -210,27 +211,27 @@ where
         None => (None, None),
     };
 
-    let (mut scanned, cacheable) = match scan_source(&unit.path) {
+    let (mut scanned, cacheable) = match scan_input(&unit.path) {
         Ok(scanned) => scanned,
-        Err(error) => return ParsedUnit::unavailable(unit, SourceFailure::from(&error)),
+        Err(error) => return ParsedUnit::unavailable(unit, InputFailure::from(&error)),
     };
     let fingerprint_failed = fingerprint_failure.is_some();
     crate::finalize_token_priced_messages(&mut scanned.messages, ctx.pricing);
     let post_scan_snapshot_failure = match input_policy.snapshot() {
         Ok(current) if current == snapshot => None,
-        Ok(_) => Some(SourceFailure::new(
-            "validate source snapshot after scan",
+        Ok(_) => Some(InputFailure::new(
+            "validate input snapshot after scan",
             format!("{} changed while it was scanned", unit.path.display()),
         )),
         Err(source) => Some(snapshot_failure(source)),
     };
-    let source_unchanged = post_scan_snapshot_failure.is_none();
+    let input_unchanged = post_scan_snapshot_failure.is_none();
     if scanned.interrupted.is_none() {
         scanned.interrupted = fingerprint_failure
             .or_else(|| {
                 precomputed_snapshot_mismatch.then(|| {
-                    SourceFailure::new(
-                        "validate precomputed source snapshot",
+                    InputFailure::new(
+                        "validate precomputed input snapshot",
                         format!(
                             "{} changed after its shared content was indexed",
                             unit.path.display()
@@ -244,7 +245,7 @@ where
     let cacheable_output =
         cache_clean_empty || !scanned.messages.is_empty() || !scanned.rejections.is_empty();
     let cache_write = match fingerprint {
-        Some(fingerprint) if complete && cacheable && source_unchanged && cacheable_output => {
+        Some(fingerprint) if complete && cacheable && input_unchanged && cacheable_output => {
             Some(Box::new(
                 message_cache::CacheWritePlan::new(
                     &unit.path,
@@ -259,18 +260,18 @@ where
     };
 
     let status = match scanned.interrupted {
-        None => SourceStatus::Complete,
-        Some(failure) => SourceStatus::Partial { failure },
+        None => InputStatus::Complete,
+        Some(failure) => InputStatus::Partial { failure },
     };
     ParsedUnit {
         unit,
-        messages: UnitMessageSource::Fresh(scanned.messages),
+        messages: UnitMessagePayload::Fresh(scanned.messages),
         cache_write,
         invalidate_cache: precomputed_snapshot_mismatch
             || fingerprint_failed
             || !complete
             || !cacheable
-            || !source_unchanged,
+            || !input_unchanged,
         health: Box::new(crate::adapters::UnitScanHealth {
             status,
             rejections: scanned.rejections,
@@ -281,33 +282,33 @@ where
 /// Seam for adapters that parse without any message-cache interplay
 /// (their units never plan cache hits and never write shards).
 pub(crate) fn parse_uncached_unit<F>(
-    mut unit: SourceUnit,
+    mut unit: InputUnit,
     ctx: &ParseContext<'_>,
     scan: F,
 ) -> ParsedUnit
 where
-    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedSource>,
+    F: Fn(&Path) -> crate::sessions::error::SessionParseResult<ScannedInput>,
 {
     unit.release_prepared_snapshot();
     match scan(&unit.path) {
         Ok(scanned) => finalize_uncached_scan(unit, scanned, ctx),
-        Err(error) => ParsedUnit::unavailable(unit, SourceFailure::from(&error)),
+        Err(error) => ParsedUnit::unavailable(unit, InputFailure::from(&error)),
     }
 }
 
 fn finalize_uncached_scan(
-    unit: SourceUnit,
-    mut scanned: ScannedSource,
+    unit: InputUnit,
+    mut scanned: ScannedInput,
     ctx: &ParseContext<'_>,
 ) -> ParsedUnit {
     crate::finalize_token_priced_messages(&mut scanned.messages, ctx.pricing);
     let status = match scanned.interrupted {
-        None => SourceStatus::Complete,
-        Some(failure) => SourceStatus::Partial { failure },
+        None => InputStatus::Complete,
+        Some(failure) => InputStatus::Partial { failure },
     };
     ParsedUnit {
         unit,
-        messages: UnitMessageSource::Fresh(scanned.messages),
+        messages: UnitMessagePayload::Fresh(scanned.messages),
         cache_write: None,
         invalidate_cache: false,
         health: Box::new(crate::adapters::UnitScanHealth {
@@ -317,13 +318,13 @@ fn finalize_uncached_scan(
     }
 }
 
-fn snapshot_failure(source: message_cache::SourceSnapshotError) -> SourceFailure {
-    SourceFailure::new("snapshot source metadata and content", source.to_string())
+fn snapshot_failure(source: message_cache::InputSnapshotError) -> InputFailure {
+    InputFailure::new("snapshot input metadata and content", source.to_string())
 }
 
 fn preserves_primary_on_related_failure(
-    unit: &SourceUnit,
-    source: &message_cache::SourceSnapshotError,
+    unit: &InputUnit,
+    source: &message_cache::InputSnapshotError,
 ) -> bool {
     unit.preserves_primary_on_related_failure() && source.is_optional_related_input_unavailable()
 }
@@ -332,7 +333,7 @@ pub(crate) fn fold_units(
     parsed: Vec<ParsedUnit>,
     ctx: &mut FoldContext<'_>,
     sink: &mut dyn MessageSink,
-) -> Result<(), SourcePipelineError> {
+) -> Result<(), InputPipelineError> {
     fold_units_with_filter(parsed, ctx, sink, |_, messages| messages)
 }
 
@@ -341,9 +342,9 @@ pub(crate) fn fold_units_with_filter<F>(
     ctx: &mut FoldContext<'_>,
     sink: &mut dyn MessageSink,
     mut filter: F,
-) -> Result<(), SourcePipelineError>
+) -> Result<(), InputPipelineError>
 where
-    F: FnMut(&SourceUnit, Vec<UnifiedMessage>) -> Vec<UnifiedMessage>,
+    F: FnMut(&InputUnit, Vec<UnifiedMessage>) -> Vec<UnifiedMessage>,
 {
     for parsed_unit in parsed {
         let ResolvedUnit {
@@ -355,7 +356,7 @@ where
             rejections,
         } = resolve_unit(parsed_unit, ctx)?;
         debug_assert!(unit.client.local_def().is_some());
-        ctx.health.record(SourceHealth {
+        ctx.health.record(InputHealth {
             client: unit.client,
             path: unit.path.clone(),
             status,
@@ -365,32 +366,32 @@ where
         let parser_version = unit.parser_version;
         let cache_write_outcome = write_cache(cache_write, ctx, &messages);
         if cache_write_outcome.is_err() && invalidate_cache {
-            ctx.source_cache.remove(&path, parser_version);
+            ctx.input_cache.remove(&path, parser_version);
         }
         let cache_write_outcome = cache_write_outcome?;
         let messages = filter(&unit, messages);
         sink.extend_messages(messages);
 
         if cache_write_outcome == CacheWriteOutcome::NotPlanned && invalidate_cache {
-            ctx.source_cache.remove(&path, parser_version);
+            ctx.input_cache.remove(&path, parser_version);
         }
     }
     Ok(())
 }
 
 pub(crate) struct ResolvedUnit {
-    pub(crate) unit: SourceUnit,
+    pub(crate) unit: InputUnit,
     pub(crate) messages: Vec<UnifiedMessage>,
     pub(crate) cache_write: Option<Box<message_cache::CacheWritePlan>>,
     pub(crate) invalidate_cache: bool,
-    pub(crate) status: SourceStatus,
-    pub(crate) rejections: crate::source_health::RejectionSummary,
+    pub(crate) status: InputStatus,
+    pub(crate) rejections: crate::input_health::RejectionSummary,
 }
 
 pub(crate) fn resolve_unit(
     mut parsed: ParsedUnit,
     ctx: &mut FoldContext<'_>,
-) -> Result<ResolvedUnit, SourcePipelineError> {
+) -> Result<ResolvedUnit, InputPipelineError> {
     let mut recovery_requires_removal = false;
     loop {
         let ParsedUnit {
@@ -416,23 +417,23 @@ pub(crate) fn resolve_unit(
                 });
             }
             Err(failure) => {
-                if !failure.can_reparse_source() {
+                if !failure.can_reparse_input() {
                     return Err(failure.into());
                 }
-                debug_assert_eq!(failure.source_path, unit.path);
+                debug_assert_eq!(failure.input_path, unit.path);
                 debug_assert_eq!(failure.parser_version, unit.parser_version);
                 let remove_failed_shard = failure.requires_shard_removal();
                 if remove_failed_shard {
-                    ctx.source_cache.remove(&unit.path, unit.parser_version);
+                    ctx.input_cache.remove(&unit.path, unit.parser_version);
                 } else {
-                    ctx.source_cache
+                    ctx.input_cache
                         .invalidate_read(&unit.path, unit.parser_version);
                 }
                 unit.mark_cache_lookup_completed_no_hit();
                 recovery_requires_removal |= remove_failed_shard;
 
                 let adapter = super::adapter_for(unit.client)
-                    .expect("cacheable source unit must have a registered local adapter");
+                    .expect("cacheable input unit must have a registered local adapter");
                 let mut reparsed = adapter.parse_checked(
                     vec![unit],
                     &ParseContext {
@@ -440,13 +441,13 @@ pub(crate) fn resolve_unit(
                     },
                 );
                 if reparsed.len() != 1 {
-                    return Err(SourcePipelineError::contract(format!(
-                        "single-source cache recovery returned {} parsed units instead of one",
+                    return Err(InputPipelineError::contract(format!(
+                        "single-input cache recovery returned {} parsed units instead of one",
                         reparsed.len()
                     )));
                 }
                 parsed = reparsed.pop().ok_or_else(|| {
-                    SourcePipelineError::contract("single-source cache recovery result disappeared")
+                    InputPipelineError::contract("single-input cache recovery result disappeared")
                 })?;
             }
         }
@@ -470,28 +471,28 @@ pub(crate) fn write_cache(
     cache_write: Option<Box<message_cache::CacheWritePlan>>,
     ctx: &mut FoldContext<'_>,
     messages: &[UnifiedMessage],
-) -> Result<CacheWriteOutcome, message_cache::SourceCacheError> {
+) -> Result<CacheWriteOutcome, message_cache::InputCacheError> {
     if let Some(plan) = cache_write {
-        ctx.source_cache.write_messages(*plan, messages)?;
+        ctx.input_cache.write_messages(*plan, messages)?;
         return Ok(CacheWriteOutcome::Written);
     }
     Ok(CacheWriteOutcome::NotPlanned)
 }
 
 pub(crate) fn resolve_messages(
-    source: UnitMessageSource,
+    payload: UnitMessagePayload,
     ctx: &mut FoldContext<'_>,
 ) -> Result<Vec<UnifiedMessage>, message_cache::CacheReadFailure> {
-    match source {
-        UnitMessageSource::Fresh(messages) => Ok(messages),
-        UnitMessageSource::CacheHit(plan) => {
-            let mut messages = ctx.source_cache.take_messages(&plan)?;
+    match payload {
+        UnitMessagePayload::Fresh(messages) => Ok(messages),
+        UnitMessagePayload::CacheHit(plan) => {
+            let mut messages = ctx.input_cache.take_messages(&plan)?;
             crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
             Ok(messages)
         }
-        UnitMessageSource::CodexFresh(_)
-        | UnitMessageSource::CodexCacheHit(_)
-        | UnitMessageSource::CodexAppend(_) => {
+        UnitMessagePayload::CodexFresh(_)
+        | UnitMessagePayload::CodexCacheHit(_)
+        | UnitMessagePayload::CodexAppend(_) => {
             unreachable!("codex deferred messages must be resolved by CodexAdapter")
         }
     }
@@ -500,14 +501,14 @@ pub(crate) fn resolve_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::SourceUnit;
+    use crate::adapters::InputUnit;
     use crate::clients::ClientId;
     use crate::TokenBreakdown;
 
-    const PI_SOURCE: &str = r#"{"type":"session","id":"source-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+    const PI_INPUT: &str = r#"{"type":"session","id":"input-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":17,"output":3,"cacheRead":0,"cacheWrite":0,"totalTokens":20}}}"#;
 
-    const PI_REPLACEMENT_SOURCE: &str = r#"{"type":"session","id":"replacement-source-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+    const PI_REPLACEMENT_INPUT: &str = r#"{"type":"session","id":"replacement-input-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_002","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":29,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":34}}}"#;
 
     fn cached_message() -> UnifiedMessage {
@@ -537,12 +538,12 @@ mod tests {
         )
     }
 
-    fn pi_unit(path: &Path) -> SourceUnit {
-        SourceUnit::plain_file(ClientId::Pi, path.to_path_buf())
+    fn pi_unit(path: &Path) -> InputUnit {
+        InputUnit::plain_file(ClientId::Pi, path.to_path_buf())
     }
 
     fn expect_cache_hit(
-        result: Result<CacheHitPlan, crate::adapters::SourcePlanningError>,
+        result: Result<CacheHitPlan, crate::adapters::InputPlanningError>,
         message: &str,
     ) -> ParsedUnit {
         match result.expect(message) {
@@ -552,9 +553,9 @@ mod tests {
     }
 
     fn expect_cache_miss(
-        result: Result<CacheHitPlan, crate::adapters::SourcePlanningError>,
+        result: Result<CacheHitPlan, crate::adapters::InputPlanningError>,
         message: &str,
-    ) -> SourceUnit {
+    ) -> InputUnit {
         match result.expect(message) {
             CacheHitPlan::Miss(unit) => unit,
             CacheHitPlan::Hit(_) => panic!("{message}"),
@@ -563,12 +564,12 @@ mod tests {
 
     fn seed_disk_cache(
         cache_dir: &Path,
-        unit: &SourceUnit,
+        unit: &InputUnit,
         session_id: &str,
-    ) -> message_cache::SourceFingerprint {
-        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir);
-        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+    ) -> message_cache::InputFingerprint {
+        let fingerprint = unit.input_policy().fingerprint().unwrap();
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir);
+        cache.insert(message_cache::CachedInputEntry::new_with_version(
             &unit.path,
             unit.parser_version,
             fingerprint.clone(),
@@ -592,28 +593,28 @@ mod tests {
 
     fn fold_planned_unit(
         parsed: ParsedUnit,
-        cache: &mut message_cache::SourceMessageCache,
+        cache: &mut message_cache::InputMessageCache,
     ) -> Vec<UnifiedMessage> {
         fold_planned_unit_result(parsed, cache).unwrap()
     }
 
     fn fold_planned_unit_result(
         parsed: ParsedUnit,
-        cache: &mut message_cache::SourceMessageCache,
-    ) -> Result<Vec<UnifiedMessage>, SourcePipelineError> {
+        cache: &mut message_cache::InputMessageCache,
+    ) -> Result<Vec<UnifiedMessage>, InputPipelineError> {
         let mut sink = Vec::new();
         fold_units(vec![parsed], &mut FoldContext::new(cache, None), &mut sink)?;
         Ok(sink)
     }
 
-    fn assert_warm_hit_reads_no_source_bytes(unit: SourceUnit) {
+    fn assert_warm_hit_reads_no_input_bytes(unit: InputUnit) {
         let cache_home = tempfile::TempDir::new().unwrap();
         let unit = unit.prepare_snapshot().unwrap();
-        let policy = unit.source_input_policy();
+        let policy = unit.input_policy();
         let stamp = policy.stamp().unwrap();
         let fingerprint = policy.fingerprint_from_stamp(stamp).unwrap();
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
-        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
+        cache.insert(message_cache::CachedInputEntry::new_with_version(
             &unit.path,
             unit.parser_version,
             fingerprint,
@@ -621,9 +622,9 @@ mod tests {
             None,
         ));
         cache.save_if_dirty().unwrap();
-        let cache = message_cache::SourceMessageCache::with_cache_dir(cache_home.path());
+        let cache = message_cache::InputMessageCache::with_cache_dir(cache_home.path());
         for path in policy.paths() {
-            message_cache::reset_source_read_stats(&path);
+            message_cache::reset_input_read_stats(&path);
         }
 
         let parsed = expect_cache_hit(
@@ -631,56 +632,55 @@ mod tests {
             "exact stamp should plan a cache hit",
         );
 
-        assert!(matches!(parsed.messages, UnitMessageSource::CacheHit(_)));
+        assert!(matches!(parsed.messages, UnitMessagePayload::CacheHit(_)));
         assert!(
             parsed.unit.prepared_snapshot.is_none(),
             "executed units must release their prepared snapshot instead of retaining a duplicate"
         );
         for path in policy.paths() {
             assert_eq!(
-                message_cache::get_source_read_stats(&path),
-                message_cache::SourceReadStats::default(),
-                "warm hit read or hashed source input {}",
+                message_cache::get_input_read_stats(&path),
+                message_cache::InputReadStats::default(),
+                "warm hit read or hashed scan input {}",
                 path.display()
             );
         }
     }
 
     #[test]
-    fn plain_file_warm_hit_reads_no_source_bytes() {
+    fn plain_file_warm_hit_reads_no_input_bytes() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.json");
-        std::fs::write(&path, b"source contents").unwrap();
+        std::fs::write(&path, b"input contents").unwrap();
 
-        assert_warm_hit_reads_no_source_bytes(SourceUnit::plain_file(ClientId::Amp, path));
+        assert_warm_hit_reads_no_input_bytes(InputUnit::plain_file(ClientId::Amp, path));
     }
 
     #[test]
-    fn sqlite_wal_warm_hit_reads_no_source_bytes() {
+    fn sqlite_wal_warm_hit_reads_no_input_bytes() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("history.db");
         let wal_path = dir.path().join("history.db-wal");
         std::fs::write(&path, b"sqlite contents").unwrap();
         std::fs::write(&wal_path, b"wal contents").unwrap();
 
-        assert_warm_hit_reads_no_source_bytes(SourceUnit::sqlite_with_wal(ClientId::Zed, path));
+        assert_warm_hit_reads_no_input_bytes(InputUnit::sqlite_with_wal(ClientId::Zed, path));
     }
 
     #[test]
-    fn claude_related_inputs_warm_hit_reads_no_source_bytes() {
+    fn claude_related_inputs_warm_hit_reads_no_input_bytes() {
         let home = tempfile::TempDir::new().unwrap();
-        let variant_dir = home.path().join(".cc-mirror/kimi-code");
-        let path = variant_dir.join("config/projects/project/session.jsonl");
+        let path = home.path().join(".claude/projects/project/session.jsonl");
         let meta_path = path.with_file_name("session.meta.json");
-        let variant_path = variant_dir.join("variant.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"session contents").unwrap();
         std::fs::write(&meta_path, b"meta contents").unwrap();
-        std::fs::write(&variant_path, b"{\"name\":\"Kimi\"}").unwrap();
 
-        assert_warm_hit_reads_no_source_bytes(
-            SourceUnit::claude_code(ClientId::Claude, path, home.path().to_path_buf()).unwrap(),
-        );
+        assert_warm_hit_reads_no_input_bytes(InputUnit::claude_code(
+            ClientId::Claude,
+            path,
+            home.path().to_path_buf(),
+        ));
     }
 
     #[test]
@@ -688,10 +688,10 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.json");
         std::fs::write(&path, b"old contents").unwrap();
-        let old_unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
-        let old_fingerprint = old_unit.source_input_policy().fingerprint().unwrap();
-        let mut cache = message_cache::SourceMessageCache::default();
-        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+        let old_unit = InputUnit::plain_file(ClientId::Amp, path.clone());
+        let old_fingerprint = old_unit.input_policy().fingerprint().unwrap();
+        let mut cache = message_cache::InputMessageCache::default();
+        cache.insert(message_cache::CachedInputEntry::new_with_version(
             &path,
             old_unit.parser_version,
             old_fingerprint,
@@ -700,11 +700,11 @@ mod tests {
         ));
 
         std::fs::write(&path, b"new and larger contents").unwrap();
-        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone())
+        let unit = InputUnit::plain_file(ClientId::Amp, path.clone())
             .prepare_snapshot()
             .unwrap();
-        let expected_snapshot = unit.source_input_policy().snapshot().unwrap();
-        message_cache::reset_source_read_stats(&path);
+        let expected_snapshot = unit.input_policy().snapshot().unwrap();
+        message_cache::reset_input_read_stats(&path);
 
         let mut miss = expect_cache_miss(
             plan_cache_hit(unit, &cache),
@@ -713,14 +713,14 @@ mod tests {
 
         assert!(miss.cache_lookup_completed_no_hit);
         assert_eq!(
-            miss.take_source_input_snapshot().unwrap(),
+            miss.take_input_snapshot().unwrap(),
             expected_snapshot,
             "planning a miss must return the prepared inventory snapshot unchanged"
         );
         assert_eq!(
-            message_cache::get_source_read_stats(&path),
-            message_cache::SourceReadStats::default(),
-            "cache-hit planning must not read source bytes"
+            message_cache::get_input_read_stats(&path),
+            message_cache::InputReadStats::default(),
+            "cache-hit planning must not read input bytes"
         );
     }
 
@@ -728,19 +728,19 @@ mod tests {
     fn confirmed_no_hit_skips_cache_inserted_between_plan_and_parse() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.json");
-        std::fs::write(&path, b"source contents").unwrap();
-        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone())
+        std::fs::write(&path, b"input contents").unwrap();
+        let unit = InputUnit::plain_file(ClientId::Amp, path.clone())
             .prepare_snapshot()
             .unwrap();
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
 
         let miss = expect_cache_miss(plan_cache_hit(unit, &cache), "empty cache must plan a miss");
         assert!(miss.cache_lookup_completed_no_hit);
-        assert!(miss.prepared_source_input_snapshot().is_some());
-        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+        assert!(miss.prepared_input_snapshot().is_some());
+        cache.insert(message_cache::CachedInputEntry::new_with_version(
             &path,
             miss.parser_version,
-            miss.source_input_policy().fingerprint().unwrap(),
+            miss.input_policy().fingerprint().unwrap(),
             vec![cached_message()],
             None,
         ));
@@ -748,20 +748,20 @@ mod tests {
 
         let parsed = load_or_scan_unit_with(miss, &ParseContext { pricing: None }, |_| {
             parse_called.set(true);
-            Ok(ScannedSource::complete(vec![cached_message()]))
+            Ok(ScannedInput::complete(vec![cached_message()]))
         });
 
         assert!(parse_called.get());
-        assert!(matches!(parsed.messages, UnitMessageSource::Fresh(_)));
+        assert!(matches!(parsed.messages, UnitMessagePayload::Fresh(_)));
         assert!(!parsed.unit.cache_lookup_completed_no_hit);
     }
 
     #[test]
-    fn parser_error_is_isolated_as_unavailable_source_health() {
-        let source_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("session.jsonl");
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let unit = pi_unit(&source_path);
+    fn parser_error_is_isolated_as_unavailable_input_health() {
+        let input_dir = tempfile::TempDir::new().unwrap();
+        let input_path = input_dir.path().join("session.jsonl");
+        std::fs::write(&input_path, PI_INPUT).unwrap();
+        let unit = pi_unit(&input_path);
 
         let parsed = load_or_scan_unit_with(
             unit.prepare_snapshot().unwrap(),
@@ -774,15 +774,15 @@ mod tests {
             },
         );
 
-        let health = parsed.source_health();
+        let health = parsed.input_health();
         assert_eq!(health.client, ClientId::Pi);
-        assert_eq!(health.path, source_path);
-        let failure = health.status.failure().expect("source must be unavailable");
+        assert_eq!(health.path, input_path);
+        let failure = health.status.failure().expect("input must be unavailable");
         assert_eq!(failure.operation, "parse test SQLite");
         assert!(failure.message.contains("sqlite root cause"));
         assert!(matches!(
             parsed.messages,
-            UnitMessageSource::Fresh(ref messages) if messages.is_empty()
+            UnitMessagePayload::Fresh(ref messages) if messages.is_empty()
         ));
         assert!(parsed.cache_write.is_none());
     }
@@ -792,10 +792,10 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("empty.jsonl");
         std::fs::write(&path, b"").unwrap();
-        let unit = SourceUnit::plain_file(ClientId::Amp, path);
+        let unit = InputUnit::plain_file(ClientId::Amp, path);
 
         let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
-            Ok(ScannedSource::complete(Vec::new()))
+            Ok(ScannedInput::complete(Vec::new()))
         });
 
         assert!(parsed.cache_write.is_none());
@@ -806,13 +806,13 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("all-bad.jsonl");
         std::fs::write(&path, b"bad").unwrap();
-        let unit = SourceUnit::plain_file(ClientId::Amp, path);
+        let unit = InputUnit::plain_file(ClientId::Amp, path);
 
         let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
-            let mut scanned = ScannedSource::complete(Vec::new());
+            let mut scanned = ScannedInput::complete(Vec::new());
             scanned
                 .rejections
-                .record(crate::source_health::RecordRejectionReason::MalformedRecord);
+                .record(crate::input_health::RecordRejectionReason::MalformedRecord);
             Ok(scanned)
         });
 
@@ -821,24 +821,24 @@ mod tests {
 
     #[test]
     fn previous_format_lookup_downgrades_to_miss_without_mutating_the_shard() {
-        let source_dir = tempfile::TempDir::new().unwrap();
+        let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("session.jsonl");
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let unit = pi_unit(&source_path);
+        let input_path = input_dir.path().join("session.jsonl");
+        std::fs::write(&input_path, PI_INPUT).unwrap();
+        let unit = pi_unit(&input_path);
         seed_disk_cache(cache_dir.path(), &unit, "previous-format-session");
         let shard_path = message_cache::mark_current_key_shard_as_previous_format_for_test(
             cache_dir.path(),
-            &source_path,
+            &input_path,
             unit.parser_version,
         );
         let before = std::fs::read(&shard_path).unwrap();
-        let cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let miss = expect_cache_miss(
             plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache),
-            "a previous-format shard must plan a reparse miss instead of failing the source",
+            "a previous-format shard must plan a reparse miss instead of failing the input",
         );
-        assert_eq!(miss.path, source_path);
+        assert_eq!(miss.path, input_path);
         assert_eq!(
             std::fs::read(shard_path).unwrap(),
             before,
@@ -848,25 +848,25 @@ mod tests {
 
     #[test]
     fn future_format_lookup_downgrades_to_miss_without_mutating_the_shard() {
-        let source_dir = tempfile::TempDir::new().unwrap();
+        let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("session.jsonl");
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let unit = pi_unit(&source_path);
+        let input_path = input_dir.path().join("session.jsonl");
+        std::fs::write(&input_path, PI_INPUT).unwrap();
+        let unit = pi_unit(&input_path);
         seed_disk_cache(cache_dir.path(), &unit, "future-format-session");
         let shard_path = message_cache::mark_current_key_shard_as_future_format_for_test(
             cache_dir.path(),
-            &source_path,
+            &input_path,
             unit.parser_version,
         );
         let before = std::fs::read(&shard_path).unwrap();
-        let cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
 
         let miss = expect_cache_miss(
             plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache),
-            "a future-format shard is disposable and must trigger a source reparse",
+            "a future-format shard is disposable and must trigger an input reparse",
         );
-        assert_eq!(miss.path, source_path);
+        assert_eq!(miss.path, input_path);
         assert_eq!(std::fs::read(shard_path).unwrap(), before);
     }
 
@@ -874,13 +874,13 @@ mod tests {
     fn unprepared_planner_refreshes_snapshot_and_accepts_exact_hit() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.json");
-        std::fs::write(&path, b"source contents").unwrap();
-        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
-        let mut cache = message_cache::SourceMessageCache::default();
-        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+        std::fs::write(&path, b"input contents").unwrap();
+        let unit = InputUnit::plain_file(ClientId::Amp, path.clone());
+        let mut cache = message_cache::InputMessageCache::default();
+        cache.insert(message_cache::CachedInputEntry::new_with_version(
             &path,
             unit.parser_version,
-            unit.source_input_policy().fingerprint().unwrap(),
+            unit.input_policy().fingerprint().unwrap(),
             vec![cached_message()],
             None,
         ));
@@ -889,7 +889,7 @@ mod tests {
             plan_cache_hit(unit, &cache),
             "cache planning must refresh metadata at the acceptance boundary",
         );
-        assert!(matches!(parsed.messages, UnitMessageSource::CacheHit(_)));
+        assert!(matches!(parsed.messages, UnitMessagePayload::CacheHit(_)));
     }
 
     #[test]
@@ -898,12 +898,12 @@ mod tests {
         let path = dir.path().join("session.json");
         std::fs::write(&path, b"original").unwrap();
         let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
-        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone())
+        let unit = InputUnit::plain_file(ClientId::Amp, path.clone())
             .prepare_snapshot()
             .unwrap();
-        let policy = unit.source_input_policy();
+        let policy = unit.input_policy();
         let original_modified_ms = unit
-            .prepared_source_input_snapshot()
+            .prepared_input_snapshot()
             .unwrap()
             .primary_modified_ms();
         let original_stamp = policy.stamp().unwrap();
@@ -911,8 +911,8 @@ mod tests {
             .fingerprint_from_stamp(original_stamp.clone())
             .unwrap();
         let original_content_hash = fingerprint.content_hash;
-        let mut cache = message_cache::SourceMessageCache::default();
-        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+        let mut cache = message_cache::InputMessageCache::default();
+        cache.insert(message_cache::CachedInputEntry::new_with_version(
             &path,
             unit.parser_version,
             fingerprint,
@@ -947,34 +947,31 @@ mod tests {
             original_content_hash,
             "the replacement really changed content even though size and mtime were restored"
         );
-        message_cache::reset_source_read_stats(&path);
+        message_cache::reset_input_read_stats(&path);
         let parse_called = std::cell::Cell::new(false);
 
         let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
             parse_called.set(true);
-            Ok(ScannedSource::complete(vec![cached_message()]))
+            Ok(ScannedInput::complete(vec![cached_message()]))
         });
         assert!(parse_called.get());
-        assert!(matches!(parsed.messages, UnitMessageSource::Fresh(_)));
+        assert!(matches!(parsed.messages, UnitMessagePayload::Fresh(_)));
     }
 
     #[test]
-    fn source_change_during_parse_prevents_cache_write() {
+    fn input_change_during_parse_prevents_cache_write() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.json");
         std::fs::write(&path, b"before").unwrap();
-        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
+        let unit = InputUnit::plain_file(ClientId::Amp, path.clone());
         let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
             std::fs::write(&path, b"after-and-different-size").unwrap();
-            Ok(ScannedSource::complete(vec![cached_message()]))
+            Ok(ScannedInput::complete(vec![cached_message()]))
         });
 
         assert!(parsed.cache_write.is_none());
         assert!(parsed.invalidate_cache);
-        assert!(matches!(
-            &parsed.health.status,
-            SourceStatus::Partial { .. }
-        ));
+        assert!(matches!(&parsed.health.status, InputStatus::Partial { .. }));
     }
 
     #[test]
@@ -984,12 +981,12 @@ mod tests {
         let related = dir.path().join("metadata.jsonl");
         std::fs::write(&primary, b"primary contents").unwrap();
         std::fs::write(&related, b"related contents").unwrap();
-        let unit = SourceUnit::plain_file(ClientId::Kiro, primary.clone())
+        let unit = InputUnit::plain_file(ClientId::Kiro, primary.clone())
             .with_optional_dependency(related.clone());
         let parser_version = unit.parser_version;
-        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
-        let mut cache = message_cache::SourceMessageCache::default();
-        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+        let fingerprint = unit.input_policy().fingerprint().unwrap();
+        let mut cache = message_cache::InputMessageCache::default();
+        cache.insert(message_cache::CachedInputEntry::new_with_version(
             &primary,
             unit.parser_version,
             fingerprint,
@@ -1006,7 +1003,7 @@ mod tests {
         let scan_called = std::cell::Cell::new(false);
         let parsed = load_or_scan_unit_with(miss, &ParseContext { pricing: None }, |_| {
             scan_called.set(true);
-            Ok(ScannedSource::complete(vec![scanned_message()]))
+            Ok(ScannedInput::complete(vec![scanned_message()]))
         });
 
         assert!(
@@ -1015,10 +1012,10 @@ mod tests {
         );
         assert!(parsed.cache_write.is_none());
         assert!(parsed.invalidate_cache);
-        assert!(matches!(parsed.health.status, SourceStatus::Partial { .. }));
+        assert!(matches!(parsed.health.status, InputStatus::Partial { .. }));
         assert!(matches!(
             parsed.messages,
-            UnitMessageSource::Fresh(ref messages) if messages.len() == 1
+            UnitMessagePayload::Fresh(ref messages) if messages.len() == 1
         ));
         let messages = fold_planned_unit(parsed, &mut cache);
         assert_eq!(messages.len(), 1);
@@ -1029,25 +1026,25 @@ mod tests {
     }
 
     #[test]
-    fn required_related_fingerprint_failure_keeps_source_unavailable() {
+    fn required_related_fingerprint_failure_keeps_input_unavailable() {
         let dir = tempfile::TempDir::new().unwrap();
         let primary = dir.path().join("child.jsonl");
         let dependency = dir.path().join("parent.jsonl");
         std::fs::write(&primary, b"child contents").unwrap();
         std::fs::create_dir(&dependency).unwrap();
         let unit =
-            SourceUnit::plain_file(ClientId::CommandCode, primary).with_dependency(dependency);
+            InputUnit::plain_file(ClientId::CommandCode, primary).with_dependency(dependency);
         let scan_called = std::cell::Cell::new(false);
 
         let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
             scan_called.set(true);
-            Ok(ScannedSource::complete(vec![cached_message()]))
+            Ok(ScannedInput::complete(vec![cached_message()]))
         });
 
         assert!(!scan_called.get());
         assert!(matches!(
             parsed.health.status,
-            SourceStatus::Unavailable { .. }
+            InputStatus::Unavailable { .. }
         ));
         assert!(parsed.cache_write.is_none());
     }
@@ -1059,19 +1056,18 @@ mod tests {
         let related = dir.path().join("metadata.jsonl");
         std::fs::create_dir(&primary).unwrap();
         std::fs::write(&related, b"related contents").unwrap();
-        let unit =
-            SourceUnit::plain_file(ClientId::Kiro, primary).with_optional_dependency(related);
+        let unit = InputUnit::plain_file(ClientId::Kiro, primary).with_optional_dependency(related);
         let scan_called = std::cell::Cell::new(false);
 
         let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
             scan_called.set(true);
-            Ok(ScannedSource::complete(vec![cached_message()]))
+            Ok(ScannedInput::complete(vec![cached_message()]))
         });
 
         assert!(!scan_called.get());
         assert!(matches!(
             parsed.health.status,
-            SourceStatus::Unavailable { .. }
+            InputStatus::Unavailable { .. }
         ));
         assert!(parsed.cache_write.is_none());
     }
@@ -1083,39 +1079,36 @@ mod tests {
         let wal_path = dir.path().join("history.db-wal");
         std::fs::write(&path, b"database").unwrap();
         std::fs::write(&wal_path, b"wal-before").unwrap();
-        let unit = SourceUnit::sqlite_with_wal(ClientId::Zed, path);
+        let unit = InputUnit::sqlite_with_wal(ClientId::Zed, path);
         let parsed = load_or_scan_unit_with(unit, &ParseContext { pricing: None }, |_| {
             std::fs::write(&wal_path, b"wal-after-and-larger").unwrap();
-            Ok(ScannedSource::complete(vec![cached_message()]))
+            Ok(ScannedInput::complete(vec![cached_message()]))
         });
 
         assert!(parsed.cache_write.is_none());
         assert!(parsed.invalidate_cache);
-        assert!(matches!(
-            &parsed.health.status,
-            SourceStatus::Partial { .. }
-        ));
+        assert!(matches!(&parsed.health.status, InputStatus::Partial { .. }));
     }
 
     #[test]
     fn corrupt_body_is_reparsed_rewritten_and_warm_after_repair() {
-        let source_dir = tempfile::TempDir::new().unwrap();
+        let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("session.jsonl");
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let unit = pi_unit(&source_path);
+        let input_path = input_dir.path().join("session.jsonl");
+        std::fs::write(&input_path, PI_INPUT).unwrap();
+        let unit = pi_unit(&input_path);
         let fingerprint = seed_disk_cache(cache_dir.path(), &unit, "stale-cache-session");
         message_cache::truncate_shard_after_header_for_test(
             cache_dir.path(),
-            &source_path,
+            &input_path,
             unit.parser_version,
         );
 
         let mut diagnostic_reader =
-            message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+            message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let failure = diagnostic_reader
             .take_messages(&message_cache::CacheReadPlan::new(
-                &source_path,
+                &input_path,
                 unit.parser_version,
                 fingerprint,
             ))
@@ -1130,43 +1123,43 @@ mod tests {
             reason.source().is_some(),
             "body decode reason must retain the bincode root cause"
         );
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let parsed = expect_cache_hit(
             plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &cache),
             "valid header must still plan a cache hit",
         );
         let repaired = fold_planned_unit(parsed, &mut cache);
         assert_eq!(repaired.len(), 1);
-        assert_eq!(repaired[0].session_id.as_ref(), "source-session");
+        assert_eq!(repaired[0].session_id.as_ref(), "input-session");
         assert_eq!(repaired[0].tokens.input, 17);
 
-        let mut warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        message_cache::reset_source_read_stats(&source_path);
+        let mut warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
+        message_cache::reset_input_read_stats(&input_path);
         let warm = expect_cache_hit(
             plan_cache_hit(unit.prepare_snapshot().unwrap(), &warm_cache),
             "successful recovery must atomically replace the failed shard",
         );
         let warm_messages = fold_planned_unit(warm, &mut warm_cache);
-        assert_eq!(warm_messages[0].session_id.as_ref(), "source-session");
+        assert_eq!(warm_messages[0].session_id.as_ref(), "input-session");
         assert_eq!(
-            message_cache::get_source_read_stats(&source_path),
-            message_cache::SourceReadStats::default(),
-            "second warm hit after repair must not read or hash source bytes"
+            message_cache::get_input_read_stats(&input_path),
+            message_cache::InputReadStats::default(),
+            "second warm hit after repair must not read or hash input bytes"
         );
     }
 
     #[test]
     fn corrupt_shard_removal_is_saved_when_recovery_parser_fails() {
-        let source_dir = tempfile::TempDir::new().unwrap();
+        let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("opencode.db");
-        std::fs::write(&source_path, b"not-a-database").unwrap();
-        let unit = SourceUnit::sqlite_with_wal(ClientId::OpenCode, source_path.clone())
-            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
-        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
-        let mut seed = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        seed.insert(message_cache::CachedSourceEntry::new_with_version(
-            &source_path,
+        let input_path = input_dir.path().join("opencode.db");
+        std::fs::write(&input_path, b"not-a-database").unwrap();
+        let unit = InputUnit::sqlite_with_wal(ClientId::OpenCode, input_path.clone())
+            .with_meta(crate::adapters::InputUnitMeta::OpenCodeSqlite);
+        let fingerprint = unit.input_policy().fingerprint().unwrap();
+        let mut seed = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
+        seed.insert(message_cache::CachedInputEntry::new_with_version(
+            &input_path,
             unit.parser_version,
             fingerprint,
             vec![cached_message()],
@@ -1175,28 +1168,28 @@ mod tests {
         seed.save_if_dirty().unwrap();
         let shard_path = message_cache::truncate_shard_after_header_for_test(
             cache_dir.path(),
-            &source_path,
+            &input_path,
             unit.parser_version,
         );
 
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let parsed = expect_cache_hit(
             plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache),
             "valid header must plan a cache hit before body recovery",
         );
-        std::fs::remove_file(&source_path).unwrap();
-        std::fs::create_dir(&source_path).unwrap();
+        std::fs::remove_file(&input_path).unwrap();
+        std::fs::create_dir(&input_path).unwrap();
         let mut ctx = FoldContext::new(&mut cache, None);
         let resolved = resolve_unit(parsed, &mut ctx)
             .expect("recovery parse failure must isolate the unit, not fail the pipeline");
         let failure = resolved
             .status
             .failure()
-            .expect("failed recovery must mark the source unavailable");
-        assert!(failure.message.contains(source_path.to_str().unwrap()));
+            .expect("failed recovery must mark the input unavailable");
+        assert!(failure.message.contains(input_path.to_str().unwrap()));
         assert!(resolved.messages.is_empty());
 
-        ctx.source_cache.save_if_dirty().unwrap();
+        ctx.input_cache.save_if_dirty().unwrap();
         assert!(
             !shard_path.exists(),
             "body corruption removal must persist even when recovery parsing fails"
@@ -1205,16 +1198,16 @@ mod tests {
 
     #[test]
     fn recovery_parse_and_cache_deletion_failures_are_both_retained() {
-        let source_dir = tempfile::TempDir::new().unwrap();
+        let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("opencode.db");
-        std::fs::write(&source_path, b"not-a-database").unwrap();
-        let unit = SourceUnit::sqlite_with_wal(ClientId::OpenCode, source_path.clone())
-            .with_meta(crate::adapters::SourceUnitMeta::OpenCodeSqlite);
-        let fingerprint = unit.source_input_policy().fingerprint().unwrap();
-        let mut seed = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        seed.insert(message_cache::CachedSourceEntry::new_with_version(
-            &source_path,
+        let input_path = input_dir.path().join("opencode.db");
+        std::fs::write(&input_path, b"not-a-database").unwrap();
+        let unit = InputUnit::sqlite_with_wal(ClientId::OpenCode, input_path.clone())
+            .with_meta(crate::adapters::InputUnitMeta::OpenCodeSqlite);
+        let fingerprint = unit.input_policy().fingerprint().unwrap();
+        let mut seed = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
+        seed.insert(message_cache::CachedInputEntry::new_with_version(
+            &input_path,
             unit.parser_version,
             fingerprint,
             vec![cached_message()],
@@ -1223,29 +1216,29 @@ mod tests {
         seed.save_if_dirty().unwrap();
         let shard_path = message_cache::truncate_shard_after_header_for_test(
             cache_dir.path(),
-            &source_path,
+            &input_path,
             unit.parser_version,
         );
 
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let parsed = expect_cache_hit(
             plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache),
             "valid header must plan a cache hit before body recovery",
         );
-        std::fs::remove_file(&source_path).unwrap();
-        std::fs::create_dir(&source_path).unwrap();
+        std::fs::remove_file(&input_path).unwrap();
+        std::fs::create_dir(&input_path).unwrap();
         let mut ctx = FoldContext::new(&mut cache, None);
         let resolved = resolve_unit(parsed, &mut ctx)
             .expect("recovery parse failure must isolate the unit, not fail the pipeline");
         assert!(
             resolved.status.failure().is_some(),
-            "failed recovery must mark the source unavailable"
+            "failed recovery must mark the input unavailable"
         );
 
         std::fs::remove_file(&shard_path).unwrap();
         std::fs::create_dir(&shard_path).unwrap();
         let cache_error = ctx
-            .source_cache
+            .input_cache
             .save_if_dirty()
             .expect_err("a directory at the shard path must make deletion fail");
         let diagnostic = cache_error.to_string();
@@ -1255,20 +1248,20 @@ mod tests {
 
     #[test]
     fn mismatched_body_count_is_reparsed_instead_of_served() {
-        let source_dir = tempfile::TempDir::new().unwrap();
+        let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("session.jsonl");
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let unit = pi_unit(&source_path);
+        let input_path = input_dir.path().join("session.jsonl");
+        std::fs::write(&input_path, PI_INPUT).unwrap();
+        let unit = pi_unit(&input_path);
         seed_disk_cache(cache_dir.path(), &unit, "stale-cache-session");
         message_cache::replace_shard_message_count_for_test(
             cache_dir.path(),
-            &source_path,
+            &input_path,
             unit.parser_version,
             2,
         );
 
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let parsed = expect_cache_hit(
             plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache),
             "mismatched body count remains a planned header hit",
@@ -1276,94 +1269,90 @@ mod tests {
         let messages = fold_planned_unit(parsed, &mut cache);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].session_id.as_ref(), "source-session");
+        assert_eq!(messages[0].session_id.as_ref(), "input-session");
         assert_eq!(messages[0].tokens.input, 17);
     }
 
     #[test]
-    fn deleted_planned_shard_is_rebuilt_from_the_source() {
-        let source_dir = tempfile::TempDir::new().unwrap();
+    fn deleted_planned_shard_is_rebuilt_from_the_input() {
+        let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("session.jsonl");
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let unit = pi_unit(&source_path);
+        let input_path = input_dir.path().join("session.jsonl");
+        std::fs::write(&input_path, PI_INPUT).unwrap();
+        let unit = pi_unit(&input_path);
         seed_disk_cache(cache_dir.path(), &unit, "stale-cache-session");
 
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let parsed = expect_cache_hit(
             plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &cache),
             "seeded shard must plan a cache hit",
         );
         let shard_path =
-            message_cache::shard_path_for_test(cache_dir.path(), &source_path, unit.parser_version);
+            message_cache::shard_path_for_test(cache_dir.path(), &input_path, unit.parser_version);
         std::fs::remove_file(&shard_path).unwrap();
 
         let messages = fold_planned_unit_result(parsed, &mut cache)
-            .expect("a missing derived shard must be rebuilt from the source");
+            .expect("a missing derived shard must be rebuilt from the input");
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].session_id.as_ref(), "source-session");
+        assert_eq!(messages[0].session_id.as_ref(), "input-session");
         assert!(
             shard_path.exists(),
-            "a successful source scan must replace the missing derived shard"
+            "a successful input scan must replace the missing derived shard"
         );
     }
 
     #[test]
-    fn replaced_shard_fingerprint_reparses_the_current_source() {
-        let source_dir = tempfile::TempDir::new().unwrap();
+    fn replaced_shard_fingerprint_reparses_the_current_input() {
+        let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("session.jsonl");
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let unit = pi_unit(&source_path);
+        let input_path = input_dir.path().join("session.jsonl");
+        std::fs::write(&input_path, PI_INPUT).unwrap();
+        let unit = pi_unit(&input_path);
         seed_disk_cache(cache_dir.path(), &unit, "initial-cache-session");
 
-        let mut reader = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut reader = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let parsed = expect_cache_hit(
             plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &reader),
             "initial shard must plan a cache hit",
         );
 
-        std::fs::write(&source_path, PI_REPLACEMENT_SOURCE).unwrap();
-        seed_disk_cache(cache_dir.path(), &unit, "replacement-source-session");
+        std::fs::write(&input_path, PI_REPLACEMENT_INPUT).unwrap();
+        seed_disk_cache(cache_dir.path(), &unit, "replacement-input-session");
 
         let messages = fold_planned_unit_result(parsed, &mut reader)
-            .expect("a stale derived shard plan must reparse the current source");
+            .expect("a stale derived shard plan must reparse the current input");
         assert_eq!(messages.len(), 1);
-        assert_eq!(
-            messages[0].session_id.as_ref(),
-            "replacement-source-session"
-        );
+        assert_eq!(messages[0].session_id.as_ref(), "replacement-input-session");
 
-        let mut repaired_cache =
-            message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut repaired_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let repaired = expect_cache_hit(
             plan_cache_hit(unit.prepare_snapshot().unwrap(), &repaired_cache),
-            "current source fingerprint must have a repaired shard",
+            "current input fingerprint must have a repaired shard",
         );
         let cached = fold_planned_unit(repaired, &mut repaired_cache);
-        assert_eq!(cached[0].session_id.as_ref(), "replacement-source-session");
+        assert_eq!(cached[0].session_id.as_ref(), "replacement-input-session");
     }
 
     #[test]
-    fn replaced_shard_is_not_served_when_current_source_is_unavailable() {
-        let source_dir = tempfile::TempDir::new().unwrap();
+    fn replaced_shard_is_not_served_when_current_input_is_unavailable() {
+        let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("session.jsonl");
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let unit = pi_unit(&source_path);
+        let input_path = input_dir.path().join("session.jsonl");
+        std::fs::write(&input_path, PI_INPUT).unwrap();
+        let unit = pi_unit(&input_path);
         seed_disk_cache(cache_dir.path(), &unit, "initial-cache-session");
 
-        let mut reader = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut reader = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let parsed = expect_cache_hit(
             plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &reader),
             "initial shard must plan a cache hit",
         );
-        std::fs::write(&source_path, PI_REPLACEMENT_SOURCE).unwrap();
+        std::fs::write(&input_path, PI_REPLACEMENT_INPUT).unwrap();
         seed_disk_cache(cache_dir.path(), &unit, "replacement-cache-session");
         let shard_path =
-            message_cache::shard_path_for_test(cache_dir.path(), &source_path, unit.parser_version);
+            message_cache::shard_path_for_test(cache_dir.path(), &input_path, unit.parser_version);
         let replacement_bytes = std::fs::read(&shard_path).unwrap();
-        std::fs::write(&source_path, b"not a pi jsonl session").unwrap();
+        std::fs::write(&input_path, b"not a pi jsonl session").unwrap();
 
         let mut sink = Vec::new();
         let mut ctx = FoldContext::new(&mut reader, None);
@@ -1371,7 +1360,7 @@ mod tests {
             .expect("malformed third-party records must not fail the pipeline");
         assert!(sink.is_empty());
         assert_eq!(ctx.health.rejected_records(), 0);
-        assert_eq!(ctx.health.failed_sources(), 1);
+        assert_eq!(ctx.health.failed_inputs(), 1);
         reader.save_if_dirty().unwrap();
         assert_eq!(
             std::fs::read(&shard_path).unwrap(),
@@ -1382,33 +1371,33 @@ mod tests {
 
     #[test]
     fn failed_reparse_removes_corrupt_shard_and_next_run_is_cold() {
-        let source_dir = tempfile::TempDir::new().unwrap();
+        let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("session.jsonl");
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let unit = pi_unit(&source_path);
+        let input_path = input_dir.path().join("session.jsonl");
+        std::fs::write(&input_path, PI_INPUT).unwrap();
+        let unit = pi_unit(&input_path);
         seed_disk_cache(cache_dir.path(), &unit, "stale-cache-session");
 
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let parsed = expect_cache_hit(
             plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &cache),
             "seeded shard must plan a cache hit",
         );
         let shard_path = message_cache::truncate_shard_after_header_for_test(
             cache_dir.path(),
-            &source_path,
+            &input_path,
             unit.parser_version,
         );
-        std::fs::write(&source_path, b"not a pi jsonl session").unwrap();
+        std::fs::write(&input_path, b"not a pi jsonl session").unwrap();
 
         let mut sink = Vec::new();
         let mut ctx = FoldContext::new(&mut cache, None);
         fold_units(vec![parsed], &mut ctx, &mut sink)
             .expect("recovery parse failure must isolate the unit, not fail the fold");
         assert!(sink.is_empty());
-        assert_eq!(ctx.health.failed_sources(), 1);
-        let health = &ctx.health.sources()[0];
-        assert_eq!(health.path, source_path);
+        assert_eq!(ctx.health.failed_inputs(), 1);
+        let health = &ctx.health.inputs()[0];
+        assert_eq!(health.path, input_path);
         assert!(health.status.failure().is_some());
         cache.save_if_dirty().unwrap();
         assert!(
@@ -1416,8 +1405,8 @@ mod tests {
             "known-corrupt derived shard must be removed when recovery cannot replace it"
         );
 
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let cold_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        std::fs::write(&input_path, PI_INPUT).unwrap();
+        let cold_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let cold_unit = expect_cache_miss(
             plan_cache_hit(unit.prepare_snapshot().unwrap(), &cold_cache),
             "next run must cold-parse instead of planning the removed bad shard",
@@ -1429,18 +1418,18 @@ mod tests {
         );
         let mut cold_cache = cold_cache;
         let cold_messages = fold_planned_unit(cold_parsed, &mut cold_cache);
-        assert_eq!(cold_messages[0].session_id.as_ref(), "source-session");
+        assert_eq!(cold_messages[0].session_id.as_ref(), "input-session");
     }
 
     #[test]
     fn repeated_cache_read_is_an_explicit_pipeline_failure_not_duplicate_output() {
-        let source_dir = tempfile::TempDir::new().unwrap();
+        let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
-        let source_path = source_dir.path().join("session.jsonl");
-        std::fs::write(&source_path, PI_SOURCE).unwrap();
-        let unit = pi_unit(&source_path);
+        let input_path = input_dir.path().join("session.jsonl");
+        std::fs::write(&input_path, PI_INPUT).unwrap();
+        let unit = pi_unit(&input_path);
         seed_disk_cache(cache_dir.path(), &unit, "cached-session");
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let first = expect_cache_hit(
             plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &cache),
             "first planned read must hit",

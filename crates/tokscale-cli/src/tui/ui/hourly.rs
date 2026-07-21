@@ -16,8 +16,8 @@ use super::widgets::{
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 
 const HOUR_WIDTH: u16 = 7;
-const SOURCE_MIN_WIDTH: u16 = 8;
-const SOURCE_MAX_WIDTH: u16 = 40;
+const CLIENT_MIN_WIDTH: u16 = 8;
+const CLIENT_MAX_WIDTH: u16 = 40;
 const TURN_WIDTH: u16 = 6;
 const MSGS_WIDTH: u16 = 6;
 const NUMERIC_WIDTH: u16 = 10;
@@ -29,7 +29,7 @@ const COST_PER_MILLION_WIDTH: u16 = 10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HourlyColumn {
     Hour,
-    Source,
+    Client,
     Turn,
     Messages,
     Input,
@@ -64,7 +64,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 fn hourly_column_order(column: HourlyColumn) -> u16 {
     match column {
         HourlyColumn::Hour => 0,
-        HourlyColumn::Source => 10,
+        HourlyColumn::Client => 10,
         HourlyColumn::Turn => 20,
         HourlyColumn::Messages => 30,
         HourlyColumn::Input => 40,
@@ -81,7 +81,7 @@ fn hourly_column_order(column: HourlyColumn) -> u16 {
 fn hourly_table_layout(
     table_width: u16,
     has_turn_data: bool,
-    source_content_width: u16,
+    client_content_width: u16,
 ) -> HourlyTableLayout {
     let mut columns = vec![
         ResponsiveColumn::fixed_required(
@@ -107,12 +107,12 @@ fn hourly_table_layout(
             MSGS_WIDTH,
         ),
         ResponsiveColumn::measured_atomic_optional(
-            HourlyColumn::Source,
+            HourlyColumn::Client,
             20,
-            hourly_column_order(HourlyColumn::Source),
-            SOURCE_MIN_WIDTH,
-            source_content_width,
-            SOURCE_MAX_WIDTH,
+            hourly_column_order(HourlyColumn::Client),
+            CLIENT_MIN_WIDTH,
+            client_content_width,
+            CLIENT_MAX_WIDTH,
         ),
         ResponsiveColumn::fixed_optional(
             HourlyColumn::Input,
@@ -172,7 +172,7 @@ fn hourly_table_layout(
 fn hourly_column_header(column: HourlyColumn) -> &'static str {
     match column {
         HourlyColumn::Hour => "Hour",
-        HourlyColumn::Source => "Source",
+        HourlyColumn::Client => "Client",
         HourlyColumn::Turn => "Turn",
         HourlyColumn::Messages => "Msgs",
         HourlyColumn::Input => "Input",
@@ -232,9 +232,9 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let has_turn_data = hourly.iter().any(|h| h.turn_count > 0);
-    let source_content_width = hourly
+    let client_content_width = hourly
         .iter()
-        .map(|hour| display_width(&hourly_source_text(hour.clients.iter())))
+        .map(|hour| display_width(&hourly_client_text(hour.clients.iter())))
         .max()
         .unwrap_or(0);
     let sort_field = app.sort_field;
@@ -251,7 +251,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let striped_row_style = app.theme.striped_row_style();
     let now = Local::now().naive_local();
     let current_hour = now.date().and_hms_opt(now.hour(), 0, 0).unwrap_or(now);
-    let table_layout = hourly_table_layout(table_area.width, has_turn_data, source_content_width);
+    let table_layout = hourly_table_layout(table_area.width, has_turn_data, client_content_width);
     let columns = table_layout.columns.clone();
 
     let sort_indicator = |field: SortField| -> &'static str {
@@ -319,7 +319,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
         let is_striped = idx % 2 == 1;
         let is_current = hour.datetime == current_hour;
 
-        let clients_str = hourly_source_text(hour.clients.iter());
+        let clients_str = hourly_client_text(hour.clients.iter());
         let hour_label = format_hour_label(hour.datetime);
         let hour_style = if is_current {
             Style::default()
@@ -337,9 +337,9 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
         let cell_for_column = |column: HourlyColumn| -> Cell {
             match column {
                 HourlyColumn::Hour => Cell::from(hour_label.clone()).style(hour_style),
-                HourlyColumn::Source => Cell::from(truncate_display_width(
+                HourlyColumn::Client => Cell::from(truncate_display_width(
                     &clients_str,
-                    table_layout.width_for(HourlyColumn::Source),
+                    table_layout.width_for(HourlyColumn::Client),
                 )),
                 HourlyColumn::Turn => Cell::from(turn_str.clone()),
                 HourlyColumn::Messages => Cell::from(hour.message_count.to_string()),
@@ -422,7 +422,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn hourly_source_text<'a>(clients: impl Iterator<Item = &'a String>) -> String {
+fn hourly_client_text<'a>(clients: impl Iterator<Item = &'a String>) -> String {
     let mut labels: Vec<String> = clients
         .map(|client| get_client_display_name(client))
         .collect();
@@ -529,23 +529,23 @@ mod tests {
     }
 
     #[test]
-    fn hourly_layout_stops_at_wide_source_after_cost() {
+    fn hourly_layout_stops_at_wide_client_after_cost() {
         let layout = hourly_table_layout(44, false, 40);
 
         assert!(layout.columns.contains(&HourlyColumn::Cost));
-        assert!(!layout.columns.contains(&HourlyColumn::Source));
+        assert!(!layout.columns.contains(&HourlyColumn::Client));
         assert!(!layout.columns.contains(&HourlyColumn::Messages));
     }
 
     #[test]
-    fn hourly_layout_does_not_skip_source_to_show_turn_or_messages() {
+    fn hourly_layout_does_not_skip_client_to_show_turn_or_messages() {
         let layout = hourly_table_layout(45, true, 40);
 
         assert_eq!(
             layout.columns,
             vec![HourlyColumn::Hour, HourlyColumn::Total, HourlyColumn::Cost]
         );
-        assert!(!layout.columns.contains(&HourlyColumn::Source));
+        assert!(!layout.columns.contains(&HourlyColumn::Client));
         assert!(!layout.columns.contains(&HourlyColumn::Turn));
         assert!(!layout.columns.contains(&HourlyColumn::Messages));
     }
@@ -555,7 +555,7 @@ mod tests {
         let layout = hourly_table_layout(72, true, 20);
 
         assert_eq!(layout.columns[0], HourlyColumn::Hour);
-        assert!(layout.columns.contains(&HourlyColumn::Source));
+        assert!(layout.columns.contains(&HourlyColumn::Client));
         assert!(layout.columns.contains(&HourlyColumn::Turn));
         assert_eq!(
             layout.columns[layout.columns.len() - 2],
@@ -565,16 +565,16 @@ mod tests {
     }
 
     #[test]
-    fn hourly_layout_uses_measured_source_width_when_selected() {
+    fn hourly_layout_uses_measured_client_width_when_selected() {
         let layout = hourly_table_layout(100, true, 16);
-        let source_index = layout
+        let client_index = layout
             .columns
             .iter()
-            .position(|column| *column == HourlyColumn::Source)
-            .expect("source column should fit");
+            .position(|column| *column == HourlyColumn::Client)
+            .expect("client column should fit");
 
-        assert!(length_at(&layout.widths, source_index) > SOURCE_MIN_WIDTH);
-        assert!(length_at(&layout.widths, source_index) <= 16);
+        assert!(length_at(&layout.widths, client_index) > CLIENT_MIN_WIDTH);
+        assert!(length_at(&layout.widths, client_index) <= 16);
     }
 
     #[test]

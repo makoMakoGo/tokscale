@@ -39,7 +39,7 @@ The granularity boundary is the rule's hinge:
   per-message in the hot loop, because `daily` has already discarded that
   finer granularity. Minutely was removed rather than kept because its
   per-message, high-cardinality cost was not worth a niche view; hourly is
-  kept because it is broadly useful and there is no coarser source to
+  kept because it is broadly useful and there is no coarser projection to
   derive it from.
 
 Why from-daily, not per-message:
@@ -62,7 +62,7 @@ Why from-daily, not per-message:
 - `build_period_usage` belongs in the aggregation engine as a derived
   finalization step from `daily`, not as its own per-message accumulator.
 - The design depends on `daily` retaining enough detail
-  (`source_breakdown` with per-model `TokenBreakdown`) for the period to be
+  (`client_breakdown` with per-model `TokenBreakdown`) for the period to be
   lossless. A period-level metric `daily` does not store cannot be derived
   this way — extend `daily` first, or fold per-message with explicit
   justification.

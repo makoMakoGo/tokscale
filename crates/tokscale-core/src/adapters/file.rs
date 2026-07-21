@@ -5,15 +5,15 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourcePipelineError, SourceUnit,
+    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputPipelineError,
+    InputUnit, LocalInputAdapter, MessageSink, ParseContext, ParsedUnit,
     MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
+use crate::input_health::ScannedInput;
 use crate::message_cache::{ParserId, ParserVersion, RelatedInputFailurePolicy};
 use crate::sessions::error::SessionParseResult;
 use crate::sessions::WorkspaceMetadata;
-use crate::source_health::ScannedSource;
 use crate::{scanner, sessions, UnifiedMessage};
 
 const GROK_TOTAL_ONLY_IMPUTATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
@@ -42,7 +42,7 @@ pub(crate) struct CachedFileAdapter {
     dependency_failure_policy: RelatedInputFailurePolicy,
     dependency_path: Option<fn(&Path) -> Option<PathBuf>>,
     workspace_enrichment: Option<fn(&Path, &mut [UnifiedMessage])>,
-    parse: fn(&Path) -> SessionParseResult<ScannedSource>,
+    parse: fn(&Path) -> SessionParseResult<ScannedInput>,
 }
 
 impl CachedFileAdapter {
@@ -50,13 +50,13 @@ impl CachedFileAdapter {
         client: ClientId,
         parser_id: ParserId,
         revision: u32,
-        parse: fn(&Path) -> SessionParseResult<ScannedSource>,
+        parse: fn(&Path) -> SessionParseResult<ScannedInput>,
     ) -> Self {
         Self {
             client,
             parser_version: ParserVersion::new(parser_id, revision),
             fingerprint_policy: FingerprintPolicy::PlainFile,
-            dependency_failure_policy: RelatedInputFailurePolicy::FailSource,
+            dependency_failure_policy: RelatedInputFailurePolicy::FailInput,
             dependency_path: None,
             workspace_enrichment: None,
             parse,
@@ -68,13 +68,13 @@ impl CachedFileAdapter {
         parser_id: ParserId,
         revision: u32,
         dependency_path: fn(&Path) -> Option<PathBuf>,
-        parse: fn(&Path) -> SessionParseResult<ScannedSource>,
+        parse: fn(&Path) -> SessionParseResult<ScannedInput>,
     ) -> Self {
         Self {
             client,
             parser_version: ParserVersion::new(parser_id, revision),
             fingerprint_policy: FingerprintPolicy::PlainFile,
-            dependency_failure_policy: RelatedInputFailurePolicy::FailSource,
+            dependency_failure_policy: RelatedInputFailurePolicy::FailInput,
             dependency_path: Some(dependency_path),
             workspace_enrichment: None,
             parse,
@@ -86,7 +86,7 @@ impl CachedFileAdapter {
         parser_id: ParserId,
         revision: u32,
         dependency_path: fn(&Path) -> Option<PathBuf>,
-        parse: fn(&Path) -> SessionParseResult<ScannedSource>,
+        parse: fn(&Path) -> SessionParseResult<ScannedInput>,
     ) -> Self {
         Self {
             client,
@@ -104,7 +104,7 @@ impl CachedFileAdapter {
         parser_id: ParserId,
         revision: u32,
         sibling_names: &'static [&'static str],
-        parse: fn(&Path) -> SessionParseResult<ScannedSource>,
+        parse: fn(&Path) -> SessionParseResult<ScannedInput>,
     ) -> Self {
         Self {
             client,
@@ -113,7 +113,7 @@ impl CachedFileAdapter {
                 sibling_names,
                 related_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
             },
-            dependency_failure_policy: RelatedInputFailurePolicy::FailSource,
+            dependency_failure_policy: RelatedInputFailurePolicy::FailInput,
             dependency_path: None,
             workspace_enrichment: None,
             parse,
@@ -126,7 +126,7 @@ impl CachedFileAdapter {
     }
 }
 
-impl LocalSourceAdapter for CachedFileAdapter {
+impl LocalInputAdapter for CachedFileAdapter {
     fn client(&self) -> ClientId {
         self.client
     }
@@ -134,7 +134,7 @@ impl LocalSourceAdapter for CachedFileAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         Ok(adapter_discover::discover_default_scanned_units(
             self.client,
             ctx,
@@ -160,7 +160,7 @@ impl LocalSourceAdapter for CachedFileAdapter {
         .collect())
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         let parse = self.parse;
         units
             .into_par_iter()
@@ -170,10 +170,10 @@ impl LocalSourceAdapter for CachedFileAdapter {
 
     fn plan_cache_hit(
         &self,
-        unit: SourceUnit,
-        source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
-        adapter_cache::plan_cache_hit(unit, source_cache)
+        unit: InputUnit,
+        input_cache: &crate::message_cache::InputMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::InputPlanningError> {
+        adapter_cache::plan_cache_hit(unit, input_cache)
     }
 
     fn fold(
@@ -181,7 +181,7 @@ impl LocalSourceAdapter for CachedFileAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), SourcePipelineError> {
+    ) -> Result<(), InputPipelineError> {
         let workspace_enrichment = self.workspace_enrichment;
         // Companion workspace metadata is projected after cache resolution so
         // both old and fresh usage shards observe the current authoritative path.
@@ -218,7 +218,7 @@ fn enrich_gemini_workspace(path: &Path, messages: &mut [UnifiedMessage]) {
 
 pub(crate) struct CopilotAdapter;
 
-impl LocalSourceAdapter for CopilotAdapter {
+impl LocalInputAdapter for CopilotAdapter {
     fn client(&self) -> ClientId {
         ClientId::Copilot
     }
@@ -226,7 +226,7 @@ impl LocalSourceAdapter for CopilotAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let def = ClientId::Copilot
             .local_def()
             .expect("Copilot adapter must have local scan policy");
@@ -246,7 +246,7 @@ impl LocalSourceAdapter for CopilotAdapter {
             adapter_discover::push_existing_file(ClientId::Copilot, exporter_path, &mut paths)?;
         }
 
-        Ok(adapter_discover::source_units_from_paths(
+        Ok(adapter_discover::input_units_from_paths(
             ClientId::Copilot,
             paths,
             FingerprintPolicy::PlainFile,
@@ -261,7 +261,7 @@ impl LocalSourceAdapter for CopilotAdapter {
         .collect())
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         let workspace_index = sessions::copilot::CopilotWorkspaceIndex::discover(
             units.iter().map(|unit| unit.path.as_path()),
         );
@@ -280,10 +280,10 @@ impl LocalSourceAdapter for CopilotAdapter {
 
     fn plan_cache_hit(
         &self,
-        unit: SourceUnit,
-        source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
-        adapter_cache::plan_cache_hit(unit, source_cache)
+        unit: InputUnit,
+        input_cache: &crate::message_cache::InputMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::InputPlanningError> {
+        adapter_cache::plan_cache_hit(unit, input_cache)
     }
 
     fn fold(
@@ -291,7 +291,7 @@ impl LocalSourceAdapter for CopilotAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), SourcePipelineError> {
+    ) -> Result<(), InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
@@ -401,9 +401,9 @@ not-json
     }
 
     fn fold_with_adapter(
-        adapter: &'static dyn LocalSourceAdapter,
-        units: Vec<SourceUnit>,
-        cache: &mut message_cache::SourceMessageCache,
+        adapter: &'static dyn LocalInputAdapter,
+        units: Vec<InputUnit>,
+        cache: &mut message_cache::InputMessageCache,
     ) -> Vec<UnifiedMessage> {
         let parsed = adapter.parse_checked(units, &ParseContext { pricing: None });
         let mut sink = Vec::new();
@@ -447,8 +447,8 @@ not-json
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("T-test.json");
         write_file(&path, AMP_CONTENT);
-        let units = vec![SourceUnit::plain_file(ClientId::Amp, path.clone())];
-        let mut cache = message_cache::SourceMessageCache::default();
+        let units = vec![InputUnit::plain_file(ClientId::Amp, path.clone())];
+        let mut cache = message_cache::InputMessageCache::default();
 
         let actual = fold_with_adapter(&AMP_ADAPTER, units, &mut cache);
         let expected = finalized(sessions::amp::parse_amp_file(&path).unwrap().messages);
@@ -476,7 +476,7 @@ model = "gpt-5"
         );
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
 
         let cold_unit = KIMI_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
         assert_eq!(
@@ -526,13 +526,13 @@ model = "claude-sonnet-4"
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
         let unit = KIMI_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
 
         let parsed = KIMI_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
-            parsed[0].source_health().status,
-            crate::source_health::SourceStatus::Partial { .. }
+            parsed[0].input_health().status,
+            crate::input_health::InputStatus::Partial { .. }
         ));
         assert!(parsed[0].cache_write.is_none());
 
@@ -546,7 +546,7 @@ model = "claude-sonnet-4"
         assert_eq!(messages[0].model_id.as_ref(), "active-model");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 2);
-        assert_eq!(fold_ctx.health.partial_sources(), 1);
+        assert_eq!(fold_ctx.health.partial_inputs(), 1);
         assert!(cache
             .get_meta(&wire_path, KIMI_ADAPTER.parser_version)
             .unwrap()
@@ -568,7 +568,7 @@ model = "claude-sonnet-4"
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
         let unit = KIMI_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
 
         let messages = fold_with_adapter(&KIMI_ADAPTER, vec![unit], &mut cache);
 
@@ -600,7 +600,7 @@ model = "claude-sonnet-4"
         write_file(&config_path, r#"{"provider":"openai","model":"gpt-5"}"#);
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
 
         let cold_unit = COMMANDCODE_ADAPTER
             .discover_checked(&ctx)
@@ -611,7 +611,7 @@ model = "claude-sonnet-4"
             cold_unit.fingerprint_policy,
             FingerprintPolicy::PrimaryWithDependency {
                 dependency_path: config_path.clone(),
-                related_failure_policy: RelatedInputFailurePolicy::FailSource,
+                related_failure_policy: RelatedInputFailurePolicy::FailInput,
             }
         );
         let cold_messages = fold_with_adapter(&COMMANDCODE_ADAPTER, vec![cold_unit], &mut cache);
@@ -642,7 +642,7 @@ model = "claude-sonnet-4"
     }
 
     #[test]
-    fn commandcode_checkpoint_sidecars_are_not_discovered_as_usage_sources() {
+    fn commandcode_checkpoint_sidecars_are_not_discovered_as_usage_inputs() {
         let home = tempfile::TempDir::new().unwrap();
         let checkpoint_path = home
             .path()
@@ -683,13 +683,13 @@ model = "claude-sonnet-4"
             .unwrap()
             .pop()
             .unwrap();
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
 
         let parsed = COMMANDCODE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
-            parsed[0].source_health().status,
-            crate::source_health::SourceStatus::Unavailable { .. }
+            parsed[0].input_health().status,
+            crate::input_health::InputStatus::Unavailable { .. }
         ));
         assert!(parsed[0].cache_write.is_none());
 
@@ -714,22 +714,22 @@ model = "claude-sonnet-4"
         let cache_dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, QWEN_MIXED_CONTENT);
-        let unit = SourceUnit::plain_file(ClientId::Qwen, path.clone())
+        let unit = InputUnit::plain_file(ClientId::Qwen, path.clone())
             .with_parser_version(ParserVersion::new(
                 ParserId::Qwen,
                 QWEN_RECORD_REJECTION_REVISION,
             ))
             .prepare_snapshot()
             .unwrap();
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
 
         let parsed =
             QWEN_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].source_health();
+        let health = parsed[0].input_health();
         assert!(matches!(
             health.status,
-            crate::source_health::SourceStatus::Complete
+            crate::input_health::InputStatus::Complete
         ));
         assert_eq!(health.rejections.total(), 1);
         assert_eq!(
@@ -744,12 +744,12 @@ model = "claude-sonnet-4"
         assert_eq!(fold_ctx.health.rejected_records(), 1);
         cache.save_if_dirty().unwrap();
 
-        let warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let planned = QWEN_ADAPTER.plan_cache_hit(unit, &warm_cache).unwrap();
         let crate::adapters::CacheHitPlan::Hit(hit) = planned else {
-            panic!("unchanged Qwen source must use its cached complete scan");
+            panic!("unchanged Qwen input must use its cached complete scan");
         };
-        let warm_health = hit.source_health();
+        let warm_health = hit.input_health();
         assert_eq!(warm_health.rejections.total(), 1);
         assert_eq!(
             warm_health.rejections.entries().next().unwrap().key,
@@ -770,14 +770,14 @@ model = "claude-sonnet-4"
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
         let unit = GROK_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
 
         let parsed =
             GROK_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
-        let health = parsed[0].source_health();
+        let health = parsed[0].input_health();
         assert!(matches!(
             health.status,
-            crate::source_health::SourceStatus::Complete
+            crate::input_health::InputStatus::Complete
         ));
         assert_eq!(health.rejections.total(), 1);
         assert_eq!(
@@ -793,12 +793,12 @@ model = "claude-sonnet-4"
         drop(fold_ctx);
         cache.save_if_dirty().unwrap();
 
-        let warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let planned = GROK_ADAPTER.plan_cache_hit(unit, &warm_cache).unwrap();
         let crate::adapters::CacheHitPlan::Hit(hit) = planned else {
             panic!("unchanged Grok siblings must restore the complete cached scan");
         };
-        let warm_health = hit.source_health();
+        let warm_health = hit.input_health();
         assert_eq!(warm_health.rejections.total(), 1);
         assert_eq!(
             warm_health.rejections.entries().next().unwrap().key,
@@ -821,7 +821,7 @@ model = "claude-sonnet-4"
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
         let unit = GROK_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
         let parsed =
             GROK_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
         let mut sink = Vec::new();
@@ -858,13 +858,13 @@ model = "claude-sonnet-4"
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
         let unit = GROK_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
 
         let parsed = GROK_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
-        let health = parsed[0].source_health();
+        let health = parsed[0].input_health();
         assert!(matches!(
             health.status,
-            crate::source_health::SourceStatus::Partial { .. }
+            crate::input_health::InputStatus::Partial { .. }
         ));
         let failure = health.status.failure().unwrap();
         assert_eq!(failure.operation, "read related events line");
@@ -874,8 +874,8 @@ model = "claude-sonnet-4"
         let mut fold_ctx = FoldContext::new(&mut cache, None);
         GROK_ADAPTER.fold(parsed, &mut fold_ctx, &mut sink).unwrap();
         assert_eq!(sink.len(), 1);
-        assert_eq!(fold_ctx.health.partial_sources(), 1);
-        assert_eq!(fold_ctx.health.failed_sources(), 0);
+        assert_eq!(fold_ctx.health.partial_inputs(), 1);
+        assert_eq!(fold_ctx.health.failed_inputs(), 0);
         assert_eq!(fold_ctx.health.rejected_records(), 1);
         assert!(cache
             .get_meta(&updates_path, GROK_ADAPTER.parser_version)
@@ -895,18 +895,18 @@ model = "claude-sonnet-4"
                 "tokenUsage": {"inputTokens": 10}
             }"#,
         );
-        let unit = SourceUnit::plain_file(ClientId::Droid, path.clone()).with_parser_version(
+        let unit = InputUnit::plain_file(ClientId::Droid, path.clone()).with_parser_version(
             ParserVersion::new(ParserId::Droid, DROID_RECORD_REJECTION_REVISION),
         );
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
 
         let parsed = DROID_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
 
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].source_health();
+        let health = parsed[0].input_health();
         assert!(matches!(
             health.status,
-            crate::source_health::SourceStatus::Complete
+            crate::input_health::InputStatus::Complete
         ));
         let rejection = health.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "missing-model");
@@ -919,7 +919,7 @@ model = "claude-sonnet-4"
             .unwrap();
         assert!(sink.is_empty());
         assert_eq!(fold_ctx.health.rejected_records(), 1);
-        assert_eq!(fold_ctx.health.failed_sources(), 0);
+        assert_eq!(fold_ctx.health.failed_inputs(), 0);
     }
 
     #[test]
@@ -944,7 +944,7 @@ model = "claude-sonnet-4"
         );
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
 
         let cold_unit = DROID_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
         let cold_messages = fold_with_adapter(&DROID_ADAPTER, vec![cold_unit], &mut cache);
@@ -1028,7 +1028,7 @@ model = "claude-sonnet-4"
             }
         );
 
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
         let worker_messages = fold_with_adapter(&DROID_ADAPTER, vec![unit], &mut cache);
         assert_eq!(worker_messages.len(), 1);
         assert_eq!(worker_messages[0].agent.as_deref(), Some("Droid Worker"));
@@ -1041,7 +1041,7 @@ model = "claude-sonnet-4"
         let changed_unit = match DROID_ADAPTER.plan_cache_hit(changed_unit, &cache).unwrap() {
             crate::adapters::CacheHitPlan::Miss(unit) => unit,
             crate::adapters::CacheHitPlan::Hit(_) => {
-                panic!("changed Mission feature must invalidate the Droid source cache")
+                panic!("changed Mission feature must invalidate the Droid input cache")
             }
         };
         let validator_messages = fold_with_adapter(&DROID_ADAPTER, vec![changed_unit], &mut cache);
@@ -1082,13 +1082,13 @@ model = "claude-sonnet-4"
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
         let unit = DROID_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
 
         let parsed = DROID_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
-            parsed[0].source_health().status,
-            crate::source_health::SourceStatus::Partial { .. }
+            parsed[0].input_health().status,
+            crate::input_health::InputStatus::Partial { .. }
         ));
         assert!(parsed[0].cache_write.is_none());
 
@@ -1102,7 +1102,7 @@ model = "claude-sonnet-4"
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 5);
         assert_eq!(messages[0].agent.as_deref(), Some("Droid Worker"));
-        assert_eq!(fold_ctx.health.partial_sources(), 1);
+        assert_eq!(fold_ctx.health.partial_inputs(), 1);
         assert!(cache
             .get_meta(&settings_path, DROID_ADAPTER.parser_version)
             .unwrap()
@@ -1230,12 +1230,12 @@ model = "claude-sonnet-4"
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, ZCODE_CONTENT);
-        let units = vec![SourceUnit::plain_file(ClientId::Zcode, path.clone())
-            .with_parser_version(ParserVersion::new(
-                ParserId::Zcode,
-                ZCODE_RECORD_REJECTION_REVISION,
-            ))];
-        let mut cache = message_cache::SourceMessageCache::default();
+        let units = vec![
+            InputUnit::plain_file(ClientId::Zcode, path.clone()).with_parser_version(
+                ParserVersion::new(ParserId::Zcode, ZCODE_RECORD_REJECTION_REVISION),
+            ),
+        ];
+        let mut cache = message_cache::InputMessageCache::default();
 
         let actual = fold_with_adapter(&ZCODE_ADAPTER, units, &mut cache);
         let expected = finalized(sessions::zcode::parse_zcode_file(&path).unwrap().messages);
@@ -1251,18 +1251,18 @@ model = "claude-sonnet-4"
             &path,
             "{\"type\":\"init\",\"model\":\"gemini-2.5-pro\",\"session_id\":\"session-1\"}\nnot-json\n{\"type\":\"result\",\"stats\":{\"input_tokens\":10,\"output_tokens\":20}}\n",
         );
-        let units = vec![SourceUnit::plain_file(ClientId::Gemini, path.clone())];
+        let units = vec![InputUnit::plain_file(ClientId::Gemini, path.clone())];
         let parsed = GEMINI_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
 
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].source_health();
+        let health = parsed[0].input_health();
         assert_eq!(health.client, ClientId::Gemini);
         assert_eq!(health.path, path);
-        let failure = health.status.failure().expect("source must be partial");
+        let failure = health.status.failure().expect("input must be partial");
         assert_eq!(failure.operation, "decode JSONL line");
         assert!(matches!(
             health.status,
-            crate::source_health::SourceStatus::Partial { .. }
+            crate::input_health::InputStatus::Partial { .. }
         ));
     }
 }

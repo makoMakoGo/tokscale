@@ -1,18 +1,18 @@
 //! Kiro session parser
 //!
-//! Parses session data from two sources:
+//! Parses session data from two inputs:
 //! 1. File-based: ~/.kiro/sessions/cli/*.json + *.jsonl
 //! 2. SQLite-based: ~/Library/Application Support/kiro-cli/data.sqlite3
 //!    (conversations_v2 table with history[*].request_metadata)
 //!
-//! Turn-level token counts are currently zero in both sources, so usage is
+//! Turn-level token counts are currently zero in both inputs, so usage is
 //! estimated from context_usage_percentage * context_window (input) and
 //! response_size / 4 (output).
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{open_readonly_sqlite, parse_epoch_f64_millis, read_file};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::TokenBreakdown;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -174,7 +174,7 @@ struct ParsedKiroJsonlRecord {
     timestamp_ms: Option<i64>,
 }
 
-pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedInput> {
     if is_kiro_global_storage_path(path)
         || path
             .extension()
@@ -189,7 +189,7 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedSource> {
 
     let header = serde_json::from_slice::<KiroSessionHeader>(&json_bytes)
         .map_err(|source| SessionParseError::at_path(path, "decode Kiro session header", source))?;
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
 
     let session_id = header
         .session_id
@@ -242,7 +242,7 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedSource> {
                             error,
                         );
                         content_by_message_id.clear();
-                        scanned.interrupted = Some(SourceFailure::from(&error));
+                        scanned.interrupted = Some(InputFailure::from(&error));
                         break;
                     }
                 };
@@ -319,7 +319,7 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedSource> {
                     Ok(None) => continue,
                     Err(error) => {
                         scanned.rejections.record(kiro_rejection_reason(&error));
-                        scanned.interrupted = Some(SourceFailure::from(&error));
+                        scanned.interrupted = Some(InputFailure::from(&error));
                         break;
                     }
                 };
@@ -345,7 +345,7 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedSource> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             let error = SessionParseError::at_path(&jsonl_path, "open Kiro JSONL sidecar", error);
-            scanned.interrupted = Some(SourceFailure::from(&error));
+            scanned.interrupted = Some(InputFailure::from(&error));
         }
     }
 
@@ -655,11 +655,11 @@ struct KiroGlobalStorageMessage {
     content: Option<String>,
 }
 
-fn parse_kiro_global_storage_file(path: &Path) -> SessionParseResult<ScannedSource> {
+fn parse_kiro_global_storage_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let json = std::fs::read_to_string(path).map_err(|error| {
         SessionParseError::at_path(path, "read Kiro global storage file", error)
     })?;
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     let snapshot: KiroGlobalStorageSnapshot = match serde_json::from_str(&json) {
         Ok(snapshot) => snapshot,
         Err(_error) => {
@@ -750,7 +750,7 @@ fn parse_kiro_global_storage_file(path: &Path) -> SessionParseResult<ScannedSour
     Ok(scanned)
 }
 
-pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
     let conn = open_readonly_sqlite(db_path).map_err(|source| {
         SessionParseError::at_path(db_path, "open Kiro database read-only", source)
     })?;
@@ -764,7 +764,7 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         SessionParseError::at_path(db_path, "execute Kiro conversations query", error)
     })?;
 
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
 
     loop {
         let row = match rows.next() {
@@ -773,7 +773,7 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             Err(error) => {
                 let error =
                     SessionParseError::at_path(db_path, "iterate Kiro conversation rows", error);
-                scanned.interrupted = Some(SourceFailure::from(&error));
+                scanned.interrupted = Some(InputFailure::from(&error));
                 break;
             }
         };
@@ -1041,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_kiro_cli_header_is_a_source_error() {
+    fn malformed_kiro_cli_header_is_a_input_error() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("broken.json");
         std::fs::write(&path, "not json").unwrap();
@@ -1339,7 +1339,7 @@ not json
     }
 
     #[test]
-    fn parse_kiro_sqlite_reports_missing_schema_as_source_error() {
+    fn parse_kiro_sqlite_reports_missing_schema_as_input_error() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("data.sqlite3");
         drop(Connection::open(&db_path).unwrap());
@@ -1608,7 +1608,7 @@ not json
     }
 
     #[test]
-    fn malformed_kiro_global_storage_record_is_rejected_without_source_failure() {
+    fn malformed_kiro_global_storage_record_is_rejected_without_input_failure() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("execution.chat");
         std::fs::write(&path, "not json").unwrap();

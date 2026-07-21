@@ -41,8 +41,8 @@ For OpenCode:
   `scanner.extraScanPaths.opencode` or `TOKSCALE_EXTRA_DIRS=opencode:...`;
 - deduplicate messages across every discovered current-format database and
   across bounded parse batches;
-- treat `NotFound` during OpenCode discovery as an absent source, but surface
-  every other directory-discovery I/O failure as an unavailable source in
+- treat `NotFound` during OpenCode discovery as an absent input, but surface
+  every other directory-discovery I/O failure as an unavailable input in
   report health;
 - borrow raw message TEXT, stream-validate a required role envelope, and fully
   decode only assistant payloads in Rust, filtering only non-assistant
@@ -54,7 +54,7 @@ For OpenCode:
   provider according to ADR 0020; reject blank model or session identifiers and
   non-finite or non-positive creation timestamps, including values that cannot
   convert to an `i64` exactly; never cache those failures as an empty successful
-  source; and
+  input; and
 - reject the former SQL query without the current `session` join rather than
   falling back to it.
 
@@ -86,7 +86,7 @@ schema receive an explicit error and must let OpenCode migrate the database or
 select a current database. Multi-channel current databases and explicitly
 pinned current databases continue to be combined without double counting.
 
-Removing the JSON parser, migration record, source metadata, precedence
+Removing the JSON parser, migration record, input metadata, precedence
 partition, and legacy scanner tasks leaves one discovery and parse contract for
 OpenCode. Existing `opencode-migration.json` files are ignored and may be
 deleted.

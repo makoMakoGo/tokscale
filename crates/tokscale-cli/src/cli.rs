@@ -65,7 +65,7 @@ pub(crate) fn legacy_invocation_hint(arguments: &[String]) -> Option<String> {
                 return valid_replacement_hint(replacement);
             }
             Some("lookup") if contains_long_option(arguments, "provider") => {
-                return Some("replace `--provider` with `--source`".to_string());
+                return Some("replace `--provider` with `--pricing-source`".to_string());
             }
             Some(value) if !value.starts_with('-') && value != "lookup" && value != "overrides" => {
                 let mut replacement = vec!["pricing".to_string(), "lookup".to_string()];
@@ -368,7 +368,7 @@ pub(crate) struct TuiArgs {
     #[arg(long)]
     pub(crate) debug: bool,
     #[command(flatten)]
-    pub(crate) source: SourceScopeArgs,
+    pub(crate) input: InputScopeArgs,
     #[command(flatten)]
     pub(crate) date: DateRangeFlags,
 }
@@ -391,7 +391,7 @@ pub(crate) struct ReportArgs {
     #[arg(long, help = "Output as JSON")]
     pub(crate) json: bool,
     #[command(flatten)]
-    pub(crate) source: SourceScopeArgs,
+    pub(crate) input: InputScopeArgs,
     #[command(flatten)]
     pub(crate) date: DateRangeFlags,
     #[arg(long, help = "Write processing time to stderr")]
@@ -405,7 +405,7 @@ pub(crate) struct ClientsArgs {
     #[arg(long, help = "Output as JSON")]
     pub(crate) json: bool,
     #[command(flatten)]
-    pub(crate) source: SourceScopeArgs,
+    pub(crate) input: InputScopeArgs,
 }
 
 #[derive(Args, Debug)]
@@ -413,7 +413,7 @@ pub(crate) struct GraphArgs {
     #[arg(long, value_name = "PATH", help = "Write JSON to a file")]
     pub(crate) output: Option<PathBuf>,
     #[command(flatten)]
-    pub(crate) source: SourceScopeArgs,
+    pub(crate) input: InputScopeArgs,
     #[command(flatten)]
     pub(crate) date: DateRangeFlags,
     #[arg(long, help = "Write processing time to stderr")]
@@ -429,7 +429,7 @@ pub(crate) struct WrappedArgs {
     #[arg(long, value_parser = parse_year_arg, help = "Year to generate")]
     pub(crate) year: Option<String>,
     #[command(flatten)]
-    pub(crate) source: SourceScopeArgs,
+    pub(crate) input: InputScopeArgs,
     #[arg(long, help = "Display total tokens in abbreviated format")]
     pub(crate) short: bool,
     #[arg(
@@ -467,7 +467,7 @@ impl From<WrappedRankingArg> for WrappedRanking {
 }
 
 #[derive(Args, Clone, Debug, Default)]
-pub(crate) struct SourceScopeArgs {
+pub(crate) struct InputScopeArgs {
     #[arg(
         long,
         value_name = "PATH",
@@ -544,8 +544,8 @@ pub(crate) enum PricingSubcommand {
         model_id: String,
         #[arg(long, help = "Output as JSON")]
         json: bool,
-        #[arg(long, value_enum, help = "Use one pricing data source")]
-        source: Option<PricingSource>,
+        #[arg(long = "pricing-source", value_enum, help = "Use one Pricing Source")]
+        pricing_source: Option<PricingSource>,
         #[arg(long, help = "Disable progress animation")]
         no_spinner: bool,
     },
@@ -558,12 +558,12 @@ pub(crate) enum PricingSubcommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum CacheSubcommand {
-    #[command(about = "Build the TUI aggregate cache for a source scope")]
+    #[command(about = "Build the TUI aggregate cache for a client scope")]
     Warm {
         #[command(flatten)]
-        source: SourceScopeArgs,
+        input: InputScopeArgs,
     },
-    #[command(about = "Remove orphaned and superseded source-message cache shards")]
+    #[command(about = "Remove orphaned and superseded scan-input message cache shards")]
     Prune,
 }
 
@@ -664,7 +664,7 @@ impl TerminalState {
 }
 
 #[derive(Debug)]
-pub(crate) struct ResolvedSourceScope {
+pub(crate) struct ResolvedInputScope {
     pub(crate) home: Option<String>,
     pub(crate) clients: Option<Vec<String>>,
 }
@@ -682,7 +682,7 @@ pub(crate) struct ResolvedDateRange {
 #[derive(Debug)]
 pub(crate) struct LocalReportPlan {
     pub(crate) json: bool,
-    pub(crate) source: ResolvedSourceScope,
+    pub(crate) input: ResolvedInputScope,
     pub(crate) date: ResolvedDateRange,
     pub(crate) benchmark: bool,
     pub(crate) no_spinner: bool,
@@ -700,7 +700,7 @@ pub(crate) struct TuiPlan {
     pub(crate) refresh: Option<u64>,
     pub(crate) no_refresh: bool,
     pub(crate) debug: bool,
-    pub(crate) source: ResolvedSourceScope,
+    pub(crate) input: ResolvedInputScope,
     pub(crate) date: ResolvedDateRange,
     pub(crate) initial_tab: Option<Tab>,
 }
@@ -708,13 +708,13 @@ pub(crate) struct TuiPlan {
 #[derive(Debug)]
 pub(crate) struct ClientsPlan {
     pub(crate) json: bool,
-    pub(crate) source: ResolvedSourceScope,
+    pub(crate) input: ResolvedInputScope,
 }
 
 #[derive(Debug)]
 pub(crate) struct GraphPlan {
     pub(crate) output: Option<PathBuf>,
-    pub(crate) source: ResolvedSourceScope,
+    pub(crate) input: ResolvedInputScope,
     pub(crate) date: ResolvedDateRange,
     pub(crate) benchmark: bool,
     pub(crate) no_spinner: bool,
@@ -724,7 +724,7 @@ pub(crate) struct GraphPlan {
 pub(crate) struct WrappedPlan {
     pub(crate) output: Option<String>,
     pub(crate) year: Option<String>,
-    pub(crate) source: ResolvedSourceScope,
+    pub(crate) input: ResolvedInputScope,
     pub(crate) short: bool,
     pub(crate) ranking: WrappedRanking,
     pub(crate) disable_pinned: bool,
@@ -744,7 +744,7 @@ pub(crate) enum ExecutionPlan {
     Usage { json: bool },
     Wrapped(WrappedPlan),
     CachePrune,
-    CacheWarm(ResolvedSourceScope),
+    CacheWarm(ResolvedInputScope),
     Warp(WarpSubcommand),
 }
 
@@ -761,11 +761,11 @@ impl ExecutionPlan {
             Commands::TimeMetrics(args) => resolve_report(args).map(Self::TimeMetrics),
             Commands::Clients(args) => Ok(Self::Clients(ClientsPlan {
                 json: args.json,
-                source: resolve_source(args.source)?,
+                input: resolve_input(args.input)?,
             })),
             Commands::Graph(args) => Ok(Self::Graph(GraphPlan {
                 output: args.output,
-                source: resolve_source(args.source)?,
+                input: resolve_input(args.input)?,
                 date: resolve_date(args.date)?,
                 benchmark: args.benchmark,
                 no_spinner: args.no_spinner,
@@ -775,7 +775,7 @@ impl ExecutionPlan {
             Commands::Wrapped(args) => resolve_wrapped(args).map(Self::Wrapped),
             Commands::Cache { subcommand } => match subcommand {
                 CacheSubcommand::Prune => Ok(Self::CachePrune),
-                CacheSubcommand::Warm { source } => resolve_source(source).map(Self::CacheWarm),
+                CacheSubcommand::Warm { input } => resolve_input(input).map(Self::CacheWarm),
             },
             Commands::Warp { subcommand } => Ok(Self::Warp(subcommand)),
         }
@@ -783,14 +783,14 @@ impl ExecutionPlan {
 }
 
 fn resolve_wrapped(args: WrappedArgs) -> Result<WrappedPlan, CliFailure> {
-    let source = resolve_source(args.source)?;
+    let input = resolve_input(args.input)?;
     let ranking = args
         .ranking
         .map(WrappedRanking::from)
         .unwrap_or(WrappedRanking::Auto);
 
     if ranking == WrappedRanking::Agents
-        && source.clients.as_ref().is_some_and(|clients| {
+        && input.clients.as_ref().is_some_and(|clients| {
             !clients
                 .iter()
                 .any(|client| client == ClientId::OpenCode.as_str())
@@ -810,7 +810,7 @@ fn resolve_wrapped(args: WrappedArgs) -> Result<WrappedPlan, CliFailure> {
     Ok(WrappedPlan {
         output: args.output,
         year: args.year,
-        source,
+        input,
         short: args.short,
         ranking,
         disable_pinned: args.disable_pinned,
@@ -826,11 +826,11 @@ fn resolve_tui(args: TuiArgs, terminal: TerminalState) -> Result<TuiPlan, CliFai
         ));
     }
 
-    let source = resolve_source(args.source)?;
+    let input = resolve_input(args.input)?;
     let initial_tab = args.tab.map(Tab::from);
     if initial_tab == Some(Tab::Usage) {
         let settings = tui::settings::Settings::load_for_home_override(
-            source.home.as_deref().map(std::path::Path::new),
+            input.home.as_deref().map(std::path::Path::new),
         )?;
         if !settings.usage_tab_enabled {
             return Err(CliFailure::invalid_message(
@@ -844,7 +844,7 @@ fn resolve_tui(args: TuiArgs, terminal: TerminalState) -> Result<TuiPlan, CliFai
         refresh: args.refresh,
         no_refresh: args.no_refresh,
         debug: args.debug,
-        source,
+        input,
         date: resolve_date(args.date)?,
         initial_tab,
     })
@@ -853,17 +853,17 @@ fn resolve_tui(args: TuiArgs, terminal: TerminalState) -> Result<TuiPlan, CliFai
 fn resolve_report(args: ReportArgs) -> Result<LocalReportPlan, CliFailure> {
     Ok(LocalReportPlan {
         json: args.json,
-        source: resolve_source(args.source)?,
+        input: resolve_input(args.input)?,
         date: resolve_date(args.date)?,
         benchmark: args.benchmark,
         no_spinner: args.no_spinner,
     })
 }
 
-fn resolve_source(args: SourceScopeArgs) -> Result<ResolvedSourceScope, CliFailure> {
+fn resolve_input(args: InputScopeArgs) -> Result<ResolvedInputScope, CliFailure> {
     let home = args.home.map(|path| path.to_string_lossy().into_owned());
     let clients = build_client_filter(args.clients, &home)?;
-    Ok(ResolvedSourceScope { home, clients })
+    Ok(ResolvedInputScope { home, clients })
 }
 
 fn resolve_date(date: DateRangeFlags) -> Result<ResolvedDateRange, CliFailure> {

@@ -41,7 +41,7 @@ fn test_parse_client_id_arg_rejects_unknown_ids() {
 }
 
 #[test]
-fn removed_clients_are_not_valid_source_ids() {
+fn removed_clients_are_not_valid_client_ids() {
     for client in ["cursor", "trae"] {
         let error = parse_client_id_arg(client).unwrap_err();
         assert!(error.contains(client), "unexpected error: {error}");
@@ -159,7 +159,7 @@ fn test_client_flags_parses_canonical_form() {
         panic!("expected models command");
     };
     assert_eq!(
-        args.report.source.clients.clients,
+        args.report.input.clients.clients,
         vec![ClientId::OpenCode, ClientId::Claude]
     );
 
@@ -169,7 +169,7 @@ fn test_client_flags_parses_canonical_form() {
         panic!("expected tui command");
     };
     assert_eq!(
-        args.source.clients.clients,
+        args.input.clients.clients,
         vec![ClientId::OpenCode, ClientId::Claude]
     );
 }
@@ -271,7 +271,7 @@ fn test_client_flag_accepts_uppercase() {
     let Some(Commands::Models(args)) = cli.command else {
         panic!("expected models command");
     };
-    assert_eq!(args.report.source.clients.clients, vec![ClientId::OpenCode]);
+    assert_eq!(args.report.input.clients.clients, vec![ClientId::OpenCode]);
 
     let cli = Cli::try_parse_from(["tokscale", "models", "-c", "Codebuff,Antigravity"])
         .expect("mixed-case parses");
@@ -279,7 +279,7 @@ fn test_client_flag_accepts_uppercase() {
         panic!("expected models command");
     };
     assert_eq!(
-        args.report.source.clients.clients,
+        args.report.input.clients.clients,
         vec![ClientId::Codebuff, ClientId::Antigravity]
     );
 }
@@ -309,23 +309,41 @@ fn test_pricing_source_accepts_known_values() {
         "pricing",
         "lookup",
         "gpt-4o",
-        "--source",
+        "--pricing-source",
         "openrouter",
     ])
-    .expect("source parses");
+    .expect("Pricing Source parses");
     let Some(Commands::Pricing {
-        subcommand: PricingSubcommand::Lookup { source, .. },
+        subcommand: PricingSubcommand::Lookup { pricing_source, .. },
     }) = cli.command
     else {
         panic!("expected pricing command");
     };
-    assert_eq!(source, Some(PricingSource::Openrouter));
+    assert_eq!(pricing_source, Some(PricingSource::Openrouter));
 }
 
 #[test]
 fn test_pricing_source_rejects_unknown_values() {
     assert!(Cli::try_parse_from([
-        "tokscale", "pricing", "lookup", "gpt-4o", "--source", "unknown",
+        "tokscale",
+        "pricing",
+        "lookup",
+        "gpt-4o",
+        "--pricing-source",
+        "unknown",
+    ])
+    .is_err());
+}
+
+#[test]
+fn retired_pricing_source_flag_is_not_an_alias() {
+    assert!(Cli::try_parse_from([
+        "tokscale",
+        "pricing",
+        "lookup",
+        "gpt-4o",
+        "--source",
+        "openrouter",
     ])
     .is_err());
 }
@@ -755,7 +773,7 @@ fn report_execution_plan_does_not_depend_on_terminal_state() {
         };
         assert!(plan.report.json);
         assert_eq!(
-            plan.report.source.clients,
+            plan.report.input.clients,
             Some(vec!["opencode".to_string()])
         );
     }
@@ -890,7 +908,7 @@ fn removed_report_and_cache_flags_are_rejected() {
 }
 
 #[test]
-fn clap_accepts_source_cache_prune_command() {
+fn clap_accepts_input_cache_prune_command() {
     let cli = Cli::try_parse_from(["tokscale", "cache", "prune"]).expect("cache prune parses");
     assert!(matches!(
         cli.command,
@@ -956,7 +974,7 @@ fn antigravity_is_a_local_client_without_an_integration_command_namespace() {
 }
 
 #[test]
-fn antigravity_local_source_uses_home_when_env_roots_are_disabled() {
+fn antigravity_local_input_uses_home_when_env_roots_are_disabled() {
     let def = ClientId::Antigravity.local_def().unwrap();
     assert_eq!(
         def.resolve_path_with_env_strategy("/tmp/home", false),
@@ -966,7 +984,7 @@ fn antigravity_local_source_uses_home_when_env_roots_are_disabled() {
 
 #[test]
 #[serial_test::serial]
-fn antigravity_local_source_falls_back_for_blank_env() {
+fn antigravity_local_input_falls_back_for_blank_env() {
     let previous = std::env::var("GEMINI_CLI_HOME").ok();
     unsafe { std::env::set_var("GEMINI_CLI_HOME", "   ") };
 

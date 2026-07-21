@@ -16,13 +16,13 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{parse_timestamp_str, parse_timestamp_value, read_file};
 use super::UnifiedMessage;
-use crate::source_health::{RecordRejectionReason, ScannedSource};
+use crate::input_health::{RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde_json::Value;
 use std::path::Path;
 
 /// Parse a single `chat-messages.json` file into UnifiedMessages.
-pub fn parse_codebuff_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_codebuff_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let mut bytes = read_file(path)?;
     let root: Value = simd_json::from_slice(&mut bytes)
         .map_err(|error| SessionParseError::new("decode Codebuff chat file", error))?;
@@ -39,7 +39,7 @@ pub fn parse_codebuff_file(path: &Path) -> SessionParseResult<ScannedSource> {
 
     let chat_id_ts = parse_chat_id_to_millis(&chat_id).unwrap_or(0);
 
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     for (ordinal, msg) in messages.iter().enumerate() {
         if !is_assistant_role(msg) {
             continue;
@@ -81,7 +81,7 @@ pub fn parse_codebuff_file(path: &Path) -> SessionParseResult<ScannedSource> {
                 .record(RecordRejectionReason::MissingModel);
             continue;
         };
-        let provider = provider_identity::source_provider_id("", &model);
+        let provider = provider_identity::observed_provider_id("", &model);
 
         let dedup_key = upstream_message_id(msg)
             .unwrap_or_else(|| derive_dedup_key(&session_id, ts, &model, &usage, ordinal));

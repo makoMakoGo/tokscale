@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// This is the persistent, declarative counterpart to environment variables
 /// like `TOKSCALE_EXTRA_DIRS` — it lives on the `scanner` key inside
-/// `~/.config/tokscale/settings.json` and is consumed by source adapters.
+/// `~/.config/tokscale/settings.json` and is consumed by input adapters.
 ///
 /// `#[serde(default)]` at both the struct and field level guarantees that
 /// older settings.json files (which have no `scanner` key at all, or an
@@ -127,7 +127,7 @@ pub enum ScanDirectoryError {
 ///
 /// An absent root means that the client has no local data. Once a root exists,
 /// every traversal error is returned instead of being misreported as an empty
-/// source set.
+/// input set.
 pub fn scan_directory(
     root: impl AsRef<Path>,
     pattern: &str,
@@ -355,11 +355,6 @@ pub fn built_in_extra_scan_paths_for(
 
     if enabled.contains(&ClientId::Claude) {
         paths.push((ClientId::Claude, home_dir.join(".claude/transcripts")));
-        paths.extend(
-            crate::cc_mirror::discover_claude_project_roots(home_dir)?
-                .into_iter()
-                .map(|path| (ClientId::Claude, path)),
-        );
     }
 
     Ok(paths)

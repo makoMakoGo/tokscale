@@ -4,7 +4,7 @@ use super::{
     normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
     UnifiedMessage,
 };
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::TokenBreakdown;
 use crate::{model_aliases, provider_identity};
 use rusqlite::{Connection, OpenFlags};
@@ -354,7 +354,7 @@ fn validate_created_timestamp(created: f64) -> Result<i64, OpenCodeMessageSemant
 }
 
 fn canonicalize_opencode_model_id(model_id: String) -> String {
-    model_aliases::canonicalize_source_model_id(&model_id).unwrap_or(model_id)
+    model_aliases::canonicalize_observed_model_id(&model_id).unwrap_or(model_id)
 }
 
 fn decode_opencode_assistant(
@@ -366,11 +366,11 @@ fn decode_opencode_assistant(
 /// Parse a current-format OpenCode SQLite database.
 ///
 /// Opening the database and preparing/executing the current `message`/`session`
-/// query are source-level errors. A malformed row is rejected without erasing
+/// query are input-level errors. A malformed row is rejected without erasing
 /// other rows, while a row-step failure interrupts the scan and preserves the
 /// messages already confirmed. Databases that predate the current
-/// `session.directory` schema are not accepted as an empty source.
-pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSqliteError> {
+/// `session.directory` schema are not accepted as an empty input.
+pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedInput, OpenCodeSqliteError> {
     let conn = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -431,7 +431,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSq
             source,
         })?;
 
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     let mut fingerprint_indices: HashMap<OpenCodeSqliteFingerprint, usize> = HashMap::new();
     let mut dedup_states: Vec<OpenCodeSqliteDedupState> = Vec::new();
 
@@ -444,7 +444,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSq
                     db_path: db_path.to_path_buf(),
                     source,
                 };
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "read OpenCode SQLite row",
                     error.to_string(),
                 ));
@@ -600,7 +600,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedSource, OpenCodeSq
             }
         };
         let model_id = canonicalize_opencode_model_id(model_id);
-        let provider_id = provider_identity::source_provider_id(
+        let provider_id = provider_identity::observed_provider_id(
             provider_id.as_deref().unwrap_or_default(),
             &model_id,
         );

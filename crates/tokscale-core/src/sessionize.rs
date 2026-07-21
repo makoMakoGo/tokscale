@@ -339,7 +339,7 @@ impl SessionBlockAcc<UnifiedMessage> for AccountingSessionBlock {
 ///
 /// `idle_gap_ms` controls how much silence between messages is still counted
 /// as "active". Time gaps exceeding this threshold are excluded from
-/// `active_duration_ms` by splitting a source session into separate active
+/// `active_duration_ms` by splitting an original session into separate active
 /// intervals.
 pub fn sessionize(messages: &[UnifiedMessage], idle_gap_ms: i64) -> Vec<SessionInterval> {
     sessionize_rows::<UnifiedMessage, AccountingSessionBlock>(messages, idle_gap_ms)

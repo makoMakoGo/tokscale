@@ -8,7 +8,7 @@ mod warp;
 
 use anyhow::Result;
 use cli::{Cli, ExecutionPlan, PricingSource, PricingSubcommand, TerminalState, WrappedPlan};
-use commands::cache::{run_source_cache_prune, run_warm_tui_cache};
+use commands::cache::{run_input_cache_prune, run_warm_tui_cache};
 use commands::clients::run_clients_command;
 use commands::graph::run_graph_command;
 use commands::hourly::run_hourly_report;
@@ -63,8 +63,8 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
                 plan.refresh,
                 plan.no_refresh,
                 plan.debug,
-                plan.source.home,
-                plan.source.clients,
+                plan.input.home,
+                plan.input.clients,
                 plan.date.since,
                 plan.date.until,
                 plan.date.year,
@@ -78,8 +78,8 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
             let no_spinner = effective_no_spinner(report.json, report.no_spinner);
             run_models_report(
                 report.json,
-                report.source.home,
-                report.source.clients,
+                report.input.home,
+                report.input.clients,
                 report.date.since,
                 report.date.until,
                 report.date.year,
@@ -93,8 +93,8 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
         }
         ExecutionPlan::Monthly(plan) => run_monthly_report(
             plan.json,
-            plan.source.home,
-            plan.source.clients,
+            plan.input.home,
+            plan.input.clients,
             plan.date.since,
             plan.date.until,
             plan.date.year,
@@ -106,8 +106,8 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
         ),
         ExecutionPlan::Hourly(plan) => run_hourly_report(
             plan.json,
-            plan.source.home,
-            plan.source.clients,
+            plan.input.home,
+            plan.input.clients,
             plan.date.since,
             plan.date.until,
             plan.date.year,
@@ -119,8 +119,8 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
         ),
         ExecutionPlan::TimeMetrics(plan) => run_time_metrics_report(
             plan.json,
-            plan.source.home,
-            plan.source.clients,
+            plan.input.home,
+            plan.input.clients,
             plan.date.since,
             plan.date.until,
             plan.date.year,
@@ -128,12 +128,12 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
             effective_no_spinner(plan.json, plan.no_spinner),
         ),
         ExecutionPlan::Clients(plan) => {
-            run_clients_command(plan.json, plan.source.home, plan.source.clients)
+            run_clients_command(plan.json, plan.input.home, plan.input.clients)
         }
         ExecutionPlan::Graph(plan) => run_graph_command(
             plan.output,
-            plan.source.home,
-            plan.source.clients,
+            plan.input.home,
+            plan.input.clients,
             plan.date.since,
             plan.date.until,
             plan.date.year,
@@ -144,20 +144,20 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
             PricingSubcommand::Lookup {
                 model_id,
                 json,
-                source,
+                pricing_source,
                 no_spinner,
             } => run_pricing_lookup(
                 &model_id,
                 json,
-                source.map(PricingSource::as_str),
+                pricing_source.map(PricingSource::as_str),
                 effective_no_spinner(json, no_spinner),
             ),
             PricingSubcommand::Overrides { json } => run_pricing_list_overrides(json),
         },
         ExecutionPlan::Usage { json } => commands::usage::run(json),
         ExecutionPlan::Wrapped(plan) => run_wrapped_command(plan),
-        ExecutionPlan::CachePrune => run_source_cache_prune(),
-        ExecutionPlan::CacheWarm(source) => run_warm_tui_cache(source.home, source.clients),
+        ExecutionPlan::CachePrune => run_input_cache_prune(),
+        ExecutionPlan::CacheWarm(input) => run_warm_tui_cache(input.home, input.clients),
         ExecutionPlan::Warp(subcommand) => run_warp_command(subcommand),
     }?;
 
@@ -178,8 +178,8 @@ fn run_wrapped_command(plan: WrappedPlan) -> Result<()> {
     let wrapped_options = commands::wrapped::WrappedOptions {
         output: plan.output,
         year: plan.year,
-        home_dir: plan.source.home,
-        clients: plan.source.clients,
+        home_dir: plan.input.home,
+        clients: plan.input.clients,
         short: plan.short,
         ranking: plan.ranking,
         pin_sisyphus: !plan.disable_pinned,

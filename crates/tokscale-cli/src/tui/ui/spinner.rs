@@ -84,7 +84,7 @@ pub fn get_scanner_spans(frame: usize, theme: &Theme) -> Vec<Span<'static>> {
 pub fn get_phase_message(phase: &str) -> &'static str {
     match phase {
         "idle" => "Initializing...",
-        "parsing-sources" => "Scanning session data...",
+        "parsing-inputs" => "Scanning session data...",
         "loading-pricing" => "Loading pricing data...",
         "finalizing-report" => "Finalizing report...",
         "complete" => "Complete",

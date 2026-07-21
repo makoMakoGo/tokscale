@@ -111,7 +111,7 @@ pub struct DailyModelInfo {
 }
 
 #[derive(Debug, Clone)]
-pub struct DailySourceInfo {
+pub struct DailyClientInfo {
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
     pub models: BTreeMap<String, DailyModelInfo>,
@@ -122,7 +122,7 @@ pub struct DailyUsage {
     pub date: NaiveDate,
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
-    pub source_breakdown: BTreeMap<String, DailySourceInfo>,
+    pub client_breakdown: BTreeMap<String, DailyClientInfo>,
     pub message_count: u32,
     pub turn_count: u32,
 }
@@ -165,7 +165,7 @@ pub struct PeriodUsage {
     pub end_date: NaiveDate,
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
-    pub source_breakdown: BTreeMap<String, DailySourceInfo>,
+    pub client_breakdown: BTreeMap<String, DailyClientInfo>,
     pub message_count: u32,
     pub turn_count: u32,
     pub active_days: u32,
@@ -186,9 +186,9 @@ pub struct UsageGraphData {
 
 #[derive(Debug, Clone, Default)]
 pub struct UsageData {
-    /// Source health for the load that produced this data. Empty/complete
-    /// when every source was healthy.
-    pub health: crate::source_health::HealthReport,
+    /// Data Health for the load that produced this data. Empty/complete
+    /// when every input was healthy.
+    pub health: crate::input_health::HealthReport,
     pub models: Vec<UsageModelEntry>,
     pub agents: Vec<AgentEntry>,
     pub daily: Vec<DailyUsage>,

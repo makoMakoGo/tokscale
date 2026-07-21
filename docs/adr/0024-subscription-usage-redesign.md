@@ -79,7 +79,7 @@ application of this boundary:
   deleting user files is an explicit maintenance action.
 
 Codex and ChatGPT subscription lookup reads the active provider-owned Codex
-authentication source under ADR 0023. It does not restore Tokscale account
+authentication artifact under ADR 0023. It does not restore Tokscale account
 switching or a second credential store.
 
 The existing `TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY` contract remains valid.
@@ -108,7 +108,7 @@ This ADR extends ADR 0014's explicit remote-access boundary and ADR 0023's
 provider-owned credential policy. It supersedes the Cursor and Trae clauses in
 ADR 0015, ADR 0018, and ADR 0023, and removes the `parse_local` capability split
 from ADR 0007 because every remaining catalog identity is an ordinary local
-report source.
+report input.
 
 ## Consequences
 

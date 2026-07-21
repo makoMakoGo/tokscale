@@ -8,7 +8,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;
 use super::UnifiedMessage;
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::path::Path;
@@ -51,7 +51,7 @@ pub struct KiloTime {
     pub completed: Option<f64>,
 }
 
-pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
     let conn = open_readonly_sqlite(db_path)?;
 
     let query = r#"
@@ -68,7 +68,7 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         .query([])
         .map_err(|error| SessionParseError::new("execute Kilo message query", error))?;
 
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
 
     loop {
         let row = match rows.next() {
@@ -76,7 +76,7 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             Ok(None) => break,
             Err(error) => {
                 let error = SessionParseError::new("iterate Kilo message rows", error);
-                scanned.interrupted = Some(SourceFailure::from(&error));
+                scanned.interrupted = Some(InputFailure::from(&error));
                 break;
             }
         };
@@ -229,7 +229,7 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             .map(str::trim)
             .filter(|provider| !provider.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| provider_identity::source_provider_id("", &model_id));
+            .unwrap_or_else(|| provider_identity::observed_provider_id("", &model_id));
 
         let mut unified = UnifiedMessage::new_with_agent(
             "kilo",
@@ -415,11 +415,11 @@ mod tests {
     #[test]
     fn test_parse_kilo_sqlite_reports_missing_db() {
         let error = parse_kilo_sqlite(std::path::Path::new("/nonexistent/kilo.db")).unwrap_err();
-        assert_eq!(error.operation(), "open SQLite source read-only");
+        assert_eq!(error.operation(), "open SQLite input read-only");
     }
 
     #[test]
-    fn parse_kilo_sqlite_reports_missing_schema_as_source_error() {
+    fn parse_kilo_sqlite_reports_missing_schema_as_input_error() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("kilo.db");
         drop(Connection::open(&path).unwrap());

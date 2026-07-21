@@ -4,7 +4,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::{dedup_hash_str, UnifiedMessage};
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use chrono::{Local, LocalResult, NaiveDateTime, TimeZone};
 use serde_json::Value;
@@ -21,14 +21,14 @@ const SKIP_EVENT_KINDS: &[&str] = &[
     "AgentPatchCreatedEvent",
 ];
 
-pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::new("open Junie events file", error))?;
 
     let session_id = session_id_from_path(path)?;
     let default_timestamp = session_timestamp_from_id(&session_id);
     let mut pending_turn_start = false;
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     let mut seen = HashSet::new();
 
     for (line_index, line) in BufReader::new(file).lines().enumerate() {
@@ -36,7 +36,7 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "read Junie JSONL line",
                     format!("{} line {line_number}: {error}", path.display()),
                 ));
@@ -125,7 +125,7 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedSource> {
                     .record(RecordRejectionReason::MissingModel);
                 continue;
             };
-            let model_id = model_aliases::canonicalize_source_model_id(model_raw)
+            let model_id = model_aliases::canonicalize_observed_model_id(model_raw)
                 .unwrap_or_else(|| model_raw.trim().to_string());
             let provider_id = provider_from_usage(usage, &model_id);
 
@@ -231,7 +231,7 @@ fn agent_name(agent_event: &Value) -> Option<String> {
 }
 
 fn provider_from_usage(usage: &Value, model_id: &str) -> String {
-    provider_identity::source_provider_id(
+    provider_identity::observed_provider_id(
         string_field(usage, "provider").unwrap_or_default(),
         model_id,
     )
@@ -386,7 +386,7 @@ mod tests {
         assert_eq!(error.operation(), "validate Junie token count");
     }
 
-    fn parse_events_result(content: &str) -> SessionParseResult<ScannedSource> {
+    fn parse_events_result(content: &str) -> SessionParseResult<ScannedInput> {
         let dir = TempDir::new().unwrap();
         let session_dir = dir.path().join("session-250622-101010");
         std::fs::create_dir_all(&session_dir).unwrap();
@@ -623,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_events_file_remains_a_source_error() {
+    fn missing_events_file_remains_a_input_error() {
         let dir = TempDir::new().unwrap();
         let session_dir = dir.path().join("session-250622-101010");
         std::fs::create_dir_all(&session_dir).unwrap();

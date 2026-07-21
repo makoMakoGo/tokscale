@@ -194,7 +194,7 @@ fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
         frame,
         app,
         inner,
-        spinner::get_phase_message("parsing-sources"),
+        spinner::get_phase_message("parsing-inputs"),
     );
 }
 

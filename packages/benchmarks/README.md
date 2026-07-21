@@ -47,7 +47,7 @@ HOME=/tmp/tokscale-bench \
 For generated data, set `HOME` to the output root or pass the equivalent
 client-specific environment roots. The script performs one unmeasured warm-up,
 then records CLI processing time, wall/user/system time, and GNU `time` maximum
-RSS for each fresh process. Keep the source and cache snapshots fixed when
+RSS for each fresh process. Keep the input and cache snapshots fixed when
 comparing binaries.
 
 ## Measure aggregation

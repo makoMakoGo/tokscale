@@ -266,8 +266,8 @@ pub(crate) fn get_date_range_label_for_date(
 }
 
 /// Print the report's data-health summary to stderr. Data stays on stdout;
-/// degraded sources are warnings, never a failed exit.
-pub(crate) fn emit_health_summary(health: &tokscale_core::source_health::HealthReport) {
+/// degraded inputs are warnings, never a failed exit.
+pub(crate) fn emit_health_summary(health: &tokscale_core::input_health::HealthReport) {
     use colored::Colorize;
     if health.complete {
         return;
@@ -275,11 +275,11 @@ pub(crate) fn emit_health_summary(health: &tokscale_core::source_health::HealthR
     eprintln!(
         "{}",
         format!(
-            "  Data health: {} degraded source(s), {} rejected record(s), {} partial source(s), {} failed source(s)",
-            health.degraded_sources,
+            "  Data health: {} degraded input(s), {} rejected record(s), {} partial input(s), {} failed input(s)",
+            health.degraded_inputs,
             health.rejected_records,
-            health.partial_sources,
-            health.failed_sources
+            health.partial_inputs,
+            health.failed_inputs
         )
         .yellow()
     );
@@ -290,7 +290,7 @@ pub(crate) fn emit_health_summary(health: &tokscale_core::source_health::HealthR
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReportEnvelope<T> {
     pub(crate) data: T,
-    pub(crate) health: tokscale_core::source_health::HealthReport,
+    pub(crate) health: tokscale_core::input_health::HealthReport,
     pub(crate) metadata: ReportMetadata,
 }
 
@@ -303,7 +303,7 @@ pub(crate) struct ReportMetadata {
 impl<T> ReportEnvelope<T> {
     pub(crate) fn new(
         data: T,
-        health: tokscale_core::source_health::HealthReport,
+        health: tokscale_core::input_health::HealthReport,
         processing_time_ms: impl Into<u64>,
     ) -> Self {
         Self {
