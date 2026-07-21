@@ -14,7 +14,7 @@ use tokscale_core::{
 };
 
 mod overview;
-pub(crate) use overview::{OverviewFamily, OverviewSummary};
+pub(crate) use overview::{CacheRate, OverviewFamily, OverviewSummary};
 
 // The TUI view types live in core (`tokscale_core::usage_views`) so the
 // aggregation engine can produce them directly (#37). Re-export them under the

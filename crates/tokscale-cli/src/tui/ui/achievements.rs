@@ -5,6 +5,7 @@ use ratatui::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::app::App;
+use crate::tui::data::CacheRate;
 
 struct TierSet {
     roast: &'static str,
@@ -72,9 +73,17 @@ pub(super) struct Achievement {
 }
 
 fn rank(set: &TierSet, value: u64) -> Achievement {
+    rank_when(set, |threshold| value >= threshold)
+}
+
+fn rank_cache(set: &TierSet, rate: CacheRate) -> Achievement {
+    rank_when(set, |threshold| rate.reaches(threshold))
+}
+
+fn rank_when(set: &TierSet, reached: impl Fn(u64) -> bool) -> Achievement {
     let mut current: i8 = -1;
     for (index, (threshold, _, _)) in set.tiers.iter().enumerate() {
-        if value >= *threshold {
+        if reached(*threshold) {
             current = index as i8;
         }
     }
@@ -93,18 +102,14 @@ fn rank(set: &TierSet, value: u64) -> Achievement {
 pub(super) fn build(
     current_streak: u32,
     total_tokens: u64,
-    cache_read: u64,
+    cache_rate: CacheRate,
     models: usize,
     clients: usize,
 ) -> Vec<Achievement> {
-    let cache_pct = cache_read
-        .saturating_mul(100)
-        .checked_div(total_tokens)
-        .unwrap_or_default();
     vec![
         rank(&STREAK, current_streak as u64),
         rank(&TOKENS, total_tokens),
-        rank(&CACHE, cache_pct),
+        rank_cache(&CACHE, cache_rate),
         rank(&MODELS, models as u64),
         rank(&CLIENTS, clients as u64),
     ]
@@ -192,9 +197,20 @@ mod tests {
 
     #[test]
     fn build_uses_the_authoritative_current_streak() {
-        let achievements = build(30, 0, 0, 0, 0);
+        let achievements = build(30, 0, CacheRate::default(), 0, 0);
 
         assert_eq!(achievements[0].title, "废寝忘食");
         assert_eq!(achievements[0].current, 2);
+    }
+
+    #[test]
+    fn cache_tier_uses_the_same_tenth_percent_as_the_display() {
+        let rounded_to_fifty = build(0, 0, CacheRate::from_tokens(4_996, 10_000), 0, 0);
+        let still_below_fifty = build(0, 0, CacheRate::from_tokens(4_994, 10_000), 0, 0);
+
+        assert_eq!(rounded_to_fifty[2].title, "省吃俭用");
+        assert_eq!(rounded_to_fifty[2].current, 0);
+        assert_eq!(still_below_fifty[2].title, "败家子");
+        assert_eq!(still_below_fifty[2].current, -1);
     }
 }

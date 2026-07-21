@@ -130,15 +130,7 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary)
             format_bytes(app.data.health.input_data_bytes),
             app.theme.foreground,
         ),
-        metric_line(
-            app,
-            "Cache Rate",
-            format!(
-                "{:.1}%",
-                share_percent(data.tokens.cache_read, data.tokens.total())
-            ),
-            Color::Cyan,
-        ),
+        metric_line(app, "Cache Rate", data.cache_rate.to_string(), Color::Cyan),
         metric_line(
             app,
             "Models Eaten",
@@ -466,11 +458,10 @@ fn fun_facts(app: &App, data: &OverviewSummary) -> Vec<String> {
         facts.push(format!("≈ {} 杯奶茶", commafy((cost / 3.0) as u64)));
     }
     if total > 0 {
-        let share = share_percent(data.tokens.cache_read, total);
-        if share >= 80.0 {
-            facts.push(format!("缓存命中 {share:.0}% · 会过日子"));
-        } else if share < 50.0 {
-            facts.push(format!("缓存命中 {share:.0}% · 败家指数拉满"));
+        if data.cache_rate.reaches(80) {
+            facts.push(format!("缓存命中 {} · 会过日子", data.cache_rate));
+        } else if !data.cache_rate.reaches(50) {
+            facts.push(format!("缓存命中 {} · 败家指数拉满", data.cache_rate));
         }
     }
     if data.active_days >= 7 {
@@ -530,7 +521,7 @@ fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary
     let items = achievements::build(
         app.data.current_streak,
         data.tokens.total(),
-        data.tokens.cache_read,
+        data.cache_rate,
         data.model_count,
         data.client_count,
     );

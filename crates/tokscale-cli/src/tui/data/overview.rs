@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::fmt;
 
 use tokscale_core::inferred_provider_from_model;
 
@@ -36,6 +37,43 @@ impl OverviewFamily {
     }
 }
 
+/// Cache-token share rounded to the one decimal place shown by Overview.
+///
+/// Keeping the displayed precision in the value makes tier checks and text
+/// rendering use the same user-visible number at threshold boundaries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CacheRate(u16);
+
+impl CacheRate {
+    const TENTHS_PER_PERCENT: u16 = 10;
+    const MAX_TENTHS: u128 = 100 * Self::TENTHS_PER_PERCENT as u128;
+
+    pub(crate) fn from_tokens(cache_read: u64, total: u64) -> Self {
+        if total == 0 {
+            return Self::default();
+        }
+
+        let total = u128::from(total);
+        let rounded_tenths = (u128::from(cache_read) * Self::MAX_TENTHS + total / 2) / total;
+        Self(rounded_tenths.min(Self::MAX_TENTHS) as u16)
+    }
+
+    pub(crate) fn reaches(self, percent: u64) -> bool {
+        u64::from(self.0) >= percent.saturating_mul(u64::from(Self::TENTHS_PER_PERCENT))
+    }
+}
+
+impl fmt::Display for CacheRate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}.{}%",
+            self.0 / Self::TENTHS_PER_PERCENT,
+            self.0 % Self::TENTHS_PER_PERCENT
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RankedUsage {
     pub(crate) id: String,
@@ -57,6 +95,7 @@ pub(crate) struct RankedFamilyUsage {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OverviewSummary {
     pub(crate) tokens: TokenBreakdown,
+    pub(crate) cache_rate: CacheRate,
     pub(crate) active_days: usize,
     pub(crate) peak_daily_tokens: u64,
     pub(crate) peak_daily_cost: f64,
@@ -114,6 +153,8 @@ impl OverviewSummary {
 
         summary.model_count = models.len();
         summary.client_count = clients.len();
+        summary.cache_rate =
+            CacheRate::from_tokens(summary.tokens.cache_read, summary.tokens.total());
         summary.favorite_model = favorite_named(models);
         summary.favorite_client = favorite_named(clients);
         summary.favorite_family = favorite_family(families);
@@ -279,6 +320,24 @@ mod tests {
         assert_eq!(family.family, OverviewFamily::Gpt);
         assert_eq!(family.tokens, 300);
         assert_eq!(family.cost, 5.0);
+    }
+
+    #[test]
+    fn cache_rate_uses_one_decimal_for_display_and_thresholds() {
+        let rounded_to_fifty = CacheRate::from_tokens(4_996, 10_000);
+        let displayed_below_fifty = CacheRate::from_tokens(4_960, 10_000);
+
+        assert_eq!(rounded_to_fifty.to_string(), "50.0%");
+        assert!(rounded_to_fifty.reaches(50));
+        assert_eq!(displayed_below_fifty.to_string(), "49.6%");
+        assert!(!displayed_below_fifty.reaches(50));
+
+        for threshold in [50, 80, 90, 95, 99] {
+            let boundary = threshold * 100;
+            assert!(CacheRate::from_tokens(boundary - 4, 10_000).reaches(threshold));
+            assert!(!CacheRate::from_tokens(boundary - 6, 10_000).reaches(threshold));
+        }
+        assert_eq!(CacheRate::from_tokens(1, 0), CacheRate::default());
     }
 
     #[test]
