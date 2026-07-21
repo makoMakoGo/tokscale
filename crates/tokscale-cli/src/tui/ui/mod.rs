@@ -236,8 +236,21 @@ mod tests {
         let screen = render_screen(&mut app, 120, 32).join("\n");
 
         assert!(screen.contains("Scanning session data..."));
+        assert!(screen.contains('~'), "fish pond should render: {screen}");
+        assert!(screen.contains('°'), "fish pond should render: {screen}");
         assert!(!screen.contains("No session data available"));
         assert!(!screen.contains("Total Tokens"));
+    }
+
+    #[test]
+    fn cramped_terminal_cold_start_shows_spinner_without_pond() {
+        let mut app = make_app();
+        app.set_background_loading(true);
+
+        let screen = render_screen(&mut app, 40, 12).join("\n");
+
+        assert!(screen.contains("Scanning session data..."), "{screen}");
+        assert!(!screen.contains('°'), "pond must degrade away: {screen}");
     }
 
     #[test]
