@@ -17,8 +17,8 @@ use tokscale_core::ClientId;
 const RANK_WIDTH: u16 = 3;
 const AGENT_MIN_WIDTH: u16 = 16;
 const AGENT_MAX_WIDTH: u16 = 36;
-const SOURCE_MIN_WIDTH: u16 = 16;
-const SOURCE_MAX_WIDTH: u16 = 40;
+const CLIENT_MIN_WIDTH: u16 = 16;
+const CLIENT_MAX_WIDTH: u16 = 40;
 const TOKENS_WIDTH: u16 = 10;
 const COST_WIDTH: u16 = 10;
 const MSGS_WIDTH: u16 = 6;
@@ -28,7 +28,7 @@ const INSTANCES_WIDTH: u16 = 9;
 enum AgentColumn {
     Rank,
     Agent,
-    Source,
+    Client,
     Tokens,
     Cost,
     Messages,
@@ -108,13 +108,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|agent| display_width(&agent.agent))
         .max()
         .unwrap_or(AGENT_MIN_WIDTH);
-    let source_content_width = agents
+    let client_content_width = agents
         .iter()
         .map(|agent| client_labels_display_width(&agent.clients))
         .max()
-        .unwrap_or(SOURCE_MIN_WIDTH);
+        .unwrap_or(CLIENT_MIN_WIDTH);
     let table_layout =
-        agents_table_layout(table_area.width, agent_content_width, source_content_width);
+        agents_table_layout(table_area.width, agent_content_width, client_content_width);
     let columns = table_layout.columns.clone();
 
     let header = Row::new(
@@ -144,7 +144,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
 
-            let source_labels = client_labels(&agent.clients);
+            let client_labels = client_labels(&agent.clients);
             let cell_for_column =
                 |column: AgentColumn| -> Cell {
                     match column {
@@ -159,9 +159,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                                 .fg(app.theme.foreground)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        AgentColumn::Source => Cell::from(truncate_display_width(
-                            &source_labels,
-                            table_layout.width_for(AgentColumn::Source),
+                        AgentColumn::Client => Cell::from(truncate_display_width(
+                            &client_labels,
+                            table_layout.width_for(AgentColumn::Client),
                         ))
                         .style(Style::default().fg(theme_muted)),
                         AgentColumn::Tokens => total_tokens_cell(agent.tokens.total(), &app.theme),
@@ -226,7 +226,7 @@ fn agent_column_order(column: AgentColumn) -> u16 {
     match column {
         AgentColumn::Rank => 0,
         AgentColumn::Agent => 10,
-        AgentColumn::Source => 20,
+        AgentColumn::Client => 20,
         AgentColumn::Tokens => 30,
         AgentColumn::Cost => 40,
         AgentColumn::Messages => 50,
@@ -238,7 +238,7 @@ fn agent_column_header(column: AgentColumn) -> &'static str {
     match column {
         AgentColumn::Rank => "#",
         AgentColumn::Agent => "Agent",
-        AgentColumn::Source => "Source",
+        AgentColumn::Client => "Client",
         AgentColumn::Tokens => "Tokens",
         AgentColumn::Cost => "Cost",
         AgentColumn::Messages => "Msgs",
@@ -257,7 +257,7 @@ fn agent_column_sort_field(column: AgentColumn) -> Option<SortField> {
 fn agents_table_layout(
     table_width: u16,
     agent_content_width: u16,
-    source_content_width: u16,
+    client_content_width: u16,
 ) -> AgentsTableLayout {
     let columns = vec![
         ResponsiveColumn::measured_required(
@@ -279,12 +279,12 @@ fn agents_table_layout(
             COST_WIDTH,
         ),
         ResponsiveColumn::measured_atomic_optional(
-            AgentColumn::Source,
+            AgentColumn::Client,
             20,
-            agent_column_order(AgentColumn::Source),
-            SOURCE_MIN_WIDTH,
-            source_content_width,
-            SOURCE_MAX_WIDTH,
+            agent_column_order(AgentColumn::Client),
+            CLIENT_MIN_WIDTH,
+            client_content_width,
+            CLIENT_MAX_WIDTH,
         ),
         ResponsiveColumn::fixed_optional(
             AgentColumn::Messages,
@@ -321,10 +321,10 @@ fn get_empty_message(app: &App) -> String {
             .all(|client| *client == ClientId::Codex);
 
     if only_codex {
-        "No agent breakdown is available for the current sources.\nThe selected source usually does not record agent metadata for regular sessions.\nPress 's' to try a different source."
+        "No agent breakdown is available for the current clients.\nThe selected client usually does not record agent metadata for regular sessions.\nPress 's' to try a different client."
             .to_string()
     } else {
-        "No agent breakdown is available for the current sources.\nOnly some sources record agent metadata.\nPress 's' to change sources or 'r' to refresh."
+        "No agent breakdown is available for the current clients.\nOnly some clients record agent metadata.\nPress 's' to change clients or 'r' to refresh."
             .to_string()
     }
 }
@@ -352,7 +352,7 @@ fn client_labels_display_width(clients: &str) -> u16 {
 mod tests {
     use super::{
         agents_table_layout, client_labels_display_width, get_empty_message, AgentColumn,
-        AGENT_MAX_WIDTH, COST_WIDTH, INSTANCES_WIDTH, MSGS_WIDTH, SOURCE_MAX_WIDTH, TOKENS_WIDTH,
+        AGENT_MAX_WIDTH, CLIENT_MAX_WIDTH, COST_WIDTH, INSTANCES_WIDTH, MSGS_WIDTH, TOKENS_WIDTH,
     };
     use crate::tui::app::{App, TuiConfig};
     use crate::tui::data::UsageData;
@@ -392,17 +392,17 @@ mod tests {
         let app = make_app(vec![ClientId::Codex]);
         let message = get_empty_message(&app);
 
-        assert!(message.contains("selected source usually does not record"));
-        assert!(message.contains("try a different source"));
+        assert!(message.contains("selected client usually does not record"));
+        assert!(message.contains("try a different client"));
     }
 
     #[test]
-    fn test_get_empty_message_for_mixed_sources() {
+    fn test_get_empty_message_for_mixed_clients() {
         let app = make_app(vec![ClientId::OpenCode, ClientId::RooCode]);
         let message = get_empty_message(&app);
 
-        assert!(message.contains("Only some sources record agent metadata"));
-        assert!(message.contains("change sources"));
+        assert!(message.contains("Only some clients record agent metadata"));
+        assert!(message.contains("change clients"));
     }
 
     #[test]
@@ -424,7 +424,7 @@ mod tests {
             vec![
                 AgentColumn::Rank,
                 AgentColumn::Agent,
-                AgentColumn::Source,
+                AgentColumn::Client,
                 AgentColumn::Tokens,
                 AgentColumn::Cost,
                 AgentColumn::Messages,
@@ -446,7 +446,7 @@ mod tests {
         let widths = &layout.widths;
 
         assert_eq!(length_at(widths, 1), AGENT_MAX_WIDTH);
-        assert_eq!(length_at(widths, 2), SOURCE_MAX_WIDTH);
+        assert_eq!(length_at(widths, 2), CLIENT_MAX_WIDTH);
     }
 
     #[test]
@@ -475,12 +475,12 @@ mod tests {
     }
 
     #[test]
-    fn agents_source_blocks_later_columns_under_strict_priority() {
+    fn agents_client_blocks_later_columns_under_strict_priority() {
         let layout = agents_table_layout(51, 22, 40);
 
         assert!(layout.columns.contains(&AgentColumn::Tokens));
         assert!(layout.columns.contains(&AgentColumn::Cost));
-        assert!(!layout.columns.contains(&AgentColumn::Source));
+        assert!(!layout.columns.contains(&AgentColumn::Client));
         assert!(!layout.columns.contains(&AgentColumn::Messages));
         assert!(!layout.columns.contains(&AgentColumn::Instances));
     }

@@ -62,7 +62,7 @@ Why from-daily, not per-message:
 - `build_period_usage` belongs in the aggregation engine as a derived
   finalization step from `daily`, not as its own per-message accumulator.
 - The design depends on `daily` retaining enough detail
-  (`source_breakdown` with per-model `TokenBreakdown`) for the period to be
+  (`client_breakdown` with per-model `TokenBreakdown`) for the period to be
   lossless. A period-level metric `daily` does not store cannot be derived
   this way — extend `daily` first, or fold per-message with explicit
   justification.

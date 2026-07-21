@@ -57,18 +57,6 @@ struct AgentMetaFile {
     agent_type: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct CcMirrorVariantMetadata {
-    name: String,
-    provider_id: Option<String>,
-}
-
-impl CcMirrorVariantMetadata {
-    fn client_id(&self) -> String {
-        format!("cc-mirror/{}", sanitize_cc_mirror_segment(&self.name))
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClaudeWorkspaceParts {
     key: String,
@@ -712,33 +700,21 @@ pub fn parse_claude_file_with_home(
 ) -> SessionParseResult<ScannedSource> {
     let mut parent_cache = ParentSubagentTypeCache::new();
     let project_resolver = ClaudeProjectResolver::new(home_dir);
-    parse_claude_file_with_cache_home_and_resolver(
-        path,
-        &mut parent_cache,
-        home_dir,
-        &project_resolver,
-    )
-    .map(|(scanned, _)| scanned)
+    parse_claude_file_with_cache_home_and_resolver(path, &mut parent_cache, &project_resolver)
+        .map(|(scanned, _)| scanned)
 }
 
 pub(crate) fn parse_claude_file_with_project_resolver(
     path: &Path,
-    home_dir: Option<&Path>,
     project_resolver: &ClaudeProjectResolver,
 ) -> SessionParseResult<(ScannedSource, ClaudeProjectDependency)> {
     let mut parent_cache = ParentSubagentTypeCache::new();
-    parse_claude_file_with_cache_home_and_resolver(
-        path,
-        &mut parent_cache,
-        home_dir,
-        project_resolver,
-    )
+    parse_claude_file_with_cache_home_and_resolver(path, &mut parent_cache, project_resolver)
 }
 
 fn parse_claude_file_with_cache_home_and_resolver(
     path: &Path,
     parent_cache: &mut ParentSubagentTypeCache,
-    home_dir: Option<&Path>,
     project_resolver: &ClaudeProjectResolver,
 ) -> SessionParseResult<(ScannedSource, ClaudeProjectDependency)> {
     if is_workflow_journal(path) {
@@ -754,14 +730,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
     let mut project_candidates = ClaudeProjectCandidates::default();
     let mut parent_session_id = None;
     let is_transcript_path = is_claude_transcripts_path(path);
-    let cc_mirror_metadata = cc_mirror_variant_metadata_from_path(path, home_dir)?;
-    let client_id = cc_mirror_metadata
-        .as_ref()
-        .map(CcMirrorVariantMetadata::client_id)
-        .unwrap_or_else(|| "claude".to_string());
-    let metadata_provider_hint = cc_mirror_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.provider_id.as_deref());
+    let client_id = "claude".to_string();
     let mut session_id = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -971,7 +940,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
                             last_model: last_model.as_deref(),
                             last_provider_hint: last_provider_hint.as_deref(),
                             client_id: &client_id,
-                            default_provider_hint: metadata_provider_hint,
+                            default_provider_hint: None,
                             session_id: &session_id,
                             suppress_unattributed: suppress_unattributed_tool_results,
                             workspace_key: context_workspace_key,
@@ -1128,11 +1097,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     }
                 };
 
-                let provider_hint = message
-                    .provider_id
-                    .clone()
-                    .or(entry.provider_id.clone())
-                    .or_else(|| metadata_provider_hint.map(str::to_string));
+                let provider_hint = message.provider_id.clone().or(entry.provider_id.clone());
 
                 // Build dedup key for global deduplication (messageId:requestId composite).
                 // For streaming responses, merge using per-field max to capture the most
@@ -1342,12 +1307,6 @@ fn claude_project_key_from_path(path: &Path) -> Option<String> {
     for window in components.windows(3) {
         if window[0] == ".claude" && window[1] == "projects" {
             return Some(window[2].clone());
-        }
-    }
-
-    for window in components.windows(5) {
-        if window[0] == ".cc-mirror" && window[2] == "config" && window[3] == "projects" {
-            return Some(window[4].clone());
         }
     }
 
@@ -1649,111 +1608,6 @@ fn read_external_project_candidates(home_dir: &Path) -> ClaudeProjectCandidates 
     }
 
     candidates
-}
-
-fn sanitize_cc_mirror_segment(raw: &str) -> String {
-    let mut segment: String = raw
-        .trim()
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-
-    while segment.contains("--") {
-        segment = segment.replace("--", "-");
-    }
-    let mut segment = segment
-        .trim_matches(|ch| matches!(ch, '-' | '_' | '.'))
-        .to_string();
-    if segment.len() > 96 {
-        segment.truncate(96);
-        segment = segment
-            .trim_matches(|ch| matches!(ch, '-' | '_' | '.'))
-            .to_string();
-    }
-    if segment.is_empty() {
-        "variant".to_string()
-    } else {
-        segment
-    }
-}
-
-fn cc_mirror_provider_id(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed.eq_ignore_ascii_case("mirror") {
-        return Some("anthropic".to_string());
-    }
-    provider_identity::canonical_provider(trimmed)
-}
-
-fn cc_mirror_variant_metadata_from_path(
-    path: &Path,
-    home_dir: Option<&Path>,
-) -> SessionParseResult<Option<CcMirrorVariantMetadata>> {
-    let Some(variant_dir) =
-        crate::cc_mirror::variant_dir_from_session_path_checked(path, home_dir)?
-    else {
-        return Ok(None);
-    };
-    let variant_name = variant_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            SessionParseError::at_path(
-                &variant_dir,
-                "validate cc-mirror variant path",
-                std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    "variant directory name is missing or not valid UTF-8",
-                ),
-            )
-        })?
-        .to_string();
-    let variant_path = crate::cc_mirror::variant_file_path(&variant_dir);
-    let metadata = crate::cc_mirror::read_variant_file_checked(&variant_path)?;
-
-    let name = match metadata
-        .as_ref()
-        .and_then(|metadata| metadata.name.as_deref())
-    {
-        Some(name) if !name.trim().is_empty() => name.to_string(),
-        Some(_) => {
-            return Err(SessionParseError::at_path(
-                &variant_path,
-                "validate cc-mirror variant metadata",
-                std::io::Error::new(ErrorKind::InvalidData, "variant name is blank"),
-            ));
-        }
-        None => variant_name,
-    };
-    let provider_id = match metadata.as_ref().and_then(|metadata| {
-        metadata
-            .provider_id
-            .as_deref()
-            .or(metadata.provider.as_deref())
-    }) {
-        Some(provider) => Some(cc_mirror_provider_id(provider).ok_or_else(|| {
-            SessionParseError::at_path(
-                &variant_path,
-                "validate cc-mirror variant metadata",
-                std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!("unsupported provider `{provider}`"),
-                ),
-            )
-        })?),
-        None => None,
-    };
-
-    Ok(Some(CcMirrorVariantMetadata { name, provider_id }))
 }
 
 fn parse_claude_entry_timestamp_checked(
@@ -2446,30 +2300,6 @@ mod tests {
         (temp_dir, path)
     }
 
-    fn create_cc_mirror_project_file(
-        content: &str,
-        variant: &str,
-        provider: &str,
-        project: &str,
-        filename: &str,
-    ) -> (TempDir, std::path::PathBuf) {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let variant_dir = temp_dir.path().join(".cc-mirror").join(variant);
-        let config_dir = variant_dir.join("config");
-        let path = config_dir.join("projects").join(project).join(filename);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            variant_dir.join("variant.json"),
-            format!(
-                r#"{{"name":"{variant}","provider":"{provider}","configDir":"{}"}}"#,
-                config_dir.display()
-            ),
-        )
-        .unwrap();
-        std::fs::write(&path, content).unwrap();
-        (temp_dir, path)
-    }
-
     fn create_transcript_file(content: &str, filename: &str) -> (TempDir, std::path::PathBuf) {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir
@@ -2758,26 +2588,6 @@ mod tests {
     }
 
     #[test]
-    fn malformed_cc_mirror_variant_reports_variant_path() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let variant_dir = temp_dir.path().join(".cc-mirror/zai/config");
-        let path = variant_dir.join("projects/project-a/session.jsonl");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":1,"output_tokens":1}}}"#,
-        )
-        .unwrap();
-        let variant_path = temp_dir.path().join(".cc-mirror/zai/variant.json");
-        std::fs::write(&variant_path, "{not-json").unwrap();
-
-        let error = parse_claude_file_with_home(&path, Some(temp_dir.path())).unwrap_err();
-
-        assert_eq!(error.path(), Some(variant_path.as_path()));
-        assert_eq!(error.operation(), "decode cc-mirror variant metadata");
-    }
-
-    #[test]
     fn test_deduplication_skips_duplicate_entries() {
         let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
 {"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
@@ -2793,43 +2603,6 @@ mod tests {
         );
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[1].tokens.input, 200);
-    }
-
-    #[test]
-    fn test_parse_cc_mirror_claude_variant_attributes_client_provider_and_workspace() {
-        let content = r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","cwd":"/Users/example/work","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}"#;
-
-        let (_temp_dir, path) = create_cc_mirror_project_file(
-            content,
-            "zai-worker",
-            "zai",
-            "-Users-example-work",
-            "session.jsonl",
-        );
-
-        let messages = parse_claude_file(&path).unwrap();
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), "cc-mirror/zai-worker");
-        assert_eq!(messages[0].provider_id.as_ref(), "zai");
-        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
-        assert_eq!(messages[0].tokens.input, 100);
-        assert_eq!(messages[0].tokens.output, 50);
-        assert_eq!(messages[0].tokens.cache_read, 10);
-        assert_eq!(messages[0].tokens.cache_write, 5);
-        assert_eq!(
-            messages[0].workspace_key.as_deref(),
-            Some("/Users/example/work")
-        );
-        assert_eq!(messages[0].workspace_label.as_deref(), Some("work"));
-    }
-
-    #[test]
-    fn test_cc_mirror_variant_client_segment_is_submit_safe() {
-        assert_eq!(sanitize_cc_mirror_segment(" zaicc "), "zaicc");
-        assert_eq!(sanitize_cc_mirror_segment("../Zai CC!"), "zai-cc");
-        assert_eq!(sanitize_cc_mirror_segment("..."), "variant");
-        assert_eq!(sanitize_cc_mirror_segment(&"a".repeat(120)).len(), 96);
     }
 
     #[test]
@@ -3186,27 +2959,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cc_mirror_tool_result_keeps_variant_client_and_provider() {
-        let content = r#"{"type":"user","timestamp":"2026-05-27T10:00:00.000Z","message":{"model":"sonnet","content":[{"type":"tool_result","tool_use_id":"toolu_cc_mirror","tool_output":{"input_tokens":7,"output":"tool output"}}]}}"#;
-
-        let (_temp_dir, path) = create_cc_mirror_project_file(
-            content,
-            "zai-worker",
-            "zai",
-            "project-one",
-            "session.jsonl",
-        );
-        let messages = parse_claude_file(&path).unwrap();
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), "cc-mirror/zai-worker");
-        assert_eq!(messages[0].provider_id.as_ref(), "zai");
-        assert_eq!(messages[0].model_id.as_ref(), "sonnet");
-        assert_eq!(messages[0].tokens.input, 7);
-        assert_eq!(messages[0].message_count, 0);
-    }
-
-    #[test]
     fn test_tool_result_duplicate_uses_max_input_tokens() {
         let content = r#"{"type":"tool_result","timestamp":"2026-05-27T10:00:00.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_stream","tool_output":{"output":"abcdefghijklmnop"}}}
 {"type":"tool_result","timestamp":"2026-05-27T10:00:00.100Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_stream","tool_output":{"output":"abcdefghijklmnopqrstuvwxyzabcd"}}}"#;
@@ -3523,13 +3275,9 @@ mod tests {
 
         let resolver = ClaudeProjectResolver::new(Some(home.path()));
         let mut parent_cache = ParentSubagentTypeCache::new();
-        let (scanned, dependency) = parse_claude_file_with_cache_home_and_resolver(
-            &path,
-            &mut parent_cache,
-            Some(home.path()),
-            &resolver,
-        )
-        .unwrap();
+        let (scanned, dependency) =
+            parse_claude_file_with_cache_home_and_resolver(&path, &mut parent_cache, &resolver)
+                .unwrap();
 
         assert_eq!(scanned.messages.len(), 1);
         assert_eq!(

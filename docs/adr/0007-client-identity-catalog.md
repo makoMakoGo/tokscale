@@ -14,7 +14,7 @@ capability split has been removed.
 
 ## Decision
 
-Use `crates/tokscale-core/client-catalog.json` as the canonical source for
+Use `crates/tokscale-core/client-catalog.json` as the canonical registry for
 client identity and presentation facts:
 
 - Rust enum variant name.
@@ -30,7 +30,7 @@ paths, filename patterns, parser choice, pricing behavior, aggregation, and
 grouping rules remain in local adapters or their owning modules.
 
 Every catalog client in this fork represents an accepted local integration and
-must have exactly one local scan definition and exactly one local source
+must have exactly one local scan definition and exactly one local input
 adapter. The catalog, local scan definitions, and adapter registry must cover
 the same `ClientId` set without duplicates. Identity-only, remote-only, and
 display-placeholder catalog entries require a new explicit decision rather
@@ -38,6 +38,23 @@ than a capability branch in callers.
 
 `ClientId` is the only Rust client identity type. Do not add a second enum,
 hand-written base-client list, or hidden per-client CLI flag set.
+
+## Public terminology
+
+`Client` is the only public usage-identity term. Models, Daily, Sessions,
+Group By selectors, filters, and client counts use it consistently. The
+`claude` catalog display name is `Claude`; `Claude Code` remains appropriate
+only when naming the upstream product, its files, parser, or credentials.
+
+Filesystem paths and databases acquired by a client are `Input` or `Scan
+Input`. Their diagnostics live under `Data Health`. Provider attribution is
+`Provider`, and pricing provenance must use the qualified term `Pricing
+Source`. Compatibility field names such as `SourceHealth` and
+`sourceDataBytes` may remain internal or in established machine-readable
+health payloads, but they do not define a second UI identity dimension. The
+Overview fact label `Sources Healthy` is a compact health metric, not a Group
+By dimension. Additional scan-path provenance in `clients --json` is `origin`,
+not another `source` identity.
 
 ## Persisted client ID migrations
 
@@ -48,7 +65,7 @@ one-way identity migration:
 
 This applies only to persisted defaults written before the Antigravity identity
 unification. It is not a catalog ID, CLI alias, scanner key, adapter identity,
-TUI source, cache identity, or general alias mechanism.
+TUI client, cache identity, or general alias mechanism.
 
 Additional persisted identity migrations must be explicitly enumerated here.
 
@@ -57,7 +74,7 @@ Additional persisted identity migrations must be explicitly enumerated here.
 Adding a base client requires:
 
 1. Add identity and presentation facts to `client-catalog.json`.
-2. Add exactly one local scan definition and exactly one local source adapter.
+2. Add exactly one local scan definition and exactly one local input adapter.
 3. Add parser and adapter tests for the local behavior.
 4. Keep the catalog/scan-definition/adapter parity tests passing.
 5. Run the Rust checks that compile the generated client identity data.

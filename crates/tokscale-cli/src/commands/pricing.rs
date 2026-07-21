@@ -100,7 +100,7 @@ pub(crate) fn run_pricing_lookup(
                     "models.dev" => "Models.dev",
                     _ => pricing.source.as_str(),
                 };
-                println!("  Source: {}", source_label);
+                println!("  Pricing Source: {}", source_label);
                 println!();
                 let input = pricing.pricing.input_cost_per_token.unwrap_or(0.0);
                 let output = pricing.pricing.output_cost_per_token.unwrap_or(0.0);

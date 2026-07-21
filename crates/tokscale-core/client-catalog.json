@@ -11,7 +11,7 @@
   {
     "variant": "Claude",
     "id": "claude",
-    "displayName": "Claude Code",
+    "displayName": "Claude",
     "shortName": "Claude",
     "hotkey": "2",
     "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-claude.jpg",

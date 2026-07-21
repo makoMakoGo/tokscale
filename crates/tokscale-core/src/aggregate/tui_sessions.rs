@@ -52,7 +52,7 @@ impl TuiSessionTokens {
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TuiSessionEntry {
-    pub source: String,
+    pub client: String,
     pub session_id: String,
     pub is_main_session: bool,
     pub workspace_key: Option<String>,
@@ -133,8 +133,8 @@ impl TuiSessionAcc {
         let mut sessions = self
             .sessions
             .into_iter()
-            .map(|((source, session_id), bucket)| TuiSessionEntry {
-                source: source.to_string(),
+            .map(|((client, session_id), bucket)| TuiSessionEntry {
+                client: client.to_string(),
                 session_id: session_id.to_string(),
                 is_main_session: bucket.is_main_session,
                 workspace_key: bucket.workspace_key.map(|value| value.to_string()),
@@ -156,7 +156,7 @@ impl TuiSessionAcc {
             right
                 .last_seen
                 .cmp(&left.last_seen)
-                .then_with(|| left.source.cmp(&right.source))
+                .then_with(|| left.client.cmp(&right.client))
                 .then_with(|| left.session_id.cmp(&right.session_id))
         });
         sessions
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn sorts_by_recent_then_source_then_session() {
+    fn sorts_by_recent_then_client_then_session() {
         let mut acc = TuiSessionAcc::new();
         acc.push(&message("zed", "b", 9));
         acc.push(&message("codex", "z", 9));
@@ -246,7 +246,7 @@ mod tests {
         let keys = acc
             .finish()
             .into_iter()
-            .map(|entry| (entry.source, entry.session_id))
+            .map(|entry| (entry.client, entry.session_id))
             .collect::<Vec<_>>();
         assert_eq!(
             keys,

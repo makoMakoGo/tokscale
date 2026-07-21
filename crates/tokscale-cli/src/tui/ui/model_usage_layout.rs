@@ -10,15 +10,15 @@ pub(crate) const MODEL_MAX_WIDTH: u16 = MODEL_DISPLAY_MAX_WIDTH as u16;
 pub(crate) const WORKSPACE_MIN_WIDTH: u16 = 12;
 pub(crate) const WORKSPACE_MAX_WIDTH: u16 = 20;
 
-pub(crate) const SOURCE_MIN_WIDTH: u16 = 8;
-pub(crate) const SOURCE_MAX_WIDTH: u16 = 40;
+pub(crate) const CLIENT_MIN_WIDTH: u16 = 8;
+pub(crate) const CLIENT_MAX_WIDTH: u16 = 40;
 pub(crate) const PROVIDER_MIN_WIDTH: u16 = 8;
 pub(crate) const PROVIDER_MAX_WIDTH: u16 = 40;
-pub(crate) const DETAIL_SOURCE_MAX_WIDTH: u16 = SOURCE_MAX_WIDTH;
+pub(crate) const DETAIL_CLIENT_MAX_WIDTH: u16 = CLIENT_MAX_WIDTH;
 pub(crate) const DETAIL_PROVIDER_MAX_WIDTH: u16 = PROVIDER_MAX_WIDTH;
 
 pub(crate) const DETAIL_PROVIDER_WIDTH: u16 = PROVIDER_MIN_WIDTH;
-pub(crate) const DETAIL_SOURCE_WIDTH: u16 = SOURCE_MIN_WIDTH;
+pub(crate) const DETAIL_CLIENT_WIDTH: u16 = CLIENT_MIN_WIDTH;
 pub(crate) const DETAIL_MESSAGES_WIDTH: u16 = 6;
 pub(crate) const DETAIL_NUMERIC_WIDTH: u16 = 8;
 pub(crate) const DETAIL_TOTAL_WIDTH: u16 = 9;
@@ -38,7 +38,7 @@ pub(crate) enum ModelUsageTableDensity {
 pub(crate) enum ModelUsageColumn {
     Workspace,
     Model,
-    Source,
+    Client,
     Provider,
     Messages,
     Input,
@@ -78,7 +78,7 @@ fn column_order(column: ModelUsageColumn) -> u16 {
     match column {
         ModelUsageColumn::Workspace => 0,
         ModelUsageColumn::Model => 10,
-        ModelUsageColumn::Source => 20,
+        ModelUsageColumn::Client => 20,
         ModelUsageColumn::Provider => 30,
         ModelUsageColumn::Messages => 40,
         ModelUsageColumn::Input => 50,
@@ -97,19 +97,19 @@ fn model_usage_columns(
     schema: ModelUsageLayoutSchema,
     model_content_width: u16,
     provider_content_width: u16,
-    source_content_width: u16,
+    client_content_width: u16,
     workspace_content_width: u16,
 ) -> Vec<ResponsiveColumn<ModelUsageColumn>> {
     let has_workspace = matches!(
         schema,
         ModelUsageLayoutSchema::WorkspaceModels | ModelUsageLayoutSchema::WorkspaceDetail
     );
-    let source_max_width = match schema {
+    let client_max_width = match schema {
         ModelUsageLayoutSchema::Detail | ModelUsageLayoutSchema::WorkspaceDetail => {
-            DETAIL_SOURCE_MAX_WIDTH
+            DETAIL_CLIENT_MAX_WIDTH
         }
         ModelUsageLayoutSchema::Models | ModelUsageLayoutSchema::WorkspaceModels => {
-            SOURCE_MAX_WIDTH
+            CLIENT_MAX_WIDTH
         }
     };
     let provider_max_width = match schema {
@@ -151,12 +151,12 @@ fn model_usage_columns(
             DETAIL_COST_WIDTH,
         ),
         ResponsiveColumn::measured_atomic_optional(
-            ModelUsageColumn::Source,
+            ModelUsageColumn::Client,
             20,
-            column_order(ModelUsageColumn::Source),
-            SOURCE_MIN_WIDTH,
-            source_content_width,
-            source_max_width,
+            column_order(ModelUsageColumn::Client),
+            CLIENT_MIN_WIDTH,
+            client_content_width,
+            client_max_width,
         ),
         ResponsiveColumn::measured_atomic_optional(
             ModelUsageColumn::Provider,
@@ -268,7 +268,7 @@ fn density_for_columns(columns: &[ModelUsageColumn]) -> ModelUsageTableDensity {
     } else if columns.iter().any(|column| {
         matches!(
             column,
-            ModelUsageColumn::Source
+            ModelUsageColumn::Client
                 | ModelUsageColumn::Provider
                 | ModelUsageColumn::Messages
                 | ModelUsageColumn::Input
@@ -292,7 +292,7 @@ pub(crate) fn model_usage_table_layout(
     table_width: u16,
     model_content_width: u16,
     provider_content_width: u16,
-    source_content_width: u16,
+    client_content_width: u16,
     workspace_content_width: u16,
     schema: ModelUsageLayoutSchema,
 ) -> ModelUsageTableLayout {
@@ -300,7 +300,7 @@ pub(crate) fn model_usage_table_layout(
         schema,
         model_content_width,
         provider_content_width,
-        source_content_width,
+        client_content_width,
         workspace_content_width,
     );
     let layout = responsive_table_layout(table_width, &specs);
@@ -323,14 +323,14 @@ mod tests {
         table_width: u16,
         model_content_width: u16,
         provider_content_width: u16,
-        source_content_width: u16,
+        client_content_width: u16,
         schema: ModelUsageLayoutSchema,
     ) -> ModelUsageTableLayout {
         model_usage_table_layout(
             table_width,
             model_content_width,
             provider_content_width,
-            source_content_width,
+            client_content_width,
             0,
             schema,
         )
@@ -371,7 +371,7 @@ mod tests {
                 ModelUsageColumn::Cost,
             ]
         );
-        assert!(!layout.columns.contains(&ModelUsageColumn::Source));
+        assert!(!layout.columns.contains(&ModelUsageColumn::Client));
         assert!(!layout.columns.contains(&ModelUsageColumn::Messages));
     }
 
@@ -423,21 +423,21 @@ mod tests {
     }
 
     #[test]
-    fn source_column_uses_measured_width_when_selected() {
+    fn client_column_uses_measured_width_when_selected() {
         let layout = layout(80, 20, 80, 36, ModelUsageLayoutSchema::Models);
 
-        assert!(layout.columns.contains(&ModelUsageColumn::Source));
-        assert_eq!(layout.width_for(ModelUsageColumn::Source), 36);
+        assert!(layout.columns.contains(&ModelUsageColumn::Client));
+        assert_eq!(layout.width_for(ModelUsageColumn::Client), 36);
     }
 
     #[test]
-    fn models_never_show_input_before_source_when_source_has_higher_priority() {
+    fn models_never_show_input_before_client_when_client_has_higher_priority() {
         let layout = layout(80, 29, 40, 40, ModelUsageLayoutSchema::Models);
 
         assert!(layout.columns.contains(&ModelUsageColumn::Model));
         assert!(layout.columns.contains(&ModelUsageColumn::Total));
         assert!(layout.columns.contains(&ModelUsageColumn::Cost));
-        assert!(!layout.columns.contains(&ModelUsageColumn::Source));
+        assert!(!layout.columns.contains(&ModelUsageColumn::Client));
         assert!(!layout.columns.contains(&ModelUsageColumn::Provider));
         assert!(!layout.columns.contains(&ModelUsageColumn::Input));
         assert!(!layout.columns.contains(&ModelUsageColumn::Output));
@@ -447,7 +447,7 @@ mod tests {
     fn models_optional_columns_are_strict_prefix_as_width_grows() {
         let priority = [
             ModelUsageColumn::Cost,
-            ModelUsageColumn::Source,
+            ModelUsageColumn::Client,
             ModelUsageColumn::Provider,
             ModelUsageColumn::Input,
             ModelUsageColumn::Output,
@@ -483,14 +483,14 @@ mod tests {
     }
 
     #[test]
-    fn detail_layout_keeps_source_priority_when_source_fits() {
+    fn detail_layout_keeps_client_priority_when_client_fits() {
         let layout = layout(90, 80, 80, 80, ModelUsageLayoutSchema::Detail);
 
         assert_eq!(
             layout.columns,
             vec![
                 ModelUsageColumn::Model,
-                ModelUsageColumn::Source,
+                ModelUsageColumn::Client,
                 ModelUsageColumn::Total,
                 ModelUsageColumn::Cost,
             ]
@@ -521,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn model_column_is_not_sacrificed_for_source_and_provider() {
+    fn model_column_is_not_sacrificed_for_client_and_provider() {
         let layout = layout(110, 29, 40, 40, ModelUsageLayoutSchema::Models);
 
         assert_eq!(layout.model_width, 29);
@@ -551,20 +551,20 @@ mod tests {
     }
 
     #[test]
-    fn source_and_provider_columns_stop_at_schema_caps() {
+    fn client_and_provider_columns_stop_at_schema_caps() {
         let layout = layout(200, 80, 80, 80, ModelUsageLayoutSchema::Models);
-        let source_index = layout
+        let client_index = layout
             .columns
             .iter()
-            .position(|column| *column == ModelUsageColumn::Source)
-            .expect("source should fit");
+            .position(|column| *column == ModelUsageColumn::Client)
+            .expect("client should fit");
         let provider_index = layout
             .columns
             .iter()
             .position(|column| *column == ModelUsageColumn::Provider)
             .expect("provider should fit");
 
-        assert_eq!(width_at(&layout.widths, source_index), SOURCE_MAX_WIDTH);
+        assert_eq!(width_at(&layout.widths, client_index), CLIENT_MAX_WIDTH);
         assert_eq!(width_at(&layout.widths, provider_index), PROVIDER_MAX_WIDTH);
     }
 

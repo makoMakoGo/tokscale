@@ -112,12 +112,12 @@ mod tests {
     #[test]
     fn typed_invalid_configuration_survives_anyhow_context() {
         let error = anyhow::Error::new(InvalidConfiguration::new("bad settings value"))
-            .context("resolve source scope");
+            .context("resolve client scope");
         let failure = CliFailure::from(error);
 
         assert_eq!(failure.class(), FailureClass::InvalidInvocation);
         assert_eq!(failure.exit_code(), 2);
-        assert!(failure.to_string().contains("resolve source scope"));
+        assert!(failure.to_string().contains("resolve client scope"));
         assert!(failure.to_string().contains("bad settings value"));
     }
 

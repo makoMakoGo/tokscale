@@ -6,7 +6,7 @@ use ratatui::widgets::{
 use super::model_usage_layout::{
     model_usage_table_layout, ModelUsageColumn as ModelsColumn, ModelUsageLayoutSchema,
     ModelUsageTableDensity as ModelsTableDensity, ModelUsageTableLayout as ModelsTableLayout,
-    DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH, MODEL_MIN_WIDTH, WORKSPACE_MIN_WIDTH,
+    DETAIL_CLIENT_WIDTH, DETAIL_PROVIDER_WIDTH, MODEL_MIN_WIDTH, WORKSPACE_MIN_WIDTH,
 };
 use super::table_layout::{
     display_width, distributed_table_area, DISTRIBUTED_TABLE_FLEX, TABLE_COLUMN_SPACING,
@@ -55,7 +55,7 @@ fn models_table_layout(
     table_width: u16,
     model_content_width: u16,
     provider_content_width: u16,
-    source_content_width: u16,
+    client_content_width: u16,
     workspace_content_width: u16,
     group_by: &GroupBy,
 ) -> ModelsTableLayout {
@@ -69,7 +69,7 @@ fn models_table_layout(
         table_width,
         model_content_width,
         provider_content_width,
-        source_content_width,
+        client_content_width,
         workspace_content_width,
         schema,
     )
@@ -85,7 +85,7 @@ fn model_column_header(
         ModelsColumn::Model => "Model",
         ModelsColumn::Messages => "Msgs",
         ModelsColumn::Provider => "Provider",
-        ModelsColumn::Source => "Source",
+        ModelsColumn::Client => "Client",
         ModelsColumn::Input => "Input",
         ModelsColumn::Output => "Output",
         ModelsColumn::CacheRead if *group_by == GroupBy::WorkspaceModel => "Cache Read",
@@ -111,11 +111,22 @@ fn model_column_sort_field(column: ModelsColumn) -> Option<SortField> {
 }
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+    let title = match &app.selected_model_detail {
+        Some(selection) => match selection.client.as_deref() {
+            Some(client) => format!(
+                " Model Details · {} · {} ",
+                get_client_display_name(client),
+                selection.model
+            ),
+            None => format!(" Model Details · {} ", selection.model),
+        },
+        None => " Models ".to_string(),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " Models ",
+            title,
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -145,11 +156,14 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let models = app.get_sorted_models();
     if models.is_empty() {
-        let empty_msg = Paragraph::new(
-            "No usage data found. Press 'r' to refresh, 's' for sources, 'g' for grouping.",
-        )
-        .style(Style::default().fg(theme_muted))
-        .alignment(Alignment::Center);
+        let message = if app.is_model_detail_active() {
+            "No provider details found. Press Esc to return."
+        } else {
+            "No usage data found. Press 'r' to refresh, 's' for clients, 'g' for grouping."
+        };
+        let empty_msg = Paragraph::new(message)
+            .style(Style::default().fg(theme_muted))
+            .alignment(Alignment::Center);
         frame.render_widget(empty_msg, inner);
         return;
     }
@@ -179,11 +193,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|model| display_width(&get_provider_display_name(&model.provider)))
         .max()
         .unwrap_or(DETAIL_PROVIDER_WIDTH);
-    let source_content_width = models
+    let client_content_width = models
         .iter()
         .map(|model| display_width(&get_client_display_name(&model.client)))
         .max()
-        .unwrap_or(DETAIL_SOURCE_WIDTH);
+        .unwrap_or(DETAIL_CLIENT_WIDTH);
     let workspace_content_width = if group_by == GroupBy::WorkspaceModel {
         workspace_content_width(&models)
     } else {
@@ -194,7 +208,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         table_area.width,
         model_content_width,
         provider_content_width,
-        source_content_width,
+        client_content_width,
         workspace_content_width,
         &group_by,
     );
@@ -250,9 +264,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     )),
                     // models_table_layout never includes Messages; panic if renderer and layout diverge.
                     ModelsColumn::Messages => unreachable!("models rows do not have message data"),
-                    ModelsColumn::Source => Cell::from(truncate_display_width(
+                    ModelsColumn::Client => Cell::from(truncate_display_width(
                         &get_client_display_name(&model.client),
-                        table_layout.width_for(ModelsColumn::Source),
+                        table_layout.width_for(ModelsColumn::Client),
                     ))
                     .style(Style::default().fg(theme_muted)),
                     ModelsColumn::Input => {
@@ -335,7 +349,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::super::model_usage_layout::{
-        MODEL_MAX_WIDTH, PROVIDER_MAX_WIDTH, SOURCE_MAX_WIDTH, WORKSPACE_MAX_WIDTH,
+        CLIENT_MAX_WIDTH, MODEL_MAX_WIDTH, PROVIDER_MAX_WIDTH, WORKSPACE_MAX_WIDTH,
     };
     use super::*;
 
@@ -346,21 +360,21 @@ mod tests {
         }
     }
 
-    fn model_layout(table_width: u16, model: u16, provider: u16, source: u16) -> ModelsTableLayout {
-        models_table_layout(table_width, model, provider, source, 0, &GroupBy::Model)
+    fn model_layout(table_width: u16, model: u16, provider: u16, client: u16) -> ModelsTableLayout {
+        models_table_layout(table_width, model, provider, client, 0, &GroupBy::Model)
     }
 
     fn workspace_model_layout(
         table_width: u16,
         model: u16,
         provider: u16,
-        source: u16,
+        client: u16,
     ) -> ModelsTableLayout {
         models_table_layout(
             table_width,
             model,
             provider,
-            source,
+            client,
             22,
             &GroupBy::WorkspaceModel,
         )
@@ -375,7 +389,7 @@ mod tests {
             layout.columns,
             vec![
                 ModelsColumn::Model,
-                ModelsColumn::Source,
+                ModelsColumn::Client,
                 ModelsColumn::Total,
                 ModelsColumn::Cost,
             ]
@@ -395,7 +409,7 @@ mod tests {
             vec![ModelsColumn::Model, ModelsColumn::Total, ModelsColumn::Cost]
         );
         assert_eq!(layout.model_width, 29);
-        assert!(!layout.columns.contains(&ModelsColumn::Source));
+        assert!(!layout.columns.contains(&ModelsColumn::Client));
         assert!(!layout.columns.contains(&ModelsColumn::Provider));
         assert!(!layout.columns.contains(&ModelsColumn::Input));
     }
@@ -426,13 +440,13 @@ mod tests {
     }
 
     #[test]
-    fn wide_model_layout_keeps_provider_and_source_content_widths() {
+    fn wide_model_layout_keeps_provider_and_client_content_widths() {
         let base = model_layout(140, 28, 42, 34);
         let wide = model_layout(180, 28, 42, 34);
 
         assert_eq!(length_at(&wide.widths, 0) as usize, wide.model_width);
         assert!(wide.model_width <= MODEL_MAX_WIDTH as usize);
-        assert!(wide.columns.contains(&ModelsColumn::Source));
+        assert!(wide.columns.contains(&ModelsColumn::Client));
         assert!(wide.columns.contains(&ModelsColumn::Provider));
         assert_eq!(length_at(&base.widths, 1), 34);
         assert_eq!(length_at(&base.widths, 2), PROVIDER_MAX_WIDTH);
@@ -441,13 +455,13 @@ mod tests {
     }
 
     #[test]
-    fn wide_workspace_model_layout_keeps_provider_and_source_content_widths() {
+    fn wide_workspace_model_layout_keeps_provider_and_client_content_widths() {
         let base = workspace_model_layout(160, 28, 42, 34);
         let wide = workspace_model_layout(200, 28, 42, 34);
 
         assert_eq!(length_at(&wide.widths, 1) as usize, wide.model_width);
         assert!(wide.model_width <= MODEL_MAX_WIDTH as usize);
-        assert!(wide.columns.contains(&ModelsColumn::Source));
+        assert!(wide.columns.contains(&ModelsColumn::Client));
         assert!(wide.columns.contains(&ModelsColumn::Provider));
         assert_eq!(length_at(&base.widths, 2), 34);
         assert_eq!(length_at(&base.widths, 3), PROVIDER_MAX_WIDTH);
@@ -481,7 +495,7 @@ mod tests {
 
         assert_eq!(length_at(&layout.widths, 0), MODEL_MAX_WIDTH);
         assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
-        assert_eq!(length_at(&layout.widths, 1), SOURCE_MAX_WIDTH);
+        assert_eq!(length_at(&layout.widths, 1), CLIENT_MAX_WIDTH);
         assert_eq!(length_at(&layout.widths, 2), PROVIDER_MAX_WIDTH);
     }
 
@@ -495,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn source_column_stays_at_content_width_until_cap() {
+    fn client_column_stays_at_content_width_until_cap() {
         let fit = model_layout(220, 28, 56, 26);
         let wider = model_layout(260, 28, 56, 26);
 
@@ -665,5 +679,61 @@ mod tests {
             "Workspace column must not render under GroupBy::Model\n{body}"
         );
         assert!(body.contains("gpt-5"), "expected bare model name\n{body}");
+    }
+
+    #[test]
+    fn model_detail_renders_client_and_provider_rows() {
+        let messages = [
+            tokscale_core::UnifiedMessage::new(
+                "claude",
+                "shared-model",
+                "anthropic",
+                "anthropic-session",
+                1_800_000_000,
+                tokscale_core::TokenBreakdown {
+                    input: 10,
+                    ..Default::default()
+                },
+                0.1,
+            ),
+            tokscale_core::UnifiedMessage::new(
+                "claude",
+                "shared-model",
+                "openrouter",
+                "openrouter-session",
+                1_800_000_001,
+                tokscale_core::TokenBreakdown {
+                    input: 20,
+                    ..Default::default()
+                },
+                0.2,
+            ),
+        ];
+        let accumulator =
+            tokscale_core::build_tui_accumulator(&messages, tokscale_core::DateRange::none());
+        let mut app = make_models_app(180, GroupBy::Model);
+        app.data = accumulator.project(&GroupBy::Model);
+        app.data_group_by = GroupBy::Model;
+        app.projection_backend = Some(crate::tui::app::ProjectionBackend::Memory(accumulator));
+
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let body = render_body(&mut app, 180, 8);
+
+        assert!(
+            body.contains("Model Details · shared-model"),
+            "expected detail title\n{body}"
+        );
+        assert!(body.contains("Model"), "expected Model header\n{body}");
+        assert!(body.contains("Client"), "expected Client header\n{body}");
+        assert!(
+            body.contains("Provider"),
+            "expected Provider header\n{body}"
+        );
+        assert!(body.contains("Claude"), "expected client rows\n{body}");
+        assert!(body.contains("Anthropic"), "expected provider row\n{body}");
+        assert!(body.contains("OpenRouter"), "expected provider row\n{body}");
     }
 }

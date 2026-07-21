@@ -80,8 +80,8 @@ fn collect_overview_data(app: &App) -> OverviewData {
     let mut overview = OverviewData::default();
 
     for day in &app.data.daily {
-        for source in day.source_breakdown.values() {
-            for model in source.models.values() {
+        for client in day.client_breakdown.values() {
+            for model in client.models.values() {
                 let entry = overview.models.entry(model.model_id.clone()).or_default();
                 if entry.provider.is_empty() && !model.provider.is_empty() {
                     entry.provider = model.provider.clone();
@@ -114,8 +114,8 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
             .rev()
             .map(|day| {
                 let mut models = BTreeMap::<String, ModelAggregate>::new();
-                for source in day.source_breakdown.values() {
-                    for model in source.models.values() {
+                for client in day.client_breakdown.values() {
+                    for model in client.models.values() {
                         let entry = models.entry(model.model_id.clone()).or_default();
                         if entry.provider.is_empty() && !model.provider.is_empty() {
                             entry.provider = model.provider.clone();
@@ -289,7 +289,7 @@ fn truncate_string(value: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::tui::app::TuiConfig;
-    use crate::tui::data::{DailyModelInfo, DailySourceInfo, DailyUsage, TokenBreakdown};
+    use crate::tui::data::{DailyClientInfo, DailyModelInfo, DailyUsage, TokenBreakdown};
     use chrono::NaiveDate;
     use ratatui::{backend::TestBackend, Terminal};
 
@@ -335,10 +335,10 @@ mod tests {
                 },
             );
         }
-        let mut source_breakdown = BTreeMap::new();
-        source_breakdown.insert(
+        let mut client_breakdown = BTreeMap::new();
+        client_breakdown.insert(
             "claude".to_string(),
-            DailySourceInfo {
+            DailyClientInfo {
                 tokens: TokenBreakdown::default(),
                 cost: 1.0,
                 models,
@@ -348,7 +348,7 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
             tokens: TokenBreakdown::default(),
             cost: 1.0,
-            source_breakdown,
+            client_breakdown,
             message_count: 1,
             turn_count: 1,
         }];

@@ -1,6 +1,6 @@
+pub mod client_picker;
 pub mod group_by_picker;
 pub mod overlay;
-pub mod source_picker;
 pub mod stack;
 
 use crossterm::event::{KeyEvent, MouseEvent};
@@ -9,8 +9,8 @@ use ratatui::{layout::Rect, Frame};
 use crate::tui::interaction::InteractionOutcome;
 use crate::tui::themes::Theme;
 
+pub use client_picker::ClientPickerDialog;
 pub use group_by_picker::GroupByPickerDialog;
-pub use source_picker::ClientPickerDialog;
 pub use stack::DialogStack;
 
 /// Result of handling a dialog event

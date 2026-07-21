@@ -83,7 +83,7 @@ mod tests {
     use crate::tui::data::ModelUsage;
 
     #[test]
-    fn exported_report_keeps_degraded_source_health() {
+    fn exported_report_keeps_degraded_input_health() {
         let mut data = UsageData::default();
         data.health.complete = false;
         data.health.degraded_sources = 1;

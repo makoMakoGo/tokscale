@@ -188,19 +188,12 @@ impl SourceUnit {
         }
     }
 
-    pub(crate) fn claude_code(
-        client: ClientId,
-        path: PathBuf,
-        home_dir: PathBuf,
-    ) -> crate::sessions::error::SessionParseResult<Self> {
-        let variant_path =
-            crate::cc_mirror::variant_file_for_session_path_checked(&path, Some(&home_dir))?;
-        Ok(Self {
+    pub(crate) fn claude_code(client: ClientId, path: PathBuf, home_dir: PathBuf) -> Self {
+        Self {
             client,
             path,
             fingerprint_policy: FingerprintPolicy::ClaudeCodeWithHome {
                 home_dir,
-                variant_path,
                 parent_session_path: None,
             },
             meta: SourceUnitMeta::None,
@@ -209,7 +202,7 @@ impl SourceUnit {
             snapshot_confirmed_for_execution: false,
             planned_cache_meta: None,
             cache_lookup_completed_no_hit: false,
-        })
+        }
     }
 
     pub(crate) fn with_meta(mut self, meta: SourceUnitMeta) -> Self {
@@ -465,12 +458,10 @@ impl SourceUnit {
                 message_cache::SourceInputPolicy::sqlite_with_wal(&self.path)
             }
             FingerprintPolicy::ClaudeCodeWithHome {
-                variant_path,
                 parent_session_path,
                 ..
             } => message_cache::SourceInputPolicy::claude_code(
                 &self.path,
-                variant_path.clone(),
                 parent_session_path.clone(),
             ),
             FingerprintPolicy::PrimaryWithSiblings {
@@ -587,7 +578,6 @@ pub(crate) enum FingerprintPolicy {
     SqliteWithWal,
     ClaudeCodeWithHome {
         home_dir: PathBuf,
-        variant_path: Option<PathBuf>,
         parent_session_path: Option<PathBuf>,
     },
     PrimaryWithSiblings {

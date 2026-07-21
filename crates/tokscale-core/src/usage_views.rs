@@ -111,7 +111,7 @@ pub struct DailyModelInfo {
 }
 
 #[derive(Debug, Clone)]
-pub struct DailySourceInfo {
+pub struct DailyClientInfo {
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
     pub models: BTreeMap<String, DailyModelInfo>,
@@ -122,7 +122,7 @@ pub struct DailyUsage {
     pub date: NaiveDate,
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
-    pub source_breakdown: BTreeMap<String, DailySourceInfo>,
+    pub client_breakdown: BTreeMap<String, DailyClientInfo>,
     pub message_count: u32,
     pub turn_count: u32,
 }
@@ -165,7 +165,7 @@ pub struct PeriodUsage {
     pub end_date: NaiveDate,
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
-    pub source_breakdown: BTreeMap<String, DailySourceInfo>,
+    pub client_breakdown: BTreeMap<String, DailyClientInfo>,
     pub message_count: u32,
     pub turn_count: u32,
     pub active_days: u32,

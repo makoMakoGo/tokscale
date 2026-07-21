@@ -201,7 +201,7 @@ mod tests {
                 ..TokenBreakdown::default()
             },
             cost,
-            source_breakdown: BTreeMap::new(),
+            client_breakdown: BTreeMap::new(),
             message_count: 1,
             turn_count: 1,
         }

@@ -772,7 +772,7 @@ fn test_cache_prune_reports_empty_cache_stats() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Source cache prune: scanned 0, removed 0, retained 0.",
+            "Input cache prune: scanned 0, removed 0, retained 0.",
         ));
 }
 
@@ -1115,7 +1115,7 @@ fn test_opencode_obsolete_sqlite_schema_reports_aggregate_health_only() {
             "\"issue\": \"source-unavailable\"",
         ))
         .stdout(predicate::str::contains("does not match the current session schema").not())
-        .stderr(predicate::str::contains("1 failed source(s)"));
+        .stderr(predicate::str::contains("1 failed input(s)"));
 }
 
 #[test]
@@ -1150,7 +1150,7 @@ fn test_opencode_invalid_sqlite_payload_is_rejected_without_losing_good_rows() {
         .stdout(predicate::str::contains("\"failedSources\": 0"))
         .stdout(predicate::str::contains("gpt-5.5"))
         .stderr(predicate::str::contains(
-            "Data health: 1 degraded source(s), 1 rejected record(s), 0 partial source(s), 0 failed source(s)",
+            "Data health: 1 degraded input(s), 1 rejected record(s), 0 partial input(s), 0 failed input(s)",
         ));
 }
 
@@ -1548,7 +1548,7 @@ fn test_reports_reject_removed_client_ids() {
 }
 
 #[test]
-fn test_time_metrics_reports_degraded_source_health_without_failing() {
+fn test_time_metrics_reports_degraded_input_health_without_failing() {
     let tmp = create_empty_fixture_dir();
     let missing_db = tmp.path().join("missing/opencode.db");
     write_settings_json(
@@ -1581,14 +1581,14 @@ fn test_time_metrics_reports_degraded_source_health_without_failing() {
     assert_eq!(json["health"]["failedSources"], 1);
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("Data health: 0 degraded source(s), 0 rejected record(s), 0 partial source(s), 1 failed source(s)"),
+            .contains("Data health: 0 degraded input(s), 0 rejected record(s), 0 partial input(s), 1 failed input(s)"),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
 
 #[test]
-fn test_time_metrics_text_reports_degraded_source_health_without_failing() {
+fn test_time_metrics_text_reports_degraded_input_health_without_failing() {
     let tmp = create_empty_fixture_dir();
     let missing_db = tmp.path().join("missing/opencode.db");
     write_settings_json(
@@ -1605,7 +1605,7 @@ fn test_time_metrics_text_reports_degraded_source_health_without_failing() {
         .success()
         .stdout(predicate::str::contains("Session Time Metrics"))
         .stderr(predicate::str::contains(
-            "Data health: 0 degraded source(s), 0 rejected record(s), 0 partial source(s), 1 failed source(s)",
+            "Data health: 0 degraded input(s), 0 rejected record(s), 0 partial input(s), 1 failed input(s)",
         ));
 }
 
@@ -3128,7 +3128,7 @@ fn test_clients_filter_does_not_discover_unselected_opencode() {
 }
 
 #[test]
-fn test_clients_json_reports_degraded_source_health_without_losing_payload() {
+fn test_clients_json_reports_degraded_input_health_without_losing_payload() {
     let tmp = create_empty_fixture_dir();
     let missing_db = tmp.path().join("missing/clients-opencode.db");
     write_settings_json(
@@ -3158,14 +3158,14 @@ fn test_clients_json_reports_degraded_source_health_without_losing_payload() {
     assert_eq!(json["health"]["failedSources"], 1);
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("Data health: 0 degraded source(s), 0 rejected record(s), 0 partial source(s), 1 failed source(s)"),
+            .contains("Data health: 0 degraded input(s), 0 rejected record(s), 0 partial input(s), 1 failed input(s)"),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
 
 #[test]
-fn test_clients_text_reports_degraded_source_health_without_failing() {
+fn test_clients_text_reports_degraded_input_health_without_failing() {
     let tmp = create_empty_fixture_dir();
     let missing_db = tmp.path().join("missing/clients-opencode.db");
     write_settings_json(
@@ -3182,56 +3182,8 @@ fn test_clients_text_reports_degraded_source_health_without_failing() {
         .success()
         .stdout(predicate::str::contains("Local clients & session counts"))
         .stderr(predicate::str::contains(
-            "Data health: 0 degraded source(s), 0 rejected record(s), 0 partial source(s), 1 failed source(s)",
+            "Data health: 0 degraded input(s), 0 rejected record(s), 0 partial input(s), 1 failed input(s)",
         ));
-}
-
-#[test]
-fn test_clients_json_reports_broken_claude_mirror_without_losing_payload() {
-    let tmp = create_empty_fixture_dir();
-    let variant_dir = tmp.path().join(".cc-mirror/broken");
-    fs::create_dir_all(&variant_dir).unwrap();
-    fs::write(variant_dir.join("variant.json"), "not-json").unwrap();
-
-    let output = cmd_with_home(tmp.path())
-        .args(["clients", "--json"])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(json["data"]["clients"]
-        .as_array()
-        .is_some_and(|rows| !rows.is_empty()));
-    assert_eq!(json["health"]["failedSources"], 1);
-    assert_eq!(json["health"]["issues"][0]["source"], "claude");
-    assert_eq!(json["health"]["issues"][0]["issue"], "source-unavailable");
-    let health_json = serde_json::to_string(&json["health"]).unwrap();
-    assert!(!health_json.contains("variant.json"));
-    assert!(!health_json.contains("failure"));
-    assert!(!health_json.contains("path"));
-    assert!(json["health"].get("sources").is_none());
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("variant.json"));
-}
-
-#[test]
-fn test_clients_text_reports_broken_claude_mirror_without_failing() {
-    let tmp = create_empty_fixture_dir();
-    let variant_dir = tmp.path().join(".cc-mirror/broken");
-    fs::create_dir_all(&variant_dir).unwrap();
-    fs::write(variant_dir.join("variant.json"), "not-json").unwrap();
-
-    cmd_with_home(tmp.path())
-        .args(["clients"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Local clients & session counts"))
-        .stderr(predicate::str::contains("variant.json").not())
-        .stderr(predicate::str::contains("1 failed source(s)"));
 }
 
 #[cfg(unix)]
@@ -3453,9 +3405,10 @@ fn test_clients_json_includes_settings_extra_paths() {
         serde_json::json!("/tmp/project-a/.codex/sessions")
     );
     assert_eq!(
-        codex["extraPaths"][0]["source"],
+        codex["extraPaths"][0]["origin"],
         serde_json::json!("settings")
     );
+    assert!(codex["extraPaths"][0].get("source").is_none());
 }
 
 #[test]
@@ -3496,7 +3449,7 @@ fn test_clients_json_includes_hermes_settings_extra_profile_path() {
         serde_json::json!(hermes_profile)
     );
     assert_eq!(
-        hermes["extraPaths"][0]["source"],
+        hermes["extraPaths"][0]["origin"],
         serde_json::json!("settings")
     );
     assert_eq!(hermes["extraPaths"][0]["exists"], true);
@@ -3526,7 +3479,7 @@ fn test_clients_command_includes_settings_extra_paths_text() {
 }
 
 #[test]
-fn test_clients_command_groups_opencode_database_paths_by_source() {
+fn test_clients_command_groups_opencode_database_paths_by_origin() {
     let tmp = create_empty_fixture_dir();
     let configured_db = tmp.path().join("external/opencode.db");
     drop(create_opencode_sqlite_at(&configured_db));
@@ -3569,7 +3522,7 @@ fn test_clients_command_groups_opencode_database_paths_by_source() {
         .any(|entry| {
             entry["path"] == serde_json::json!(configured_db)
                 && entry["exists"] == true
-                && entry["source"] == "scanner.opencodeDbPaths"
+                && entry["origin"] == "scanner.opencodeDbPaths"
         }));
 }
 

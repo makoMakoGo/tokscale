@@ -45,16 +45,16 @@ impl GroupByPickerDialog {
             GroupByOption {
                 value: GroupBy::Model,
                 label: "Model",
-                description: "One row per model; merge harnesses and providers",
+                description: "One row per model; merge clients and providers (default)",
             },
             GroupByOption {
                 value: GroupBy::ClientModel,
-                label: "Harness + Model",
-                description: "One row per harness-model pair (default)",
+                label: "Client + Model",
+                description: "One row per client-model pair",
             },
             GroupByOption {
                 value: GroupBy::ClientProviderModel,
-                label: "Harness + Provider + Model",
+                label: "Client + Provider + Model",
                 description: "Keep provider identity; no model merging",
             },
             GroupByOption {
@@ -64,7 +64,7 @@ impl GroupByPickerDialog {
             },
         ];
 
-        let cursor = options.iter().position(|o| o.value == current).unwrap_or(1);
+        let cursor = options.iter().position(|o| o.value == current).unwrap_or(0);
 
         Self {
             options,
@@ -310,7 +310,7 @@ mod tests {
 
         let rendered = render_symbols(&dialog, Rect::new(0, 0, 54, 14));
 
-        assert!(rendered.contains("(●) Harness + Model  current"));
+        assert!(rendered.contains("(●) Client + Model  current"));
     }
 
     #[test]
@@ -370,6 +370,7 @@ mod tests {
     fn legacy_session_selection_falls_back_to_default_cursor() {
         let dialog = make_dialog(GroupBy::Session);
 
-        assert_eq!(dialog.cursor, 1);
+        assert_eq!(dialog.cursor, 0);
+        assert_eq!(dialog.options[dialog.cursor].value, GroupBy::Model);
     }
 }

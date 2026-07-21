@@ -41,7 +41,7 @@ fn test_parse_client_id_arg_rejects_unknown_ids() {
 }
 
 #[test]
-fn removed_clients_are_not_valid_source_ids() {
+fn removed_clients_are_not_valid_client_ids() {
     for client in ["cursor", "trae"] {
         let error = parse_client_id_arg(client).unwrap_err();
         assert!(error.contains(client), "unexpected error: {error}");
@@ -159,7 +159,7 @@ fn test_client_flags_parses_canonical_form() {
         panic!("expected models command");
     };
     assert_eq!(
-        args.report.source.clients.clients,
+        args.report.input.clients.clients,
         vec![ClientId::OpenCode, ClientId::Claude]
     );
 
@@ -169,7 +169,7 @@ fn test_client_flags_parses_canonical_form() {
         panic!("expected tui command");
     };
     assert_eq!(
-        args.source.clients.clients,
+        args.input.clients.clients,
         vec![ClientId::OpenCode, ClientId::Claude]
     );
 }
@@ -271,7 +271,7 @@ fn test_client_flag_accepts_uppercase() {
     let Some(Commands::Models(args)) = cli.command else {
         panic!("expected models command");
     };
-    assert_eq!(args.report.source.clients.clients, vec![ClientId::OpenCode]);
+    assert_eq!(args.report.input.clients.clients, vec![ClientId::OpenCode]);
 
     let cli = Cli::try_parse_from(["tokscale", "models", "-c", "Codebuff,Antigravity"])
         .expect("mixed-case parses");
@@ -279,7 +279,7 @@ fn test_client_flag_accepts_uppercase() {
         panic!("expected models command");
     };
     assert_eq!(
-        args.report.source.clients.clients,
+        args.report.input.clients.clients,
         vec![ClientId::Codebuff, ClientId::Antigravity]
     );
 }
@@ -755,7 +755,7 @@ fn report_execution_plan_does_not_depend_on_terminal_state() {
         };
         assert!(plan.report.json);
         assert_eq!(
-            plan.report.source.clients,
+            plan.report.input.clients,
             Some(vec!["opencode".to_string()])
         );
     }
@@ -890,7 +890,7 @@ fn removed_report_and_cache_flags_are_rejected() {
 }
 
 #[test]
-fn clap_accepts_source_cache_prune_command() {
+fn clap_accepts_input_cache_prune_command() {
     let cli = Cli::try_parse_from(["tokscale", "cache", "prune"]).expect("cache prune parses");
     assert!(matches!(
         cli.command,

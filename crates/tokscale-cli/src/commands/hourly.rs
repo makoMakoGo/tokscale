@@ -137,7 +137,7 @@ pub(crate) fn run_hourly_report(
         if compact {
             table.set_header(vec![
                 Cell::new("Hour").fg(Color::Cyan),
-                Cell::new("Source").fg(Color::Cyan),
+                Cell::new("Client").fg(Color::Cyan),
                 Cell::new("Turn").fg(Color::Cyan),
                 Cell::new("Msgs").fg(Color::Cyan),
                 Cell::new("Input").fg(Color::Cyan),
@@ -177,7 +177,7 @@ pub(crate) fn run_hourly_report(
         } else {
             table.set_header(vec![
                 Cell::new("Hour").fg(Color::Cyan),
-                Cell::new("Source").fg(Color::Cyan),
+                Cell::new("Client").fg(Color::Cyan),
                 Cell::new("Models").fg(Color::Cyan),
                 Cell::new("Turn").fg(Color::Cyan),
                 Cell::new("Msgs").fg(Color::Cyan),

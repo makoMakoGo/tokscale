@@ -31,8 +31,8 @@ fn sessions_summary_line(app: &App, state: &ViewState) -> Line<'static> {
         format!(" ({} sessions)", state.session_count(app))
     } else {
         format!(
-            " ({} sources · {} sessions)",
-            state.source_count(app),
+            " ({} clients · {} sessions)",
+            state.client_count(app),
             state.session_count(app)
         )
     };
@@ -60,9 +60,9 @@ fn sessions_help_line(app: &App, state: &ViewState) -> Line<'static> {
             "↑↓·d/t/c·↵·s·r·←→·q".to_string()
         }
     } else if state.session_detail_active() {
-        "↑↓ scroll • [d:active / t:tokens / c:cost] • [esc:back] • [s:sources] • [r:refresh local] • ←→/tab view • e • q".to_string()
+        "↑↓ scroll • [d:active / t:tokens / c:cost] • [esc:back] • [s:clients] • [r:refresh local] • ←→/tab view • e • q".to_string()
     } else {
-        "↑↓ scroll • [d:active / t:sessions / c:space] • [enter:sessions] • [s:sources] • [r:refresh local] • ←→/tab view • e • q".to_string()
+        "↑↓ scroll • [d:active / t:sessions / c:space] • [enter:sessions] • [s:clients] • [r:refresh local] • ←→/tab view • e • q".to_string()
     };
     Line::from(Span::styled(text, Style::default().fg(app.theme.muted)))
 }
@@ -91,7 +91,7 @@ fn daily_help_line(app: &App, state: &ViewState) -> Line<'static> {
             format!("↑↓·←→·v:{view}·s·g·p·r·q")
         } else {
             format!(
-                "↑↓ scroll • ←→/tab view • [v:{view}] • [s:sources] [g:{}] • [p:{}] • [r:refresh local] • e • q",
+                "↑↓ scroll • ←→/tab view • [v:{view}] • [s:clients] [g:{}] • [p:{}] • [r:refresh local] • e • q",
                 app.group_by.borrow(),
                 app.theme.name.as_str()
             )
@@ -100,7 +100,7 @@ fn daily_help_line(app: &App, state: &ViewState) -> Line<'static> {
         format!("↑↓·←→·d/t/c·↵·j·v:{view}·s·g·p·r·q")
     } else {
         format!(
-            "↑↓ scroll • ←→/tab view • [d/t/c:sort] • [enter:details] [j:today] • [v:{view}] • [s:sources] [g:{}] • [p:{}] • [r:refresh local] • e • q",
+            "↑↓ scroll • ←→/tab view • [d/t/c:sort] • [enter:details] [j:today] • [v:{view}] • [s:clients] [g:{}] • [p:{}] • [r:refresh local] • e • q",
             app.group_by.borrow(),
             app.theme.name.as_str()
         )
@@ -233,7 +233,7 @@ mod tests {
         let height = 5;
         let mut app = make_app(width);
         let mut state = ViewState::default();
-        state.select_session_source_for_test("codex");
+        state.select_session_client_for_test("codex");
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
         terminal

@@ -81,7 +81,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect, content: Foot
         return;
     }
 
-    // Split into 3 rows: sources+sort, help text, status
+    // Split into 3 rows: clients+sort, help text, status
     let row_constraints = if inner.height >= 3 {
         vec![
             Constraint::Length(1),
@@ -224,21 +224,24 @@ fn current_count_label(app: &App) -> String {
     match app.current_tab {
         Tab::Overview => {
             let mut models = BTreeSet::new();
-            let mut harnesses = BTreeSet::new();
+            let mut clients = BTreeSet::new();
             for day in &app.data.daily {
-                for (harness, source) in &day.source_breakdown {
-                    harnesses.insert(harness.as_str());
-                    for model in source.models.values() {
+                for (client, client_info) in &day.client_breakdown {
+                    clients.insert(client.as_str());
+                    for model in client_info.models.values() {
                         models.insert(model.model_id.as_str());
                     }
                 }
             }
             format!(
-                " ({} models · {} harnesses · {} days)",
+                " ({} models · {} clients · {} days)",
                 models.len(),
-                harnesses.len(),
+                clients.len(),
                 app.data.daily.len()
             )
+        }
+        Tab::Models if app.is_model_detail_active() => {
+            format!(" ({} provider rows)", app.get_sorted_models().len())
         }
         Tab::Models => format!(" ({} models)", app.data.models.len()),
         Tab::Agents => format!(" ({} agents)", app.data.agents.len()),
@@ -359,6 +362,19 @@ fn help_row_line(app: &App) -> Line<'static> {
                 spans.push(Span::styled("j", Style::default().fg(Color::Yellow)));
             }
         }
+        if app.current_tab == Tab::Models
+            && (app.is_model_detail_active() || app.model_details_supported())
+        {
+            spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
+            spans.push(Span::styled(
+                if app.is_model_detail_active() {
+                    "esc"
+                } else {
+                    "↵"
+                },
+                Style::default().fg(Color::Yellow),
+            ));
+        }
         if matches!(app.current_tab, Tab::Monthly | Tab::Weekly) {
             spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
             if app.is_period_detail_active() {
@@ -400,6 +416,19 @@ fn help_row_line(app: &App) -> Line<'static> {
             }
             spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
         }
+        if app.current_tab == Tab::Models
+            && (app.is_model_detail_active() || app.model_details_supported())
+        {
+            spans.push(Span::styled(
+                if app.is_model_detail_active() {
+                    "[esc:back]"
+                } else {
+                    "[enter:details]"
+                },
+                Style::default().fg(Color::Yellow),
+            ));
+            spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
+        }
         if matches!(app.current_tab, Tab::Monthly | Tab::Weekly) {
             if app.is_period_detail_active() {
                 spans.push(Span::styled(
@@ -422,7 +451,7 @@ fn help_row_line(app: &App) -> Line<'static> {
             spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
         }
         spans.push(Span::styled(
-            "[s:sources]",
+            "[s:clients]",
             Style::default().fg(Color::Cyan),
         ));
         if app.group_by_applies_to_current_tab() {
@@ -657,7 +686,7 @@ mod tests {
     fn test_current_count_label_matches_active_tab() {
         assert_eq!(
             current_count_label(&make_app_on(Tab::Overview)),
-            " (0 models · 0 harnesses · 0 days)"
+            " (0 models · 0 clients · 0 days)"
         );
         assert_eq!(
             current_count_label(&make_app_on(Tab::Models)),

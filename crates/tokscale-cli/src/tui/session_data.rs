@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) use tokscale_core::TuiSessionEntry as SessionEntry;
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct SourceSummary {
-    pub source: String,
+pub(crate) struct ClientSummary {
+    pub client: String,
     pub main_session_count: usize,
     pub session_count: usize,
     pub workspace_count: usize,
@@ -20,8 +20,8 @@ pub(crate) struct SourceSummary {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SessionSnapshot {
     sessions: Vec<SessionEntry>,
-    source_summaries: Vec<SourceSummary>,
-    session_indices_by_source: BTreeMap<String, Vec<usize>>,
+    client_summaries: Vec<ClientSummary>,
+    session_indices_by_client: BTreeMap<String, Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -40,26 +40,26 @@ pub(crate) enum SessionProjectionStatus {
 impl SessionSnapshot {
     pub(crate) fn new(
         mut sessions: Vec<SessionEntry>,
-        source_space: BTreeMap<String, u64>,
+        client_space: BTreeMap<String, u64>,
     ) -> Self {
         sessions.sort_by(|left, right| {
             right
                 .last_seen
                 .cmp(&left.last_seen)
-                .then_with(|| left.source.cmp(&right.source))
+                .then_with(|| left.client.cmp(&right.client))
                 .then_with(|| left.session_id.cmp(&right.session_id))
         });
 
         let mut summaries = BTreeMap::<String, (usize, usize, BTreeSet<String>, i64)>::new();
-        let mut session_indices_by_source = BTreeMap::<String, Vec<usize>>::new();
+        let mut session_indices_by_client = BTreeMap::<String, Vec<usize>>::new();
 
         for (index, session) in sessions.iter().enumerate() {
-            session_indices_by_source
-                .entry(session.source.clone())
+            session_indices_by_client
+                .entry(session.client.clone())
                 .or_default()
                 .push(index);
             let entry = summaries
-                .entry(session.source.clone())
+                .entry(session.client.clone())
                 .or_insert_with(|| (0, 0, BTreeSet::new(), 0));
             entry.0 = entry.0.saturating_add(1);
             if session.is_main_session {
@@ -81,19 +81,19 @@ impl SessionSnapshot {
             entry.3 = entry.3.max(session.last_seen);
         }
 
-        for source in source_space.keys() {
+        for client in client_space.keys() {
             summaries
-                .entry(source.clone())
+                .entry(client.clone())
                 .or_insert_with(|| (0, 0, BTreeSet::new(), 0));
         }
 
-        let source_summaries = summaries
+        let client_summaries = summaries
             .into_iter()
             .map(
-                |(source, (session_count, main_session_count, workspaces, last_seen))| {
-                    SourceSummary {
-                        space_bytes: source_space.get(&source).copied().unwrap_or(0),
-                        source,
+                |(client, (session_count, main_session_count, workspaces, last_seen))| {
+                    ClientSummary {
+                        space_bytes: client_space.get(&client).copied().unwrap_or(0),
+                        client,
                         main_session_count,
                         session_count,
                         workspace_count: workspaces.len(),
@@ -105,8 +105,8 @@ impl SessionSnapshot {
 
         Self {
             sessions,
-            source_summaries,
-            session_indices_by_source,
+            client_summaries,
+            session_indices_by_client,
         }
     }
 
@@ -115,25 +115,25 @@ impl SessionSnapshot {
         &self.sessions
     }
 
-    pub(crate) fn source_summaries(&self) -> &[SourceSummary] {
-        &self.source_summaries
+    pub(crate) fn client_summaries(&self) -> &[ClientSummary] {
+        &self.client_summaries
     }
 
-    /// Borrow the pre-indexed sessions for a source without cloning the entries.
-    pub(crate) fn session_refs_for_source<'a>(
+    /// Borrow the pre-indexed sessions for a client without cloning the entries.
+    pub(crate) fn session_refs_for_client<'a>(
         &'a self,
-        source: &str,
+        client: &str,
     ) -> impl Iterator<Item = &'a SessionEntry> + 'a {
-        self.session_indices_by_source
-            .get(source)
+        self.session_indices_by_client
+            .get(client)
             .into_iter()
             .flatten()
             .map(|index| &self.sessions[*index])
     }
 
     #[cfg(test)]
-    pub(crate) fn source_count(&self) -> usize {
-        self.source_summaries.len()
+    pub(crate) fn client_count(&self) -> usize {
+        self.client_summaries.len()
     }
 
     #[cfg(test)]
@@ -141,9 +141,9 @@ impl SessionSnapshot {
         self.sessions.len()
     }
 
-    pub(crate) fn session_count_for_source(&self, source: &str) -> usize {
-        self.session_indices_by_source
-            .get(source)
+    pub(crate) fn session_count_for_client(&self, client: &str) -> usize {
+        self.session_indices_by_client
+            .get(client)
             .map_or(0, Vec::len)
     }
 }
@@ -153,7 +153,7 @@ mod tests {
     use super::*;
 
     fn session(
-        source: &str,
+        client: &str,
         session_id: &str,
         is_main_session: bool,
         workspace_key: Option<&str>,
@@ -161,7 +161,7 @@ mod tests {
         last_seen: i64,
     ) -> SessionEntry {
         SessionEntry {
-            source: source.to_string(),
+            client: client.to_string(),
             session_id: session_id.to_string(),
             is_main_session,
             workspace_key: workspace_key.map(str::to_string),
@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_sorts_sessions_and_precomputes_source_indices() {
+    fn snapshot_sorts_sessions_and_precomputes_client_indices() {
         let snapshot = SessionSnapshot::new(
             vec![
                 session("codex", "c-old", true, Some("repo-a"), None, 10),
@@ -190,13 +190,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["c-new", "o-new", "c-old"]
         );
-        assert_eq!(snapshot.source_count(), 2);
+        assert_eq!(snapshot.client_count(), 2);
         assert_eq!(snapshot.session_count(), 3);
-        assert_eq!(snapshot.session_count_for_source("codex"), 2);
-        assert_eq!(snapshot.session_count_for_source("claude"), 0);
+        assert_eq!(snapshot.session_count_for_client("codex"), 2);
+        assert_eq!(snapshot.session_count_for_client("claude"), 0);
         assert_eq!(
             snapshot
-                .session_refs_for_source("codex")
+                .session_refs_for_client("codex")
                 .map(|entry| entry.session_id.as_str())
                 .collect::<Vec<_>>(),
             ["c-new", "c-old"]
@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_builds_source_summaries_and_keeps_empty_sources() {
+    fn snapshot_builds_client_summaries_and_keeps_empty_sources() {
         let snapshot = SessionSnapshot::new(
             vec![
                 session("codex", "c-1", true, Some("repo-a"), None, 10),
@@ -219,9 +219,9 @@ mod tests {
         );
 
         let codex = snapshot
-            .source_summaries()
+            .client_summaries()
             .iter()
-            .find(|summary| summary.source == "codex")
+            .find(|summary| summary.client == "codex")
             .expect("codex summary should be present");
         assert_eq!(codex.session_count, 2);
         assert_eq!(codex.main_session_count, 1);
@@ -230,17 +230,17 @@ mod tests {
         assert_eq!(codex.space_bytes, 42);
 
         let opencode = snapshot
-            .source_summaries()
+            .client_summaries()
             .iter()
-            .find(|summary| summary.source == "opencode")
+            .find(|summary| summary.client == "opencode")
             .expect("opencode summary should be present");
         assert_eq!(opencode.workspace_count, 1);
 
         let claude = snapshot
-            .source_summaries()
+            .client_summaries()
             .iter()
-            .find(|summary| summary.source == "claude")
-            .expect("space-only source should be present");
+            .find(|summary| summary.client == "claude")
+            .expect("space-only client should be present");
         assert_eq!(claude.session_count, 0);
         assert_eq!(claude.main_session_count, 0);
         assert_eq!(claude.workspace_count, 0);

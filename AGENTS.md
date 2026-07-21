@@ -41,12 +41,12 @@ matching the split documented in `docs/development.md`.
 ## TUI Data Pipeline Invariants
 
 - Resolve `--client` or `defaultClients` once at TUI startup into an immutable
-  source universe. Without either, the universe is the complete accepted local
+  client universe. Without either, the universe is the complete accepted local
   client catalog.
-- Treat Sources and Group By as projections of the installed generation. They
-  must not scan sources, write the cache, reset the refresh clock, or persist
+- Treat Clients and Group By as projections of the installed generation. They
+  must not scan inputs, write the cache, reset the refresh clock, or persist
   picker selection; see ADR 0028.
-- Source scanning is limited to a stale or missing startup generation,
+- Input scanning is limited to a stale or missing startup generation,
   automatic refresh, and explicit manual refresh. Keep acquisition in the
   background, disable projection controls until the first generation exists,
   and never add a content-area blocking reload state.

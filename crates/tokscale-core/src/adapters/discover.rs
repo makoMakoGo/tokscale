@@ -171,17 +171,7 @@ fn source_unit_for_policy(
         FingerprintPolicy::PlainFile => SourceUnit::plain_file(client, path),
         FingerprintPolicy::SqliteWithWal => SourceUnit::sqlite_with_wal(client, path),
         FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => {
-            return SourceUnit::claude_code(client, path.clone(), home_dir.clone()).map_err(
-                |source| {
-                    let error_path = source.path().unwrap_or(&path).to_path_buf();
-                    SourceDiscoveryError::new(
-                        client,
-                        error_path,
-                        "resolve cc-mirror variant metadata",
-                        source,
-                    )
-                },
-            );
+            SourceUnit::claude_code(client, path, home_dir.clone())
         }
         FingerprintPolicy::PrimaryWithSiblings {
             sibling_names,

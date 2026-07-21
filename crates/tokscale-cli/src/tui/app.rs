@@ -18,7 +18,7 @@ use ratatui::style::Color;
 use super::cache::ProjectionStore;
 use super::colors::{get_provider_shade, provider_color_key};
 use super::data::{
-    build_period_usage, AgentUsage, DailySourceInfo, DailyUsage, DataLoader, HourlyUsage,
+    build_period_usage, AgentUsage, DailyClientInfo, DailyUsage, DataLoader, HourlyUsage,
     ModelUsage, PeriodKind, PeriodUsage, TokenBreakdown, UsageData,
 };
 use super::interaction::{
@@ -54,7 +54,7 @@ pub(crate) enum KeyEventOutcome {
     Exit(TuiExit),
 }
 
-/// Source for near-instant Group By projections of the currently installed
+/// Backend for near-instant Group By projections of the currently installed
 /// TUI snapshot. The normal path reads from the pinned cache bundle; the
 /// in-memory accumulator is retained only when cache persistence failed.
 pub(crate) enum ProjectionBackend {
@@ -143,7 +143,7 @@ impl Tab {
 
     /// Whether this tab projects the installed local-report generation.
     /// Subscription Usage has its own remote fetch lifecycle and must remain
-    /// usable while local source acquisition is cold-loading or has failed.
+    /// usable while local input acquisition is cold-loading or has failed.
     pub(crate) fn depends_on_local_generation(self) -> bool {
         self != Tab::Usage
     }
@@ -224,6 +224,7 @@ pub enum SortDirection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum DetailSortContextKind {
+    Models,
     Daily,
     Period,
 }
@@ -241,7 +242,7 @@ pub struct ClickArea {
 
 #[derive(Debug, Clone)]
 pub struct DetailRow {
-    pub source: String,
+    pub client: String,
     pub provider: String,
     pub model: String,
     pub color_key: String,
@@ -254,6 +255,12 @@ pub struct DetailRow {
 }
 
 pub type DailyDetailRow = DetailRow;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelDetailSelection {
+    pub model: String,
+    pub client: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeriodDetailSelection {
@@ -272,7 +279,7 @@ pub enum ClickAction {
 }
 
 struct DetailRowAccumulator {
-    source_totals: HashMap<String, ClientContributionOrder>,
+    client_totals: HashMap<String, ClientContributionOrder>,
     provider: String,
     model: String,
     color_key: String,
@@ -312,16 +319,16 @@ fn merge_provider_label(target: &mut String, provider: &str) {
     }
 }
 
-fn build_detail_rows(source_breakdown: &BTreeMap<String, DailySourceInfo>) -> Vec<DetailRow> {
+fn build_detail_rows(client_breakdown: &BTreeMap<String, DailyClientInfo>) -> Vec<DetailRow> {
     let mut rows_by_key: BTreeMap<String, DetailRowAccumulator> = BTreeMap::new();
 
-    for (source, source_info) in source_breakdown {
-        for (model_key, model_info) in &source_info.models {
+    for (client, client_info) in client_breakdown {
+        for (model_key, model_info) in &client_info.models {
             let row =
                 rows_by_key
                     .entry(model_key.clone())
                     .or_insert_with(|| DetailRowAccumulator {
-                        source_totals: HashMap::new(),
+                        client_totals: HashMap::new(),
                         provider: String::new(),
                         model: if model_info.display_name.is_empty() {
                             model_key.clone()
@@ -339,17 +346,17 @@ fn build_detail_rows(source_breakdown: &BTreeMap<String, DailySourceInfo>) -> Ve
                         messages: 0,
                     });
 
-            let source_count = row.source_totals.len();
-            let source_total = row.source_totals.entry(source.clone()).or_insert_with(|| {
+            let client_count = row.client_totals.len();
+            let client_total = row.client_totals.entry(client.clone()).or_insert_with(|| {
                 ClientContributionOrder {
-                    first_seen: source_count,
+                    first_seen: client_count,
                     total_tokens: 0,
                 }
             });
-            source_total.total_tokens = source_total
+            client_total.total_tokens = client_total
                 .total_tokens
                 .checked_add(model_info.tokens.total())
-                .expect("TUI source token total exceeds u64::MAX");
+                .expect("TUI client token total exceeds u64::MAX");
 
             merge_provider_label(&mut row.provider, &model_info.provider);
             add_detail_tokens(&mut row.tokens, &model_info.tokens);
@@ -361,7 +368,7 @@ fn build_detail_rows(source_breakdown: &BTreeMap<String, DailySourceInfo>) -> Ve
     rows_by_key
         .into_values()
         .map(|row| DetailRow {
-            source: ordered_clients_by_token_contribution(&row.source_totals),
+            client: ordered_clients_by_token_contribution(&row.client_totals),
             provider: row.provider,
             model: row.model,
             color_key: row.color_key,
@@ -375,8 +382,8 @@ fn build_detail_rows(source_breakdown: &BTreeMap<String, DailySourceInfo>) -> Ve
 
 fn sort_detail_rows(rows: &mut [DetailRow], field: SortField, direction: SortDirection) {
     let tie_breaker = |a: &DetailRow, b: &DetailRow| {
-        a.source
-            .cmp(&b.source)
+        a.client
+            .cmp(&b.client)
             .then_with(|| a.model.cmp(&b.model))
             .then_with(|| a.provider.cmp(&b.provider))
     };
@@ -413,9 +420,9 @@ pub struct App {
 
     /// Immutable acquisition boundary chosen when this TUI process starts.
     /// Cache identity, digest probes, and every refresh use this set.
-    pub(crate) source_universe: HashSet<ClientId>,
-    /// Session-local view filter. The source picker may only choose a subset
-    /// of `source_universe`; it never changes scanner inputs or cache identity.
+    pub(crate) client_universe: HashSet<ClientId>,
+    /// Session-local view filter. The client picker may only choose a subset
+    /// of `client_universe`; it never changes scanner inputs or cache identity.
     pub selected_clients: Rc<RefCell<HashSet<ClientId>>>,
     pub group_by: Rc<RefCell<tokscale_core::GroupBy>>,
     /// Projections and Sessions are installed as one immutable generation.
@@ -425,7 +432,7 @@ pub struct App {
     /// The grouping the currently loaded `data` was projected with. It stays
     /// paired with `data` for exports while a replacement snapshot is pending.
     pub data_group_by: tokscale_core::GroupBy,
-    /// The source selection paired atomically with the currently installed
+    /// The client selection paired atomically with the currently installed
     /// `data` projection. Used to roll back a failed local projection.
     pub data_clients: HashSet<ClientId>,
     pub sort_field: SortField,
@@ -443,6 +450,8 @@ pub struct App {
     hourly_profile_text_total_lines: usize,
     pub selected_daily_detail_date: Option<NaiveDate>,
     pub selected_period_detail: Option<PeriodDetailSelection>,
+    pub selected_model_detail: Option<ModelDetailSelection>,
+    model_detail_models: Option<Vec<ModelUsage>>,
     detail_sort_contexts: HashMap<DetailSortContextKind, DetailSortContext>,
 
     pub selected_graph_cell: Option<(usize, usize)>,
@@ -476,17 +485,17 @@ pub struct App {
 
     pub needs_reload: bool,
 
-    /// Forces the next background reload to skip the source-digest probe
+    /// Forces the next background reload to skip the input-digest probe
     /// (manual refresh and filter changes must always re-aggregate).
     pub reload_force: bool,
 
     /// Digest of the scanned sources at the last completed load; auto-refresh
     /// skips the parse when a fresh probe matches (ADR 0008).
-    pub last_source_digest: Option<u64>,
+    pub last_input_digest: Option<u64>,
 
     pub dialog_stack: DialogStack,
 
-    pub dialog_source_changed: Rc<RefCell<bool>>,
+    pub dialog_client_changed: Rc<RefCell<bool>>,
     pub dialog_group_changed: Rc<RefCell<bool>>,
 
     pub hourly_view_mode: HourlyViewMode,
@@ -533,7 +542,7 @@ impl App {
         };
         let theme = Theme::from_name_for_current_terminal(theme_name);
 
-        let source_universe: HashSet<ClientId> = if let Some(ref cli_clients) = config.clients {
+        let client_universe: HashSet<ClientId> = if let Some(ref cli_clients) = config.clients {
             // CLI-provided filter list. Each entry is the canonical
             // lowercase client id.
             cli_clients
@@ -573,7 +582,7 @@ impl App {
         let data = cached_data.unwrap_or_default();
         let has_data = !data.models.is_empty();
         let dialog_stack = DialogStack::new(theme.clone());
-        let dialog_source_changed = Rc::new(RefCell::new(false));
+        let dialog_client_changed = Rc::new(RefCell::new(false));
         let dialog_group_changed = Rc::new(RefCell::new(false));
         let requested_tab = config.initial_tab.unwrap_or(Tab::Overview);
         if !Self::tab_visible(&settings, requested_tab) {
@@ -591,14 +600,14 @@ impl App {
             settings,
             data,
             data_loader,
-            source_universe: source_universe.clone(),
-            selected_clients: Rc::new(RefCell::new(source_universe.clone())),
+            client_universe: client_universe.clone(),
+            selected_clients: Rc::new(RefCell::new(client_universe.clone())),
             group_by: Rc::new(RefCell::new(super::cache::TUI_DEFAULT_GROUP_BY)),
             projection_backend: None,
             session_snapshot: SessionSnapshot::default(),
             session_projection_status: SessionProjectionStatus::Pending,
             data_group_by: super::cache::TUI_DEFAULT_GROUP_BY,
-            data_clients: source_universe,
+            data_clients: client_universe,
             sort_field,
             sort_direction,
             tab_sort_state: HashMap::new(),
@@ -613,6 +622,8 @@ impl App {
             hourly_profile_text_total_lines: 0,
             selected_daily_detail_date: None,
             selected_period_detail: None,
+            selected_model_detail: None,
+            model_detail_models: None,
             detail_sort_contexts: HashMap::new(),
             selected_graph_cell: None,
             stats_auto_select_today_pending: current_tab == Tab::Stats,
@@ -643,9 +654,9 @@ impl App {
             background_loading: false,
             needs_reload: false,
             reload_force: false,
-            last_source_digest: None,
+            last_input_digest: None,
             dialog_stack,
-            dialog_source_changed,
+            dialog_client_changed,
             dialog_group_changed,
             hourly_view_mode: HourlyViewMode::default(),
             model_shade_map: HashMap::new(),
@@ -687,7 +698,7 @@ impl App {
         !self.subscription_provider_ids.is_empty()
     }
 
-    /// Marks an auto-refresh probe that found no source changes: resets the
+    /// Marks an auto-refresh probe that found no input changes: resets the
     /// refresh clock without touching the data.
     pub fn mark_refresh_checked(&mut self) {
         let now = Instant::now();
@@ -698,21 +709,21 @@ impl App {
         if self.dialog_stack.is_active() {
             return;
         }
-        let source_changed = std::mem::take(&mut *self.dialog_source_changed.borrow_mut());
+        let client_changed = std::mem::take(&mut *self.dialog_client_changed.borrow_mut());
         let group_changed = std::mem::take(&mut *self.dialog_group_changed.borrow_mut());
 
-        if source_changed || group_changed {
-            self.apply_selected_projection(source_changed, group_changed);
+        if client_changed || group_changed {
+            self.apply_selected_projection(client_changed, group_changed);
         }
     }
 
-    fn apply_selected_projection(&mut self, source_changed: bool, group_changed: bool) {
+    fn apply_selected_projection(&mut self, client_changed: bool, group_changed: bool) {
         let group_by = self.group_by.borrow().clone();
         let selected_clients = self.selected_clients.borrow().clone();
-        if !selected_clients.is_subset(&self.source_universe) || selected_clients.is_empty() {
+        if !selected_clients.is_subset(&self.client_universe) || selected_clients.is_empty() {
             *self.selected_clients.borrow_mut() = self.data_clients.clone();
             *self.group_by.borrow_mut() = self.data_group_by.clone();
-            self.set_status("Source selection is outside the loaded source universe");
+            self.set_status("Client selection is outside the loaded client universe");
             return;
         }
         if selected_clients == self.data_clients && group_by == self.data_group_by {
@@ -728,8 +739,8 @@ impl App {
         let mut data = match backend.project(&group_by, &selected_clients) {
             Ok(data) => data,
             Err(error) => {
-                let operation = if source_changed && !group_changed {
-                    "Source projection"
+                let operation = if client_changed && !group_changed {
+                    "Client projection"
                 } else {
                     "Group By projection"
                 };
@@ -742,11 +753,12 @@ impl App {
         };
         data.health = self.data.health.clone();
         data.error = self.data.error.clone();
+        self.clear_model_detail_state(client_changed);
         self.update_projected_data(data);
         self.data_group_by = group_by.clone();
         self.data_clients = selected_clients;
-        if source_changed && !group_changed {
-            self.set_local_report_status("Sources filtered locally");
+        if client_changed && !group_changed {
+            self.set_local_report_status("Clients filtered locally");
         } else {
             self.set_local_report_status(&format!("Regrouped by {group_by}"));
         }
@@ -806,6 +818,9 @@ impl App {
     }
 
     fn replace_usage_data(&mut self, data: UsageData, mark_refresh: bool) {
+        if mark_refresh {
+            self.clear_model_detail_state(true);
+        }
         let had_graph_selection = self.selected_graph_cell.is_some();
         let selected_graph_date = self
             .selected_graph_cell
@@ -853,14 +868,14 @@ impl App {
         &mut self,
         data: UsageData,
         sessions: Vec<tokscale_core::TuiSessionEntry>,
-        source_space: BTreeMap<String, u64>,
+        client_space: BTreeMap<String, u64>,
         projection_backend: ProjectionBackend,
         group_by: tokscale_core::GroupBy,
     ) {
         self.replace_usage_data(data, true);
         drop(std::mem::replace(
             &mut self.session_snapshot,
-            SessionSnapshot::new(sessions, source_space),
+            SessionSnapshot::new(sessions, client_space),
         ));
         drop(self.projection_backend.replace(projection_backend));
         self.session_projection_status = SessionProjectionStatus::Ready;
@@ -1135,6 +1150,9 @@ impl App {
             KeyCode::Char('u') if self.current_tab == Tab::Usage => {
                 self.fetch_subscription_usage();
             }
+            KeyCode::Enter if self.current_tab == Tab::Models => {
+                self.open_selected_model_detail();
+            }
             KeyCode::Enter if self.current_tab == Tab::Daily => {
                 self.open_selected_daily_detail();
             }
@@ -1146,6 +1164,11 @@ impl App {
             }
             KeyCode::Enter if self.current_tab == Tab::Stats => {
                 self.handle_graph_selection();
+            }
+            KeyCode::Esc | KeyCode::Backspace
+                if self.current_tab == Tab::Models && self.is_model_detail_active() =>
+            {
+                self.close_model_detail();
             }
             KeyCode::Esc | KeyCode::Backspace
                 if self.current_tab == Tab::Daily && self.is_daily_detail_active() =>
@@ -1360,6 +1383,9 @@ impl App {
     }
 
     fn should_persist_current_list_interaction(&self) -> bool {
+        if self.current_tab == Tab::Models && self.is_model_detail_active() {
+            return false;
+        }
         if self.current_tab == Tab::Daily && self.is_daily_detail_active() {
             return false;
         }
@@ -1426,12 +1452,17 @@ impl App {
         }
 
         let entering_stats = target == Tab::Stats && self.current_tab != Tab::Stats;
+        let was_model_detail = self.current_tab == Tab::Models && self.is_model_detail_active();
         let was_daily_detail = self.current_tab == Tab::Daily && self.is_daily_detail_active();
         let was_period_detail = self.is_period_detail_active();
         self.persist_current_sort();
         self.persist_current_list_interaction();
 
         self.current_tab = target;
+        if was_model_detail {
+            self.selected_model_detail = None;
+            self.clear_detail_sort_context(DetailSortContextKind::Models);
+        }
         if target != Tab::Daily || was_daily_detail {
             self.selected_daily_detail_date = None;
             self.clear_detail_sort_context(DetailSortContextKind::Daily);
@@ -1476,6 +1507,10 @@ impl App {
     }
 
     fn default_sort_for_daily_detail() -> (SortField, SortDirection) {
+        (SortField::Tokens, SortDirection::Descending)
+    }
+
+    fn default_sort_for_model_detail() -> (SortField, SortDirection) {
         (SortField::Tokens, SortDirection::Descending)
     }
 
@@ -1527,6 +1562,20 @@ impl App {
 
     fn persist_current_sort(&mut self) {
         let current_sort = (self.sort_field, self.sort_direction);
+        if self.current_tab == Tab::Models && self.is_model_detail_active() {
+            let context = self
+                .detail_sort_contexts
+                .entry(DetailSortContextKind::Models)
+                .or_default();
+            context.detail_sort_state = Some(current_sort);
+            let model_sort = self
+                .detail_sort_contexts
+                .get(&DetailSortContextKind::Models)
+                .and_then(|context| context.list_sort_before_detail)
+                .unwrap_or_else(|| Self::default_sort_for_tab(Tab::Models));
+            self.tab_sort_state.insert(Tab::Models, model_sort);
+            return;
+        }
         if self.current_tab == Tab::Daily && self.is_daily_detail_active() {
             let context = self
                 .detail_sort_contexts
@@ -1605,6 +1654,17 @@ impl App {
         );
     }
 
+    fn enter_model_detail_sort_context(&mut self) {
+        self.enter_detail_sort_context(
+            DetailSortContextKind::Models,
+            Self::default_sort_for_model_detail,
+        );
+    }
+
+    fn leave_model_detail_sort_context(&mut self) {
+        self.leave_detail_sort_context(DetailSortContextKind::Models, Tab::Models);
+    }
+
     fn leave_daily_detail_sort_context(&mut self) {
         self.leave_detail_sort_context(DetailSortContextKind::Daily, Tab::Daily);
     }
@@ -1664,7 +1724,9 @@ impl App {
 
     fn get_current_list_len(&self) -> usize {
         match self.current_tab {
-            Tab::Overview | Tab::Models => self.data.models.len(),
+            Tab::Overview => self.data.models.len(),
+            Tab::Models if self.is_model_detail_active() => self.get_sorted_models().len(),
+            Tab::Models => self.data.models.len(),
             Tab::Agents => self.data.agents.len(),
             Tab::Daily if self.is_daily_detail_active() => {
                 self.get_sorted_daily_detail_rows().len()
@@ -1700,7 +1762,8 @@ impl App {
             self.sort_direction = SortDirection::Descending;
         }
         self.persist_current_sort();
-        if (self.current_tab == Tab::Daily && self.is_daily_detail_active())
+        if (self.current_tab == Tab::Models && self.is_model_detail_active())
+            || (self.current_tab == Tab::Daily && self.is_daily_detail_active())
             || self.is_period_detail_active()
         {
             self.selected_index = 0;
@@ -1771,21 +1834,21 @@ impl App {
 
     fn open_client_picker(&mut self) {
         if !self.has_installed_generation() {
-            self.set_status("Sources are unavailable until local reports finish loading");
+            self.set_status("Clients are unavailable until local reports finish loading");
             return;
         }
-        let mut sources: Vec<ClientId> = self.source_universe.iter().copied().collect();
-        sources.sort_by_key(|client| *client as usize);
+        let mut clients: Vec<ClientId> = self.client_universe.iter().copied().collect();
+        clients.sort_by_key(|client| *client as usize);
         let dialog = ClientPickerDialog::new(
-            sources,
+            clients,
             self.selected_clients.clone(),
-            self.dialog_source_changed.clone(),
+            self.dialog_client_changed.clone(),
         );
         self.dialog_stack.show(Box::new(dialog));
     }
 
     pub fn scan_clients(&self) -> Vec<ClientId> {
-        let mut out: Vec<ClientId> = self.source_universe.iter().copied().collect();
+        let mut out: Vec<ClientId> = self.client_universe.iter().copied().collect();
         // Stable order for downstream cache key + log output. Sort by the
         // declaration index in ClientId::ALL so the projection mirrors
         // the canonical ordering used elsewhere.
@@ -1793,10 +1856,9 @@ impl App {
         out
     }
 
-    pub(crate) fn is_source_selected(&self, source: &str) -> bool {
+    pub(crate) fn is_client_selected(&self, client: &str) -> bool {
         let selected = self.selected_clients.borrow();
-        ClientId::from_str(source).is_some_and(|client| selected.contains(&client))
-            || (selected.contains(&ClientId::Claude) && source.starts_with("cc-mirror/"))
+        ClientId::from_str(client).is_some_and(|client| selected.contains(&client))
     }
 
     /// Group By only reshapes the group-keyed projections (ADR 0026):
@@ -1818,6 +1880,102 @@ impl App {
         let dialog =
             GroupByPickerDialog::new(self.group_by.clone(), self.dialog_group_changed.clone());
         self.dialog_stack.show(Box::new(dialog));
+    }
+
+    pub fn model_details_supported(&self) -> bool {
+        matches!(
+            self.data_group_by,
+            tokscale_core::GroupBy::Model | tokscale_core::GroupBy::ClientModel
+        )
+    }
+
+    pub fn is_model_detail_active(&self) -> bool {
+        self.selected_model_detail.is_some()
+    }
+
+    fn model_detail_matches(selection: &ModelDetailSelection, model: &ModelUsage) -> bool {
+        model.model == selection.model
+            && selection
+                .client
+                .as_deref()
+                .is_none_or(|client| model.client == client)
+    }
+
+    fn open_selected_model_detail(&mut self) {
+        if self.is_model_detail_active() || !self.model_details_supported() {
+            return;
+        }
+
+        let selection = {
+            let models = self.get_sorted_models();
+            models
+                .get(self.selected_index)
+                .map(|model| ModelDetailSelection {
+                    model: model.model.clone(),
+                    client: (self.data_group_by == tokscale_core::GroupBy::ClientModel)
+                        .then(|| model.client.clone()),
+                })
+        };
+        let Some(selection) = selection else {
+            return;
+        };
+
+        if self.model_detail_models.is_none() {
+            let selected_clients = self.selected_clients.borrow().clone();
+            let Some(backend) = self.projection_backend.as_mut() else {
+                self.set_status("Model details are unavailable until local reports finish loading");
+                return;
+            };
+            let detail_data = match backend.project(
+                &tokscale_core::GroupBy::ClientProviderModel,
+                &selected_clients,
+            ) {
+                Ok(data) => data,
+                Err(error) => {
+                    self.set_status(&format!("Model details failed: {error:#}"));
+                    return;
+                }
+            };
+            self.model_detail_models = Some(detail_data.models);
+        }
+
+        let has_rows = self.model_detail_models.as_deref().is_some_and(|models| {
+            models
+                .iter()
+                .any(|model| Self::model_detail_matches(&selection, model))
+        });
+        if !has_rows {
+            self.set_status("No provider details are available for the selected model");
+            return;
+        }
+
+        self.persist_list_interaction_for(Tab::Models);
+        self.selected_model_detail = Some(selection.clone());
+        self.enter_model_detail_sort_context();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.set_local_report_status(&format!("Viewing provider details for {}", selection.model));
+        self.clamp_selection();
+    }
+
+    fn clear_model_detail_state(&mut self, invalidate_projection: bool) {
+        if self.is_model_detail_active() {
+            self.leave_model_detail_sort_context();
+            self.selected_model_detail = None;
+            self.set_current_list_interaction(self.stored_list_interaction(Tab::Models));
+        }
+        if invalidate_projection {
+            self.model_detail_models = None;
+        }
+    }
+
+    fn close_model_detail(&mut self) {
+        let Some(selection) = self.selected_model_detail.clone() else {
+            return;
+        };
+        self.clear_model_detail_state(false);
+        self.set_local_report_status(&format!("Returned to model {}", selection.model));
+        self.clamp_selection();
     }
 
     fn open_selected_daily_detail(&mut self) {
@@ -2019,7 +2177,7 @@ impl App {
                 .map(|row| {
                     format!(
                         "{} / {}: {} tokens, ${:.4}",
-                        row.source,
+                        row.client,
                         row.model,
                         row.tokens.total(),
                         row.cost
@@ -2031,7 +2189,7 @@ impl App {
                 .map(|row| {
                     format!(
                         "{} / {}: {} tokens, ${:.4}",
-                        row.source,
+                        row.client,
                         row.model,
                         row.tokens.total(),
                         row.cost
@@ -2144,7 +2302,16 @@ impl App {
     }
 
     pub fn get_sorted_models(&self) -> Vec<&ModelUsage> {
-        let mut models: Vec<&ModelUsage> = self.data.models.iter().collect();
+        let mut models: Vec<&ModelUsage> = match &self.selected_model_detail {
+            Some(selection) => self
+                .model_detail_models
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .filter(|model| Self::model_detail_matches(selection, model))
+                .collect(),
+            None => self.data.models.iter().collect(),
+        };
 
         let tie_breaker = |a: &&ModelUsage, b: &&ModelUsage| {
             a.model
@@ -2284,7 +2451,7 @@ impl App {
             return Vec::new();
         };
 
-        let mut rows = build_detail_rows(&day.source_breakdown);
+        let mut rows = build_detail_rows(&day.client_breakdown);
         sort_detail_rows(&mut rows, self.sort_field, self.sort_direction);
         rows
     }
@@ -2302,7 +2469,7 @@ impl App {
             return Vec::new();
         };
 
-        let mut rows = build_detail_rows(&period.source_breakdown);
+        let mut rows = build_detail_rows(&period.client_breakdown);
         sort_detail_rows(&mut rows, self.sort_field, self.sort_direction);
         rows
     }
@@ -2395,13 +2562,13 @@ impl App {
 mod tests {
     use super::super::colors::get_provider_shade;
     use super::*;
-    use crate::tui::data::{DailyModelInfo, DailySourceInfo, ModelUsage, TokenBreakdown};
+    use crate::tui::data::{DailyClientInfo, DailyModelInfo, ModelUsage, TokenBreakdown};
     use chrono::NaiveDate;
     use serial_test::serial;
     use std::collections::BTreeMap;
     use std::ffi::OsString;
 
-    type SourceModelCosts<'a> = Vec<(&'a str, Vec<(&'a str, &'a str, f64)>)>;
+    type ClientModelCosts<'a> = Vec<(&'a str, Vec<(&'a str, &'a str, f64)>)>;
 
     fn config_with_theme(theme: Option<&str>) -> TuiConfig {
         TuiConfig {
@@ -2832,11 +2999,11 @@ mod tests {
             "no-filter TUI must select exactly the accepted client catalog"
         );
         assert!(actual.contains(&ClientId::Claude));
-        assert_eq!(app.source_universe, expected);
+        assert_eq!(app.client_universe, expected);
     }
 
     #[test]
-    fn explicit_clients_define_an_immutable_source_universe() {
+    fn explicit_clients_define_an_immutable_client_universe() {
         let config = TuiConfig {
             theme: Some("blue".to_string()),
             refresh: 0,
@@ -2851,7 +3018,7 @@ mod tests {
         let app = App::new_with_cached_data_and_settings(config, None, test_settings()).unwrap();
         let expected = HashSet::from([ClientId::Claude, ClientId::Codex]);
 
-        assert_eq!(app.source_universe, expected);
+        assert_eq!(app.client_universe, expected);
         assert_eq!(*app.selected_clients.borrow(), expected);
         assert_eq!(app.data_clients, expected);
         assert_eq!(
@@ -2878,19 +3045,67 @@ mod tests {
         app
     }
 
-    fn daily_usage(date: &str, cost: f64, models: Vec<(&str, &str, f64)>) -> DailyUsage {
-        daily_usage_by_source(date, cost, vec![("claude", models)])
+    fn model_detail_accumulator() -> tokscale_core::TuiAcc {
+        let messages = [
+            (
+                "claude",
+                "shared-model",
+                "anthropic",
+                "claude-anthropic",
+                11,
+            ),
+            (
+                "claude",
+                "shared-model",
+                "openrouter",
+                "claude-openrouter",
+                22,
+            ),
+            ("codex", "shared-model", "openai", "codex-openai", 33),
+            ("claude", "other-model", "anthropic", "claude-other", 7),
+        ]
+        .map(|(client, model, provider, session, input)| {
+            tokscale_core::UnifiedMessage::new(
+                client,
+                model,
+                provider,
+                session,
+                1_800_000_000,
+                tokscale_core::TokenBreakdown {
+                    input,
+                    ..Default::default()
+                },
+                input as f64 / 100.0,
+            )
+        });
+        tokscale_core::build_tui_accumulator(&messages, tokscale_core::DateRange::none())
     }
 
-    fn daily_usage_by_source(date: &str, cost: f64, sources: SourceModelCosts<'_>) -> DailyUsage {
-        let mut source_breakdown = BTreeMap::new();
+    fn make_app_with_model_projection(group_by: tokscale_core::GroupBy) -> App {
+        let accumulator = model_detail_accumulator();
+        let mut app = make_app();
+        app.current_tab = Tab::Models;
+        app.data = accumulator.project(&group_by);
+        app.data_group_by = group_by.clone();
+        *app.group_by.borrow_mut() = group_by;
+        app.data_clients = app.selected_clients.borrow().clone();
+        app.projection_backend = Some(ProjectionBackend::Memory(accumulator));
+        app
+    }
+
+    fn daily_usage(date: &str, cost: f64, models: Vec<(&str, &str, f64)>) -> DailyUsage {
+        daily_usage_by_client(date, cost, vec![("claude", models)])
+    }
+
+    fn daily_usage_by_client(date: &str, cost: f64, clients: ClientModelCosts<'_>) -> DailyUsage {
+        let mut client_breakdown = BTreeMap::new();
         let mut total_tokens = TokenBreakdown::default();
         let mut total_cost = 0.0;
 
-        for (source, models) in sources {
+        for (client, models) in clients {
             let mut model_breakdown = BTreeMap::new();
-            let mut source_tokens = TokenBreakdown::default();
-            let mut source_cost = 0.0;
+            let mut client_tokens = TokenBreakdown::default();
+            let mut client_cost = 0.0;
 
             for (model, provider, model_cost) in models {
                 let tokens = TokenBreakdown {
@@ -2900,14 +3115,14 @@ mod tests {
                     cache_write: 0,
                     reasoning: 0,
                 };
-                source_tokens.input = source_tokens.input.saturating_add(tokens.input);
-                source_tokens.output = source_tokens.output.saturating_add(tokens.output);
-                source_tokens.cache_read =
-                    source_tokens.cache_read.saturating_add(tokens.cache_read);
+                client_tokens.input = client_tokens.input.saturating_add(tokens.input);
+                client_tokens.output = client_tokens.output.saturating_add(tokens.output);
+                client_tokens.cache_read =
+                    client_tokens.cache_read.saturating_add(tokens.cache_read);
                 total_tokens.input = total_tokens.input.saturating_add(tokens.input);
                 total_tokens.output = total_tokens.output.saturating_add(tokens.output);
                 total_tokens.cache_read = total_tokens.cache_read.saturating_add(tokens.cache_read);
-                source_cost += model_cost;
+                client_cost += model_cost;
                 total_cost += model_cost;
 
                 model_breakdown.insert(
@@ -2926,11 +3141,11 @@ mod tests {
                 );
             }
 
-            source_breakdown.insert(
-                source.to_string(),
-                DailySourceInfo {
-                    tokens: source_tokens,
-                    cost: source_cost,
+            client_breakdown.insert(
+                client.to_string(),
+                DailyClientInfo {
+                    tokens: client_tokens,
+                    cost: client_cost,
                     models: model_breakdown,
                 },
             );
@@ -2940,7 +3155,7 @@ mod tests {
             date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
             tokens: total_tokens,
             cost: if cost > 0.0 { cost } else { total_cost },
-            source_breakdown,
+            client_breakdown,
             message_count: 1,
             turn_count: 1,
         }
@@ -2996,7 +3211,7 @@ mod tests {
         let outcome = app.handle_key_event(key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
         assert_eq!(outcome, KeyEventOutcome::Exit(TuiExit::Interrupted));
-        assert!(!*app.dialog_source_changed.borrow());
+        assert!(!*app.dialog_client_changed.borrow());
     }
 
     // ── handle_key_event: tab switching ─────────────────────────────
@@ -3526,7 +3741,7 @@ mod tests {
         app.sort_field = SortField::Date;
         app.sort_direction = SortDirection::Descending;
         *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
-        app.data.daily = vec![daily_usage_by_source(
+        app.data.daily = vec![daily_usage_by_client(
             "2026-05-17",
             0.0,
             vec![
@@ -3541,7 +3756,7 @@ mod tests {
 
         *app.group_by.borrow_mut() = tokscale_core::GroupBy::Model;
         app.update_data(UsageData {
-            daily: vec![daily_usage_by_source(
+            daily: vec![daily_usage_by_client(
                 "2026-05-17",
                 0.0,
                 vec![
@@ -3559,7 +3774,7 @@ mod tests {
             Some(NaiveDate::from_ymd_opt(2026, 5, 17).unwrap())
         );
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].source, "claude, codex");
+        assert_eq!(rows[0].client, "claude, codex");
         assert_eq!(rows[0].model, "gpt-5");
         assert_eq!(rows[0].tokens.total(), 730);
         assert_eq!(rows[0].messages, 2);
@@ -3608,7 +3823,7 @@ mod tests {
             vec![("fallback-model", "openai", 7.0)],
         )];
         app.data.daily[0]
-            .source_breakdown
+            .client_breakdown
             .get_mut("claude")
             .unwrap()
             .models
@@ -3706,7 +3921,7 @@ mod tests {
         app.sort_direction = SortDirection::Descending;
         *app.group_by.borrow_mut() = tokscale_core::GroupBy::Model;
         app.data.daily = vec![
-            daily_usage_by_source(
+            daily_usage_by_client(
                 "2026-05-17",
                 0.0,
                 vec![
@@ -3723,7 +3938,7 @@ mod tests {
         let rows = app.get_sorted_period_detail_rows();
         assert!(app.is_period_detail_active_for_kind(PeriodKind::Monthly));
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].source, "claude, codex");
+        assert_eq!(rows[0].client, "claude, codex");
         assert_eq!(rows[0].model, "gpt-5");
         assert_eq!(rows[0].tokens.total(), 730);
         assert_eq!(rows[0].messages, 2);
@@ -4176,6 +4391,177 @@ mod tests {
     }
 
     #[test]
+    fn model_group_enter_splits_one_model_by_client_and_provider() {
+        let mut app = make_app_with_model_projection(tokscale_core::GroupBy::Model);
+        app.selected_index = app
+            .get_sorted_models()
+            .iter()
+            .position(|model| model.model == "shared-model")
+            .unwrap();
+
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.selected_model_detail,
+            Some(ModelDetailSelection {
+                model: "shared-model".to_string(),
+                client: None,
+            })
+        );
+        let mut rows = app
+            .get_sorted_models()
+            .into_iter()
+            .map(|model| (model.client.clone(), model.provider.clone()))
+            .collect::<Vec<_>>();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                ("claude".to_string(), "anthropic".to_string()),
+                ("claude".to_string(), "openrouter".to_string()),
+                ("codex".to_string(), "openai".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn client_model_group_enter_keeps_outer_client_and_splits_providers() {
+        let mut app = make_app_with_model_projection(tokscale_core::GroupBy::ClientModel);
+        app.selected_index = app
+            .get_sorted_models()
+            .iter()
+            .position(|model| model.model == "shared-model" && model.client == "claude")
+            .unwrap();
+
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.selected_model_detail,
+            Some(ModelDetailSelection {
+                model: "shared-model".to_string(),
+                client: Some("claude".to_string()),
+            })
+        );
+        let mut providers = app
+            .get_sorted_models()
+            .into_iter()
+            .map(|model| {
+                assert_eq!(model.client, "claude");
+                model.provider.clone()
+            })
+            .collect::<Vec<_>>();
+        providers.sort();
+        assert_eq!(providers, vec!["anthropic", "openrouter"]);
+    }
+
+    #[test]
+    fn model_detail_escape_restores_outer_state_without_reprojection() {
+        let mut app = make_app_with_model_projection(tokscale_core::GroupBy::Model);
+        app.sort_field = SortField::Cost;
+        app.sort_direction = SortDirection::Ascending;
+        app.selected_index = app
+            .get_sorted_models()
+            .iter()
+            .position(|model| model.model == "shared-model")
+            .unwrap();
+        let outer_selection = app.selected_index;
+
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_model_detail_active());
+        assert!(app.model_detail_models.is_some());
+        app.set_sort(SortField::Cost);
+        app.projection_backend = Some(ProjectionBackend::Failing("must not project on escape"));
+
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert!(!app.is_model_detail_active());
+        assert!(app.model_detail_models.is_some());
+        assert_eq!(app.selected_index, outer_selection);
+        assert_eq!(app.sort_field, SortField::Cost);
+        assert_eq!(app.sort_direction, SortDirection::Ascending);
+        assert!(!app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("must not project")));
+
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(
+            app.is_model_detail_active(),
+            "re-enter should reuse the cached provider projection"
+        );
+    }
+
+    #[test]
+    fn model_detail_projection_failure_keeps_the_outer_list() {
+        let mut app = make_app_with_model_projection(tokscale_core::GroupBy::Model);
+        app.selected_index = app
+            .get_sorted_models()
+            .iter()
+            .position(|model| model.model == "shared-model")
+            .unwrap();
+        let outer_selection = app.selected_index;
+        let outer_models = app.data.models.len();
+        app.projection_backend = Some(ProjectionBackend::Failing("injected detail failure"));
+
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert!(!app.is_model_detail_active());
+        assert!(app.model_detail_models.is_none());
+        assert_eq!(app.selected_index, outer_selection);
+        assert_eq!(app.data.models.len(), outer_models);
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("injected detail failure")));
+        assert!(!app.needs_reload);
+    }
+
+    #[test]
+    fn model_detail_is_disabled_for_already_expanded_groupings() {
+        for group_by in [
+            tokscale_core::GroupBy::ClientProviderModel,
+            tokscale_core::GroupBy::WorkspaceModel,
+        ] {
+            let mut app = make_app_with_model_projection(group_by);
+            app.handle_key_event(key(KeyCode::Enter));
+
+            assert!(!app.is_model_detail_active());
+            assert!(app.model_detail_models.is_none());
+        }
+    }
+
+    #[test]
+    fn refresh_and_client_projection_invalidate_model_detail_cache() {
+        let mut app = make_app_with_model_projection(tokscale_core::GroupBy::Model);
+        app.selected_index = app
+            .get_sorted_models()
+            .iter()
+            .position(|model| model.model == "shared-model")
+            .unwrap();
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.model_detail_models.is_some());
+
+        app.update_data(app.data.clone());
+        assert!(!app.is_model_detail_active());
+        assert!(app.model_detail_models.is_none());
+
+        app.selected_index = app
+            .get_sorted_models()
+            .iter()
+            .position(|model| model.model == "shared-model")
+            .unwrap();
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.model_detail_models.is_some());
+        *app.selected_clients.borrow_mut() = HashSet::from([ClientId::Claude]);
+
+        app.apply_selected_projection(true, false);
+
+        assert!(!app.is_model_detail_active());
+        assert!(app.model_detail_models.is_none());
+        assert_eq!(app.data_clients, HashSet::from([ClientId::Claude]));
+    }
+
+    #[test]
     #[serial]
     fn test_group_by_change_reprojects_immediately_with_memory_backend() {
         let (_home, accumulator) = load_test_accumulator();
@@ -4322,7 +4708,7 @@ mod tests {
     }
 
     #[test]
-    fn test_source_picker_reprojects_without_requesting_reload() {
+    fn test_client_picker_reprojects_without_requesting_reload() {
         let mut app = make_app();
         app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
         app.last_refresh = Instant::now() - Duration::from_secs(10);
@@ -4336,13 +4722,13 @@ mod tests {
         assert!(!app.reload_force);
         assert_eq!(app.last_refresh, last_refresh);
         assert_eq!(app.data_clients, *app.selected_clients.borrow());
-        assert_eq!(app.scan_clients().len(), app.source_universe.len());
+        assert_eq!(app.scan_clients().len(), app.client_universe.len());
     }
 
     #[test]
-    fn failed_source_projection_rolls_back_without_requesting_a_scan() {
+    fn failed_client_projection_rolls_back_without_requesting_a_scan() {
         let mut app = make_app();
-        app.projection_backend = Some(ProjectionBackend::Failing("injected source failure"));
+        app.projection_backend = Some(ProjectionBackend::Failing("injected client failure"));
         let original = app.data_clients.clone();
 
         app.handle_key_event(key(KeyCode::Char('s')));
@@ -4356,7 +4742,7 @@ mod tests {
         assert!(app
             .status_message
             .as_deref()
-            .is_some_and(|message| message.contains("injected source failure")));
+            .is_some_and(|message| message.contains("injected client failure")));
     }
 
     #[test]
@@ -4395,7 +4781,7 @@ mod tests {
     }
 
     #[test]
-    fn test_source_picker_waits_until_close_before_local_projection() {
+    fn test_client_picker_waits_until_close_before_local_projection() {
         let mut app = make_app();
         app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
         let original_clients = app.data_clients.clone();
@@ -4422,7 +4808,7 @@ mod tests {
     }
 
     #[test]
-    fn test_source_picker_is_unavailable_during_cold_load() {
+    fn test_client_picker_is_unavailable_during_cold_load() {
         let mut app = make_app();
         app.background_loading = true;
 
@@ -4433,7 +4819,7 @@ mod tests {
         assert!(!app.reload_force);
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Sources are unavailable until local reports finish loading")
+            Some("Clients are unavailable until local reports finish loading")
         );
     }
 

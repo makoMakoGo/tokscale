@@ -669,18 +669,17 @@ mod tests {
     #[test]
     fn claude_related_inputs_warm_hit_reads_no_source_bytes() {
         let home = tempfile::TempDir::new().unwrap();
-        let variant_dir = home.path().join(".cc-mirror/kimi-code");
-        let path = variant_dir.join("config/projects/project/session.jsonl");
+        let path = home.path().join(".claude/projects/project/session.jsonl");
         let meta_path = path.with_file_name("session.meta.json");
-        let variant_path = variant_dir.join("variant.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"session contents").unwrap();
         std::fs::write(&meta_path, b"meta contents").unwrap();
-        std::fs::write(&variant_path, b"{\"name\":\"Kimi\"}").unwrap();
 
-        assert_warm_hit_reads_no_source_bytes(
-            SourceUnit::claude_code(ClientId::Claude, path, home.path().to_path_buf()).unwrap(),
-        );
+        assert_warm_hit_reads_no_source_bytes(SourceUnit::claude_code(
+            ClientId::Claude,
+            path,
+            home.path().to_path_buf(),
+        ));
     }
 
     #[test]

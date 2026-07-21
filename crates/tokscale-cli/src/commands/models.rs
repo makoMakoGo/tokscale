@@ -646,7 +646,7 @@ pub(crate) fn run_models_report(
                     table.set_header(vec![
                         Cell::new("Workspace").fg(Color::Cyan),
                         Cell::new("Providers").fg(Color::Cyan),
-                        Cell::new("Sources").fg(Color::Cyan),
+                        Cell::new("Clients").fg(Color::Cyan),
                         Cell::new("Model").fg(Color::Cyan),
                         Cell::new("Input").fg(Color::Cyan),
                         Cell::new("Output").fg(Color::Cyan),

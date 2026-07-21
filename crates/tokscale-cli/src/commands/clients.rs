@@ -98,7 +98,7 @@ pub(crate) fn run_clients_command(
     struct ExtraPath {
         path: String,
         exists: bool,
-        source: String,
+        origin: String,
     }
 
     let all_clients = selected_clients.clone();
@@ -221,14 +221,14 @@ pub(crate) fn run_clients_command(
                     .map(|(_, path)| ExtraPath {
                         path: path.to_string_lossy().to_string(),
                         exists: path.exists(),
-                        source: "settings".to_string(),
+                        origin: "settings".to_string(),
                     })
                     .collect();
                 extra_paths.extend(extra_dirs.iter().filter(|(c, _)| *c == client).map(
                     |(_, path)| ExtraPath {
                         path: path.clone(),
                         exists: Path::new(path).exists(),
-                        source: "env".to_string(),
+                        origin: "env".to_string(),
                     },
                 ));
                 if client == ClientId::OpenCode {
@@ -236,7 +236,7 @@ pub(crate) fn run_clients_command(
                         ExtraPath {
                             path: path.to_string_lossy().to_string(),
                             exists: path.is_file(),
-                            source: "scanner.opencodeDbPaths".to_string(),
+                            origin: "scanner.opencodeDbPaths".to_string(),
                         }
                     }));
                 }
@@ -284,8 +284,8 @@ pub(crate) fn run_clients_command(
 
         for row in clients {
             println!("  {}", row.label.white());
-            let source_label = if row.client == "amp" {
-                "source"
+            let input_label = if row.client == "amp" {
+                "input"
             } else {
                 "sessions"
             };
@@ -293,7 +293,7 @@ pub(crate) fn run_clients_command(
                 "  {}",
                 format!(
                     "{}: {}",
-                    source_label,
+                    input_label,
                     describe_path_for_home(&row.sessions_path, row.sessions_path_exists, &home_dir)
                 )
                 .bright_black()
@@ -324,24 +324,24 @@ pub(crate) fn run_clients_command(
             }
 
             if !row.extra_paths.is_empty() {
-                let mut paths_by_source: Vec<(&str, Vec<String>)> = Vec::new();
+                let mut paths_by_origin: Vec<(&str, Vec<String>)> = Vec::new();
                 for extra_path in &row.extra_paths {
                     let description =
                         describe_path_for_home(&extra_path.path, extra_path.exists, &home_dir);
-                    if let Some((_, paths)) = paths_by_source
+                    if let Some((_, paths)) = paths_by_origin
                         .iter_mut()
-                        .find(|(source, _)| *source == extra_path.source)
+                        .find(|(origin, _)| *origin == extra_path.origin)
                     {
                         paths.push(description);
                     } else {
-                        paths_by_source.push((&extra_path.source, vec![description]));
+                        paths_by_origin.push((&extra_path.origin, vec![description]));
                     }
                 }
 
-                for (source, paths) in paths_by_source {
+                for (origin, paths) in paths_by_origin {
                     println!(
                         "  {}",
-                        format!("extra ({source}): {}", paths.join(", ")).bright_black()
+                        format!("extra ({origin}): {}", paths.join(", ")).bright_black()
                     );
                 }
             }

@@ -14,9 +14,9 @@ use crate::adapters::{
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
-use crate::{cc_mirror, sessions};
+use crate::sessions;
 
-const CLAUDE_PARSER_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 9;
+const CLAUDE_PARSER_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 10;
 
 static CLAUDE_PROJECT_RESOLVERS: LazyLock<
     Mutex<HashMap<PathBuf, Arc<sessions::claudecode::ClaudeProjectResolver>>>,
@@ -78,29 +78,12 @@ impl LocalSourceAdapter for ClaudeAdapter {
             "{}/.claude/transcripts",
             ctx.home_dir
         )));
-        roots.extend(
-            cc_mirror::discover_claude_project_roots(std::path::Path::new(ctx.home_dir)).map_err(
-                |source| {
-                    let path = source
-                        .path()
-                        .unwrap_or_else(|| std::path::Path::new(ctx.home_dir))
-                        .to_path_buf();
-                    SourceDiscoveryError::new(
-                        ClientId::Claude,
-                        path,
-                        "discover cc-mirror project roots",
-                        source,
-                    )
-                },
-            )?,
-        );
 
         let units = adapter_discover::source_units_from_paths(
             ClientId::Claude,
             adapter_discover::scan_roots(ClientId::Claude, roots, def.pattern)?,
             FingerprintPolicy::ClaudeCodeWithHome {
                 home_dir: PathBuf::from(ctx.home_dir),
-                variant_path: None,
                 parent_session_path: None,
             },
         )?
@@ -130,7 +113,6 @@ impl LocalSourceAdapter for ClaudeAdapter {
                 adapter_cache::load_or_scan_unit_with_cacheability(unit, ctx, |path| {
                     sessions::claudecode::parse_claude_file_with_project_resolver(
                         path,
-                        home_dir.as_deref(),
                         &project_resolver,
                     )
                     .map(|(scanned, dependency)| {
@@ -386,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_adapter_discovers_default_transcripts_extra_and_cc_mirror_roots() {
+    fn claude_adapter_discovers_default_transcripts_and_extra_roots() {
         let home = tempfile::TempDir::new().unwrap();
         let default_file = home.path().join(".claude/projects/project-a/default.jsonl");
         let workflow_file = home
@@ -395,22 +377,10 @@ mod tests {
         let transcript_file = home.path().join(".claude/transcripts/transcript.jsonl");
         let extra_root = home.path().join("extra-claude");
         let extra_file = extra_root.join("extra.jsonl");
-        let mirror_variant = home.path().join(".cc-mirror/kimi-code");
-        let mirror_file = mirror_variant.join("config/projects/mirror-project/mirror.jsonl");
 
-        for path in [
-            &default_file,
-            &workflow_file,
-            &transcript_file,
-            &extra_file,
-            &mirror_file,
-        ] {
+        for path in [&default_file, &workflow_file, &transcript_file, &extra_file] {
             write_file(path, "");
         }
-        write_file(
-            &mirror_variant.join("variant.json"),
-            r#"{"name":"Kimi Code","provider":"moonshot"}"#,
-        );
 
         let mut extra_scan_paths = BTreeMap::new();
         extra_scan_paths.insert("claude".to_string(), vec![extra_root]);
@@ -423,13 +393,7 @@ mod tests {
             .discover_checked(&scan_context(home.path(), &settings))
             .unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
-        let mut expected = vec![
-            default_file,
-            workflow_file,
-            transcript_file,
-            extra_file,
-            mirror_file,
-        ];
+        let mut expected = vec![default_file, workflow_file, transcript_file, extra_file];
         expected.sort_unstable();
 
         assert_eq!(paths, expected);
@@ -440,26 +404,23 @@ mod tests {
     }
 
     #[test]
-    fn claude_unit_digest_paths_include_meta_and_cc_mirror_variant() {
+    fn claude_unit_digest_paths_include_meta_sidecar() {
         let home = tempfile::TempDir::new().unwrap();
-        let variant_dir = home.path().join(".cc-mirror/kimi-code");
-        let session_path = variant_dir.join("config/projects/project-a/session-1.jsonl");
-        let variant_path = variant_dir.join("variant.json");
+        let session_path = home
+            .path()
+            .join(".claude/projects/project-a/session-1.jsonl");
         write_file(&session_path, "");
-        write_file(&variant_path, r#"{"name":"Kimi Code"}"#);
         let unit = SourceUnit::claude_code(
             ClientId::Claude,
             session_path.clone(),
             home.path().to_path_buf(),
-        )
-        .unwrap();
+        );
 
         let mut digest_paths = unit.digest_paths();
         digest_paths.sort_unstable();
         let mut expected = vec![
             session_path.clone(),
             session_path.with_file_name("session-1.meta.json"),
-            variant_path,
         ];
         expected.sort_unstable();
 
@@ -467,15 +428,12 @@ mod tests {
     }
 
     #[test]
-    fn claude_tier2_digest_paths_keep_meta_and_cc_mirror_variant() {
+    fn claude_tier2_digest_paths_keep_meta_and_parent_session() {
         let home = tempfile::TempDir::new().unwrap();
-        let variant_dir = home.path().join(".cc-mirror/kimi-code");
-        let project = variant_dir.join("config/projects/project-a");
+        let project = home.path().join(".claude/projects/project-a");
         let session_path = project.join("parent-mirror/subagents/agent-mirror1.jsonl");
         let parent_path = project.join("parent-mirror.jsonl");
-        let variant_path = variant_dir.join("variant.json");
         write_file(&session_path, &sidechain("parent-mirror", "mirror1"));
-        write_file(&variant_path, r#"{"name":"Kimi Code"}"#);
 
         let unit = discover_unit(home.path(), &session_path);
         let mut digest_paths = unit.digest_paths();
@@ -484,7 +442,6 @@ mod tests {
             session_path.clone(),
             session_path.with_file_name("agent-mirror1.meta.json"),
             parent_path,
-            variant_path,
         ];
         expected.sort_unstable();
 
@@ -506,8 +463,7 @@ mod tests {
             ClientId::Claude,
             session_path.clone(),
             home.path().to_path_buf(),
-        )
-        .unwrap();
+        );
         let parsed = CLAUDE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
         let mut actual = Vec::new();
         CLAUDE_ADAPTER
@@ -536,8 +492,7 @@ mod tests {
             ClientId::Claude,
             session_path.clone(),
             home.path().to_path_buf(),
-        )
-        .unwrap();
+        );
         let parser_version = unit.parser_version;
 
         let parsed = CLAUDE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
@@ -592,7 +547,6 @@ mod tests {
             session_path.clone(),
             home.path().to_path_buf(),
         )
-        .unwrap()
         .with_parser_version(ParserVersion::new(ParserId::Claude, CLAUDE_PARSER_REVISION))
         .prepare_snapshot()
         .unwrap();

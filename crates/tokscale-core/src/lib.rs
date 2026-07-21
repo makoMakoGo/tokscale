@@ -1,7 +1,6 @@
 #![deny(clippy::all)]
 
 mod adapters;
-mod cc_mirror;
 mod client_catalog;
 pub mod clients;
 pub mod fs_atomic;
@@ -98,19 +97,14 @@ fn retain_for_requested_clients(
 }
 
 pub(crate) fn requested_clients_include(client: &str, requested: &HashSet<&str>) -> bool {
-    requested.contains(client) || (requested.contains("claude") && client.starts_with("cc-mirror/"))
+    requested.contains(client)
 }
 
 pub(crate) fn selected_client_ids_include(client: &str, selected: &HashSet<ClientId>) -> bool {
     ClientId::from_str(client).is_some_and(|client_id| selected.contains(&client_id))
-        || (selected.contains(&ClientId::Claude) && client.starts_with("cc-mirror/"))
 }
 
 fn client_count_bucket(client: &str) -> Option<ClientId> {
-    if client.starts_with("cc-mirror/") {
-        return Some(ClientId::Claude);
-    }
-
     ClientId::from_str(client)
 }
 
@@ -737,7 +731,7 @@ fn parse_all_messages_with_health_with_env_strategy(
 
 struct FoldOutcome {
     source_inventory_signature: SourceInventorySignature,
-    source_space: BTreeMap<String, u64>,
+    client_space: BTreeMap<String, u64>,
     health: DataHealth,
 }
 
@@ -792,12 +786,12 @@ fn fold_prepared_local_sources_with_pricing(
         .map(|confirmed| {
             let source_inventory_signature =
                 confirmed_source_inventory_signature(&clients, &confirmed);
-            let (source_space, source_data_bytes) =
+            let (client_space, source_data_bytes) =
                 confirmed_source_data_bytes(&clients, &confirmed);
             health.set_source_data_bytes(source_data_bytes);
             FoldOutcome {
                 source_inventory_signature,
-                source_space,
+                client_space,
                 health,
             }
         })
@@ -1663,7 +1657,7 @@ pub struct TuiBundleWithDiagnostics {
     pub accumulator: TuiAcc,
     pub sessions: Vec<TuiSessionEntry>,
     /// Confirmed source bytes keyed by canonical local client id.
-    pub source_space: BTreeMap<String, u64>,
+    pub client_space: BTreeMap<String, u64>,
     pub pricing_diagnostics: pricing::PricingDiagnostics,
     pub source_inventory_signature: SourceInventorySignature,
     pub health: DataHealth,
@@ -1688,7 +1682,7 @@ pub async fn load_prepared_tui_bundle_with_diagnostics(
     });
     let FoldOutcome {
         source_inventory_signature,
-        source_space,
+        client_space,
         health,
     } = match stream_local_sources_into_engine(prepared, pricing.as_deref(), &mut engine) {
         Ok(outcome) => outcome,
@@ -1703,7 +1697,7 @@ pub async fn load_prepared_tui_bundle_with_diagnostics(
     Ok(TuiBundleWithDiagnostics {
         accumulator: accumulator.expect("tui usage view requested"),
         sessions: sessions.expect("tui sessions view requested"),
-        source_space,
+        client_space,
         pricing_diagnostics,
         source_inventory_signature,
         health,

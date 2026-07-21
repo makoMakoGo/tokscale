@@ -38,7 +38,7 @@ different tab.
 ### Every option has one owner
 
 Business options live on the narrowest command that applies them. Shared local
-source scope consists of `--home` and repeatable or comma-separated
+input scope consists of `--home` and repeatable or comma-separated
 `--client`; shared date scope consists of one preset or an inclusive
 `--since`/`--until` range. `--group-by` belongs only to `models`. `--json`,
 `--benchmark`, and `--no-spinner` belong only to report commands that use
@@ -53,7 +53,7 @@ or TTY state again. The invariant is:
 > plan; otherwise parsing must fail.
 
 An explicit `--home` must name an existing directory and is authoritative for
-source discovery and settings. It never falls back to the process home or
+scan-input discovery and settings. It never falls back to the process home or
 client-specific environment roots. Client ids are canonicalized and
 deduplicated. Date presets are mutually exclusive, dates use local-time
 inclusive boundaries, and `since` may not be later than `until`.

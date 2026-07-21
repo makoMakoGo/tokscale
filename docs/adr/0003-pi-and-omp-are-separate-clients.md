@@ -8,11 +8,11 @@ Related issue: #31
 
 Pi and OMP usage may share nearby local behavior, but they are separate client
 identities for reporting and filtering. Combining them creates misleading
-client totals and makes source filters ambiguous.
+client totals and makes client filters ambiguous.
 
 ## Decision
 
-Keep Pi and OMP as separate source/client identities.
+Keep Pi and OMP as separate client identities.
 
 Display, filtering, aggregation, and report output must not count OMP usage as
 Pi usage unless a future ADR explicitly changes that behavior.

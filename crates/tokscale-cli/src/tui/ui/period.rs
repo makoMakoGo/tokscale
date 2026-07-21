@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use super::model_usage_layout::{
     model_usage_table_layout, ModelUsageColumn as PeriodDetailColumn, ModelUsageLayoutSchema,
     ModelUsageTableDensity as PeriodDetailTableDensity,
-    ModelUsageTableLayout as PeriodDetailTableLayout, DETAIL_PROVIDER_WIDTH, DETAIL_SOURCE_WIDTH,
+    ModelUsageTableLayout as PeriodDetailTableLayout, DETAIL_CLIENT_WIDTH, DETAIL_PROVIDER_WIDTH,
     MODEL_MIN_WIDTH, WORKSPACE_MIN_WIDTH,
 };
 use super::table_layout::{
@@ -28,8 +28,8 @@ use tokscale_core::GroupBy;
 const PERIOD_MIN_WIDTH: u16 = 6;
 const PERIOD_MAX_WIDTH: u16 = 20;
 const DAYS_WIDTH: u16 = 5;
-const SOURCE_TOP_MIN_WIDTH: u16 = 10;
-const SOURCE_TOP_MAX_WIDTH: u16 = 20;
+const CLIENT_TOP_MIN_WIDTH: u16 = 10;
+const CLIENT_TOP_MAX_WIDTH: u16 = 20;
 const MODEL_TOP_MIN_WIDTH: u16 = 12;
 const MODEL_TOP_MAX_WIDTH: u16 = MODEL_DISPLAY_MAX_WIDTH as u16;
 const TURN_WIDTH: u16 = 6;
@@ -51,7 +51,7 @@ enum PeriodTableDensity {
 enum PeriodColumn {
     Period,
     ActiveDays,
-    TopSource,
+    TopClient,
     TopModel,
     Turn,
     Messages,
@@ -79,7 +79,7 @@ impl PeriodTableLayout {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct TopPeriodSource {
+struct TopPeriodClient {
     key: String,
     label: String,
     tokens: u64,
@@ -131,7 +131,7 @@ fn period_density_for_columns(columns: &[PeriodColumn]) -> PeriodTableDensity {
         matches!(
             column,
             PeriodColumn::ActiveDays
-                | PeriodColumn::TopSource
+                | PeriodColumn::TopClient
                 | PeriodColumn::TopModel
                 | PeriodColumn::Turn
                 | PeriodColumn::Messages
@@ -148,7 +148,7 @@ fn period_column_order(column: PeriodColumn) -> u16 {
     match column {
         PeriodColumn::Period => 0,
         PeriodColumn::ActiveDays => 10,
-        PeriodColumn::TopSource => 20,
+        PeriodColumn::TopClient => 20,
         PeriodColumn::TopModel => 30,
         PeriodColumn::Turn => 40,
         PeriodColumn::Messages => 50,
@@ -166,11 +166,11 @@ fn period_column_order(column: PeriodColumn) -> u16 {
 fn period_columns(
     has_turn_data: bool,
     period_content_width: u16,
-    top_source_content_width: u16,
+    top_client_content_width: u16,
     top_model_content_width: u16,
 ) -> Vec<ResponsiveColumn<PeriodColumn>> {
     let (
-        top_source_priority,
+        top_client_priority,
         top_model_priority,
         messages_priority,
         input_priority,
@@ -216,12 +216,12 @@ fn period_columns(
             MSGS_WIDTH,
         ),
         ResponsiveColumn::measured_atomic_optional(
-            PeriodColumn::TopSource,
-            top_source_priority,
-            period_column_order(PeriodColumn::TopSource),
-            SOURCE_TOP_MIN_WIDTH,
-            top_source_content_width,
-            SOURCE_TOP_MAX_WIDTH,
+            PeriodColumn::TopClient,
+            top_client_priority,
+            period_column_order(PeriodColumn::TopClient),
+            CLIENT_TOP_MIN_WIDTH,
+            top_client_content_width,
+            CLIENT_TOP_MAX_WIDTH,
         ),
         ResponsiveColumn::measured_atomic_optional(
             PeriodColumn::TopModel,
@@ -285,13 +285,13 @@ fn period_table_layout(
     table_width: u16,
     has_turn_data: bool,
     period_content_width: u16,
-    top_source_content_width: u16,
+    top_client_content_width: u16,
     top_model_content_width: u16,
 ) -> PeriodTableLayout {
     let specs = period_columns(
         has_turn_data,
         period_content_width,
-        top_source_content_width,
+        top_client_content_width,
         top_model_content_width,
     );
     let layout = responsive_table_layout(table_width, &specs);
@@ -308,7 +308,7 @@ fn period_detail_table_layout(
     table_width: u16,
     model_content_width: u16,
     provider_content_width: u16,
-    source_content_width: u16,
+    client_content_width: u16,
     workspace_content_width: u16,
     group_by: &GroupBy,
 ) -> PeriodDetailTableLayout {
@@ -321,7 +321,7 @@ fn period_detail_table_layout(
         table_width,
         model_content_width,
         provider_content_width,
-        source_content_width,
+        client_content_width,
         workspace_content_width,
         schema,
     )
@@ -331,7 +331,7 @@ fn period_column_header(column: PeriodColumn, density: PeriodTableDensity) -> &'
     match column {
         PeriodColumn::Period => "Period",
         PeriodColumn::ActiveDays => "Days",
-        PeriodColumn::TopSource => "Source*",
+        PeriodColumn::TopClient => "Client*",
         PeriodColumn::TopModel => "Model*",
         PeriodColumn::Turn => "Turn",
         PeriodColumn::Messages => "Msgs",
@@ -355,7 +355,7 @@ fn period_detail_column_header(
         PeriodDetailColumn::Workspace => "Workspace",
         PeriodDetailColumn::Model => "Model",
         PeriodDetailColumn::Provider => "Provider",
-        PeriodDetailColumn::Source => "Source",
+        PeriodDetailColumn::Client => "Client",
         PeriodDetailColumn::Messages => "Msgs",
         PeriodDetailColumn::Input => "Input",
         PeriodDetailColumn::Output => "Output",
@@ -389,15 +389,15 @@ fn period_detail_column_sort_field(column: PeriodDetailColumn) -> Option<SortFie
     }
 }
 
-fn top_period_source(period: &PeriodUsage) -> Option<TopPeriodSource> {
-    let mut candidates: Vec<TopPeriodSource> = period
-        .source_breakdown
+fn top_period_client(period: &PeriodUsage) -> Option<TopPeriodClient> {
+    let mut candidates: Vec<TopPeriodClient> = period
+        .client_breakdown
         .iter()
-        .filter_map(|(source, info)| {
+        .filter_map(|(client, info)| {
             let tokens = info.tokens.total();
-            (tokens > 0).then(|| TopPeriodSource {
-                key: source.clone(),
-                label: get_client_display_name(source),
+            (tokens > 0).then(|| TopPeriodClient {
+                key: client.clone(),
+                label: get_client_display_name(client),
                 tokens,
                 cost: info.cost,
             })
@@ -418,8 +418,8 @@ fn top_period_source(period: &PeriodUsage) -> Option<TopPeriodSource> {
 fn top_period_model(period: &PeriodUsage) -> Option<TopPeriodModel> {
     let mut models: BTreeMap<String, TopPeriodModel> = BTreeMap::new();
 
-    for source in period.source_breakdown.values() {
-        for model in source.models.values() {
+    for client in period.client_breakdown.values() {
+        for model in client.models.values() {
             let tokens = model.tokens.total();
             // Rank by the bare canonical id (ADR 0026): grouping must not
             // split one model into several candidates, and the storage map
@@ -544,11 +544,11 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|row| display_width(&get_provider_display_name(&row.provider)))
         .max()
         .unwrap_or(DETAIL_PROVIDER_WIDTH);
-    let source_content_width = rows_data
+    let client_content_width = rows_data
         .iter()
-        .map(|row| display_width(&get_client_display_name(&row.source)))
+        .map(|row| display_width(&get_client_display_name(&row.client)))
         .max()
-        .unwrap_or(DETAIL_SOURCE_WIDTH);
+        .unwrap_or(DETAIL_CLIENT_WIDTH);
     let group_by = app.group_by.borrow().clone();
     let workspace_content_width = if group_by == GroupBy::WorkspaceModel {
         rows_data
@@ -563,7 +563,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         table_area.width,
         model_content_width,
         provider_content_width,
-        source_content_width,
+        client_content_width,
         workspace_content_width,
         &group_by,
     );
@@ -622,9 +622,9 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         table_layout.width_for(PeriodDetailColumn::Provider),
                     ))
                     .style(Style::default().fg(theme_muted)),
-                    PeriodDetailColumn::Source => Cell::from(truncate_display_width(
-                        &get_client_display_name(&row.source),
-                        table_layout.width_for(PeriodDetailColumn::Source),
+                    PeriodDetailColumn::Client => Cell::from(truncate_display_width(
+                        &get_client_display_name(&row.client),
+                        table_layout.width_for(PeriodDetailColumn::Client),
                     ))
                     .style(Style::default().fg(theme_muted)),
                     PeriodDetailColumn::Messages => Cell::from(row.messages.to_string()),
@@ -741,11 +741,11 @@ fn render_period(frame: &mut Frame, app: &mut App, area: Rect, kind: PeriodKind,
         .map(|period| display_width(period_label(period, is_very_narrow)))
         .max()
         .unwrap_or(PERIOD_MIN_WIDTH);
-    let top_source_content_width = periods
+    let top_client_content_width = periods
         .iter()
-        .filter_map(|period| top_period_source(period).map(|source| display_width(&source.label)))
+        .filter_map(|period| top_period_client(period).map(|client| display_width(&client.label)))
         .max()
-        .unwrap_or(SOURCE_TOP_MIN_WIDTH);
+        .unwrap_or(CLIENT_TOP_MIN_WIDTH);
     let top_model_content_width = periods
         .iter()
         .filter_map(|period| top_period_model(period).map(|model| display_width(&model.label)))
@@ -769,7 +769,7 @@ fn render_period(frame: &mut Frame, app: &mut App, area: Rect, kind: PeriodKind,
         table_area.width,
         has_turn_data,
         period_content_width,
-        top_source_content_width,
+        top_client_content_width,
         top_model_content_width,
     );
     let columns = table_layout.columns.clone();
@@ -848,7 +848,7 @@ fn render_period(frame: &mut Frame, app: &mut App, area: Rect, kind: PeriodKind,
         } else {
             "-".to_string()
         };
-        let top_source = top_period_source(period);
+        let top_client = top_period_client(period);
         let top_model = top_period_model(period);
 
         let cell_for_column = |column: PeriodColumn| -> Cell {
@@ -859,11 +859,11 @@ fn render_period(frame: &mut Frame, app: &mut App, area: Rect, kind: PeriodKind,
                 ))
                 .style(period_style),
                 PeriodColumn::ActiveDays => Cell::from(period.active_days.to_string()),
-                PeriodColumn::TopSource => {
-                    if let Some(source) = top_source.as_ref() {
+                PeriodColumn::TopClient => {
+                    if let Some(client) = top_client.as_ref() {
                         Cell::from(truncate_display_width(
-                            &source.label,
-                            table_layout.width_for(PeriodColumn::TopSource),
+                            &client.label,
+                            table_layout.width_for(PeriodColumn::TopClient),
                         ))
                         .style(Style::default().fg(theme_muted))
                     } else {
@@ -990,7 +990,7 @@ mod tests {
         let layout = period_table_layout(92, true, 19, 12, 16);
 
         assert!(layout.columns.contains(&PeriodColumn::ActiveDays));
-        assert!(layout.columns.contains(&PeriodColumn::TopSource));
+        assert!(layout.columns.contains(&PeriodColumn::TopClient));
         assert!(layout.columns.contains(&PeriodColumn::TopModel));
         assert!(layout.columns.contains(&PeriodColumn::Turn));
         assert!(layout.columns.contains(&PeriodColumn::Total));
@@ -1006,7 +1006,7 @@ mod tests {
             vec![
                 PeriodColumn::Period,
                 PeriodColumn::ActiveDays,
-                PeriodColumn::TopSource,
+                PeriodColumn::TopClient,
                 PeriodColumn::TopModel,
                 PeriodColumn::Total,
                 PeriodColumn::Cost,
@@ -1025,7 +1025,7 @@ mod tests {
             vec![
                 PeriodColumn::Period,
                 PeriodColumn::ActiveDays,
-                PeriodColumn::TopSource,
+                PeriodColumn::TopClient,
                 PeriodColumn::TopModel,
                 PeriodColumn::Total,
                 PeriodColumn::Cost,
@@ -1047,7 +1047,7 @@ mod tests {
     }
 
     use crate::tui::app::{PeriodDetailSelection, Tab, TuiConfig};
-    use crate::tui::data::{DailyModelInfo, DailySourceInfo, DailyUsage, TokenBreakdown};
+    use crate::tui::data::{DailyClientInfo, DailyModelInfo, DailyUsage, TokenBreakdown};
     use chrono::NaiveDate;
     use ratatui::{backend::TestBackend, Terminal};
 
@@ -1100,9 +1100,9 @@ mod tests {
             end_date: NaiveDate::from_ymd_opt(2026, 6, 30).unwrap(),
             tokens: token_breakdown(tokens),
             cost: 0.0,
-            source_breakdown: BTreeMap::from([(
+            client_breakdown: BTreeMap::from([(
                 "codex".to_string(),
-                DailySourceInfo {
+                DailyClientInfo {
                     tokens: token_breakdown(tokens),
                     cost: 0.0,
                     models: models
@@ -1203,9 +1203,9 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2026, 6, 9).unwrap(),
             tokens: token_breakdown(300),
             cost: 3.0,
-            source_breakdown: BTreeMap::from([(
+            client_breakdown: BTreeMap::from([(
                 "codex".to_string(),
-                DailySourceInfo {
+                DailyClientInfo {
                     tokens: token_breakdown(300),
                     cost: 3.0,
                     models: BTreeMap::from([

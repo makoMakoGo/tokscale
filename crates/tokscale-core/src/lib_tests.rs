@@ -1903,31 +1903,6 @@ fn test_retain_for_requested_clients_keeps_original_client_matches() {
 }
 
 #[test]
-fn test_client_count_sink_attributes_cc_mirror_variants_to_claude() {
-    let mut sink = super::ClientCountSink::new(DateRange::none());
-    let mut message = UnifiedMessage::new(
-        "cc-mirror/zai-worker",
-        "claude-sonnet-4",
-        "zai",
-        "mirror-session",
-        1_717_977_600_000,
-        TokenBreakdown {
-            input: 10,
-            output: 5,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-        },
-        0.01,
-    );
-    message.message_count = 3;
-
-    super::adapters::MessageSink::push_message(&mut sink, message);
-
-    assert_eq!(sink.counts.get(ClientId::Claude), 3);
-}
-
-#[test]
 fn test_retain_for_requested_clients_preserves_kilo_split() {
     let kilocode_only: HashSet<&str> = HashSet::from(["kilocode"]);
     assert!(retain_for_requested_clients(
@@ -2596,7 +2571,7 @@ fn prepared_diagnostics_returns_signature_revalidated_after_pricing_boundary() {
 
 #[test]
 #[serial_test::serial]
-fn prepared_tui_bundle_source_space_uses_confirmed_inventory() {
+fn prepared_tui_bundle_client_space_uses_confirmed_inventory() {
     let home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(home.path());
     let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
@@ -2633,7 +2608,7 @@ fn prepared_tui_bundle_source_space_uses_confirmed_inventory() {
 
     assert_ne!(stale_signature, result.source_inventory_signature);
     assert_eq!(confirmed_signature, result.source_inventory_signature);
-    assert_eq!(result.source_space.get("amp"), Some(&confirmed_bytes));
+    assert_eq!(result.client_space.get("amp"), Some(&confirmed_bytes));
     assert_eq!(result.health.source_data_bytes(), confirmed_bytes);
     assert_eq!(
         result.accumulator.project(&GroupBy::Model).total_tokens,

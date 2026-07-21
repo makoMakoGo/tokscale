@@ -3,8 +3,8 @@
 Status: Accepted
 
 ADR 0020 owns source failure containment, input-dependency completeness,
-snapshot revalidation, and usage identity. ADR 0028 owns the fixed TUI source
-universe and session-local source selection. This ADR owns the single-copy
+snapshot revalidation, and usage identity. ADR 0028 owns the fixed TUI client
+universe and session-local client selection. This ADR owns the single-copy
 pipeline, cache-envelope/pruning contract, and atomic TUI generation lifecycle.
 
 ## Context
@@ -69,8 +69,8 @@ The parse pipeline must hold at most one owned copy of any message.
   and the session projection; a full `Vec<UnifiedMessage>` is not part of this
   path. APIs whose explicit public contract returns all messages remain
   unchanged.
-- Schema 41 stores one immutable TUI generation containing its manifest,
-  session projection, source-aware canonical aggregate, and every exposed
+- Schema 42 stores one immutable TUI generation containing its manifest,
+  session projection, client-aware canonical aggregate, and every exposed
   Group By usage projection in one atomic JSON bundle. The writer serializes
   borrowed views through a buffered temporary file and publishes the complete
   generation with one rename. The bundle carries a SHA-256 digest for the
@@ -87,24 +87,24 @@ The parse pipeline must hold at most one owned copy of any message.
   refresh preserves the prior complete generation and reports an explicit
   degraded state; it never publishes a partially refreshed mix.
 - The normal full-universe TUI retains the pinned eager projections and loads
-  the persisted fine-grained `TuiAcc` lazily only when a proper source subset
+  the persisted fine-grained `TuiAcc` lazily only when a proper client subset
   is requested. If generation persistence fails, the TUI reports that failure
   and may explicitly retain the in-memory accumulator as a degraded projection
-  backend so Group By and Source filtering remain usable.
+  backend so Group By and Clients filtering remain usable.
 - On Linux/glibc the TUI bounds the allocator to one arena before it starts
   worker threads, then trims after transient fold state is dropped and after a
   snapshot is replaced. This prevents short-lived background folds from
   leaving detached arenas resident at their high-water mark. Other platforms
   retain their native allocator behavior.
-- Session source-space accounting is the total byte size of source inputs from
+- Session client-space accounting is the total byte size of scan inputs from
   the snapshots confirmed at the final cache-decision/fold boundary, grouped by
   client. It is derived from those same confirmed snapshots as Usage, Sessions,
   health, and the inventory signature rather than by a second filesystem scan.
 - Every cacheable source has one input policy that enumerates the primary
   file and all parser-relevant related files. Related inputs include SQLite
-  WAL files, Claude `.meta.json` and cc-mirror variant metadata, and declared
-  sibling files. Source stamps and full fingerprints use exactly this same
-  set, including absent related files so additions and deletions invalidate.
+  WAL files, Claude `.meta.json`, and declared sibling files. `SourceStamp`
+  values and full fingerprints use exactly this same set, including absent
+  related files so additions and deletions invalidate.
 - Discovery and its pre-parse metadata snapshot form a consumptive
   `PreparedLocalSources` inventory. The inventory keeps selected-adapter order,
   per-adapter unit order, and each unit's parser identity and input policy.
@@ -199,13 +199,13 @@ that final output.
 - A corrupt generic shard produces one visible warning and a same-run source
   reparse instead of silently suppressing usage. Normal exact hits still read
   no source bytes and do not eagerly materialize adapter-wide cache bodies.
-- The TUI accepts only schema 41 generation bundles. Any other schema or a
-  bundle missing its inventory signature, canonical source-aware aggregate, or
+- The TUI accepts only schema 42 generation bundles. Any other schema or a
+  bundle missing its inventory signature, canonical client-aware aggregate, or
   canonical digest is an explicit miss and rebuilds once. An accepted bundle
-  supports Source and Group By projection without a background scan.
+  supports Clients and Group By projection without a background scan.
 - The full-universe TUI normally reads one projection from the pinned
   generation while steady-state memory holds only the active view and session
-  snapshot. Selecting a source subset lazily loads canonical aggregate state
+  snapshot. Selecting a client subset lazily loads canonical aggregate state
   and retains it for later local projections. Refresh failure leaves the
   previous cross-tab snapshot coherent and visible.
 - Code touching `UnifiedMessage.date` or `dedup_key` as `String` must go

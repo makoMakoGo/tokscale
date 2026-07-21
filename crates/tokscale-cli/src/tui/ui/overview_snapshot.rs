@@ -26,7 +26,7 @@ struct Aggregate {
 #[derive(Debug, Clone, Default)]
 struct SnapshotData {
     models: BTreeMap<String, Aggregate>,
-    harnesses: BTreeMap<String, Aggregate>,
+    clients: BTreeMap<String, Aggregate>,
     tokens: TokenBreakdown,
     peak_daily_tokens: u64,
     peak_daily_cost: f64,
@@ -113,9 +113,9 @@ fn collect_snapshot(app: &App) -> SnapshotData {
     let mut data = SnapshotData {
         main_session_count: app
             .session_snapshot
-            .source_summaries()
+            .client_summaries()
             .iter()
-            .filter(|summary| app.is_source_selected(&summary.source))
+            .filter(|summary| app.is_client_selected(&summary.client))
             .map(|summary| summary.main_session_count)
             .sum(),
         ..SnapshotData::default()
@@ -129,14 +129,16 @@ fn collect_snapshot(app: &App) -> SnapshotData {
         if day.cost.is_finite() {
             data.peak_daily_cost = data.peak_daily_cost.max(day.cost.max(0.0));
         }
-        for (harness, source) in &day.source_breakdown {
-            let harness_entry = data.harnesses.entry(harness.clone()).or_default();
-            harness_entry.tokens = harness_entry.tokens.saturating_add(source.tokens.total());
-            if source.cost.is_finite() {
-                harness_entry.cost += source.cost.max(0.0);
+        for (client, client_info) in &day.client_breakdown {
+            let client_entry = data.clients.entry(client.clone()).or_default();
+            client_entry.tokens = client_entry
+                .tokens
+                .saturating_add(client_info.tokens.total());
+            if client_info.cost.is_finite() {
+                client_entry.cost += client_info.cost.max(0.0);
             }
 
-            for model in source.models.values() {
+            for model in client_info.models.values() {
                 let model_entry = data.models.entry(model.model_id.clone()).or_default();
                 model_entry.tokens = model_entry.tokens.saturating_add(model.tokens.total());
                 if model.cost.is_finite() {
@@ -151,7 +153,7 @@ fn collect_snapshot(app: &App) -> SnapshotData {
 /// The middle Core column: hero totals, then the Fact block. Fact rows are
 /// ordered to line up horizontally with the achievement ladders in the
 /// right column (Active Days↔streak, Data Size↔tokens, Cache Rate↔cache,
-/// Model Eated↔models, Harness Enjoyed↔harnesses).
+/// Models Eaten↔models, Clients Used↔clients).
 fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
     let active_days = app
         .data
@@ -199,20 +201,20 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
         ),
         metric_line(
             app,
-            "Model Eated",
+            "Models Eaten",
             data.models.len().to_string(),
             Color::Cyan,
         ),
         metric_line(
             app,
-            "Harness Enjoyed",
-            data.harnesses.len().to_string(),
+            "Clients Used",
+            data.clients.len().to_string(),
             Color::Cyan,
         ),
-        sources_metric_line(app),
+        sources_healthy_metric_line(app),
         metric_line(
             app,
-            "Sessions",
+            "Sessions Scanned",
             data.main_session_count.to_string(),
             Color::Cyan,
         ),
@@ -330,21 +332,21 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
         ));
     }
 
-    let mut harness_block: Vec<Line<'static>> = Vec::new();
-    if let Some((key, display, aggregate)) = favorite_harness(data) {
-        harness_block.push(Line::default());
-        harness_block.push(Line::from(Span::styled(
-            "Favorite Harness",
+    let mut client_block: Vec<Line<'static>> = Vec::new();
+    if let Some((key, display, aggregate)) = favorite_client(data) {
+        client_block.push(Line::default());
+        client_block.push(Line::from(Span::styled(
+            "Favorite Client",
             Style::default().fg(app.theme.muted),
         )));
-        harness_block.push(center_line(
+        client_block.push(center_line(
             Line::from(Span::styled(
-                harness_slogan(key).to_string(),
+                client_slogan(key).to_string(),
                 Style::default().fg(app.theme.accent),
             )),
             width,
         ));
-        harness_block.push(center_line(
+        client_block.push(center_line(
             Line::from(vec![
                 Span::styled(
                     display,
@@ -373,7 +375,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
         + model_block.len()
         + family_line.is_some() as usize
         + model_line.is_some() as usize
-        + harness_block.len();
+        + client_block.len();
     let height = area.height as usize;
 
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -389,7 +391,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
             }
         }
         if height >= full_height {
-            lines.extend(harness_block);
+            lines.extend(client_block);
         }
     } else if height >= 6 {
         // Compact: title + portrait + slogan + family line.
@@ -431,9 +433,9 @@ fn center_line(line: Line<'static>, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Harness slogans, keyed off the raw harness id.
-fn harness_slogan(harness_key: &str) -> &'static str {
-    let key = harness_key.to_ascii_lowercase();
+/// Client slogans, keyed off the raw client id.
+fn client_slogan(client_key: &str) -> &'static str {
+    let key = client_key.to_ascii_lowercase();
     if key == "pi" || key.contains("claude") {
         "夯"
     } else if key.contains("kimi")
@@ -455,17 +457,16 @@ fn harness_slogan(harness_key: &str) -> &'static str {
     }
 }
 
-/// Sources health as a left-column metric: a green ✓ count when everything
-/// is clean, otherwise the health percentage (the right column keeps the
-/// expanded gauge for failures).
-fn sources_metric_line(app: &App) -> Line<'static> {
+/// Input health as a Core fact: a green ✓ count when everything is clean,
+/// otherwise the health percentage.
+fn sources_healthy_metric_line(app: &App) -> Line<'static> {
     let sources = total_sources(app);
     let (value, color) = if sources > 0 && app.data.health.clean_sources == sources {
         (format!("✓ {} clean", commafy(sources as u64)), Color::Green)
     } else {
         (health_percentage(app), health_color(app))
     };
-    metric_line(app, "Sources", value, color)
+    metric_line(app, "Sources Healthy", value, color)
 }
 
 fn share_percent(tokens: u64, total: u64) -> f64 {
@@ -476,8 +477,8 @@ fn share_percent(tokens: u64, total: u64) -> f64 {
     }
 }
 
-fn favorite_harness(data: &SnapshotData) -> Option<(&String, String, &Aggregate)> {
-    data.harnesses
+fn favorite_client(data: &SnapshotData) -> Option<(&String, String, &Aggregate)> {
+    data.clients
         .iter()
         .max_by(|(left_name, left), (right_name, right)| {
             left.tokens
@@ -635,7 +636,7 @@ fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
         data.tokens.total(),
         data.tokens.cache_read,
         data.models.len(),
-        data.harnesses.len(),
+        data.clients.len(),
     );
     let mut lines = achievements::lines(app, &items);
     lines.truncate(rows[3].height as usize);
@@ -670,8 +671,8 @@ fn left_lines(app: &App, data: &SnapshotData, width: usize, height: usize) -> Ve
         })
         .map(|(name, _)| name.as_str())
         .unwrap_or("—");
-    let favorite_harness = data
-        .harnesses
+    let favorite_client = data
+        .clients
         .iter()
         .max_by(|(left_name, left), (right_name, right)| {
             left.tokens
@@ -721,18 +722,18 @@ fn left_lines(app: &App, data: &SnapshotData, width: usize, height: usize) -> Ve
         vec![
             metric_line(
                 app,
-                "Source Data",
+                "Input Data",
                 format_bytes(app.data.health.source_data_bytes),
                 app.theme.foreground,
             ),
-            // Source health lives in the Sources section's hero gauge; Active
-            // Days takes its place so every group stays a pair.
+            // The narrow fallback omits input health; Active Days keeps this
+            // group paired with Input Data.
             metric_line(app, "Active Days", active_days.to_string(), Color::Cyan),
         ],
         vec![
             metric_line(
                 app,
-                "Models Used",
+                "Models Eaten",
                 data.models.len().to_string(),
                 Color::Cyan,
             ),
@@ -746,14 +747,14 @@ fn left_lines(app: &App, data: &SnapshotData, width: usize, height: usize) -> Ve
         vec![
             metric_line(
                 app,
-                "Harnesses Used",
-                data.harnesses.len().to_string(),
+                "Clients Used",
+                data.clients.len().to_string(),
                 Color::Cyan,
             ),
             metric_line(
                 app,
-                "Favorite Harness",
-                truncate(&favorite_harness, favorite_width),
+                "Favorite Client",
+                truncate(&favorite_client, favorite_width),
                 app.theme.foreground,
             ),
         ],
@@ -1028,10 +1029,10 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_session_count_follows_the_selected_sources() {
+    fn snapshot_session_count_follows_the_selected_clients() {
         let mut app = make_app(60);
-        let main_session = |source: &str, session_id: &str| TuiSessionEntry {
-            source: source.to_string(),
+        let main_session = |client: &str, session_id: &str| TuiSessionEntry {
+            client: client.to_string(),
             session_id: session_id.to_string(),
             is_main_session: true,
             ..TuiSessionEntry::default()
@@ -1045,13 +1046,13 @@ mod tests {
             BTreeMap::new(),
         );
 
-        assert_eq!(app.session_snapshot.source_summaries().len(), 2);
+        assert_eq!(app.session_snapshot.client_summaries().len(), 2);
         assert_eq!(collect_snapshot(&app).main_session_count, 3);
 
         *app.selected_clients.borrow_mut() = HashSet::from([ClientId::Claude]);
 
         let snapshot = collect_snapshot(&app);
-        assert_eq!(app.session_snapshot.source_summaries().len(), 2);
+        assert_eq!(app.session_snapshot.client_summaries().len(), 2);
         assert_eq!(snapshot.main_session_count, 1);
 
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
@@ -1080,8 +1081,8 @@ mod tests {
         let screen = lines.join("\n");
         assert!(screen.contains("Total Tokens"), "{screen}");
         assert!(
-            !screen.contains("Sources"),
-            "text fallback drops the Sources legend: {screen}"
+            !screen.contains("Sources Healthy"),
+            "text fallback drops the Sources Healthy fact: {screen}"
         );
         assert!(
             !screen.contains('●'),
@@ -1095,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn sources_collapses_to_a_left_column_metric_when_all_clean() {
+    fn sources_healthy_fact_is_compact_when_all_inputs_are_clean() {
         let width = 200;
         let height = 50;
         let mut app = make_app_with_theme(width, "dusk");
@@ -1107,15 +1108,16 @@ mod tests {
             .unwrap();
 
         let screen = buffer_lines(&terminal).join("\n");
+        assert!(screen.contains("Sources Healthy"), "{screen}");
         assert!(screen.contains("✓ 100 clean"), "{screen}");
         assert!(
             !screen.contains("Degraded"),
-            "clean sources earn the one-liner, not the legend: {screen}"
+            "clean inputs earn the one-liner, not the legend: {screen}"
         );
     }
 
     #[test]
-    fn left_metrics_pair_active_days_with_source_data() {
+    fn left_metrics_pair_active_days_with_input_data() {
         let app = make_app(120);
         let data = SnapshotData::default();
         let lines = left_lines(&app, &data, 54, 14);
@@ -1126,15 +1128,15 @@ mod tests {
             assert_eq!(text[index], "-".repeat(54), "separator at {index}");
         }
         assert!(text[0].starts_with("Total Tokens"));
-        assert!(text[6].starts_with("Source Data"));
+        assert!(text[6].starts_with("Input Data"));
         assert!(text[7].starts_with("Active Days"));
-        assert!(text[9].starts_with("Models Used"));
+        assert!(text[9].starts_with("Models Eaten"));
         assert!(text[10].starts_with("Favorite Model"));
-        assert!(text[12].starts_with("Harnesses Used"));
-        assert!(text[13].starts_with("Favorite Harness"));
+        assert!(text[12].starts_with("Clients Used"));
+        assert!(text[13].starts_with("Favorite Client"));
         assert!(
-            text.iter().all(|line| !line.contains("Source Health")),
-            "source health moved to the Sources hero gauge"
+            text.iter().all(|line| !line.contains("Sources Healthy")),
+            "the narrow fallback omits the input-health fact"
         );
     }
 
@@ -1154,20 +1156,20 @@ mod tests {
             "separators should be dropped bottom-up first"
         );
         assert!(text.iter().any(|line| line.starts_with("Total Tokens")));
-        assert!(text.iter().any(|line| line.starts_with("Favorite Harness")));
+        assert!(text.iter().any(|line| line.starts_with("Favorite Client")));
 
         let lines = left_lines(&app, &data, 54, 10);
         let text = lines.iter().map(line_text).collect::<Vec<_>>();
         assert_eq!(text.len(), 10);
         assert!(text.iter().all(|line| !line.starts_with('-')));
-        assert!(text.last().unwrap().starts_with("Favorite Harness"));
+        assert!(text.last().unwrap().starts_with("Favorite Client"));
 
         let lines = left_lines(&app, &data, 54, 8);
         let text = lines.iter().map(line_text).collect::<Vec<_>>();
         assert_eq!(text.len(), 8);
         assert!(text[0].starts_with("Total Tokens"));
         assert!(text.iter().any(|line| line.starts_with("Active Days")));
-        assert!(text.iter().all(|line| !line.contains("Favorite Harness")));
+        assert!(text.iter().all(|line| !line.contains("Favorite Client")));
     }
 
     #[test]

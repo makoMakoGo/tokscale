@@ -886,9 +886,9 @@ fn contract_tui_workspace_provider_daily_and_streaks() {
     assert_eq!(today_usage.turn_count, 1);
 
     let claude_source = today_usage
-        .source_breakdown
+        .client_breakdown
         .get("claude")
-        .expect("claude daily source");
+        .expect("claude daily client");
     assert_eq!(claude_source.cost, 2.0);
     let daily_model = claude_source
         .models

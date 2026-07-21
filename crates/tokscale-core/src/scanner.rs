@@ -355,11 +355,6 @@ pub fn built_in_extra_scan_paths_for(
 
     if enabled.contains(&ClientId::Claude) {
         paths.push((ClientId::Claude, home_dir.join(".claude/transcripts")));
-        paths.extend(
-            crate::cc_mirror::discover_claude_project_roots(home_dir)?
-                .into_iter()
-                .map(|path| (ClientId::Claude, path)),
-        );
     }
 
     Ok(paths)

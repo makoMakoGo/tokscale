@@ -30,11 +30,11 @@ changes how model rows are keyed and labeled; it must not change any
 authoritative number.
 
 Each atomic TUI generation contains every exposed full-universe grouping
-projection plus source-aware canonical aggregate state. The running TUI pins
+projection plus client-aware canonical aggregate state. The running TUI pins
 that generation. A Group By change selects an eager projection for the full
 universe or derives the requested grouping from the canonical state for a
-source subset. It never scans sources, refreshes sessions, writes the cache, or
-changes the refresh clock. Canonical state is loaded lazily when a source
+client subset. It never scans inputs, refreshes sessions, writes the cache, or
+changes the refresh clock. Canonical state is loaded lazily when a client
 subset first needs it. An explicitly reported cache-persistence failure may
 retain `TuiAcc` as a degraded in-memory projection backend.
 
@@ -49,7 +49,7 @@ mixing old and new tab data.
 **Projection classification.** Every projection of `UsageData` is either:
 
 - **group-keyed** — reshaped by the grouping: `UsageData.models` (the Models
-  table) and the per-source model sub-buckets inside `daily`/`hourly` and
+  table) and the per-client model sub-buckets inside `daily`/`hourly` and
   the period views derived from them; or
 - **group-agnostic** — invariant under grouping: day/hour totals, `agents`,
   the contribution graph, streaks, subscription usage, sessions, and every
@@ -77,6 +77,16 @@ length-prefixed encoding) exists to make internal buckets collision-free.
 It must not appear as a user-visible identity, and no consumer may fall back
 to it when deriving the canonical model.
 
+**Models detail is a reversible projection.** Under `GroupBy::Model`, Enter
+locks the selected model and shows one row per Client + Provider combination.
+Under `GroupBy::ClientModel`, Enter locks both the selected client and model
+and shows one row per provider. Both paths consume the installed
+`ClientProviderModel` projection; they never scan inputs, write a cache, or
+advance the refresh clock. The projection is retained for the installed
+generation, Esc only restores the outer list/sort state, and a refresh or
+client-filter change invalidates it. Groupings that already expose Provider or
+Workspace do not offer this detail transition.
+
 **Dimensions are structured fields.** A grouping dimension such as workspace
 travels in dedicated fields (`workspace_key`, `workspace_label` on
 `DailyModelInfo`, populated only under `GroupBy::WorkspaceModel`) and is
@@ -98,10 +108,10 @@ export) emit the grouping (`groupBy`) and the dimension fields
 - Any future grouping dimension follows the same rule: a structured field on
   the view entry plus an export field, never a label prefix.
 - An accepted TUI generation can switch among every exposed grouping without a
-  source load. The full-universe steady-state cost is the active usage
+  client load. The full-universe steady-state cost is the active usage
   projection, session snapshot, and pinned file handles; fine-grained canonical
-  state enters memory only after source-subset projection needs it.
-- Session projection and source-space values are generation-scoped even though
-  Group By does not reshape them. Source space means the source-input bytes
+  state enters memory only after client-subset projection needs it.
+- Session projection and client-space values are generation-scoped even though
+  Group By does not reshape them. Client space means the scan-input bytes
   confirmed for the report's final fold, not an earlier prepared snapshot or
   the result of an independent scan.
