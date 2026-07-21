@@ -26,7 +26,7 @@ pub struct ClientPickerDialog {
     /// Retains the accepted catalog's canonical order.
     sources: Vec<ClientId>,
     enabled: Rc<RefCell<HashSet<ClientId>>>,
-    needs_reload: Rc<RefCell<bool>>,
+    changed: Rc<RefCell<bool>>,
     selected: usize,
     filter: String,
     /// Indices into `sources` that match the current type-to-filter
@@ -44,13 +44,16 @@ struct SourcePickerAreas {
 }
 
 impl ClientPickerDialog {
-    pub fn new(enabled: Rc<RefCell<HashSet<ClientId>>>, needs_reload: Rc<RefCell<bool>>) -> Self {
-        let sources: Vec<ClientId> = ClientId::iter().collect();
+    pub fn new(
+        sources: Vec<ClientId>,
+        enabled: Rc<RefCell<HashSet<ClientId>>>,
+        changed: Rc<RefCell<bool>>,
+    ) -> Self {
         let filtered_indices: Vec<usize> = (0..sources.len()).collect();
         Self {
             sources,
             enabled,
-            needs_reload,
+            changed,
             selected: 0,
             filter: String::new(),
             filtered_indices,
@@ -85,20 +88,23 @@ impl ClientPickerDialog {
     }
 
     fn toggle(&mut self, client: ClientId) -> InteractionOutcome {
+        if !self.sources.contains(&client) {
+            return InteractionOutcome::Ignored("source outside loaded universe");
+        }
         let mut enabled = self.enabled.borrow_mut();
         let total = enabled.len();
         let is_enabled = enabled.contains(&client);
 
         if is_enabled && total > 1 {
             enabled.remove(&client);
-            *self.needs_reload.borrow_mut() = true;
+            *self.changed.borrow_mut() = true;
             self.last_error = None;
-            InteractionOutcome::NeedsReload
+            InteractionOutcome::Handled
         } else if !is_enabled {
             enabled.insert(client);
-            *self.needs_reload.borrow_mut() = true;
+            *self.changed.borrow_mut() = true;
             self.last_error = None;
-            InteractionOutcome::NeedsReload
+            InteractionOutcome::Handled
         } else {
             self.last_error = Some("Cannot disable the last source");
             InteractionOutcome::Ignored("last source")
@@ -365,9 +371,10 @@ mod tests {
     }
 
     fn make_dialog() -> ClientPickerDialog {
-        let enabled = Rc::new(RefCell::new(ClientId::iter().collect::<HashSet<_>>()));
-        let needs_reload = Rc::new(RefCell::new(false));
-        ClientPickerDialog::new(enabled, needs_reload)
+        let sources = ClientId::iter().collect::<Vec<_>>();
+        let enabled = Rc::new(RefCell::new(sources.iter().copied().collect()));
+        let changed = Rc::new(RefCell::new(false));
+        ClientPickerDialog::new(sources, enabled, changed)
     }
 
     fn first_hotkey_client() -> (ClientId, char) {
@@ -378,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn source_picker_lists_the_complete_catalog() {
+    fn source_picker_lists_exactly_the_loaded_universe() {
         let dialog = make_dialog();
         let expected = ClientId::iter().collect::<Vec<_>>();
 
@@ -405,9 +412,9 @@ mod tests {
 
         let result = dialog.handle_key(alt_key(key_char));
 
-        assert!(matches!(result, DialogResult::NeedsReload));
+        assert!(matches!(result, DialogResult::Handled));
         assert!(!dialog.enabled.borrow().contains(&client));
-        assert!(*dialog.needs_reload.borrow());
+        assert!(*dialog.changed.borrow());
     }
 
     #[test]
@@ -420,7 +427,7 @@ mod tests {
 
         let result = dialog.handle_key(key(KeyCode::Enter));
 
-        assert!(matches!(result, DialogResult::NeedsReload));
+        assert!(matches!(result, DialogResult::Handled));
         assert!(!dialog.enabled.borrow().contains(&client));
     }
 
@@ -446,7 +453,7 @@ mod tests {
 
         let result = dialog.handle_mouse(click(list.x, list.y), area);
 
-        assert!(matches!(result, DialogResult::NeedsReload));
+        assert!(matches!(result, DialogResult::Handled));
         assert!(!dialog.enabled.borrow().contains(&client));
     }
 
@@ -460,7 +467,7 @@ mod tests {
 
         let result = dialog.handle_mouse(click(list.x, list.y), area);
 
-        assert!(matches!(result, DialogResult::NeedsReload));
+        assert!(matches!(result, DialogResult::Handled));
         assert_eq!(dialog.selected, 2);
         assert!(!dialog.enabled.borrow().contains(&expected));
     }
@@ -479,5 +486,25 @@ mod tests {
             DialogResult::Ignored("click outside rows")
         ));
         assert_eq!(*dialog.enabled.borrow(), enabled_before);
+    }
+
+    #[test]
+    fn source_picker_rejects_hotkeys_outside_the_loaded_universe() {
+        let sources = vec![ClientId::Claude];
+        let enabled = Rc::new(RefCell::new(HashSet::from([ClientId::Claude])));
+        let changed = Rc::new(RefCell::new(false));
+        let mut dialog = ClientPickerDialog::new(sources, enabled, changed.clone());
+        let outside = ClientId::iter()
+            .find(|client| *client != ClientId::Claude && client.hotkey().is_some())
+            .expect("catalog should have a hotkey outside a one-client universe");
+
+        let result = dialog.handle_key(alt_key(hotkey(outside)));
+
+        assert!(matches!(
+            result,
+            DialogResult::Ignored("source outside loaded universe")
+        ));
+        assert!(!*changed.borrow());
+        assert_eq!(*dialog.enabled.borrow(), HashSet::from([ClientId::Claude]));
     }
 }

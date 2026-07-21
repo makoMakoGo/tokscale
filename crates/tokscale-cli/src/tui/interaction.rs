@@ -7,7 +7,6 @@ pub(crate) enum InteractionOutcome {
     Handled,
     Ignored(&'static str),
     Close,
-    NeedsReload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

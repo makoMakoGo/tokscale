@@ -21,8 +21,6 @@ pub enum DialogResult {
     Ignored(&'static str),
     /// Close the current dialog
     Close,
-    /// Dialog data changed and the app should reload after close
-    NeedsReload,
 }
 
 impl From<InteractionOutcome> for DialogResult {
@@ -31,7 +29,6 @@ impl From<InteractionOutcome> for DialogResult {
             InteractionOutcome::Handled => DialogResult::Handled,
             InteractionOutcome::Ignored(reason) => DialogResult::Ignored(reason),
             InteractionOutcome::Close => DialogResult::Close,
-            InteractionOutcome::NeedsReload => DialogResult::NeedsReload,
         }
     }
 }

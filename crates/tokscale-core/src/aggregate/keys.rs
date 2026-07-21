@@ -2,6 +2,8 @@
 
 use std::{collections::HashSet, hash::Hash, sync::Arc};
 
+use serde::{Deserialize, Serialize};
+
 use crate::{sessions, GroupBy, UnifiedMessage};
 
 pub const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
@@ -16,7 +18,11 @@ const STORAGE_KEY_VERSION: &str = "v1|";
 
 /// Allocation-free for the empty and singleton cases; a hash table is
 /// created only when a second distinct identity is actually observed.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "T: Serialize",
+    deserialize = "T: Deserialize<'de> + Eq + Hash"
+))]
 pub(crate) enum IdentitySet<T> {
     #[default]
     Empty,
@@ -111,7 +117,7 @@ where
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub(crate) enum WorkspaceKey {
     Known(Arc<str>),
     Unknown,
@@ -279,7 +285,7 @@ impl HourlyModelKey {
 /// can re-fold from (`client, provider, workspace, session, model`). The TUI
 /// accumulator keys its canonical buckets with this so switching groupings is
 /// an in-memory re-fold instead of a rescan (issue #161).
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FineModelKey {
     pub(crate) client: Arc<str>,
     pub(crate) provider: Arc<str>,
@@ -332,7 +338,7 @@ impl FineModelKey {
 /// Finest-granularity hourly model identity: `(provider, model)`. Only the
 /// ClientProviderModel grouping keeps the provider split; every other
 /// grouping re-folds providers back into the bare model.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FineHourlyModelKey {
     pub(crate) provider: Arc<str>,
     pub(crate) model: Arc<str>,

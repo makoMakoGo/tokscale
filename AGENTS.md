@@ -38,6 +38,22 @@ Keep `README.md` as the fork entry page. Put longer user-facing command,
 client, pricing, configuration, and development material under `docs/`,
 matching the split documented in `docs/development.md`.
 
+## TUI Data Pipeline Invariants
+
+- Resolve `--client` or `defaultClients` once at TUI startup into an immutable
+  source universe. Without either, the universe is the complete accepted local
+  client catalog.
+- Treat Sources and Group By as projections of the installed generation. They
+  must not scan sources, write the cache, reset the refresh clock, or persist
+  picker selection; see ADR 0028.
+- Source scanning is limited to a stale or missing startup generation,
+  automatic refresh, and explicit manual refresh. Keep acquisition in the
+  background, disable projection controls until the first generation exists,
+  and never add a content-area blocking reload state.
+- Preserve the installed generation when a warm refresh fails and expose an
+  explicit degraded diagnostic. A cold failure has no data generation and must
+  remain an explicit error rather than invented empty data.
+
 ## No-Silent-Fallback Review Discipline
 
 - Read `docs/adr/0001-no-silent-fallback.md` before classifying behavior as a

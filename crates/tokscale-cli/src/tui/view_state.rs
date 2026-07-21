@@ -144,19 +144,42 @@ impl ViewState {
     }
 
     pub(crate) fn source_count(&self, app: &App) -> usize {
-        app.session_snapshot.source_count()
+        app.session_snapshot
+            .source_summaries()
+            .iter()
+            .filter(|summary| app.is_source_selected(&summary.source))
+            .count()
     }
 
     pub(crate) fn session_count(&self, app: &App) -> usize {
         let snapshot = &app.session_snapshot;
         self.selected_session_source.as_deref().map_or_else(
-            || snapshot.session_count(),
-            |source| snapshot.session_count_for_source(source),
+            || {
+                snapshot
+                    .source_summaries()
+                    .iter()
+                    .filter(|summary| app.is_source_selected(&summary.source))
+                    .map(|summary| summary.session_count)
+                    .sum()
+            },
+            |source| {
+                if app.is_source_selected(source) {
+                    snapshot.session_count_for_source(source)
+                } else {
+                    0
+                }
+            },
         )
     }
 
     pub(crate) fn source_rows(&self, app: &App) -> Vec<SourceSummary> {
-        let mut rows = app.session_snapshot.source_summaries().to_vec();
+        let mut rows = app
+            .session_snapshot
+            .source_summaries()
+            .iter()
+            .filter(|summary| app.is_source_selected(&summary.source))
+            .cloned()
+            .collect::<Vec<_>>();
         rows.sort_by(|left, right| {
             let ordering = match app.sort_field {
                 SortField::Date => left.last_seen.cmp(&right.last_seen),
@@ -173,6 +196,9 @@ impl ViewState {
         let Some(source) = self.selected_session_source.as_deref() else {
             return Vec::new();
         };
+        if !app.is_source_selected(source) {
+            return Vec::new();
+        }
         let mut rows = app
             .session_snapshot
             .session_refs_for_source(source)
@@ -198,6 +224,7 @@ impl ViewState {
                     .source_summaries()
                     .iter()
                     .any(|summary| summary.source == selected)
+                    || !app.is_source_selected(selected)
             })
         {
             self.selected_session_source = None;

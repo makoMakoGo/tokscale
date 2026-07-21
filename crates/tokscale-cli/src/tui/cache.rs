@@ -14,6 +14,8 @@ use anyhow::Context;
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::value::RawValue;
+use sha2::{Digest, Sha256};
 use tokscale_core::{
     sessions, GroupBy, ModelPerformance, SourceInventorySignature, TuiAcc, TuiSessionEntry,
 };
@@ -27,7 +29,18 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 40;
+const CACHE_SCHEMA_VERSION: u32 = 41;
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -174,9 +187,14 @@ mod bundle_tests {
         assert_eq!(actual, expected);
     }
 
+    fn refresh_canonical_digest(value: &mut serde_json::Value) {
+        let canonical = serde_json::to_vec(&value["canonical"]).unwrap();
+        value["canonicalDigest"] = serde_json::Value::from(sha256_hex(&canonical));
+    }
+
     #[test]
     #[serial]
-    fn schema_40_bundle_round_trips_sessions_and_metadata() {
+    fn schema_41_bundle_round_trips_sessions_and_metadata() {
         let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
         let accumulator = TuiAcc::new();
         let expected_signature = signature();
@@ -209,10 +227,11 @@ mod bundle_tests {
         let raw: serde_json::Value =
             serde_json::from_reader(File::open(cache_file().unwrap()).unwrap()).unwrap();
         assert_eq!(raw["health"]["sourceDataBytes"], 4096);
+        assert_eq!(raw["canonicalDigest"].as_str().unwrap().len(), 64);
         assert!(raw["projections"]["model"].get("health").is_none());
 
         let CacheResult::Fresh(loaded) = load_cache(&clients, &GroupBy::Model, &scope) else {
-            panic!("expected a fresh schema-40 bundle");
+            panic!("expected a fresh schema-41 bundle");
         };
         assert_eq!(loaded.sessions, sessions);
         assert_eq!(loaded.source_space, source_space);
@@ -222,7 +241,7 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn schema_40_nonempty_bundle_round_trips_all_four_public_groupings() {
+    fn schema_41_nonempty_bundle_round_trips_all_four_public_groupings() {
         let (temp, _guard, _clients, scope, _sessions, _source_space) = fixture();
         let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
         let accumulator = nonempty_accumulator(temp.path());
@@ -302,7 +321,7 @@ mod bundle_tests {
             let expected = accumulator.project(&group_by);
             let loaded = match load_cache(&clients, &group_by, &scope) {
                 CacheResult::Fresh(loaded) | CacheResult::Stale(loaded) => loaded,
-                CacheResult::Miss => panic!("schema-40 bundle must load for {group_by}"),
+                CacheResult::Miss => panic!("schema-41 bundle must load for {group_by}"),
             };
             assert_projection_eq(&loaded.data, &expected);
             assert_eq!(loaded.data.health, health);
@@ -311,12 +330,112 @@ mod bundle_tests {
             assert!(!loaded.data.loading);
             assert!(loaded.data.error.is_none());
         }
-        assert!(store.project(&GroupBy::Session).is_err());
+        let claude_only = HashSet::from([ClientId::Claude]);
+        for group_by in [
+            GroupBy::Model,
+            GroupBy::ClientModel,
+            GroupBy::ClientProviderModel,
+            GroupBy::WorkspaceModel,
+        ] {
+            let expected = accumulator.project_for_clients(&group_by, &claude_only);
+            let actual = store.project(&group_by, &claude_only).unwrap();
+            assert_projection_eq(&actual, &expected);
+            assert!(actual
+                .models
+                .iter()
+                .all(|model| !model.client.contains("opencode")));
+        }
+        assert!(store.project(&GroupBy::Session, &clients).is_err());
     }
 
     #[test]
     #[serial]
-    fn schema_38_is_an_explicit_miss() {
+    fn legacy_schema_versions_are_explicit_misses() {
+        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
+        for schema_version in [38, 40] {
+            save_tui_bundle_cache(
+                &TuiAcc::new(),
+                &sessions,
+                &source_space,
+                &Default::default(),
+                &clients,
+                &scope,
+                signature(),
+            )
+            .unwrap();
+            let path = cache_file().unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+            value["schemaVersion"] = serde_json::Value::from(schema_version);
+            refresh_canonical_digest(&mut value);
+            tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+                .unwrap();
+
+            assert!(matches!(
+                load_cache(&clients, &GroupBy::Model, &scope),
+                CacheResult::Miss
+            ));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn missing_or_incomplete_canonical_state_is_an_explicit_miss() {
+        let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
+        let path = cache_file().unwrap();
+
+        for replacement in [None, Some(serde_json::json!({ "model_map": [] }))] {
+            save_tui_bundle_cache(
+                &TuiAcc::new(),
+                &sessions,
+                &source_space,
+                &Default::default(),
+                &clients,
+                &scope,
+                signature(),
+            )
+            .unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+            match replacement.clone() {
+                Some(canonical) => value["canonical"] = canonical,
+                None => {
+                    value.as_object_mut().unwrap().remove("canonical");
+                }
+            }
+            tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+                .unwrap();
+
+            assert!(matches!(
+                load_cache(&clients, &GroupBy::Model, &scope),
+                CacheResult::Miss
+            ));
+        }
+
+        save_tui_bundle_cache(
+            &TuiAcc::new(),
+            &sessions,
+            &source_space,
+            &Default::default(),
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("canonicalDigest");
+        tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+            .unwrap();
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Miss
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn canonical_content_corruption_is_an_explicit_miss() {
         let (_temp, _guard, clients, scope, sessions, source_space) = fixture();
         save_tui_bundle_cache(
             &TuiAcc::new(),
@@ -331,7 +450,7 @@ mod bundle_tests {
         let path = cache_file().unwrap();
         let mut value: serde_json::Value =
             serde_json::from_reader(File::open(&path).unwrap()).unwrap();
-        value["schemaVersion"] = serde_json::Value::from(38);
+        value["canonical"]["next_sequence"] = serde_json::Value::from(1);
         tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
             .unwrap();
 
@@ -360,6 +479,7 @@ mod bundle_tests {
         let mut value: serde_json::Value =
             serde_json::from_reader(File::open(&path).unwrap()).unwrap();
         value["sourceSpace"] = serde_json::json!({"codex": 4096});
+        refresh_canonical_digest(&mut value);
         tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
             .unwrap();
         assert!(matches!(
@@ -380,6 +500,7 @@ mod bundle_tests {
         let mut value: serde_json::Value =
             serde_json::from_reader(File::open(&path).unwrap()).unwrap();
         value["sessions"][0]["source"] = serde_json::Value::from("codex");
+        refresh_canonical_digest(&mut value);
         tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
             .unwrap();
         assert!(matches!(
@@ -412,7 +533,7 @@ mod bundle_tests {
             .ends_with(".tmp")));
 
         tokscale_core::fs_atomic::write_atomic(&path, b"not-json").unwrap();
-        assert!(store.project(&GroupBy::WorkspaceModel).is_ok());
+        assert!(store.project(&GroupBy::WorkspaceModel, &clients).is_ok());
     }
 
     #[test]
@@ -438,6 +559,7 @@ mod bundle_tests {
         let mut value: serde_json::Value =
             serde_json::from_reader(File::open(&path).unwrap()).unwrap();
         value["timestamp"] = serde_json::Value::from(0_u64);
+        refresh_canonical_digest(&mut value);
         tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
             .unwrap();
         assert!(matches!(
@@ -491,10 +613,9 @@ impl CacheReportScope {
     }
 }
 
-/// Default usage projection selected when the TUI starts. Schema 40 stores all
-/// four public projections, so this is presentation state rather than a cache
-/// key; startup and `App.group_by` must still agree on the initially displayed
-/// rows.
+/// Default usage projection selected when the TUI starts. Schema 41 stores all
+/// four public projections plus canonical source-aware state, so Group By and
+/// Sources are presentation state rather than cache keys.
 pub const TUI_DEFAULT_GROUP_BY: GroupBy = GroupBy::Model;
 
 /// Get the cache directory path
@@ -1298,10 +1419,10 @@ fn cached_models_missing_identity(data: &UsageData) -> bool {
 
 /// Determine whether the cached client key exactly matches the current TUI request.
 fn cache_clients_match_exact(
-    enabled_clients: &HashSet<ClientId>,
+    source_universe: &HashSet<ClientId>,
     cached_clients: &[String],
 ) -> bool {
-    let enabled: HashSet<&str> = enabled_clients
+    let enabled: HashSet<&str> = source_universe
         .iter()
         .map(|client| client.as_str())
         .collect();
@@ -1311,25 +1432,25 @@ fn cache_clients_match_exact(
 }
 
 fn cache_source_space_matches_exact(
-    enabled_clients: &HashSet<ClientId>,
+    source_universe: &HashSet<ClientId>,
     source_space: &BTreeMap<String, u64>,
 ) -> bool {
-    source_space.len() == enabled_clients.len()
-        && enabled_clients
+    source_space.len() == source_universe.len()
+        && source_universe
             .iter()
             .all(|client| source_space.contains_key(client.as_str()))
 }
 
 fn cache_session_sources_are_enabled(
-    enabled_clients: &HashSet<ClientId>,
+    source_universe: &HashSet<ClientId>,
     sessions: &[TuiSessionEntry],
 ) -> bool {
     sessions.iter().all(|session| {
-        enabled_clients
+        source_universe
             .iter()
             .any(|client| client.as_str() == session.source.as_str())
             || (session.source.starts_with("cc-mirror/")
-                && enabled_clients.contains(&ClientId::Claude))
+                && source_universe.contains(&ClientId::Claude))
     })
 }
 
@@ -1347,7 +1468,7 @@ pub struct LoadedTuiCache {
     pub source_inventory_signature: SourceInventorySignature,
 }
 
-/// Result of loading the schema-40 TUI bundle.
+/// Result of loading the schema-41 TUI bundle.
 pub enum CacheResult {
     Fresh(LoadedTuiCache),
     Stale(LoadedTuiCache),
@@ -1359,15 +1480,54 @@ pub enum CacheResult {
 /// The store never reopens the path. Each projection seek starts from the
 /// beginning of the pinned inode and a serde seed ignores all unrelated JSON
 /// subtrees without materializing them.
-#[derive(Debug)]
 pub struct ProjectionStore {
     file: File,
     health: tokscale_core::source_health::HealthReport,
+    universe: HashSet<ClientId>,
+    canonical: Option<TuiAcc>,
+}
+
+impl std::fmt::Debug for ProjectionStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProjectionStore")
+            .field("file", &self.file)
+            .field("universe", &self.universe)
+            .field("canonical_loaded", &self.canonical.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ProjectionStore {
-    pub fn project(&mut self, group_by: &GroupBy) -> anyhow::Result<UsageData> {
+    pub fn project(
+        &mut self,
+        group_by: &GroupBy,
+        selected_clients: &HashSet<ClientId>,
+    ) -> anyhow::Result<UsageData> {
         projection_field(group_by)?;
+        if !selected_clients.is_subset(&self.universe) {
+            anyhow::bail!("TUI source selection is outside the cached source universe");
+        }
+        if selected_clients != &self.universe {
+            if self.canonical.is_none() {
+                self.file.seek(SeekFrom::Start(0))?;
+                let accumulator = {
+                    let mut deserializer =
+                        serde_json::Deserializer::from_reader(BufReader::new(&mut self.file));
+                    let accumulator = CanonicalBundleSeed.deserialize(&mut deserializer)?;
+                    deserializer.end()?;
+                    accumulator
+                };
+                self.canonical = Some(accumulator);
+            }
+            let mut data = self
+                .canonical
+                .as_ref()
+                .expect("canonical accumulator was loaded")
+                .project_for_clients(group_by, selected_clients);
+            data.health = self.health.clone();
+            return Ok(data);
+        }
         self.file.seek(SeekFrom::Start(0))?;
 
         let cached = {
@@ -1387,12 +1547,17 @@ impl ProjectionStore {
 
     pub fn load_snapshot(
         self,
-        enabled_clients: &HashSet<ClientId>,
+        source_universe: &HashSet<ClientId>,
         group_by: &GroupBy,
         report_scope: &CacheReportScope,
     ) -> anyhow::Result<LoadedTuiCache> {
-        let Self { file, health: _ } = self;
-        load_bundle_from_file(file, enabled_clients, group_by, report_scope)
+        let Self {
+            file,
+            health: _,
+            universe: _,
+            canonical: _,
+        } = self;
+        load_bundle_from_file(file, source_universe, group_by, report_scope)
             .map(|parsed| parsed.loaded)
     }
 }
@@ -1402,12 +1567,14 @@ impl ProjectionStore {
 struct CachedTuiBundleRef<'a> {
     schema_version: u32,
     timestamp: u64,
-    enabled_clients: &'a [&'a str],
+    source_universe: &'a [&'a str],
     report_scope: &'a CacheReportScope,
     source_inventory_signature: &'a SourceInventorySignature,
     health: &'a tokscale_core::source_health::HealthReport,
     sessions: &'a [TuiSessionEntry],
     source_space: &'a BTreeMap<String, u64>,
+    canonical_digest: &'a str,
+    canonical: &'a RawValue,
     projections: CachedProjectionSetRef<'a>,
 }
 
@@ -1567,7 +1734,7 @@ impl<'de> Visitor<'de> for ProjectionSetVisitor {
 struct ParsedTuiBundle {
     schema_version: u32,
     timestamp: u64,
-    enabled_clients: Vec<String>,
+    source_universe: Vec<String>,
     report_scope: CacheReportScope,
     source_inventory_signature: SourceInventorySignature,
     health: tokscale_core::source_health::HealthReport,
@@ -1597,11 +1764,79 @@ struct FullBundleVisitor<'a> {
     group_by: &'a GroupBy,
 }
 
+struct CanonicalShapeSeed;
+
+impl<'de> DeserializeSeed<'de> for CanonicalShapeSeed {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(CanonicalShapeVisitor)
+    }
+}
+
+struct CanonicalShapeVisitor;
+
+impl<'de> Visitor<'de> for CanonicalShapeVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("canonical TUI projection state")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut present = 0_u8;
+        while let Some(field) = map.next_key::<String>()? {
+            let bit = match field.as_str() {
+                "model_map" => 1,
+                "agent_map" => 2,
+                "daily_map" => 4,
+                "hourly_map" => 8,
+                "next_sequence" => 16,
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                    continue;
+                }
+            };
+            if present & bit != 0 {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate canonical TUI field `{field}`"
+                )));
+            }
+            present |= bit;
+            map.next_value::<IgnoredAny>()?;
+        }
+
+        if present != 0b1_1111 {
+            return Err(serde::de::Error::custom(
+                "cached TUI bundle has incomplete canonical projection state",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_canonical_shape<E>(raw: &RawValue) -> Result<(), E>
+where
+    E: serde::de::Error,
+{
+    let mut deserializer = serde_json::Deserializer::from_str(raw.get());
+    CanonicalShapeSeed
+        .deserialize(&mut deserializer)
+        .map_err(E::custom)?;
+    deserializer.end().map_err(E::custom)
+}
+
 impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
     type Value = ParsedTuiBundle;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-40 TUI cache bundle")
+        formatter.write_str("a schema-41 TUI cache bundle")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -1610,12 +1845,14 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
     {
         let mut schema_version: Option<u32> = None;
         let mut timestamp = None;
-        let mut enabled_clients = None;
+        let mut source_universe = None;
         let mut report_scope = None;
         let mut source_inventory_signature = None;
         let mut health = None;
         let mut sessions = None;
         let mut source_space = None;
+        let mut expected_canonical_digest: Option<String> = None;
+        let mut actual_canonical_digest: Option<String> = None;
         let mut data = None;
 
         while let Some(field) = map.next_key::<String>()? {
@@ -1624,8 +1861,8 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
                     set_once(&mut schema_version, map.next_value()?, "schemaVersion")?
                 }
                 "timestamp" => set_once(&mut timestamp, map.next_value()?, "timestamp")?,
-                "enabledClients" => {
-                    set_once(&mut enabled_clients, map.next_value()?, "enabledClients")?
+                "sourceUniverse" => {
+                    set_once(&mut source_universe, map.next_value()?, "sourceUniverse")?
                 }
                 "reportScope" => set_once(&mut report_scope, map.next_value()?, "reportScope")?,
                 "sourceInventorySignature" => set_once(
@@ -1636,6 +1873,19 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
                 "health" => set_once(&mut health, map.next_value()?, "health")?,
                 "sessions" => set_once(&mut sessions, map.next_value()?, "sessions")?,
                 "sourceSpace" => set_once(&mut source_space, map.next_value()?, "sourceSpace")?,
+                "canonicalDigest" => set_once(
+                    &mut expected_canonical_digest,
+                    map.next_value()?,
+                    "canonicalDigest",
+                )?,
+                "canonical" => {
+                    if actual_canonical_digest.is_some() {
+                        return Err(serde::de::Error::duplicate_field("canonical"));
+                    }
+                    let raw: Box<RawValue> = map.next_value()?;
+                    validate_canonical_shape::<A::Error>(&raw)?;
+                    actual_canonical_digest = Some(sha256_hex(raw.get().as_bytes()));
+                }
                 "projections" => {
                     if data.is_some() {
                         return Err(serde::de::Error::duplicate_field("projections"));
@@ -1650,10 +1900,17 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
             }
         }
 
+        let expected_canonical_digest = required(expected_canonical_digest, "canonicalDigest")?;
+        let actual_canonical_digest = required(actual_canonical_digest, "canonical")?;
+        if actual_canonical_digest != expected_canonical_digest {
+            return Err(serde::de::Error::custom(
+                "cached TUI canonical projection digest does not match its contents",
+            ));
+        }
         Ok(ParsedTuiBundle {
             schema_version: required(schema_version, "schemaVersion")?,
             timestamp: required(timestamp, "timestamp")?,
-            enabled_clients: required(enabled_clients, "enabledClients")?,
+            source_universe: required(source_universe, "sourceUniverse")?,
             report_scope: required(report_scope, "reportScope")?,
             source_inventory_signature: required(
                 source_inventory_signature,
@@ -1709,7 +1966,7 @@ impl<'de> Visitor<'de> for ProjectionBundleVisitor<'_> {
     type Value = CachedUsageData;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-40 TUI cache bundle")
+        formatter.write_str("a schema-41 TUI cache bundle")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -1747,6 +2004,56 @@ impl<'de> Visitor<'de> for ProjectionBundleVisitor<'_> {
     }
 }
 
+struct CanonicalBundleSeed;
+
+impl<'de> DeserializeSeed<'de> for CanonicalBundleSeed {
+    type Value = TuiAcc;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(CanonicalBundleVisitor)
+    }
+}
+
+struct CanonicalBundleVisitor;
+
+impl<'de> Visitor<'de> for CanonicalBundleVisitor {
+    type Value = TuiAcc;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a schema-41 TUI cache bundle with canonical projection state")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut schema_version: Option<u32> = None;
+        let mut canonical = None;
+        while let Some(field) = map.next_key::<String>()? {
+            match field.as_str() {
+                "schemaVersion" => {
+                    set_once(&mut schema_version, map.next_value()?, "schemaVersion")?
+                }
+                "canonical" => set_once(&mut canonical, map.next_value()?, "canonical")?,
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+
+        let schema_version = required(schema_version, "schemaVersion")?;
+        if schema_version != CACHE_SCHEMA_VERSION {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported TUI cache schema {schema_version}"
+            )));
+        }
+        required(canonical, "canonical")
+    }
+}
+
 struct ParsedLoad {
     loaded: LoadedTuiCache,
     timestamp: u64,
@@ -1754,7 +2061,7 @@ struct ParsedLoad {
 
 fn load_bundle_from_file(
     mut file: File,
-    enabled_clients: &HashSet<ClientId>,
+    source_universe: &HashSet<ClientId>,
     group_by: &GroupBy,
     report_scope: &CacheReportScope,
 ) -> anyhow::Result<ParsedLoad> {
@@ -1773,14 +2080,14 @@ fn load_bundle_from_file(
     if &parsed.report_scope != report_scope {
         anyhow::bail!("cached TUI report scope does not match the request");
     }
-    if !cache_clients_match_exact(enabled_clients, &parsed.enabled_clients) {
-        anyhow::bail!("cached TUI client set does not match the request");
+    if !cache_clients_match_exact(source_universe, &parsed.source_universe) {
+        anyhow::bail!("cached TUI source universe does not match the request");
     }
-    if !cache_source_space_matches_exact(enabled_clients, &parsed.source_space) {
-        anyhow::bail!("cached TUI source-space keys do not match the enabled client set");
+    if !cache_source_space_matches_exact(source_universe, &parsed.source_space) {
+        anyhow::bail!("cached TUI source-space keys do not match the source universe");
     }
-    if !cache_session_sources_are_enabled(enabled_clients, &parsed.sessions) {
-        anyhow::bail!("cached TUI Sessions contain a source outside the enabled client set");
+    if !cache_session_sources_are_enabled(source_universe, &parsed.sessions) {
+        anyhow::bail!("cached TUI Sessions contain a source outside the source universe");
     }
 
     let mut data: UsageData = parsed.data.try_into()?;
@@ -1798,6 +2105,8 @@ fn load_bundle_from_file(
             projection_store: ProjectionStore {
                 file,
                 health: parsed.health,
+                universe: source_universe.clone(),
+                canonical: None,
             },
             source_inventory_signature: parsed.source_inventory_signature,
         },
@@ -1809,7 +2118,7 @@ fn load_bundle_from_file(
 /// projection plus Sessions. Unsupported/legacy/corrupt files are explicit
 /// misses; the caller remains responsible for reporting a refresh failure.
 pub fn load_cache(
-    enabled_clients: &HashSet<ClientId>,
+    source_universe: &HashSet<ClientId>,
     group_by: &GroupBy,
     report_scope: &CacheReportScope,
 ) -> CacheResult {
@@ -1821,7 +2130,7 @@ pub fn load_cache(
         Ok(file) => file,
         Err(_) => return CacheResult::Miss,
     };
-    let parsed = match load_bundle_from_file(file, enabled_clients, group_by, report_scope) {
+    let parsed = match load_bundle_from_file(file, source_universe, group_by, report_scope) {
         Ok(parsed) => parsed,
         Err(_) => return CacheResult::Miss,
     };
@@ -1840,7 +2149,7 @@ pub fn load_cache(
     }
 }
 
-/// Atomically persist one complete schema-40 TUI bundle.
+/// Atomically persist one complete schema-41 TUI bundle.
 ///
 /// Projection serialization borrows the canonical accumulator and materializes
 /// one grouping at a time, so the four projections never coexist in memory.
@@ -1851,34 +2160,39 @@ pub fn save_tui_bundle_cache(
     sessions: &[TuiSessionEntry],
     source_space: &BTreeMap<String, u64>,
     health: &tokscale_core::source_health::HealthReport,
-    enabled_clients: &HashSet<ClientId>,
+    source_universe: &HashSet<ClientId>,
     report_scope: &CacheReportScope,
     source_inventory_signature: SourceInventorySignature,
 ) -> anyhow::Result<ProjectionStore> {
-    if !cache_source_space_matches_exact(enabled_clients, source_space) {
-        anyhow::bail!("TUI source-space keys do not match the enabled client set");
+    if !cache_source_space_matches_exact(source_universe, source_space) {
+        anyhow::bail!("TUI source-space keys do not match the source universe");
     }
-    if !cache_session_sources_are_enabled(enabled_clients, sessions) {
-        anyhow::bail!("TUI Sessions contain a source outside the enabled client set");
+    if !cache_session_sources_are_enabled(source_universe, sessions) {
+        anyhow::bail!("TUI Sessions contain a source outside the source universe");
     }
 
     let cache_path = cache_file()?;
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-    let mut clients_vec: Vec<&str> = enabled_clients
+    let mut clients_vec: Vec<&str> = source_universe
         .iter()
         .map(|client| client.as_str())
         .collect();
     clients_vec.sort_unstable();
+    let canonical_json = serde_json::to_string(accumulator)?;
+    let canonical_digest = sha256_hex(canonical_json.as_bytes());
+    let canonical = RawValue::from_string(canonical_json)?;
 
     let cached = CachedTuiBundleRef {
         schema_version: CACHE_SCHEMA_VERSION,
         timestamp,
-        enabled_clients: &clients_vec,
+        source_universe: &clients_vec,
         report_scope,
         source_inventory_signature: &source_inventory_signature,
         health,
         sessions,
         source_space,
+        canonical_digest: &canonical_digest,
+        canonical: canonical.as_ref(),
         projections: CachedProjectionSetRef(accumulator),
     };
 
@@ -1899,5 +2213,7 @@ pub fn save_tui_bundle_cache(
     Ok(ProjectionStore {
         file,
         health: health.clone(),
+        universe: source_universe.clone(),
+        canonical: None,
     })
 }
