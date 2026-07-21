@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use super::achievements;
 use super::donut::{DonutChart, DonutSegment};
+use super::portraits;
 use super::sessions::format_bytes;
 use super::widgets::{format_cost, format_tokens, get_client_display_name};
 use crate::tui::app::App;
@@ -64,6 +66,10 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     // Snapshot rows are ordered by display priority. Compact layouts intentionally
     // clip lower-priority rows from the tail so the Overview remains usable.
     if inner.width >= THREE_COLUMN_MIN_WIDTH {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(inner);
         let columns = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -73,12 +79,13 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 Constraint::Length(1),
                 Constraint::Percentage(25),
             ])
-            .split(inner);
-        render_left(frame, app, section_area(columns[0]), &data);
+            .split(rows[0]);
+        render_left_hero(frame, app, section_area(columns[0]), &data);
         render_divider(frame, app, columns[1]);
-        render_middle(frame, app, section_area(columns[2]), &data);
+        render_middle_portrait(frame, app, section_area(columns[2]), &data);
         render_divider(frame, app, columns[3]);
-        render_right(frame, app, section_area(columns[4]));
+        render_right(frame, app, section_area(columns[4]), &data);
+        render_ticker(frame, app, rows[1], &data);
     } else if inner.width >= TWO_COLUMN_MIN_WIDTH {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
@@ -150,6 +157,255 @@ fn collect_snapshot(app: &App) -> SnapshotData {
     data
 }
 
+fn render_left_hero(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
+    let active_days = app
+        .data
+        .daily
+        .iter()
+        .filter(|day| day.tokens.total() > 0)
+        .count();
+    let lines = vec![
+        section_title(app, "Total"),
+        Line::from(vec![
+            Span::styled(
+                format_tokens(app.data.total_tokens),
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" tokens    ", Style::default().fg(app.theme.muted)),
+            Span::styled(
+                format_cost(app.data.total_cost),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" cost", Style::default().fg(app.theme.muted)),
+        ]),
+        separator_line(app, area.width as usize),
+        metric_line(
+            app,
+            "Source Data",
+            format_bytes(app.data.health.source_data_bytes),
+            app.theme.foreground,
+        ),
+        metric_line(app, "Active Days", active_days.to_string(), Color::Cyan),
+        metric_line(
+            app,
+            "Models Used",
+            data.models.len().to_string(),
+            Color::Cyan,
+        ),
+        metric_line(
+            app,
+            "Harnesses Used",
+            data.harnesses.len().to_string(),
+            Color::Cyan,
+        ),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The favorite model's kaomoji portrait with its share, plus the token-mix
+/// bar. Replaces the old donut: a ring reads as noise once one bucket
+/// dominates, while the portrait stays fun at any mix.
+fn render_middle_portrait(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
+    let total = data.tokens.total();
+    let favorite = data
+        .models
+        .iter()
+        .max_by(|(left_name, left), (right_name, right)| {
+            left.tokens
+                .cmp(&right.tokens)
+                .then_with(|| left.cost.total_cmp(&right.cost))
+                .then_with(|| right_name.cmp(left_name))
+        });
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    match favorite {
+        Some((name, aggregate)) => {
+            lines.extend(portraits::lines(app, portraits::family_of(name)));
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                name.clone(),
+                Style::default()
+                    .fg(app.model_color(name))
+                    .add_modifier(Modifier::BOLD),
+            )));
+            let share = if total > 0 {
+                aggregate.tokens as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{share:.1}% of tokens · {}", format_cost(aggregate.cost)),
+                Style::default().fg(app.theme.muted),
+            )));
+        }
+        None => {
+            lines.extend(portraits::lines(app, portraits::Family::Unknown));
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                "no data yet",
+                Style::default().fg(app.theme.muted),
+            )));
+        }
+    }
+    lines.push(Line::default());
+    lines.push(mix_bar(app, data, area.width as usize));
+    lines.extend(token_legend_rows(app, data, area.width as usize));
+
+    let pad = area.height.saturating_sub(lines.len() as u16) as usize / 2;
+    let mut padded = vec![Line::default(); pad];
+    padded.extend(lines);
+    padded.truncate(area.height as usize);
+    let paragraph = Paragraph::new(padded).alignment(Alignment::Center);
+    frame.render_widget(paragraph, area);
+}
+
+fn mix_bar(app: &App, data: &SnapshotData, width: usize) -> Line<'static> {
+    let buckets = token_buckets(app, data);
+    let total: u64 = buckets.iter().map(|(_, value, _)| *value).sum();
+    if width == 0 || total == 0 {
+        return Line::from(Span::styled(
+            "░".repeat(width),
+            app.theme.subtle_text_style(),
+        ));
+    }
+    let values: Vec<u64> = buckets.iter().map(|(_, value, _)| *value).collect();
+    let cells = segment_cells(&values, width);
+    Line::from(
+        buckets
+            .iter()
+            .zip(cells)
+            .filter(|(_, count)| *count > 0)
+            .map(|((_, _, color), count)| {
+                Span::styled("█".repeat(count), Style::default().fg(*color))
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Scrolling fun-fact ticker across the bottom of the Snapshot panel.
+fn render_ticker(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
+    let facts = fun_facts(app, data);
+    if facts.is_empty() || area.width < 4 {
+        return;
+    }
+    let text = facts.join("   ·   ") + "   ·   ";
+    let offset = app.ticker_tick as usize % text.chars().count().max(1);
+    let window = ticker_window(&text, area.width as usize - 2, offset);
+    let line = Line::from(vec![
+        Span::styled("▸ ", Style::default().fg(app.theme.accent)),
+        Span::styled(window, Style::default().fg(app.theme.muted)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn fun_facts(app: &App, data: &SnapshotData) -> Vec<String> {
+    let mut facts = Vec::new();
+    let total = data.tokens.total();
+    if total >= 1_000_000 {
+        facts.push(format!(
+            "你的 {} tokens ≈ {} 部莎士比亚全集 · 莎翁看了要沉默",
+            format_tokens(total),
+            commafy(total / 1_100_000)
+        ));
+        facts.push(format!(
+            "≈ {} 本《战争与和平》 · 托尔斯泰直呼内行",
+            commafy(total / 750_000)
+        ));
+    }
+    let cost = app.data.total_cost;
+    if cost >= 1.0 {
+        facts.push(format!(
+            "{} ≈ {} 块吮指原味鸡 · 疯狂星期四都救不了你",
+            format_cost(cost),
+            commafy((cost / 1.7) as u64)
+        ));
+        facts.push(format!(
+            "≈ {} 杯奶茶 · 糖分摄入警告",
+            commafy((cost / 3.0) as u64)
+        ));
+    }
+    if total > 0 {
+        let share = data.tokens.cache_read as f64 / total as f64 * 100.0;
+        if share >= 80.0 {
+            facts.push(format!("缓存命中 {share:.1}% · 会过日子的典范"));
+        } else if share < 50.0 {
+            facts.push(format!("缓存命中 {share:.1}% · 败家指数拉满"));
+        }
+    }
+    let active_days = app
+        .data
+        .daily
+        .iter()
+        .filter(|day| day.tokens.total() > 0)
+        .count();
+    if active_days >= 7 {
+        facts.push(format!(
+            "{active_days} 个活跃日 · 你和 AI 相处的时间超过大多数情侣"
+        ));
+    }
+    if data.models.len() >= 5 {
+        facts.push(format!(
+            "{} 个模型 · 后宫佳丽 {} 员",
+            data.models.len(),
+            data.models.len()
+        ));
+    }
+    if data.peak_daily_tokens > 0 {
+        facts.push(format!(
+            "峰值日 {} · 那天键盘冒烟了吗",
+            format_tokens(data.peak_daily_tokens)
+        ));
+    }
+    if app.data.health.source_data_bytes > 0 {
+        facts.push(format!(
+            "{} 会话数据 · 句句都是黑历史",
+            format_bytes(app.data.health.source_data_bytes)
+        ));
+    }
+    let streak = achievements::streak_days(&app.data.daily);
+    if streak >= 3 {
+        facts.push(format!("连击 {streak} 天 · 你和终端锁了"));
+    }
+    facts
+}
+
+/// Cycles the ticker text through a display-cell window; CJK chars occupy
+/// two cells.
+fn ticker_window(text: &str, width: usize, offset: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for index in 0..chars.len() {
+        let ch = chars[(offset + index) % chars.len()];
+        let cell = if (ch as u32) > 0x2E80 { 2 } else { 1 };
+        if used + cell > width {
+            break;
+        }
+        out.push(ch);
+        used += cell;
+    }
+    out
+}
+
+fn commafy(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::new();
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn render_divider(frame: &mut Frame, app: &App, area: Rect) {
     let divider = Line::from(Span::styled("│", Style::default().fg(app.theme.border)));
     frame.render_widget(Paragraph::new(vec![divider; area.height as usize]), area);
@@ -218,47 +474,46 @@ fn render_middle(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) 
     frame.render_widget(Paragraph::new(lines), body[1]);
 }
 
-fn render_right(frame: &mut Frame, app: &App, area: Rect) {
-    // Title, hero percentage, and a segmented health bar read as one gauge;
-    // the exact per-state counts stay in the legend below.
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // section title
-            Constraint::Length(1), // hero percentage
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // health bar
-            Constraint::Length(1), // spacer
-            Constraint::Min(0),    // legend
-        ])
-        .split(area);
-    frame.render_widget(
-        Paragraph::new(section_title(app, "Sources")).alignment(Alignment::Center),
-        rows[0],
+fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
+    let items = achievements::build(
+        app,
+        data.tokens.total(),
+        data.tokens.cache_read,
+        data.models.len(),
+        data.harnesses.len(),
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
+    let mut lines = achievements::lines(app, &items);
+    lines.push(Line::default());
+
+    let sources = total_sources(app);
+    if sources > 0 && app.data.health.clean_sources == sources {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "✓ ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} sources clean", commafy(sources as u64)),
+                Style::default().fg(app.theme.muted),
+            ),
+        ]));
+    } else {
+        // Health failures expand back into the full gauge and legend; the
+        // one-liner is only earned when everything is clean.
+        lines.push(section_title(app, "Sources"));
+        lines.push(Line::from(Span::styled(
             health_percentage(app),
             Style::default()
                 .fg(health_color(app))
                 .add_modifier(Modifier::BOLD),
-        )))
-        .alignment(Alignment::Center),
-        rows[1],
-    );
-    frame.render_widget(
-        Paragraph::new(health_bar(app, rows[3].width as usize)),
-        rows[3],
-    );
-    frame.render_widget(
-        Paragraph::new(
-            source_legend_rows(app, rows[5].width as usize)
-                .into_iter()
-                .take(rows[5].height as usize)
-                .collect::<Vec<_>>(),
-        ),
-        rows[5],
-    );
+        )));
+        lines.push(health_bar(app, area.width as usize));
+        lines.extend(source_legend_rows(app, area.width as usize));
+    }
+    lines.truncate(area.height as usize);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// One segmented source-health bar: each non-zero source state occupies a
@@ -278,19 +533,31 @@ fn health_bar(app: &App, width: usize) -> Line<'static> {
             app.theme.subtle_text_style(),
         ));
     }
+    let values: Vec<u64> = states.iter().map(|(_, value, _)| *value).collect();
+    let cells = segment_cells(&values, width);
 
-    let mut cells: Vec<usize> = states
+    Line::from(
+        states
+            .iter()
+            .zip(cells)
+            .filter(|(_, count)| *count > 0)
+            .map(|((_, _, color), count)| {
+                Span::styled("█".repeat(count), Style::default().fg(*color))
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Proportional segment widths summing exactly to `width`: each non-zero
+/// value keeps at least one cell, then the remainder is reconciled against
+/// the widest segments.
+fn segment_cells(values: &[u64], width: usize) -> Vec<usize> {
+    let total: u64 = values.iter().sum();
+    let mut cells: Vec<usize> = values
         .iter()
-        .map(|(_, value, _)| {
-            if *value == 0 {
-                0
-            } else {
-                (*value as u128 * width as u128 / total as u128) as usize
-            }
-        })
+        .map(|value| (*value as u128 * width as u128 / total as u128) as usize)
         .collect();
-    // One-cell minimum per non-zero state, then reconcile against the width.
-    for (index, (_, value, _)) in states.iter().enumerate() {
+    for (index, value) in values.iter().enumerate() {
         if *value > 0 && cells[index] == 0 {
             cells[index] = 1;
         }
@@ -315,21 +582,11 @@ fn health_bar(app: &App, width: usize) -> Line<'static> {
                 .iter()
                 .enumerate()
                 .max_by_key(|(_, count)| *count)
-                .expect("non-zero total has a non-zero state");
+                .expect("non-zero total has a non-zero segment");
             cells[index] += 1;
         }
     }
-
-    Line::from(
-        states
-            .iter()
-            .zip(cells)
-            .filter(|(_, count)| *count > 0)
-            .map(|((_, _, color), count)| {
-                Span::styled("█".repeat(count), Style::default().fg(*color))
-            })
-            .collect::<Vec<_>>(),
-    )
+    cells
 }
 
 fn section_title(app: &App, title: &'static str) -> Line<'static> {
@@ -717,7 +974,7 @@ mod tests {
     }
 
     /// Foreground colors of the '█' health-bar cells inside the given columns,
-    /// sampled on the bar row (three rows under the Sources title).
+    /// sampled on the bar row (two rows under the Sources title).
     fn bar_colors_in_columns(
         lines: &[String],
         buffer: &Buffer,
@@ -728,7 +985,7 @@ mod tests {
             .iter()
             .position(|line| line.contains("Sources"))
             .expect("Sources title should render") as u16;
-        let bar_y = title_y + 3;
+        let bar_y = title_y + 2;
         (x_start..x_end)
             .filter(|x| buffer[(*x, bar_y)].symbol() == "█")
             .map(|x| buffer[(x, bar_y)].fg)
@@ -787,11 +1044,11 @@ mod tests {
         let lines = buffer_lines(&terminal);
         let metric_row = lines
             .iter()
-            .find(|line| line.contains("Total Tokens"))
+            .find(|line| line.contains("Source Data"))
             .expect("snapshot metric row should render");
         assert_eq!(metric_row.matches('│').count(), 4, "{metric_row}");
         let metric_offset = metric_row
-            .find("Total Tokens")
+            .find("Source Data")
             .expect("metric label should render");
         assert_eq!(UnicodeWidthStr::width(&metric_row[..metric_offset]), 2);
     }
@@ -934,7 +1191,7 @@ mod tests {
     }
 
     #[test]
-    fn sources_bar_is_single_color_when_all_sources_are_clean() {
+    fn sources_collapses_to_a_one_liner_when_all_sources_are_clean() {
         let width = 200;
         let height = 50;
         let mut app = make_app_with_theme(width, "dusk");
@@ -945,13 +1202,12 @@ mod tests {
             .draw(|frame| render(frame, &mut app, frame.area()))
             .unwrap();
 
-        let lines = buffer_lines(&terminal);
-        let (x_start, x_end) = sources_column_range(&lines);
-        let colors = bar_colors_in_columns(&lines, terminal.backend().buffer(), x_start, x_end);
-        assert!(!colors.is_empty(), "Sources bar should render segments");
+        let screen = buffer_lines(&terminal).join("\n");
+        assert!(screen.contains("✓"), "{screen}");
+        assert!(screen.contains("100 sources clean"), "{screen}");
         assert!(
-            colors.iter().all(|color| *color == app.theme.accent),
-            "expected a single-colored bar, got {colors:?}"
+            !screen.contains("Degraded"),
+            "clean sources earn the one-liner, not the legend: {screen}"
         );
     }
 
@@ -1132,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_snapshots_show_tokens_and_sources_titles() {
+    fn wide_snapshots_show_achievements_portrait_and_sources() {
         for (width, height) in [(120, 30), (200, 50)] {
             let mut app = make_app(width);
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -1140,12 +1396,12 @@ mod tests {
                 .draw(|frame| render(frame, &mut app, frame.area()))
                 .unwrap();
 
-            let lines = buffer_lines(&terminal);
-            let title_row = lines
-                .iter()
-                .find(|line| line.contains("Sources"))
-                .expect("Sources title should render");
-            assert!(title_row.contains("Tokens"), "{title_row}");
+            let screen = buffer_lines(&terminal).join("\n");
+            assert!(screen.contains("Achievements"), "{screen}");
+            assert!(screen.contains("[■_■]"), "fallback portrait: {screen}");
+            // No data means sources are not all-clean, so the expanded
+            // Sources block keeps its title and placeholder gauge.
+            assert!(screen.contains("Sources"), "{screen}");
         }
     }
 }

@@ -1,3 +1,4 @@
+mod achievements;
 mod agents;
 mod bar_chart;
 mod daily;
@@ -14,6 +15,7 @@ mod models;
 mod overview;
 mod overview_snapshot;
 mod period;
+mod portraits;
 mod radar;
 mod sessions;
 pub mod spinner;
@@ -335,7 +337,7 @@ mod tests {
         let screen = render_screen(&mut app, 120, 32).join("\n");
 
         assert!(
-            screen.contains("Total Tokens"),
+            screen.contains("Source Data"),
             "installed generation must keep the tab content visible: {screen}"
         );
         assert!(
