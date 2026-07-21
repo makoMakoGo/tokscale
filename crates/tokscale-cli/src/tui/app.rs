@@ -62,6 +62,12 @@ pub(crate) enum ProjectionBackend {
     Memory(tokscale_core::TuiAcc),
     #[cfg(test)]
     Failing(&'static str),
+    #[cfg(test)]
+    FailingForGroup {
+        accumulator: tokscale_core::TuiAcc,
+        group_by: tokscale_core::GroupBy,
+        diagnostic: &'static str,
+    },
 }
 
 impl ProjectionBackend {
@@ -77,6 +83,17 @@ impl ProjectionBackend {
             }
             #[cfg(test)]
             Self::Failing(diagnostic) => anyhow::bail!(*diagnostic),
+            #[cfg(test)]
+            Self::FailingForGroup {
+                accumulator,
+                group_by: failing_group,
+                diagnostic,
+            } => {
+                if group_by == failing_group {
+                    anyhow::bail!(*diagnostic);
+                }
+                Ok(accumulator.project_for_clients(group_by, selected_clients))
+            }
         }
     }
 }
@@ -260,6 +277,12 @@ pub type DailyDetailRow = DetailRow;
 pub struct ModelDetailSelection {
     pub model: String,
     pub client: Option<String>,
+}
+
+enum ModelDetailClientUpdate {
+    Inactive,
+    Ready(Vec<ModelUsage>),
+    MissingSelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -753,12 +776,49 @@ impl App {
         };
         data.health = self.data.health.clone();
         data.error = self.data.error.clone();
-        self.clear_model_detail_state(client_changed);
+
+        let detail_update = if client_changed && !group_changed {
+            match self.model_detail_update_for_clients(&data, &selected_clients) {
+                Ok(update) => update,
+                Err(error) => {
+                    *self.selected_clients.borrow_mut() = self.data_clients.clone();
+                    *self.group_by.borrow_mut() = self.data_group_by.clone();
+                    self.set_status(&format!(
+                        "Client projection failed while refreshing model details: {error:#}"
+                    ));
+                    return;
+                }
+            }
+        } else {
+            ModelDetailClientUpdate::Inactive
+        };
+
+        let client_status = if group_changed {
+            self.clear_model_detail_state(client_changed);
+            None
+        } else if client_changed {
+            Some(match detail_update {
+                ModelDetailClientUpdate::Ready(models) => {
+                    self.model_detail_models = Some(models);
+                    "Clients filtered locally; model details updated"
+                }
+                ModelDetailClientUpdate::MissingSelection => {
+                    self.clear_model_detail_state(true);
+                    "Selected model is not available for the current Client filter"
+                }
+                ModelDetailClientUpdate::Inactive => {
+                    self.clear_model_detail_state(true);
+                    "Clients filtered locally"
+                }
+            })
+        } else {
+            None
+        };
         self.update_projected_data(data);
         self.data_group_by = group_by.clone();
         self.data_clients = selected_clients;
-        if client_changed && !group_changed {
-            self.set_local_report_status("Clients filtered locally");
+        if let Some(status) = client_status {
+            self.set_local_report_status(status);
         } else {
             self.set_local_report_status(&format!("Regrouped by {group_by}"));
         }
@@ -1901,6 +1961,40 @@ impl App {
                 .is_none_or(|client| model.client == client)
     }
 
+    fn model_detail_update_for_clients(
+        &mut self,
+        projected_data: &UsageData,
+        selected_clients: &HashSet<ClientId>,
+    ) -> Result<ModelDetailClientUpdate> {
+        let Some(selection) = self.selected_model_detail.clone() else {
+            return Ok(ModelDetailClientUpdate::Inactive);
+        };
+        if !projected_data
+            .models
+            .iter()
+            .any(|model| Self::model_detail_matches(&selection, model))
+        {
+            return Ok(ModelDetailClientUpdate::MissingSelection);
+        }
+
+        let Some(backend) = self.projection_backend.as_mut() else {
+            anyhow::bail!("local reports are not loaded yet");
+        };
+        let detail_data = backend.project(
+            &tokscale_core::GroupBy::ClientProviderModel,
+            selected_clients,
+        )?;
+        if !detail_data
+            .models
+            .iter()
+            .any(|model| Self::model_detail_matches(&selection, model))
+        {
+            anyhow::bail!("provider projection omitted the selected model");
+        }
+
+        Ok(ModelDetailClientUpdate::Ready(detail_data.models))
+    }
+
     fn open_selected_model_detail(&mut self) {
         if self.is_model_detail_active() || !self.model_details_supported() {
             return;
@@ -1973,7 +2067,30 @@ impl App {
         let Some(selection) = self.selected_model_detail.clone() else {
             return;
         };
-        self.clear_model_detail_state(false);
+
+        self.leave_model_detail_sort_context();
+        self.selected_model_detail = None;
+
+        let restored_index = self
+            .get_sorted_models()
+            .iter()
+            .position(|model| Self::model_detail_matches(&selection, model))
+            .unwrap_or_else(|| self.stored_list_interaction(Tab::Models).selected);
+        let model_interaction = self.stored_list_interaction(Tab::Models);
+        let max_visible = model_interaction.visible.max(1);
+        let viewport_still_holds = restored_index >= model_interaction.scroll
+            && restored_index < model_interaction.scroll + max_visible;
+        let scroll = if viewport_still_holds {
+            model_interaction.scroll
+        } else {
+            restored_index.saturating_sub(max_visible / 2)
+        };
+        self.set_current_list_interaction(ListInteraction {
+            selected: restored_index,
+            scroll,
+            visible: model_interaction.visible,
+        });
+
         self.set_local_report_status(&format!("Returned to model {}", selection.model));
         self.clamp_selection();
     }
@@ -4531,7 +4648,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_and_client_projection_invalidate_model_detail_cache() {
+    fn refresh_invalidates_model_detail_but_client_projection_refreshes_it() {
         let mut app = make_app_with_model_projection(tokscale_core::GroupBy::Model);
         app.selected_index = app
             .get_sorted_models()
@@ -4556,9 +4673,85 @@ mod tests {
 
         app.apply_selected_projection(true, false);
 
+        assert!(app.is_model_detail_active());
+        assert_eq!(
+            app.selected_model_detail,
+            Some(ModelDetailSelection {
+                model: "shared-model".to_string(),
+                client: None,
+            })
+        );
+        let rows = app.get_sorted_models();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|model| model.client == "claude"));
+        assert!(app.model_detail_models.is_some());
+        assert_eq!(app.data_clients, HashSet::from([ClientId::Claude]));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Clients filtered locally; model details updated")
+        );
+
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert!(!app.is_model_detail_active());
+        assert_eq!(
+            app.get_sorted_models()[app.selected_index].model,
+            "shared-model"
+        );
+    }
+
+    #[test]
+    fn client_projection_exits_model_detail_when_locked_selection_disappears() {
+        let mut app = make_app_with_model_projection(tokscale_core::GroupBy::ClientModel);
+        app.selected_index = app
+            .get_sorted_models()
+            .iter()
+            .position(|model| model.model == "shared-model" && model.client == "codex")
+            .unwrap();
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.is_model_detail_active());
+        assert!(app.model_detail_models.is_some());
+        *app.selected_clients.borrow_mut() = HashSet::from([ClientId::Claude]);
+
+        app.apply_selected_projection(true, false);
+
         assert!(!app.is_model_detail_active());
         assert!(app.model_detail_models.is_none());
         assert_eq!(app.data_clients, HashSet::from([ClientId::Claude]));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Selected model is not available for the current Client filter")
+        );
+    }
+
+    #[test]
+    fn detail_refresh_failure_rolls_back_client_filter_and_preserves_detail() {
+        let mut app = make_app_with_model_projection(tokscale_core::GroupBy::Model);
+        app.selected_index = app
+            .get_sorted_models()
+            .iter()
+            .position(|model| model.model == "shared-model")
+            .unwrap();
+        app.handle_key_event(key(KeyCode::Enter));
+        let original_clients = app.data_clients.clone();
+        let original_rows = app.get_sorted_models().len();
+        app.projection_backend = Some(ProjectionBackend::FailingForGroup {
+            accumulator: model_detail_accumulator(),
+            group_by: tokscale_core::GroupBy::ClientProviderModel,
+            diagnostic: "injected provider detail failure",
+        });
+        *app.selected_clients.borrow_mut() = HashSet::from([ClientId::Claude]);
+
+        app.apply_selected_projection(true, false);
+
+        assert!(app.is_model_detail_active());
+        assert_eq!(app.get_sorted_models().len(), original_rows);
+        assert_eq!(*app.selected_clients.borrow(), original_clients);
+        assert_eq!(app.data_clients, original_clients);
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("injected provider detail failure")));
     }
 
     #[test]
@@ -4715,8 +4908,8 @@ mod tests {
         let last_refresh = app.last_refresh;
 
         app.handle_key_event(key(KeyCode::Char('s')));
+        app.handle_key_event(key(KeyCode::Char(' ')));
         app.handle_key_event(key(KeyCode::Enter));
-        app.handle_key_event(key(KeyCode::Esc));
 
         assert!(!app.needs_reload);
         assert!(!app.reload_force);
@@ -4732,8 +4925,8 @@ mod tests {
         let original = app.data_clients.clone();
 
         app.handle_key_event(key(KeyCode::Char('s')));
+        app.handle_key_event(key(KeyCode::Char(' ')));
         app.handle_key_event(key(KeyCode::Enter));
-        app.handle_key_event(key(KeyCode::Esc));
 
         assert_eq!(*app.selected_clients.borrow(), original);
         assert_eq!(app.data_clients, original);
@@ -4789,16 +4982,18 @@ mod tests {
         app.handle_key_event(key(KeyCode::Char('s')));
         assert!(app.dialog_stack.is_active());
 
-        app.handle_key_event(key(KeyCode::Enter));
+        app.handle_key_event(key(KeyCode::Char(' ')));
         assert!(app.dialog_stack.is_active());
         assert!(!app.needs_reload);
         assert_eq!(app.data_clients, original_clients);
+        assert_eq!(*app.selected_clients.borrow(), original_clients);
 
         app.on_tick();
         assert!(!app.needs_reload);
         assert_eq!(app.data_clients, original_clients);
+        assert_eq!(*app.selected_clients.borrow(), original_clients);
 
-        app.handle_key_event(key(KeyCode::Esc));
+        app.handle_key_event(key(KeyCode::Enter));
 
         assert!(!app.dialog_stack.is_active());
         assert!(!app.needs_reload);

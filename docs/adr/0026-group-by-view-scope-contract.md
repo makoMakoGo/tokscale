@@ -82,10 +82,14 @@ locks the selected model and shows one row per Client + Provider combination.
 Under `GroupBy::ClientModel`, Enter locks both the selected client and model
 and shows one row per provider. Both paths consume the installed
 `ClientProviderModel` projection; they never scan inputs, write a cache, or
-advance the refresh clock. The projection is retained for the installed
-generation, Esc only restores the outer list/sort state, and a refresh or
-client-filter change invalidates it. Groupings that already expose Provider or
-Workspace do not offer this detail transition.
+advance the refresh clock. Locked dimensions move into the detail title and
+are omitted from the responsive table, so only varying identity columns remain.
+The projection is retained for the installed generation, and Esc only restores
+the outer list/sort state. A compatible client-filter change refreshes the
+provider projection and preserves the detail selection; if the locked model or
+client disappears, the TUI exits detail with an explicit status. A generation
+refresh invalidates the detail projection. Groupings that already expose
+Provider or Workspace do not offer this detail transition.
 
 **Dimensions are structured fields.** A grouping dimension such as workspace
 travels in dedicated fields (`workspace_key`, `workspace_label` on

@@ -757,8 +757,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn closing_client_picker_exits_detail_for_a_deselected_client_without_scanning() {
+    fn app_with_codex_session_detail() -> (App, view_state::ViewState) {
         let mut app = app_on(Tab::Sessions);
         app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
         app.session_snapshot = session_data::SessionSnapshot::new(
@@ -774,10 +773,14 @@ mod tests {
         assert!(view_state.session_detail_active());
         assert_eq!(view_state.session_rows(&app).len(), 1);
 
+        (app, view_state)
+    }
+
+    fn open_client_picker_and_toggle_codex(app: &mut App, view_state: &mut view_state::ViewState) {
         assert_eq!(
             dispatch_key_event(
-                &mut app,
-                &mut view_state,
+                app,
+                view_state,
                 KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
             ),
             KeyEventOutcome::Continue
@@ -788,17 +791,46 @@ mod tests {
             .hotkey()
             .expect("Codex must have a client picker hotkey");
         dispatch_key_event(
-            &mut app,
-            &mut view_state,
+            app,
+            view_state,
             KeyEvent::new(KeyCode::Char(codex_hotkey), KeyModifiers::ALT),
         );
         assert!(app.dialog_stack.is_active());
         assert!(view_state.session_detail_active());
+    }
+
+    #[test]
+    fn escape_from_client_picker_cancels_without_leaving_session_detail() {
+        let (mut app, mut view_state) = app_with_codex_session_detail();
+        let original_clients = app.selected_clients.borrow().clone();
+
+        open_client_picker_and_toggle_codex(&mut app, &mut view_state);
+        assert_eq!(*app.selected_clients.borrow(), original_clients);
 
         dispatch_key_event(
             &mut app,
             &mut view_state,
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+
+        assert!(!app.dialog_stack.is_active());
+        assert!(view_state.session_detail_active());
+        assert_eq!(view_state.selected_session_client(), Some("codex"));
+        assert_eq!(*app.selected_clients.borrow(), original_clients);
+        assert_eq!(app.data_clients, original_clients);
+        assert!(!app.needs_reload);
+        assert!(!app.reload_force);
+    }
+
+    #[test]
+    fn applying_client_picker_exits_detail_for_deselected_client_without_scanning() {
+        let (mut app, mut view_state) = app_with_codex_session_detail();
+
+        open_client_picker_and_toggle_codex(&mut app, &mut view_state);
+        dispatch_key_event(
+            &mut app,
+            &mut view_state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
 
         assert!(!app.dialog_stack.is_active());

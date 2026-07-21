@@ -56,8 +56,35 @@ pub(crate) enum ModelUsageColumn {
 pub(crate) enum ModelUsageLayoutSchema {
     Models,
     WorkspaceModels,
+    ModelProviderDetails,
+    ClientModelProviderDetails,
     Detail,
     WorkspaceDetail,
+}
+
+impl ModelUsageLayoutSchema {
+    fn has_workspace(self) -> bool {
+        matches!(self, Self::WorkspaceModels | Self::WorkspaceDetail)
+    }
+
+    fn uses_detail_metrics(self) -> bool {
+        matches!(self, Self::Detail | Self::WorkspaceDetail)
+    }
+
+    fn is_model_provider_detail(self) -> bool {
+        matches!(
+            self,
+            Self::ModelProviderDetails | Self::ClientModelProviderDetails
+        )
+    }
+
+    fn locks_model(self) -> bool {
+        self.is_model_provider_detail()
+    }
+
+    fn locks_client(self) -> bool {
+        matches!(self, Self::ClientModelProviderDetails)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,29 +127,27 @@ fn model_usage_columns(
     client_content_width: u16,
     workspace_content_width: u16,
 ) -> Vec<ResponsiveColumn<ModelUsageColumn>> {
-    let has_workspace = matches!(
-        schema,
-        ModelUsageLayoutSchema::WorkspaceModels | ModelUsageLayoutSchema::WorkspaceDetail
-    );
     let client_max_width = match schema {
-        ModelUsageLayoutSchema::Detail | ModelUsageLayoutSchema::WorkspaceDetail => {
-            DETAIL_CLIENT_MAX_WIDTH
-        }
+        ModelUsageLayoutSchema::Detail
+        | ModelUsageLayoutSchema::WorkspaceDetail
+        | ModelUsageLayoutSchema::ModelProviderDetails
+        | ModelUsageLayoutSchema::ClientModelProviderDetails => DETAIL_CLIENT_MAX_WIDTH,
         ModelUsageLayoutSchema::Models | ModelUsageLayoutSchema::WorkspaceModels => {
             CLIENT_MAX_WIDTH
         }
     };
     let provider_max_width = match schema {
-        ModelUsageLayoutSchema::Detail | ModelUsageLayoutSchema::WorkspaceDetail => {
-            DETAIL_PROVIDER_MAX_WIDTH
-        }
+        ModelUsageLayoutSchema::Detail
+        | ModelUsageLayoutSchema::WorkspaceDetail
+        | ModelUsageLayoutSchema::ModelProviderDetails
+        | ModelUsageLayoutSchema::ClientModelProviderDetails => DETAIL_PROVIDER_MAX_WIDTH,
         ModelUsageLayoutSchema::Models | ModelUsageLayoutSchema::WorkspaceModels => {
             PROVIDER_MAX_WIDTH
         }
     };
 
     let mut columns = Vec::new();
-    if has_workspace {
+    if schema.has_workspace() {
         columns.push(ResponsiveColumn::measured_required(
             ModelUsageColumn::Workspace,
             column_order(ModelUsageColumn::Workspace),
@@ -131,132 +156,149 @@ fn model_usage_columns(
             WORKSPACE_MAX_WIDTH,
         ));
     }
-    columns.extend([
-        ResponsiveColumn::measured_required(
+    if !schema.locks_model() {
+        columns.push(ResponsiveColumn::measured_required(
             ModelUsageColumn::Model,
             column_order(ModelUsageColumn::Model),
             MODEL_MIN_WIDTH,
             model_content_width,
             MODEL_MAX_WIDTH,
-        ),
-        ResponsiveColumn::fixed_required(
-            ModelUsageColumn::Total,
-            column_order(ModelUsageColumn::Total),
-            DETAIL_TOTAL_WIDTH,
-        ),
-        ResponsiveColumn::fixed_optional(
-            ModelUsageColumn::Cost,
-            10,
-            column_order(ModelUsageColumn::Cost),
-            DETAIL_COST_WIDTH,
-        ),
-        ResponsiveColumn::measured_atomic_optional(
+        ));
+    }
+    if schema.is_model_provider_detail() {
+        if !schema.locks_client() {
+            columns.push(ResponsiveColumn::measured_required(
+                ModelUsageColumn::Client,
+                column_order(ModelUsageColumn::Client),
+                CLIENT_MIN_WIDTH,
+                client_content_width,
+                client_max_width,
+            ));
+        }
+        columns.push(ResponsiveColumn::measured_required(
+            ModelUsageColumn::Provider,
+            column_order(ModelUsageColumn::Provider),
+            PROVIDER_MIN_WIDTH,
+            provider_content_width,
+            provider_max_width,
+        ));
+    }
+    columns.push(ResponsiveColumn::fixed_required(
+        ModelUsageColumn::Total,
+        column_order(ModelUsageColumn::Total),
+        DETAIL_TOTAL_WIDTH,
+    ));
+    columns.push(ResponsiveColumn::fixed_optional(
+        ModelUsageColumn::Cost,
+        10,
+        column_order(ModelUsageColumn::Cost),
+        DETAIL_COST_WIDTH,
+    ));
+    if !schema.is_model_provider_detail() {
+        columns.push(ResponsiveColumn::measured_atomic_optional(
             ModelUsageColumn::Client,
             20,
             column_order(ModelUsageColumn::Client),
             CLIENT_MIN_WIDTH,
             client_content_width,
             client_max_width,
-        ),
-        ResponsiveColumn::measured_atomic_optional(
+        ));
+        columns.push(ResponsiveColumn::measured_atomic_optional(
             ModelUsageColumn::Provider,
             30,
             column_order(ModelUsageColumn::Provider),
             PROVIDER_MIN_WIDTH,
             provider_content_width,
             provider_max_width,
-        ),
-    ]);
+        ));
+    }
 
-    match schema {
-        ModelUsageLayoutSchema::Detail | ModelUsageLayoutSchema::WorkspaceDetail => {
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::Messages,
-                40,
-                column_order(ModelUsageColumn::Messages),
-                DETAIL_MESSAGES_WIDTH,
-            ));
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::Input,
-                50,
-                column_order(ModelUsageColumn::Input),
-                DETAIL_NUMERIC_WIDTH,
-            ));
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::Output,
-                60,
-                column_order(ModelUsageColumn::Output),
-                DETAIL_NUMERIC_WIDTH,
-            ));
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::CacheRate,
-                70,
-                column_order(ModelUsageColumn::CacheRate),
-                DETAIL_NUMERIC_WIDTH,
-            ));
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::CacheRead,
-                80,
-                column_order(ModelUsageColumn::CacheRead),
-                DETAIL_NUMERIC_WIDTH,
-            ));
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::CacheWrite,
-                90,
-                column_order(ModelUsageColumn::CacheWrite),
-                DETAIL_NUMERIC_WIDTH,
-            ));
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::CostPerMillion,
-                100,
-                column_order(ModelUsageColumn::CostPerMillion),
-                DETAIL_COST_PER_MILLION_WIDTH,
-            ));
-        }
-        ModelUsageLayoutSchema::Models | ModelUsageLayoutSchema::WorkspaceModels => {
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::Input,
-                40,
-                column_order(ModelUsageColumn::Input),
-                DETAIL_NUMERIC_WIDTH,
-            ));
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::Output,
-                50,
-                column_order(ModelUsageColumn::Output),
-                DETAIL_NUMERIC_WIDTH,
-            ));
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::CacheRate,
-                60,
-                column_order(ModelUsageColumn::CacheRate),
-                DETAIL_NUMERIC_WIDTH,
-            ));
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::CacheRead,
-                70,
-                column_order(ModelUsageColumn::CacheRead),
-                DETAIL_NUMERIC_WIDTH,
-            ));
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::CacheWrite,
-                80,
-                column_order(ModelUsageColumn::CacheWrite),
-                DETAIL_NUMERIC_WIDTH,
-            ));
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::Performance,
-                90,
-                column_order(ModelUsageColumn::Performance),
-                DETAIL_PERFORMANCE_WIDTH,
-            ));
-            columns.push(ResponsiveColumn::fixed_optional(
-                ModelUsageColumn::CostPerMillion,
-                100,
-                column_order(ModelUsageColumn::CostPerMillion),
-                DETAIL_COST_PER_MILLION_WIDTH,
-            ));
-        }
+    if schema.uses_detail_metrics() {
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::Messages,
+            40,
+            column_order(ModelUsageColumn::Messages),
+            DETAIL_MESSAGES_WIDTH,
+        ));
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::Input,
+            50,
+            column_order(ModelUsageColumn::Input),
+            DETAIL_NUMERIC_WIDTH,
+        ));
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::Output,
+            60,
+            column_order(ModelUsageColumn::Output),
+            DETAIL_NUMERIC_WIDTH,
+        ));
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::CacheRate,
+            70,
+            column_order(ModelUsageColumn::CacheRate),
+            DETAIL_NUMERIC_WIDTH,
+        ));
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::CacheRead,
+            80,
+            column_order(ModelUsageColumn::CacheRead),
+            DETAIL_NUMERIC_WIDTH,
+        ));
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::CacheWrite,
+            90,
+            column_order(ModelUsageColumn::CacheWrite),
+            DETAIL_NUMERIC_WIDTH,
+        ));
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::CostPerMillion,
+            100,
+            column_order(ModelUsageColumn::CostPerMillion),
+            DETAIL_COST_PER_MILLION_WIDTH,
+        ));
+    } else {
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::Input,
+            40,
+            column_order(ModelUsageColumn::Input),
+            DETAIL_NUMERIC_WIDTH,
+        ));
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::Output,
+            50,
+            column_order(ModelUsageColumn::Output),
+            DETAIL_NUMERIC_WIDTH,
+        ));
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::CacheRate,
+            60,
+            column_order(ModelUsageColumn::CacheRate),
+            DETAIL_NUMERIC_WIDTH,
+        ));
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::CacheRead,
+            70,
+            column_order(ModelUsageColumn::CacheRead),
+            DETAIL_NUMERIC_WIDTH,
+        ));
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::CacheWrite,
+            80,
+            column_order(ModelUsageColumn::CacheWrite),
+            DETAIL_NUMERIC_WIDTH,
+        ));
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::Performance,
+            90,
+            column_order(ModelUsageColumn::Performance),
+            DETAIL_PERFORMANCE_WIDTH,
+        ));
+        columns.push(ResponsiveColumn::fixed_optional(
+            ModelUsageColumn::CostPerMillion,
+            100,
+            column_order(ModelUsageColumn::CostPerMillion),
+            DETAIL_COST_PER_MILLION_WIDTH,
+        ));
     }
 
     columns
@@ -304,7 +346,11 @@ pub(crate) fn model_usage_table_layout(
         workspace_content_width,
     );
     let layout = responsive_table_layout(table_width, &specs);
-    let model_width = layout.width_for(ModelUsageColumn::Model);
+    let model_width = if layout.columns.contains(&ModelUsageColumn::Model) {
+        layout.width_for(ModelUsageColumn::Model)
+    } else {
+        0
+    };
 
     ModelUsageTableLayout {
         density: density_for_columns(&layout.columns),
@@ -385,6 +431,56 @@ mod tests {
         );
         assert_eq!(layout.model_width, MODEL_MAX_WIDTH as usize);
         assert_eq!(table_width(&layout), 39);
+    }
+
+    #[test]
+    fn model_provider_detail_locks_model_and_keeps_varying_dimensions_required() {
+        let layout = layout(27, 80, 80, 80, ModelUsageLayoutSchema::ModelProviderDetails);
+
+        assert_eq!(
+            layout.columns,
+            vec![
+                ModelUsageColumn::Client,
+                ModelUsageColumn::Provider,
+                ModelUsageColumn::Total,
+            ]
+        );
+        assert_eq!(layout.model_width, 0);
+        assert_eq!(table_width(&layout), 27);
+    }
+
+    #[test]
+    fn client_model_provider_detail_locks_model_and_client() {
+        let layout = layout(
+            18,
+            80,
+            80,
+            80,
+            ModelUsageLayoutSchema::ClientModelProviderDetails,
+        );
+
+        assert_eq!(
+            layout.columns,
+            vec![ModelUsageColumn::Provider, ModelUsageColumn::Total]
+        );
+        assert_eq!(layout.model_width, 0);
+        assert_eq!(table_width(&layout), 18);
+    }
+
+    #[test]
+    fn locked_detail_dimensions_still_use_outer_metric_priority() {
+        let layout = layout(37, 80, 8, 8, ModelUsageLayoutSchema::ModelProviderDetails);
+
+        assert_eq!(
+            layout.columns,
+            vec![
+                ModelUsageColumn::Client,
+                ModelUsageColumn::Provider,
+                ModelUsageColumn::Total,
+                ModelUsageColumn::Cost,
+            ]
+        );
+        assert!(!layout.columns.contains(&ModelUsageColumn::Messages));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use super::widgets::{
     get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_display_width,
     truncate_model_display_name_to, viewport_scrollbar_state, workspace_label_or_unknown,
 };
-use crate::tui::app::{App, SortDirection, SortField};
+use crate::tui::app::{App, ModelDetailSelection, SortDirection, SortField};
 use tokscale_core::GroupBy;
 
 fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
@@ -58,11 +58,15 @@ fn models_table_layout(
     client_content_width: u16,
     workspace_content_width: u16,
     group_by: &GroupBy,
+    detail: Option<&ModelDetailSelection>,
 ) -> ModelsTableLayout {
-    let schema = if *group_by == GroupBy::WorkspaceModel {
-        ModelUsageLayoutSchema::WorkspaceModels
-    } else {
-        ModelUsageLayoutSchema::Models
+    let schema = match detail {
+        Some(selection) if selection.client.is_some() => {
+            ModelUsageLayoutSchema::ClientModelProviderDetails
+        }
+        Some(_) => ModelUsageLayoutSchema::ModelProviderDetails,
+        None if *group_by == GroupBy::WorkspaceModel => ModelUsageLayoutSchema::WorkspaceModels,
+        None => ModelUsageLayoutSchema::Models,
     };
 
     model_usage_table_layout(
@@ -211,6 +215,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         client_content_width,
         workspace_content_width,
         &group_by,
+        app.selected_model_detail.as_ref(),
     );
     let columns = table_layout.columns.clone();
     let header = Row::new(
@@ -361,7 +366,15 @@ mod tests {
     }
 
     fn model_layout(table_width: u16, model: u16, provider: u16, client: u16) -> ModelsTableLayout {
-        models_table_layout(table_width, model, provider, client, 0, &GroupBy::Model)
+        models_table_layout(
+            table_width,
+            model,
+            provider,
+            client,
+            0,
+            &GroupBy::Model,
+            None,
+        )
     }
 
     fn workspace_model_layout(
@@ -377,6 +390,7 @@ mod tests {
             client,
             22,
             &GroupBy::WorkspaceModel,
+            None,
         )
     }
 
@@ -402,7 +416,7 @@ mod tests {
 
     #[test]
     fn narrow_model_layout_stops_before_context_columns_before_truncating_model() {
-        let layout = models_table_layout(74, 80, 56, 40, 0, &GroupBy::Model);
+        let layout = models_table_layout(74, 80, 56, 40, 0, &GroupBy::Model, None);
 
         assert_eq!(
             layout.columns,
@@ -416,7 +430,7 @@ mod tests {
 
     #[test]
     fn very_narrow_model_layout_keeps_tokens_before_optional_detail_columns() {
-        let layout = models_table_layout(54, 80, 56, 40, 0, &GroupBy::Model);
+        let layout = models_table_layout(54, 80, 56, 40, 0, &GroupBy::Model, None);
 
         assert_eq!(layout.density, ModelsTableDensity::Core);
         assert_eq!(
@@ -425,6 +439,37 @@ mod tests {
         );
         assert_eq!(layout.model_width, 29);
         assert!(!layout.columns.contains(&ModelsColumn::Input));
+    }
+
+    #[test]
+    fn model_detail_layout_omits_dimensions_locked_in_the_title() {
+        let model_detail = ModelDetailSelection {
+            model: "shared-model".to_string(),
+            client: None,
+        };
+        let client_model_detail = ModelDetailSelection {
+            model: "shared-model".to_string(),
+            client: Some("claude".to_string()),
+        };
+
+        let by_model =
+            models_table_layout(180, 80, 56, 40, 0, &GroupBy::Model, Some(&model_detail));
+        let by_client_model = models_table_layout(
+            180,
+            80,
+            56,
+            40,
+            0,
+            &GroupBy::ClientModel,
+            Some(&client_model_detail),
+        );
+
+        assert!(!by_model.columns.contains(&ModelsColumn::Model));
+        assert!(by_model.columns.contains(&ModelsColumn::Client));
+        assert!(by_model.columns.contains(&ModelsColumn::Provider));
+        assert!(!by_client_model.columns.contains(&ModelsColumn::Model));
+        assert!(!by_client_model.columns.contains(&ModelsColumn::Client));
+        assert!(by_client_model.columns.contains(&ModelsColumn::Provider));
     }
 
     #[test]
@@ -603,6 +648,42 @@ mod tests {
         app
     }
 
+    fn make_model_detail_app(group_by: GroupBy) -> App {
+        let messages = [
+            tokscale_core::UnifiedMessage::new(
+                "claude",
+                "shared-model",
+                "anthropic",
+                "anthropic-session",
+                1_800_000_000,
+                tokscale_core::TokenBreakdown {
+                    input: 10,
+                    ..Default::default()
+                },
+                0.1,
+            ),
+            tokscale_core::UnifiedMessage::new(
+                "claude",
+                "shared-model",
+                "openrouter",
+                "openrouter-session",
+                1_800_000_001,
+                tokscale_core::TokenBreakdown {
+                    input: 20,
+                    ..Default::default()
+                },
+                0.2,
+            ),
+        ];
+        let accumulator =
+            tokscale_core::build_tui_accumulator(&messages, tokscale_core::DateRange::none());
+        let mut app = make_models_app(180, group_by.clone());
+        app.data = accumulator.project(&group_by);
+        app.data_group_by = group_by;
+        app.projection_backend = Some(crate::tui::app::ProjectionBackend::Memory(accumulator));
+        app
+    }
+
     fn workspace_model_usage(
         model: &str,
         workspace: &str,
@@ -683,38 +764,7 @@ mod tests {
 
     #[test]
     fn model_detail_renders_client_and_provider_rows() {
-        let messages = [
-            tokscale_core::UnifiedMessage::new(
-                "claude",
-                "shared-model",
-                "anthropic",
-                "anthropic-session",
-                1_800_000_000,
-                tokscale_core::TokenBreakdown {
-                    input: 10,
-                    ..Default::default()
-                },
-                0.1,
-            ),
-            tokscale_core::UnifiedMessage::new(
-                "claude",
-                "shared-model",
-                "openrouter",
-                "openrouter-session",
-                1_800_000_001,
-                tokscale_core::TokenBreakdown {
-                    input: 20,
-                    ..Default::default()
-                },
-                0.2,
-            ),
-        ];
-        let accumulator =
-            tokscale_core::build_tui_accumulator(&messages, tokscale_core::DateRange::none());
-        let mut app = make_models_app(180, GroupBy::Model);
-        app.data = accumulator.project(&GroupBy::Model);
-        app.data_group_by = GroupBy::Model;
-        app.projection_backend = Some(crate::tui::app::ProjectionBackend::Memory(accumulator));
+        let mut app = make_model_detail_app(GroupBy::Model);
 
         app.handle_key_event(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
@@ -726,7 +776,6 @@ mod tests {
             body.contains("Model Details · shared-model"),
             "expected detail title\n{body}"
         );
-        assert!(body.contains("Model"), "expected Model header\n{body}");
         assert!(body.contains("Client"), "expected Client header\n{body}");
         assert!(
             body.contains("Provider"),
@@ -735,5 +784,46 @@ mod tests {
         assert!(body.contains("Claude"), "expected client rows\n{body}");
         assert!(body.contains("Anthropic"), "expected provider row\n{body}");
         assert!(body.contains("OpenRouter"), "expected provider row\n{body}");
+        assert_eq!(
+            body.matches("shared-model").count(),
+            1,
+            "locked model should render only in the title\n{body}"
+        );
+    }
+
+    #[test]
+    fn client_model_detail_renders_only_provider_as_identity_column() {
+        let mut app = make_model_detail_app(GroupBy::ClientModel);
+
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let body = render_body(&mut app, 180, 8);
+
+        assert!(
+            body.contains("Model Details · Claude · shared-model"),
+            "expected locked client and model in the title\n{body}"
+        );
+        assert!(
+            body.contains("Provider"),
+            "expected Provider header\n{body}"
+        );
+        assert!(body.contains("Anthropic"), "expected provider row\n{body}");
+        assert!(body.contains("OpenRouter"), "expected provider row\n{body}");
+        assert!(
+            !body.contains("Client"),
+            "locked Client column must be omitted\n{body}"
+        );
+        assert_eq!(
+            body.matches("Claude").count(),
+            1,
+            "locked client should render only in the title\n{body}"
+        );
+        assert_eq!(
+            body.matches("shared-model").count(),
+            1,
+            "locked model should render only in the title\n{body}"
+        );
     }
 }

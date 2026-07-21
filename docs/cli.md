@@ -101,12 +101,13 @@ back to the process home or client-specific environment roots.
 
 Report commands scan the resolved scope for that invocation. The TUI fixes it
 as the process-wide client universe: its Clients picker initially checks every
-member and can apply only a session-local, non-persisted subset. Picker and
-Group By changes reproject the installed generation without scanning, writing
-the cache, or resetting automatic refresh. Manual and automatic refresh scan
-the original universe. Usage and Sessions follow the selected subset, while
-Data Health diagnostics continue to describe the complete universe so a
-view filter cannot conceal an acquisition failure.
+member and can apply only a session-local, non-persisted subset. Space toggles
+the draft selection, Enter applies it, and Esc cancels it. Picker and Group By
+changes reproject the installed generation without scanning, writing the cache,
+or resetting automatic refresh. Manual and automatic refresh scan the original
+universe. Usage and Sessions follow the selected subset, while Data Health
+diagnostics continue to describe the complete universe so a view filter cannot
+conceal an acquisition failure.
 
 Date boundaries are inclusive and use the local timezone:
 

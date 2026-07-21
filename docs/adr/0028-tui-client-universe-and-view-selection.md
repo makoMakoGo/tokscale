@@ -28,6 +28,12 @@ Every TUI process has two distinct client sets:
   universe. The client picker lists exactly the universe and cannot enable a
   client outside it.
 
+Client-picker edits are transactional. Space and client hotkeys mutate a
+dialog-local draft; Enter commits the draft and closes the picker, while Esc
+or an outside click closes it without changing `selected_clients`. A commit
+reprojects once after the dialog closes, so picker input cannot leak through to
+the underlying view.
+
 The scanner produces one canonical, client-aware generation for the entire
 universe. `Clients` and `Group By` changes project that installed generation;
 they never start a scanner, alter the inventory digest, or write the cache. A
@@ -39,6 +45,11 @@ remains generation-wide: hiding a client from the report must not hide the fact
 that one of its inputs was degraded or failed. Overview health counts, scanned
 input bytes, and exported health therefore describe the fixed
 universe, not the temporary selection.
+
+After a committed selection, an active detail view is reconciled by semantic
+identity. It remains open with refreshed rows when its locked identity still
+exists; otherwise it closes with an explicit status. This reconciliation uses
+the installed generation and does not broaden the scanner boundary.
 
 Only these events may request an input scan:
 
