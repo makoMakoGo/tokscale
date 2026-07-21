@@ -242,30 +242,35 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
                 .then_with(|| right_name.cmp(left_name))
         });
 
-    let mut lines: Vec<Line<'static>> = vec![section_title(app, "Fun Things"), Line::default()];
     let width = area.width as usize;
+
+    // Build the Fun Things blocks; how many of them survive depends on the
+    // available height (see the tiers below).
+    let mut model_block: Vec<Line<'static>> = Vec::new();
+    let mut family_line: Option<Line<'static>> = None;
+    let mut model_line: Option<Line<'static>> = None;
     match favorite_family {
         Some((family, aggregate)) => {
             let color = portraits::family_color(app, *family);
-            lines.push(Line::from(Span::styled(
+            model_block.push(Line::from(Span::styled(
                 "Favorite Model",
                 Style::default().fg(app.theme.muted),
             )));
-            lines.push(Line::default());
-            lines.extend(
+            model_block.push(Line::default());
+            model_block.extend(
                 portraits::lines(app, *family)
                     .into_iter()
                     .map(|line| center_line(line, width)),
             );
-            lines.push(Line::default());
-            lines.push(center_line(
+            model_block.push(Line::default());
+            model_block.push(center_line(
                 Line::from(Span::styled(
                     portraits::slogan(*family).to_string(),
                     Style::default().fg(color),
                 )),
                 width,
             ));
-            lines.push(center_line(
+            family_line = Some(center_line(
                 Line::from(vec![
                     Span::styled(
                         portraits::display_name(*family).to_string(),
@@ -285,15 +290,15 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
             ));
         }
         None => {
-            lines.extend(portraits::lines(app, portraits::Family::Unknown));
-            lines.push(Line::from(Span::styled(
+            model_block.extend(portraits::lines(app, portraits::Family::Unknown));
+            model_block.push(Line::from(Span::styled(
                 "no data yet",
                 Style::default().fg(app.theme.muted),
             )));
         }
     }
     if let Some((model_name, aggregate)) = favorite_model {
-        lines.push(center_line(
+        model_line = Some(center_line(
             Line::from(vec![
                 Span::styled(
                     model_name.clone(),
@@ -315,33 +320,88 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
         ));
     }
 
+    let mut harness_block: Vec<Line<'static>> = Vec::new();
     if let Some((key, display, aggregate)) = favorite_harness(data) {
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
+        harness_block.push(Line::default());
+        harness_block.push(Line::from(Span::styled(
             "Favorite Harness",
             Style::default().fg(app.theme.muted),
         )));
-        lines.push(Line::from(Span::styled(
-            harness_slogan(&key).to_string(),
-            Style::default().fg(app.theme.accent),
-        )));
-        lines.push(Line::from(vec![
-            Span::styled(
-                display,
-                Style::default()
-                    .fg(app.theme.foreground)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(
-                    "  {} · {:.1}% · {}",
-                    format_tokens(aggregate.tokens),
-                    share_percent(aggregate.tokens, total),
-                    format_cost(aggregate.cost),
+        harness_block.push(center_line(
+            Line::from(Span::styled(
+                harness_slogan(&key).to_string(),
+                Style::default().fg(app.theme.accent),
+            )),
+            width,
+        ));
+        harness_block.push(center_line(
+            Line::from(vec![
+                Span::styled(
+                    display,
+                    Style::default()
+                        .fg(app.theme.foreground)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Style::default().fg(app.theme.muted),
-            ),
-        ]));
+                Span::styled(
+                    format!(
+                        "  {} · {:.1}% · {}",
+                        format_tokens(aggregate.tokens),
+                        share_percent(aggregate.tokens, total),
+                        format_cost(aggregate.cost),
+                    ),
+                    Style::default().fg(app.theme.muted),
+                ),
+            ]),
+            width,
+        ));
+    }
+
+    // Height tiers: the portrait block is the anchor, everything else is
+    // shed from the tail as the column gets shorter.
+    let header: Vec<Line<'static>> = vec![section_title(app, "Fun Things"), Line::default()];
+    let full_height = header.len()
+        + model_block.len()
+        + family_line.is_some() as usize
+        + model_line.is_some() as usize
+        + harness_block.len();
+    let height = area.height as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if height >= full_height.min(10) {
+        lines.extend(header);
+        lines.extend(model_block);
+        if let Some(line) = family_line {
+            lines.push(line);
+        }
+        if height >= 11 {
+            if let Some(line) = model_line {
+                lines.push(line);
+            }
+        }
+        if height >= full_height {
+            lines.extend(harness_block);
+        }
+    } else if height >= 6 {
+        // Compact: title + portrait + slogan + family line.
+        lines.push(section_title(app, "Fun Things"));
+        if model_block.len() >= 7 {
+            lines.extend(model_block[2..7].iter().cloned());
+        } else {
+            lines.extend(model_block);
+        }
+        if let Some(line) = family_line {
+            lines.push(line);
+        }
+    } else {
+        // Minimal: portrait + family line only.
+        if model_block.len() >= 5 {
+            lines.extend(model_block[2..5].iter().cloned());
+        } else {
+            lines.extend(model_block);
+        }
+        if let Some(line) = family_line {
+            lines.push(line);
+        }
     }
 
     lines.truncate(area.height as usize);
