@@ -194,6 +194,18 @@ fn render_left_hero(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDat
             ),
             Color::Cyan,
         ),
+        sources_metric_line(app),
+        metric_line(
+            app,
+            "Sessions",
+            app.session_snapshot
+                .source_summaries()
+                .iter()
+                .map(|summary| summary.main_session_count)
+                .sum::<usize>()
+                .to_string(),
+            Color::Cyan,
+        ),
         metric_line(app, "Active Days", active_days.to_string(), Color::Cyan),
         metric_line(
             app,
@@ -265,12 +277,40 @@ fn render_middle_portrait(frame: &mut Frame, app: &App, area: Rect, data: &Snaps
         }
     }
 
+    let mut favorite_rows: Vec<Line<'static>> = Vec::new();
+    if let Some((name, aggregate)) =
+        data.models
+            .iter()
+            .max_by(|(left_name, left), (right_name, right)| {
+                left.tokens
+                    .cmp(&right.tokens)
+                    .then_with(|| left.cost.total_cmp(&right.cost))
+                    .then_with(|| right_name.cmp(left_name))
+            })
+    {
+        favorite_rows.push(favorite_line(
+            app,
+            "favorite model",
+            name,
+            aggregate.tokens,
+            total,
+        ));
+    }
     if let Some((name, aggregate)) = favorite_harness(data) {
-        lines.push(Line::default());
-        lines.push(favorite_line(app, "client", &name, aggregate.tokens, total));
+        favorite_rows.push(favorite_line(
+            app,
+            "favorite client",
+            &name,
+            aggregate.tokens,
+            total,
+        ));
     }
     if let Some((weekday, tokens)) = favorite_weekday(app) {
-        lines.push(favorite_line(app, "day", weekday, tokens, total));
+        favorite_rows.push(favorite_line(app, "favorite day", weekday, tokens, total));
+    }
+    if !favorite_rows.is_empty() {
+        lines.push(Line::default());
+        lines.extend(align_block(favorite_rows));
     }
 
     let pad = area.height.saturating_sub(lines.len() as u16) as usize / 2;
@@ -279,6 +319,19 @@ fn render_middle_portrait(frame: &mut Frame, app: &App, area: Rect, data: &Snaps
     padded.truncate(area.height as usize);
     let paragraph = Paragraph::new(padded).alignment(Alignment::Center);
     frame.render_widget(paragraph, area);
+}
+
+/// Sources health as a left-column metric: a green ✓ count when everything
+/// is clean, otherwise the health percentage (the right column keeps the
+/// expanded gauge for failures).
+fn sources_metric_line(app: &App) -> Line<'static> {
+    let sources = total_sources(app);
+    let (value, color) = if sources > 0 && app.data.health.clean_sources == sources {
+        (format!("✓ {} clean", commafy(sources as u64)), Color::Green)
+    } else {
+        (health_percentage(app), health_color(app))
+    };
+    metric_line(app, "Sources", value, color)
 }
 
 fn share_percent(tokens: u64, total: u64) -> f64 {
@@ -329,22 +382,37 @@ fn favorite_weekday(app: &App) -> Option<(&'static str, u64)> {
 
 fn favorite_line(app: &App, label: &str, name: &str, tokens: u64, total: u64) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{label}  "), Style::default().fg(app.theme.muted)),
+        Span::styled(format!("{label:<17}"), Style::default().fg(app.theme.muted)),
         Span::styled(
-            format!("{name}  "),
+            format!("{name:<12}"),
             Style::default()
                 .fg(app.theme.foreground)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(
-                "{} · {:.1}%",
+                " {} · {:.1}%",
                 format_tokens(tokens),
                 share_percent(tokens, total)
             ),
             Style::default().fg(app.theme.muted),
         ),
     ])
+}
+
+/// Pads every row to the block's widest line so per-line centering keeps
+/// the favorites block's left edges aligned.
+fn align_block(rows: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    let width = rows.iter().map(|row| row.width()).max().unwrap_or(0);
+    rows.into_iter()
+        .map(|mut row| {
+            let pad = width.saturating_sub(row.width());
+            if pad > 0 {
+                row.spans.push(Span::raw(" ".repeat(pad)));
+            }
+            row
+        })
+        .collect()
 }
 
 /// One fun fact at a time in the right column's bottom box, flipping to the
@@ -547,25 +615,13 @@ fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
         data.harnesses.len(),
     );
     let mut lines = achievements::lines(app, &items);
-    lines.push(Line::default());
 
     let sources = total_sources(app);
-    if sources > 0 && app.data.health.clean_sources == sources {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "✓ ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{} sources clean", commafy(sources as u64)),
-                Style::default().fg(app.theme.muted),
-            ),
-        ]));
-    } else {
-        // Health failures expand back into the full gauge and legend; the
-        // one-liner is only earned when everything is clean.
+    let all_clean = sources > 0 && app.data.health.clean_sources == sources;
+    if !all_clean {
+        // Health failures expand into the full gauge and legend; clean
+        // sources are a one-line metric in the left column instead.
+        lines.push(Line::default());
         lines.push(section_title(app, "Sources"));
         lines.push(Line::from(Span::styled(
             health_percentage(app),
@@ -1025,8 +1081,11 @@ mod tests {
     /// X range of the right (Sources) section, located by the border/divider
     /// columns on the section title row: `│ border │ divider │ divider │`.
     fn sources_column_range(lines: &[String]) -> (u16, u16) {
+        // The right column's section title: the LAST row mentioning Sources
+        // (the left column has a Sources metric row of its own now).
         let title_row = lines
             .iter()
+            .rev()
             .find(|line| line.contains("Sources"))
             .expect("Sources title should render");
         let dividers: Vec<usize> = title_row
@@ -1049,7 +1108,7 @@ mod tests {
     ) -> Vec<Color> {
         let title_y = lines
             .iter()
-            .position(|line| line.contains("Sources"))
+            .rposition(|line| line.contains("Sources"))
             .expect("Sources title should render") as u16;
         let bar_y = title_y + 2;
         (x_start..x_end)
@@ -1257,7 +1316,7 @@ mod tests {
     }
 
     #[test]
-    fn sources_collapses_to_a_one_liner_when_all_sources_are_clean() {
+    fn sources_collapses_to_a_left_column_metric_when_all_clean() {
         let width = 200;
         let height = 50;
         let mut app = make_app_with_theme(width, "dusk");
@@ -1269,8 +1328,7 @@ mod tests {
             .unwrap();
 
         let screen = buffer_lines(&terminal).join("\n");
-        assert!(screen.contains("✓"), "{screen}");
-        assert!(screen.contains("100 sources clean"), "{screen}");
+        assert!(screen.contains("✓ 100 clean"), "{screen}");
         assert!(
             !screen.contains("Degraded"),
             "clean sources earn the one-liner, not the legend: {screen}"

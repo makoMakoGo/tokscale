@@ -83,7 +83,7 @@ pub(super) fn family_color(app: &App, family: Family) -> Color {
     app.theme.color(color)
 }
 
-const GPT: &[&str] = &["      ✧", "   /\\_/\\", "  (｡♥‿♥｡)✧", "   /|⌨|\\"];
+const GPT: &[&str] = &["    ✧", "  /\\_/\\", " (｡>ω<｡)✧", "  ⁄|⌒⌒|⁄"];
 const CLAUDE: &[&str] = &["    ✧", "  ╭────╮ ✧", "  (｡•ᴗ•｡)", "   \\∪∪/"];
 const GEMINI: &[&str] = &["  ✦    ✦", "  (◕‿◕)✦", "   /||\\"];
 const GLM: &[&str] = &["   ___", "  (⌐■_■)▤", "   /|  |\\"];
@@ -109,20 +109,20 @@ pub(super) fn portrait(family: Family) -> &'static [&'static str] {
     }
 }
 
-/// Every line is padded to the family block's width so per-line centering
-/// cannot stagger the artwork (the pond learned this the hard way).
+/// Every line is padded on the right to the family block's width so the
+/// artwork's authored left-edge alignment survives per-line centering
+/// (left-padding each line independently was the misalignment bug).
 pub(super) fn lines(app: &App, family: Family) -> Vec<Line<'static>> {
     let art = portrait(family);
     let block_width = art.iter().map(|row| row.chars().count()).max().unwrap_or(0);
     let color = family_color(app, family);
     art.iter()
         .map(|row| {
-            let left_pad = (block_width - row.chars().count()) / 2;
-            let mut spans = vec![Span::raw(" ".repeat(left_pad))];
-            spans.extend(
-                row.chars()
-                    .map(|ch| Span::styled(ch.to_string(), Style::default().fg(color))),
-            );
+            let mut spans: Vec<Span<'static>> = row
+                .chars()
+                .map(|ch| Span::styled(ch.to_string(), Style::default().fg(color)))
+                .collect();
+            spans.push(Span::raw(" ".repeat(block_width - row.chars().count())));
             Line::from(spans)
         })
         .collect()
@@ -131,6 +131,30 @@ pub(super) fn lines(app: &App, family: Family) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portrait_lines_share_one_block_width_per_family() {
+        for family in [
+            Family::Gpt,
+            Family::Claude,
+            Family::Gemini,
+            Family::Glm,
+            Family::Deepseek,
+            Family::Qwen,
+            Family::Kimi,
+            Family::Minimax,
+            Family::Mimo,
+            Family::Unknown,
+        ] {
+            let art = portrait(family);
+            let width = art.iter().map(|row| row.chars().count()).max().unwrap();
+            assert!(
+                art.iter().all(|row| row.chars().count() <= width),
+                "portrait rows must fit the block width"
+            );
+            assert!(width <= 16, "portrait too wide for the column: {width}");
+        }
+    }
 
     #[test]
     fn family_detection_covers_the_major_model_ids() {
