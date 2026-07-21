@@ -30,7 +30,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         } else if app.usage_fetch_attempted {
             render_empty(frame, app, inner);
         } else {
-            render_loading(frame, app, inner);
+            render_prompt(frame, app, inner);
         }
     } else if app.subscription_usage.iter().all(|o| o.metrics.is_empty())
         && app.subscription_usage_errors.is_empty()
@@ -43,40 +43,18 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_fetching(frame: &mut Frame, app: &App, area: Rect) {
-    let center = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Length(3),
-            Constraint::Percentage(40),
-        ])
-        .split(area)[1];
-
-    let spin = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][app.spinner_frame % 10];
-    let paragraph = Paragraph::new(format!("{spin} Fetching subscription data..."))
-        .style(Style::default().fg(app.theme.muted))
-        .alignment(Alignment::Center);
-    frame.render_widget(paragraph, center);
+    super::loading::render(frame, app, area, "Fetching subscription data...");
 }
 
-fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
-    let center = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Length(3),
-            Constraint::Percentage(40),
-        ])
-        .split(area)[1];
-
-    let msg = loading_message(app);
-    let paragraph = Paragraph::new(msg)
-        .style(Style::default().fg(app.theme.muted))
-        .alignment(Alignment::Center);
-    frame.render_widget(paragraph, center);
+fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
+    render_centered_message(frame, app, area, prompt_message(app));
 }
 
 fn render_empty(frame: &mut Frame, app: &App, area: Rect) {
+    render_centered_message(frame, app, area, empty_message(app));
+}
+
+fn render_centered_message(frame: &mut Frame, app: &App, area: Rect, message: &str) {
     let center = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -86,13 +64,13 @@ fn render_empty(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area)[1];
 
-    let paragraph = Paragraph::new(empty_message(app))
+    let paragraph = Paragraph::new(message)
         .style(Style::default().fg(app.theme.muted))
         .alignment(Alignment::Center);
     frame.render_widget(paragraph, center);
 }
 
-fn loading_message(app: &App) -> &'static str {
+fn prompt_message(app: &App) -> &'static str {
     if app.has_enabled_subscription_providers() {
         FETCH_PROMPT
     } else {
@@ -254,6 +232,7 @@ mod tests {
     use crate::tui::data::UsageData;
     use crate::tui::settings::Settings;
     use crate::tui::themes::{Theme, ThemeName};
+    use ratatui::{backend::TestBackend, Terminal};
 
     fn make_usage_app() -> App {
         let config = TuiConfig {
@@ -286,6 +265,39 @@ mod tests {
             .collect()
     }
 
+    fn render_text(app: &mut App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content()
+            .chunks(width)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn idle_prompt_does_not_render_a_loading_animation() {
+        let mut app = make_usage_app();
+
+        let screen = render_text(&mut app);
+
+        assert!(screen.contains(NO_PROVIDERS_PROMPT), "{screen}");
+        assert!(!screen.contains('⠋'), "idle prompt must not spin: {screen}");
+        assert!(
+            !screen.contains("~  ~"),
+            "idle prompt must not show the pond: {screen}"
+        );
+    }
+
     #[test]
     fn usage_lines_render_provider_errors_without_outputs() {
         let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
@@ -303,15 +315,14 @@ mod tests {
     }
 
     #[test]
-    fn loading_prompt_requires_enabled_provider() {
+    fn idle_prompt_reflects_provider_availability() {
         let mut app = make_usage_app();
-        app.data.loading = true;
 
-        assert_eq!(loading_message(&app), NO_PROVIDERS_PROMPT);
+        assert_eq!(prompt_message(&app), NO_PROVIDERS_PROMPT);
 
         app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
 
-        assert_eq!(loading_message(&app), FETCH_PROMPT);
+        assert_eq!(prompt_message(&app), FETCH_PROMPT);
     }
 
     #[test]

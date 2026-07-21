@@ -141,6 +141,13 @@ impl Tab {
         }
     }
 
+    /// Whether this tab projects the installed local-report generation.
+    /// Subscription Usage has its own remote fetch lifecycle and must remain
+    /// usable while local source acquisition is cold-loading or has failed.
+    pub(crate) fn depends_on_local_generation(self) -> bool {
+        self != Tab::Usage
+    }
+
     pub fn next(self) -> Tab {
         match self {
             Tab::Overview => Tab::Usage,
@@ -461,6 +468,10 @@ pub struct App {
 
     pub spinner_frame: usize,
 
+    /// Monotonic tick counter driving the Overview fun-fact ticker (spinner
+    /// frames wrap too fast to scroll a long string).
+    pub(crate) ticker_tick: u32,
+
     pub background_loading: bool,
 
     pub needs_reload: bool,
@@ -628,6 +639,7 @@ impl App {
             terminal_height: 24,
             click_areas: Vec::new(),
             spinner_frame: 0,
+            ticker_tick: 0,
             background_loading: false,
             needs_reload: false,
             reload_force: false,
@@ -945,6 +957,7 @@ impl App {
 
     pub fn on_tick(&mut self) {
         self.spinner_frame = (self.spinner_frame + 1) % 20;
+        self.ticker_tick = self.ticker_tick.wrapping_add(1);
 
         if let Some(status_time) = self.status_message_time {
             if status_time.elapsed() > Duration::from_secs(3) {
