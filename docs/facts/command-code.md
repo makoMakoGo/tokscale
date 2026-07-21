@@ -72,7 +72,7 @@ estimated assistant usage record in that historical session.
 
 Tokscale does not currently read `<session-id>.meta.json.model`.
 
-Because `config.json` participates in the source fingerprint, changing its
+Because `config.json` participates in the input fingerprint, changing its
 model invalidates the cached projection and reassigns the same unchanged
 historical transcript:
 

@@ -27,9 +27,9 @@ pub struct AgentUsage {
 #[derive(Debug, Default)]
 pub struct AggregatedViews {
     pub tui_usage: Option<UsageData>,
-    /// Source health for the fold that produced these views. Populated by
+    /// Data Health for the fold that produced these views. Populated by
     /// the streaming loader; `Default` (empty) means no issues observed.
-    pub health: crate::source_health::DataHealth,
+    pub health: crate::input_health::DataHealth,
     pub model_report: Option<ModelReport>,
     pub monthly_report: Option<MonthlyReport>,
     pub hourly_report: Option<HourlyReport>,

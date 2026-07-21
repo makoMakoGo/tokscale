@@ -8,8 +8,8 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceUnit,
+    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
+    LocalInputAdapter, MessageSink, ParseContext, ParsedBatchInput, ParsedUnit,
     MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
@@ -55,7 +55,7 @@ fn claude_project_resolver(
 
 pub(crate) struct ClaudeAdapter;
 
-impl LocalSourceAdapter for ClaudeAdapter {
+impl LocalInputAdapter for ClaudeAdapter {
     fn client(&self) -> ClientId {
         ClientId::Claude
     }
@@ -63,7 +63,7 @@ impl LocalSourceAdapter for ClaudeAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         reset_claude_project_resolver(Path::new(ctx.home_dir));
         let def = ClientId::Claude
             .local_def()
@@ -79,7 +79,7 @@ impl LocalSourceAdapter for ClaudeAdapter {
             ctx.home_dir
         )));
 
-        let units = adapter_discover::source_units_from_paths(
+        let units = adapter_discover::input_units_from_paths(
             ClientId::Claude,
             adapter_discover::scan_roots(ClientId::Claude, roots, def.pattern)?,
             FingerprintPolicy::ClaudeCodeWithHome {
@@ -96,7 +96,7 @@ impl LocalSourceAdapter for ClaudeAdapter {
         Ok(units)
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -107,7 +107,7 @@ impl LocalSourceAdapter for ClaudeAdapter {
                         ..
                     } => (Some(home_dir.clone()), parent_session_path.is_some()),
                     FingerprintPolicy::NoMessageCache => (None, false),
-                    _ => unreachable!("unexpected Claude source fingerprint policy"),
+                    _ => unreachable!("unexpected Claude input fingerprint policy"),
                 };
                 let project_resolver = claude_project_resolver(home_dir.as_deref());
                 adapter_cache::load_or_scan_unit_with_cacheability(unit, ctx, |path| {
@@ -134,10 +134,10 @@ impl LocalSourceAdapter for ClaudeAdapter {
 
     fn plan_cache_hit(
         &self,
-        unit: SourceUnit,
-        source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
-        adapter_cache::plan_cache_hit(unit, source_cache)
+        unit: InputUnit,
+        input_cache: &crate::message_cache::InputMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::InputPlanningError> {
+        adapter_cache::plan_cache_hit(unit, input_cache)
     }
 
     fn fold(
@@ -145,17 +145,17 @@ impl LocalSourceAdapter for ClaudeAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), crate::adapters::SourcePipelineError> {
+    ) -> Result<(), crate::adapters::InputPipelineError> {
         let mut seen_keys = HashSet::new();
         fold_claude_units(parsed, ctx, sink, &mut seen_keys)
     }
 
     fn fold_batches(
         &self,
-        batches: &mut ParsedBatchSource<'_>,
+        batches: &mut ParsedBatchInput<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), crate::adapters::SourcePipelineError> {
+    ) -> Result<(), crate::adapters::InputPipelineError> {
         let mut seen_keys = HashSet::new();
         while let Some(parsed) = batches.next(ctx)? {
             fold_claude_units(parsed, ctx, sink, &mut seen_keys)?;
@@ -171,7 +171,7 @@ enum FlatParentResolution {
     Unresolved,
 }
 
-fn configure_claude_parent_dependency(mut unit: SourceUnit) -> SourceUnit {
+fn configure_claude_parent_dependency(mut unit: InputUnit) -> InputUnit {
     let Some(stem) = unit.path.file_stem().and_then(|stem| stem.to_str()) else {
         return unit;
     };
@@ -252,7 +252,7 @@ fn fold_claude_units(
     ctx: &mut FoldContext<'_>,
     sink: &mut dyn MessageSink,
     seen_keys: &mut HashSet<u64>,
-) -> Result<(), crate::adapters::SourcePipelineError> {
+) -> Result<(), crate::adapters::InputPipelineError> {
     for parsed_unit in parsed {
         let adapter_cache::ResolvedUnit {
             unit,
@@ -262,7 +262,7 @@ fn fold_claude_units(
             status,
             rejections,
         } = adapter_cache::resolve_unit(parsed_unit, ctx)?;
-        ctx.health.record(crate::source_health::SourceHealth {
+        ctx.health.record(crate::input_health::InputHealth {
             client: unit.client,
             path: unit.path.clone(),
             status,
@@ -271,7 +271,7 @@ fn fold_claude_units(
         let path = unit.path.clone();
         let cache_write_outcome = adapter_cache::write_cache(cache_write, ctx, &messages);
         if cache_write_outcome.is_err() && invalidate_cache {
-            ctx.source_cache.remove(&path, unit.parser_version);
+            ctx.input_cache.remove(&path, unit.parser_version);
         }
         let cache_write_outcome = cache_write_outcome?;
         sink.extend_messages(
@@ -282,7 +282,7 @@ fn fold_claude_units(
         );
 
         if cache_write_outcome == adapter_cache::CacheWriteOutcome::NotPlanned && invalidate_cache {
-            ctx.source_cache.remove(&path, unit.parser_version);
+            ctx.input_cache.remove(&path, unit.parser_version);
         }
     }
     Ok(())
@@ -296,8 +296,8 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::input_health::InputHealth;
     use crate::message_cache;
-    use crate::source_health::SourceHealth;
 
     fn write_file(path: &Path, content: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -315,22 +315,22 @@ mod tests {
         }
     }
 
-    fn discover_unit(home_dir: &Path, path: &Path) -> SourceUnit {
+    fn discover_unit(home_dir: &Path, path: &Path) -> InputUnit {
         let settings = crate::scanner::ScannerSettings::default();
         CLAUDE_ADAPTER
             .discover_checked(&scan_context(home_dir, &settings))
             .unwrap()
             .into_iter()
             .find(|unit| unit.path == path)
-            .unwrap_or_else(|| panic!("Claude source was not discovered: {}", path.display()))
+            .unwrap_or_else(|| panic!("Claude input was not discovered: {}", path.display()))
     }
 
     fn scan_and_fold(
-        unit: SourceUnit,
-        cache: &mut message_cache::SourceMessageCache,
-    ) -> (Vec<crate::UnifiedMessage>, SourceHealth) {
+        unit: InputUnit,
+        cache: &mut message_cache::InputMessageCache,
+    ) -> (Vec<crate::UnifiedMessage>, InputHealth) {
         let parsed = CLAUDE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
-        let health = parsed[0].source_health();
+        let health = parsed[0].input_health();
         let mut messages = Vec::new();
         CLAUDE_ADAPTER
             .fold(parsed, &mut FoldContext::new(cache, None), &mut messages)
@@ -340,9 +340,9 @@ mod tests {
 
     fn fold_cache_hit(
         parsed: ParsedUnit,
-        cache: &mut message_cache::SourceMessageCache,
-    ) -> (Vec<crate::UnifiedMessage>, SourceHealth) {
-        let health = parsed.source_health();
+        cache: &mut message_cache::InputMessageCache,
+    ) -> (Vec<crate::UnifiedMessage>, InputHealth) {
+        let health = parsed.input_health();
         let mut messages = Vec::new();
         CLAUDE_ADAPTER
             .fold(
@@ -410,7 +410,7 @@ mod tests {
             .path()
             .join(".claude/projects/project-a/session-1.jsonl");
         write_file(&session_path, "");
-        let unit = SourceUnit::claude_code(
+        let unit = InputUnit::claude_code(
             ClientId::Claude,
             session_path.clone(),
             home.path().to_path_buf(),
@@ -458,8 +458,8 @@ mod tests {
 {"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}"#,
         );
 
-        let mut cache = message_cache::SourceMessageCache::default();
-        let unit = SourceUnit::claude_code(
+        let mut cache = message_cache::InputMessageCache::default();
+        let unit = InputUnit::claude_code(
             ClientId::Claude,
             session_path.clone(),
             home.path().to_path_buf(),
@@ -488,7 +488,7 @@ mod tests {
 {not-json
 "#,
         );
-        let unit = SourceUnit::claude_code(
+        let unit = InputUnit::claude_code(
             ClientId::Claude,
             session_path.clone(),
             home.path().to_path_buf(),
@@ -498,23 +498,23 @@ mod tests {
         let parsed = CLAUDE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
 
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].source_health();
+        let health = parsed[0].input_health();
         assert_eq!(health.client, ClientId::Claude);
         assert_eq!(health.path, session_path);
         assert!(matches!(
             health.status,
-            crate::source_health::SourceStatus::Partial { .. }
+            crate::input_health::InputStatus::Partial { .. }
         ));
         assert_eq!(health.rejections.total(), 1);
         assert_eq!(
             health.rejections.entries().next().unwrap().key,
             "malformed-record"
         );
-        let failure = health.status.failure().expect("source must be partial");
+        let failure = health.status.failure().expect("input must be partial");
         assert_eq!(failure.operation, "decode Claude session line");
         assert!(failure.message.contains("line 2"));
 
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
         let mut messages = Vec::new();
         CLAUDE_ADAPTER
             .fold(
@@ -542,7 +542,7 @@ mod tests {
 {"type":"assistant","timestamp":"2026-07-14T00:00:01Z","message":{"usage":{"input_tokens":99,"output_tokens":9}}}
 {"type":"assistant","timestamp":"2026-07-14T00:00:02Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":20,"output_tokens":2}}}"#,
         );
-        let unit = SourceUnit::claude_code(
+        let unit = InputUnit::claude_code(
             ClientId::Claude,
             session_path.clone(),
             home.path().to_path_buf(),
@@ -550,11 +550,11 @@ mod tests {
         .with_parser_version(ParserVersion::new(ParserId::Claude, CLAUDE_PARSER_REVISION))
         .prepare_snapshot()
         .unwrap();
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
 
         let cold =
             CLAUDE_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
-        assert_eq!(cold[0].source_health().rejections.total(), 1);
+        assert_eq!(cold[0].input_health().rejections.total(), 1);
         let mut messages = Vec::new();
         CLAUDE_ADAPTER
             .fold(cold, &mut FoldContext::new(&mut cache, None), &mut messages)
@@ -562,15 +562,15 @@ mod tests {
         assert_eq!(messages.len(), 2);
         cache.save_if_dirty().unwrap();
 
-        let warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let planned = CLAUDE_ADAPTER.plan_cache_hit(unit, &warm_cache).unwrap();
         let crate::adapters::CacheHitPlan::Hit(warm) = planned else {
-            panic!("unchanged Claude source must use its complete cached scan");
+            panic!("unchanged Claude input must use its complete cached scan");
         };
-        let health = warm.source_health();
+        let health = warm.input_health();
         assert!(matches!(
             health.status,
-            crate::source_health::SourceStatus::Complete
+            crate::input_health::InputStatus::Complete
         ));
         assert_eq!(health.rejections.total(), 1);
         assert_eq!(
@@ -592,7 +592,7 @@ mod tests {
 
         let unit = discover_unit(home.path(), &session_path);
         let parser_version = unit.parser_version;
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
         let (unresolved, _) = scan_and_fold(unit, &mut cache);
         assert_eq!(
             unresolved[0].workspace_key.as_deref(),
@@ -635,7 +635,7 @@ mod tests {
 
         let unit = discover_unit(home.path(), &child_path);
         assert!(unit.digest_paths().contains(&parent_path));
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
 
         let (cold_messages, cold_health) = scan_and_fold(unit.clone(), &mut cache);
         assert_eq!(cold_messages[0].agent.as_deref(), Some("Claude Subagent"));
@@ -672,7 +672,7 @@ mod tests {
 
         let unit = discover_unit(home.path(), &child_path);
         assert!(unit.digest_paths().contains(&parent_path));
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
         let (cold_messages, cold_health) = scan_and_fold(unit.clone(), &mut cache);
         assert_eq!(cold_messages[0].agent.as_deref(), Some("Claude Subagent"));
         assert_eq!(cold_health.rejections.total(), 1);
@@ -707,7 +707,7 @@ mod tests {
             .refresh_prepared_snapshot_for_inventory_probe()
             .unwrap();
         let parent_absent_inventory = inventory_unit.inventory_signature_digest();
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
         let (cold_messages, cold_health) = scan_and_fold(unit.clone(), &mut cache);
         assert_eq!(cold_messages[0].agent.as_deref(), Some("Claude Subagent"));
         assert_eq!(cold_health.rejections.total(), 0);
@@ -739,7 +739,7 @@ mod tests {
 
         let unit = discover_unit(home.path(), &child_path);
         assert!(!unit.digest_paths().contains(&parent_path));
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
         let (cold_messages, _) = scan_and_fold(unit.clone(), &mut cache);
         assert_eq!(cold_messages[0].agent.as_deref(), Some("Claude Plan"));
 
@@ -769,7 +769,7 @@ mod tests {
         let unit = discover_unit(home.path(), &child_path);
         assert!(!unit.digest_paths().contains(&parent_path));
         let parser_version = unit.parser_version;
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
         let (unresolved, _) = scan_and_fold(unit, &mut cache);
         assert_eq!(
             unresolved[0].workspace_key.as_deref(),
@@ -811,17 +811,17 @@ mod tests {
         write_file(&child_path, &sidechain("parent-warm", "warm1"));
 
         let unit = discover_unit(home.path(), &child_path);
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
         let _ = scan_and_fold(unit.clone(), &mut cache);
-        message_cache::reset_source_read_stats(&parent_path);
+        message_cache::reset_input_read_stats(&parent_path);
 
         assert!(matches!(
             CLAUDE_ADAPTER.plan_cache_hit(unit, &cache).unwrap(),
             crate::adapters::CacheHitPlan::Hit(_)
         ));
         assert_eq!(
-            message_cache::get_source_read_stats(&parent_path),
-            message_cache::SourceReadStats::default()
+            message_cache::get_input_read_stats(&parent_path),
+            message_cache::InputReadStats::default()
         );
     }
 

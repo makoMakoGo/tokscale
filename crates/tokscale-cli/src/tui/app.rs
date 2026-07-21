@@ -324,9 +324,9 @@ fn move_command_from_key(key: KeyCode) -> Option<MoveCommand> {
     }
 }
 
-fn add_detail_tokens(target: &mut TokenBreakdown, source: &TokenBreakdown) {
+fn add_detail_tokens(target: &mut TokenBreakdown, addition: &TokenBreakdown) {
     *target = target
-        .checked_add(source)
+        .checked_add(addition)
         .expect("TUI detail token buckets exceed u64::MAX");
 }
 
@@ -512,7 +512,7 @@ pub struct App {
     /// (manual refresh and filter changes must always re-aggregate).
     pub reload_force: bool,
 
-    /// Digest of the scanned sources at the last completed load; auto-refresh
+    /// Digest of the scanned inputs at the last completed load; auto-refresh
     /// skips the parse when a fresh probe matches (ADR 0008).
     pub last_input_digest: Option<u64>,
 
@@ -4762,7 +4762,7 @@ mod tests {
         app.current_tab = Tab::Models;
         app.data = accumulator.project(&tokscale_core::GroupBy::ClientModel);
         app.data.health.complete = false;
-        app.data.health.failed_sources = 1;
+        app.data.health.failed_inputs = 1;
         app.data.error = Some("retained error".to_string());
         app.set_pricing_diagnostics(&[format!(
             "{}: offline",
@@ -4791,7 +4791,7 @@ mod tests {
         assert!(!app.background_loading);
         assert_eq!(app.last_refresh, last_refresh);
         assert!(!app.data.health.complete);
-        assert_eq!(app.data.health.failed_sources, 1);
+        assert_eq!(app.data.health.failed_inputs, 1);
         assert_eq!(app.data.error.as_deref(), Some("retained error"));
         assert_eq!(
             app.pricing_warning(),

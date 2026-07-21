@@ -1,8 +1,8 @@
-# ADR 0018: Bounded source fold pipeline
+# ADR 0018: Bounded input fold pipeline
 
 Status: Accepted
 
-OpenCode's retired JSON source-class and precedence details are superseded by
+OpenCode's retired JSON storage-class and precedence details are superseded by
 ADR 0019; this document reflects the current SQLite-only fold contract.
 
 Trae-specific fold clauses are superseded by ADR 0024's Subscription Usage
@@ -10,7 +10,7 @@ boundary; the integration and its fold state have been removed.
 
 ## Context
 
-Source discovery already produced an ordered inventory, but execution parsed every
+Input discovery already produced an ordered inventory, but execution parsed every
 unit in one adapter group in parallel and collected every `ParsedUnit` before
 folding any result. A client with many large transcript files therefore retained
 the parsed messages for the whole adapter at once. Streaming aggregation could
@@ -18,7 +18,7 @@ not reduce this peak because the fold did not begin until the group-wide collect
 finished.
 
 The fold also carries observable adapter-specific semantics. Codex, Claude,
-Hermes, Antigravity, OpenCode, and CodeBuddy deduplicate across source units;
+Hermes, Antigravity, OpenCode, and CodeBuddy deduplicate across input units;
 OMP emits cache hits before misses while using one parent-task index for all
 misses. A bounded implementation must preserve those rules across batch
 boundaries.
@@ -32,9 +32,9 @@ Execute each prepared adapter group as ordered, bounded batches.
   cap.
 - Before loading message bodies, each ordinary adapter stream performs one
   indexed Rayon pass over its lightweight prepared units. Only adapters that
-  actually use the source-message cache opt into generic exact-hit planning;
+  actually use the input-message cache opt into generic exact-hit planning;
   Codex supplies its own exact-hit rule. Planning reads shard headers and the
-  prepared source stamp, never source bytes. A miss returns the same unit with
+  prepared input stamp, never input bytes. A miss returns the same unit with
   its prepared snapshot intact.
 - A unit carries a one-shot internal marker only when planning completed a
   definitive no-hit lookup. Parsing consumes that marker and skips the duplicate
@@ -46,7 +46,7 @@ Execute each prepared adapter group as ordered, bounded batches.
   unchanged. Exact hits remain compact deferred read plans. Misses parse in
   prepared order through the adapter's indexed Rayon iterator, with at most one
   Rayon-width miss batch owning messages at a time. Hits and parsed misses are
-  woven back into source order, folded sequentially, and dropped before the next
+  woven back into input order, folded sequentially, and dropped before the next
   miss batch is parsed. Existing class-precedence rules are retained as
   described below.
 - Deduplication and merge state is created once per adapter group and survives
@@ -58,7 +58,7 @@ Execute each prepared adapter group as ordered, bounded batches.
   message-bearing parse results for the whole group.
 - Cache reads, cache writes, invalidation, message filtering, deduplication, and
   sink emission remain in the same sequential unit fold order. Pricing
-  diagnostics are collected before source execution and retain their existing
+  diagnostics are collected before input execution and retain their existing
   order.
 
 Codex cold parses, append merges, and cache-race reparses keep one owned raw
@@ -72,7 +72,7 @@ The persisted shard format and its raw-message semantics do not change.
 ## Consequences
 
 Peak intermediate memory for ordinary adapters is bounded by the parsed messages
-from at most one Rayon-width batch of cache misses instead of every source in the
+from at most one Rayon-width batch of cache misses instead of every input in the
 adapter group. Exact-hit plans for the group remain compact; their message bodies
 load only during sequential fold. Persistent cross-batch deduplication or merge
 indexes, the consumer's live aggregate, and APIs whose contract returns a final

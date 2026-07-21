@@ -44,7 +44,7 @@ const PROVIDER_CASES: &[(&str, &str)] = &[
 fn canonical_model_id_cleanup(c: &mut Criterion) {
     let mut group = c.benchmark_group("canonical_model_id_cleanup");
 
-    group.bench_function("raw_source_labels_mixed_batch", |b| {
+    group.bench_function("raw_client_labels_mixed_batch", |b| {
         b.iter(|| {
             let mut total_len = 0usize;
             for (_, model) in black_box(RAW_MODEL_CASES) {

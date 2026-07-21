@@ -187,7 +187,7 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
         metric_line(
             app,
             "Data Size",
-            format_bytes(app.data.health.source_data_bytes),
+            format_bytes(app.data.health.input_data_bytes),
             app.theme.foreground,
         ),
         metric_line(
@@ -211,7 +211,7 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
             data.clients.len().to_string(),
             Color::Cyan,
         ),
-        sources_healthy_metric_line(app),
+        inputs_healthy_metric_line(app),
         metric_line(
             app,
             "Sessions Scanned",
@@ -459,14 +459,14 @@ fn client_slogan(client_key: &str) -> &'static str {
 
 /// Input health as a Core fact: a green ✓ count when everything is clean,
 /// otherwise the health percentage.
-fn sources_healthy_metric_line(app: &App) -> Line<'static> {
-    let sources = total_sources(app);
-    let (value, color) = if sources > 0 && app.data.health.clean_sources == sources {
-        (format!("✓ {} clean", commafy(sources as u64)), Color::Green)
+fn inputs_healthy_metric_line(app: &App) -> Line<'static> {
+    let inputs = total_inputs(app);
+    let (value, color) = if inputs > 0 && app.data.health.clean_inputs == inputs {
+        (format!("✓ {} clean", commafy(inputs as u64)), Color::Green)
     } else {
         (health_percentage(app), health_color(app))
     };
-    metric_line(app, "Sources Healthy", value, color)
+    metric_line(app, "Inputs Healthy", value, color)
 }
 
 fn share_percent(tokens: u64, total: u64) -> f64 {
@@ -723,7 +723,7 @@ fn left_lines(app: &App, data: &SnapshotData, width: usize, height: usize) -> Ve
             metric_line(
                 app,
                 "Input Data",
-                format_bytes(app.data.health.source_data_bytes),
+                format_bytes(app.data.health.input_data_bytes),
                 app.theme.foreground,
             ),
             // The narrow fallback omits input health; Active Days keeps this
@@ -794,25 +794,25 @@ fn metric_line(app: &App, label: &str, value: String, color: Color) -> Line<'sta
 }
 
 fn health_percentage(app: &App) -> String {
-    let total = total_sources(app);
+    let total = total_inputs(app);
     if total == 0 {
         "—".to_string()
-    } else if app.data.health.clean_sources == total {
+    } else if app.data.health.clean_inputs == total {
         "100%".to_string()
     } else {
         format!(
             "{:.2}%",
-            app.data.health.clean_sources as f64 / total as f64 * 100.0
+            app.data.health.clean_inputs as f64 / total as f64 * 100.0
         )
     }
 }
 
 fn health_color(app: &App) -> Color {
-    let total = total_sources(app);
+    let total = total_inputs(app);
     if total == 0 {
         app.theme.muted
     } else {
-        let ratio = app.data.health.clean_sources as f64 / total as f64;
+        let ratio = app.data.health.clean_inputs as f64 / total as f64;
         if ratio >= 0.99 {
             Color::Green
         } else if ratio >= 0.95 {
@@ -823,13 +823,13 @@ fn health_color(app: &App) -> Color {
     }
 }
 
-fn total_sources(app: &App) -> usize {
+fn total_inputs(app: &App) -> usize {
     app.data
         .health
-        .clean_sources
-        .saturating_add(app.data.health.degraded_sources)
-        .saturating_add(app.data.health.partial_sources)
-        .saturating_add(app.data.health.failed_sources)
+        .clean_inputs
+        .saturating_add(app.data.health.degraded_inputs)
+        .saturating_add(app.data.health.partial_inputs)
+        .saturating_add(app.data.health.failed_inputs)
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
@@ -1081,8 +1081,8 @@ mod tests {
         let screen = lines.join("\n");
         assert!(screen.contains("Total Tokens"), "{screen}");
         assert!(
-            !screen.contains("Sources Healthy"),
-            "text fallback drops the Sources Healthy fact: {screen}"
+            !screen.contains("Inputs Healthy"),
+            "text fallback drops the Inputs Healthy fact: {screen}"
         );
         assert!(
             !screen.contains('●'),
@@ -1096,11 +1096,11 @@ mod tests {
     }
 
     #[test]
-    fn sources_healthy_fact_is_compact_when_all_inputs_are_clean() {
+    fn inputs_healthy_fact_is_compact_when_all_inputs_are_clean() {
         let width = 200;
         let height = 50;
         let mut app = make_app_with_theme(width, "dusk");
-        app.data.health.clean_sources = 100;
+        app.data.health.clean_inputs = 100;
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
         terminal
@@ -1108,7 +1108,7 @@ mod tests {
             .unwrap();
 
         let screen = buffer_lines(&terminal).join("\n");
-        assert!(screen.contains("Sources Healthy"), "{screen}");
+        assert!(screen.contains("Inputs Healthy"), "{screen}");
         assert!(screen.contains("✓ 100 clean"), "{screen}");
         assert!(
             !screen.contains("Degraded"),
@@ -1135,7 +1135,7 @@ mod tests {
         assert!(text[12].starts_with("Clients Used"));
         assert!(text[13].starts_with("Favorite Client"));
         assert!(
-            text.iter().all(|line| !line.contains("Sources Healthy")),
+            text.iter().all(|line| !line.contains("Inputs Healthy")),
             "the narrow fallback omits the input-health fact"
         );
     }

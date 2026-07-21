@@ -46,7 +46,7 @@ deep-module cleanup this fork exists for (#33).
   upstream SHA in the body: `ported from upstream <sha>`.
 - New upstream clients are adopted by writing an adapter in our
   architecture, treating the upstream parser as a reference
-  implementation, not a patch source.
+  implementation, not a patch basis.
 - The unified architecture track (streaming fold + sharded cache + client
   adapters + deep aggregation module — issues #54, #36, #37 under #33) is
   one campaign with output-parity gates between phases, not three

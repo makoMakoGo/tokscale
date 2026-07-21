@@ -7,7 +7,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
 use super::{dedup_hash_str, normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -197,14 +197,14 @@ fn normalize_input_and_output(
     }
 }
 
-pub fn parse_zcode_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_zcode_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
     let workspace_key = workspace_key_from_path(path);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
 
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     let mut session_id: Option<String> = None;
     let mut model_id: Option<String> = None;
     let mut context_chars: usize = 0;
@@ -216,7 +216,7 @@ pub fn parse_zcode_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "read JSONL line",
                     format!("{} line {line_number}: {error}", path.display()),
                 ));
@@ -231,7 +231,7 @@ pub fn parse_zcode_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let entry = match serde_json::from_str::<ZcodeEntry>(trimmed) {
             Ok(entry) => entry,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "decode JSONL line",
                     format!("{} line {line_number}: {error}", path.display()),
                 ));

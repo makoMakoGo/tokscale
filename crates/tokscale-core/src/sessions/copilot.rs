@@ -6,8 +6,8 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
-use crate::provider_identity::source_provider_id;
-use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary, ScannedInput};
+use crate::provider_identity::observed_provider_id;
 use crate::TokenBreakdown;
 use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -177,15 +177,15 @@ fn collect_response_ids<'a>(value: &'a Value, response_ids: &mut Vec<&'a str>) {
     }
 }
 
-pub fn parse_copilot_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_copilot_file(path: &Path) -> SessionParseResult<ScannedInput> {
     parse_copilot_file_with_workspace_index(path, &CopilotWorkspaceIndex::default())
 }
 
 pub(crate) fn parse_copilot_file_with_workspace_index(
     path: &Path,
     workspace_index: &CopilotWorkspaceIndex,
-) -> SessionParseResult<ScannedSource> {
-    let mut scanned = ScannedSource::default();
+) -> SessionParseResult<ScannedInput> {
+    let mut scanned = ScannedInput::default();
     let (trace_contexts, first_pass_interruption, confirmed_records) =
         collect_trace_contexts(path, &mut scanned.rejections)?;
 
@@ -211,14 +211,14 @@ pub(crate) fn parse_copilot_file_with_workspace_index(
 
     apply_copilot_workspace_matches(&mut candidates, workspace_index);
 
-    let chat_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::ChatSpan);
-    let inference_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::InferenceLog);
-    let agent_turn_traces = candidate_trace_contexts(&candidates, CopilotUsageSource::AgentTurnLog);
-    let chat_response_ids = candidate_response_ids(&candidates, CopilotUsageSource::ChatSpan);
+    let chat_traces = candidate_trace_contexts(&candidates, CopilotUsageOrigin::ChatSpan);
+    let inference_traces = candidate_trace_contexts(&candidates, CopilotUsageOrigin::InferenceLog);
+    let agent_turn_traces = candidate_trace_contexts(&candidates, CopilotUsageOrigin::AgentTurnLog);
+    let chat_response_ids = candidate_response_ids(&candidates, CopilotUsageOrigin::ChatSpan);
     let inference_response_ids =
-        candidate_response_ids(&candidates, CopilotUsageSource::InferenceLog);
+        candidate_response_ids(&candidates, CopilotUsageOrigin::InferenceLog);
     let agent_turn_response_ids =
-        candidate_response_ids(&candidates, CopilotUsageSource::AgentTurnLog);
+        candidate_response_ids(&candidates, CopilotUsageOrigin::AgentTurnLog);
 
     scanned.messages = candidates
         .into_iter()
@@ -257,7 +257,7 @@ fn for_each_json_record(
     rejections: &mut RejectionSummary,
     record_limit: Option<usize>,
     mut handle: impl FnMut(usize, &Value) -> SessionParseResult<()>,
-) -> SessionParseResult<(Option<SourceFailure>, usize)> {
+) -> SessionParseResult<(Option<InputFailure>, usize)> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
@@ -271,7 +271,7 @@ fn for_each_json_record(
             Ok(line) => line,
             Err(error) => {
                 return Ok((
-                    Some(SourceFailure::new(
+                    Some(InputFailure::new(
                         "read JSONL line",
                         format!("{} line {line_number}: {error}", path.display()),
                     )),
@@ -292,7 +292,7 @@ fn for_each_json_record(
                     rejections.record(RecordRejectionReason::MalformedRecord);
                 }
                 return Ok((
-                    Some(SourceFailure::new(
+                    Some(InputFailure::new(
                         "decode JSONL line",
                         format!("{} line {line_number}: {error}", path.display()),
                     )),
@@ -308,7 +308,7 @@ fn for_each_json_record(
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum CopilotUsageSource {
+enum CopilotUsageOrigin {
     ChatSpan,
     InferenceLog,
     AgentTurnLog,
@@ -324,7 +324,7 @@ struct TraceContext {
 }
 
 struct CopilotUsageCandidate {
-    source: CopilotUsageSource,
+    origin: CopilotUsageOrigin,
     trace_id: Option<String>,
     response_id: Option<String>,
     resource_session_id: Option<String>,
@@ -421,7 +421,7 @@ fn apply_copilot_workspace_matches(
 fn collect_trace_contexts(
     path: &Path,
     rejections: &mut RejectionSummary,
-) -> SessionParseResult<(HashMap<String, TraceContext>, Option<SourceFailure>, usize)> {
+) -> SessionParseResult<(HashMap<String, TraceContext>, Option<InputFailure>, usize)> {
     let mut contexts = HashMap::new();
 
     let (interrupted, confirmed_records) =
@@ -488,7 +488,7 @@ fn usage_candidate_from_record(
     if is_chat_span_record(record, attributes) {
         return candidate_from_attributes(
             path,
-            CopilotUsageSource::ChatSpan,
+            CopilotUsageOrigin::ChatSpan,
             record,
             attributes,
             trace_id,
@@ -500,7 +500,7 @@ fn usage_candidate_from_record(
     if is_inference_log_record(record, attributes) {
         return candidate_from_attributes(
             path,
-            CopilotUsageSource::InferenceLog,
+            CopilotUsageOrigin::InferenceLog,
             record,
             attributes,
             trace_id,
@@ -512,7 +512,7 @@ fn usage_candidate_from_record(
     if is_agent_turn_log_record(record, attributes) {
         return candidate_from_attributes(
             path,
-            CopilotUsageSource::AgentTurnLog,
+            CopilotUsageOrigin::AgentTurnLog,
             record,
             attributes,
             trace_id,
@@ -524,7 +524,7 @@ fn usage_candidate_from_record(
     if is_agent_summary_span_record(record, attributes) {
         return candidate_from_attributes(
             path,
-            CopilotUsageSource::AgentSummarySpan,
+            CopilotUsageOrigin::AgentSummarySpan,
             record,
             attributes,
             trace_id,
@@ -538,7 +538,7 @@ fn usage_candidate_from_record(
 
 fn candidate_from_attributes(
     path: &Path,
-    source: CopilotUsageSource,
+    origin: CopilotUsageOrigin,
     record: &Value,
     attributes: &Map<String, Value>,
     trace_id: Option<String>,
@@ -609,7 +609,7 @@ fn candidate_from_attributes(
     let raw_provider = first_non_empty_attr(attributes, PROVIDER_ATTRS)
         .or_else(|| trace_context.and_then(|context| context.provider.as_deref()))
         .unwrap_or_default();
-    let provider_id = source_provider_id(raw_provider, &model);
+    let provider_id = observed_provider_id(raw_provider, &model);
     let session_id = best_session_attr(attributes)
         .map(|(session_id, _)| session_id)
         .or_else(|| trace_context.and_then(|context| context.session_id.as_deref()))
@@ -634,7 +634,7 @@ fn candidate_from_attributes(
         })?;
     let duration_ms = duration_ms_from_record(record);
     let dedup_key = dedup_key_for_record(
-        source,
+        origin,
         record,
         attributes,
         trace_id.as_deref(),
@@ -644,7 +644,7 @@ fn candidate_from_attributes(
     );
 
     Ok(Some(CopilotUsageCandidate {
-        source,
+        origin,
         trace_id,
         response_id,
         resource_session_id,
@@ -677,22 +677,22 @@ fn invalid_at_path(
 
 fn candidate_trace_contexts(
     candidates: &[CopilotUsageCandidate],
-    source: CopilotUsageSource,
+    origin: CopilotUsageOrigin,
 ) -> HashSet<String> {
     candidates
         .iter()
-        .filter(|candidate| candidate.source == source)
+        .filter(|candidate| candidate.origin == origin)
         .filter_map(|candidate| candidate.trace_id.clone())
         .collect()
 }
 
 fn candidate_response_ids(
     candidates: &[CopilotUsageCandidate],
-    source: CopilotUsageSource,
+    origin: CopilotUsageOrigin,
 ) -> HashSet<String> {
     candidates
         .iter()
-        .filter(|candidate| candidate.source == source)
+        .filter(|candidate| candidate.origin == origin)
         .filter_map(|candidate| candidate.response_id.clone())
         .collect()
 }
@@ -706,7 +706,7 @@ fn should_emit_candidate(
     inference_response_ids: &HashSet<String>,
     agent_turn_response_ids: &HashSet<String>,
 ) -> bool {
-    // Cross-source priority filtering keys off two stable per-event identifiers:
+    // Cross-origin priority filtering keys off two stable per-event identifiers:
     // the OTel `trace_id` and `gen_ai.response.id`. Either match is sufficient
     // to suppress a lower-priority lane, which closes the mixed-trace gap where
     // one record carries a trace_id and another (describing the same response)
@@ -719,18 +719,18 @@ fn should_emit_candidate(
     let response_match =
         |response_ids: &HashSet<String>| response_id.is_some_and(|id| response_ids.contains(id));
 
-    match candidate.source {
-        CopilotUsageSource::ChatSpan => true,
-        CopilotUsageSource::InferenceLog => {
+    match candidate.origin {
+        CopilotUsageOrigin::ChatSpan => true,
+        CopilotUsageOrigin::InferenceLog => {
             !trace_match(chat_traces) && !response_match(chat_response_ids)
         }
-        CopilotUsageSource::AgentTurnLog => {
+        CopilotUsageOrigin::AgentTurnLog => {
             !trace_match(chat_traces)
                 && !trace_match(inference_traces)
                 && !response_match(chat_response_ids)
                 && !response_match(inference_response_ids)
         }
-        CopilotUsageSource::AgentSummarySpan => {
+        CopilotUsageOrigin::AgentSummarySpan => {
             !trace_match(chat_traces)
                 && !trace_match(inference_traces)
                 && !trace_match(agent_turn_traces)
@@ -872,7 +872,7 @@ fn span_id_from_record(value: &Value) -> Option<&str> {
 }
 
 fn dedup_key_for_record(
-    source: CopilotUsageSource,
+    origin: CopilotUsageOrigin,
     record: &Value,
     attributes: &Map<String, Value>,
     trace_id: Option<&str>,
@@ -882,18 +882,18 @@ fn dedup_key_for_record(
 ) -> String {
     let span_id = span_id_from_record(record);
 
-    match source {
-        CopilotUsageSource::ChatSpan | CopilotUsageSource::AgentSummarySpan => {
+    match origin {
+        CopilotUsageOrigin::ChatSpan | CopilotUsageOrigin::AgentSummarySpan => {
             match (trace_id, span_id) {
                 (Some(trace_id), Some(span_id)) => format!("{trace_id}:{span_id}"),
                 _ => format!("span:{session_id}:{timestamp_ms}:{index}"),
             }
         }
-        CopilotUsageSource::InferenceLog => match (trace_id, span_id) {
+        CopilotUsageOrigin::InferenceLog => match (trace_id, span_id) {
             (Some(trace_id), Some(span_id)) => format!("log:{trace_id}:{span_id}"),
             _ => format!("log:{session_id}:{timestamp_ms}:{index}"),
         },
-        CopilotUsageSource::AgentTurnLog => {
+        CopilotUsageOrigin::AgentTurnLog => {
             // When the record actually carries a turn.index, use it so the key
             // is stable across re-runs. Otherwise fall back to the line index
             // so two turn-less agent-turn records in the same trace do not
@@ -1087,7 +1087,7 @@ fn timestamp_ms_from_scalar(value: &Value) -> Option<i64> {
 fn timestamp_ms_from_unix_nanos(value: &Value) -> Option<i64> {
     // OTel `timeUnixNano` is unsigned-by-spec; a negative or zero value is
     // malformed. Refuse it and let the caller fall through to the next
-    // timestamp source instead of producing a pre-1970 timestamp downstream.
+    // timestamp origin instead of producing a pre-1970 timestamp downstream.
     value_as_i64(value)
         .filter(|raw| *raw > 0)
         .map(|raw| raw / 1_000_000)
@@ -1640,7 +1640,7 @@ not-json
     fn test_parse_copilot_traceless_records_do_not_cross_suppress() {
         // Two traceless records describing distinct OTel responses must both
         // emit even when they share a coarse session attribute (here
-        // gen_ai.conversation.id, which spans an entire chat). Cross-source
+        // gen_ai.conversation.id, which spans an entire chat). Cross-origin
         // suppression must key on the per-response identifier
         // (gen_ai.response.id), not on chat-wide session attributes.
         let content = r#"{"type":"span","spanId":"chat-traceless","name":"chat gpt-5.4-mini","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-shared","gen_ai.response.id":"resp-A","gen_ai.usage.input_tokens":11,"gen_ai.usage.output_tokens":3}}
@@ -1758,7 +1758,7 @@ not-json
 
     #[test]
     fn test_parse_copilot_interleaved_multi_trace_suppression_is_per_trace() {
-        // Two traces interleaved on the wire. Source-priority suppression must
+        // Two traces interleaved on the wire. Origin-priority suppression must
         // be scoped per-trace; both invoke_agent records should be dropped in
         // favor of their own trace's chat span, regardless of line order.
         let content = r#"{"type":"span","traceId":"trace-A","spanId":"agent-A","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.response.model":"gpt-5.4-mini","gen_ai.conversation.id":"conv-A","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":30}}

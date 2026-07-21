@@ -70,7 +70,7 @@ with disjoint duties:
   workspace dimension. (Session groupings still prefix the session id; that
   dimension is out of scope for this contract.)
 - `color_key` — a pure color key for the color path (`model_color_for`). It
-  is not an identity source and must not be read as one.
+  is not an identity authority and must not be read as one.
 
 **Storage keys are not identity.** `GroupedModelKey::map_key` (the `v1|…`
 length-prefixed encoding) exists to make internal buckets collision-free.

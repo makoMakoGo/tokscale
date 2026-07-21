@@ -119,7 +119,7 @@ pub(crate) fn run_clients_command(
     let built_in_extra_paths = match built_in_extra_scan_paths_for(&home_dir, &all_clients) {
         Ok(paths) => paths,
         Err(_) => {
-            health.record_unavailable_source(ClientId::Claude.as_str());
+            health.record_unavailable_input(ClientId::Claude.as_str());
             vec![(ClientId::Claude, home_dir.join(".claude/transcripts"))]
         }
     };
@@ -130,7 +130,7 @@ pub(crate) fn run_clients_command(
         match discover_opencode_dbs(&opencode_data_root) {
             Ok(paths) => paths,
             Err(_) => {
-                health.record_unavailable_source(ClientId::OpenCode.as_str());
+                health.record_unavailable_input(ClientId::OpenCode.as_str());
                 Vec::new()
             }
         }

@@ -3,8 +3,8 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit,
+    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
+    LocalInputAdapter, MessageSink, ParseContext, ParsedUnit,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -18,7 +18,7 @@ pub(crate) static PI_ADAPTER: PiAdapter = PiAdapter;
 // breakdowns were clamped to their authoritative output bucket.
 const PI_RECORD_REJECTION_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 5;
 
-impl LocalSourceAdapter for PiAdapter {
+impl LocalInputAdapter for PiAdapter {
     fn client(&self) -> ClientId {
         ClientId::Pi
     }
@@ -26,7 +26,7 @@ impl LocalSourceAdapter for PiAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let units = adapter_discover::discover_default_scanned_units(
             ClientId::Pi,
             ctx,
@@ -43,7 +43,7 @@ impl LocalSourceAdapter for PiAdapter {
         Ok(units)
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -56,10 +56,10 @@ impl LocalSourceAdapter for PiAdapter {
 
     fn plan_cache_hit(
         &self,
-        unit: SourceUnit,
-        source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
-        adapter_cache::plan_cache_hit(unit, source_cache)
+        unit: InputUnit,
+        input_cache: &crate::message_cache::InputMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::InputPlanningError> {
+        adapter_cache::plan_cache_hit(unit, input_cache)
     }
 
     fn fold(
@@ -67,7 +67,7 @@ impl LocalSourceAdapter for PiAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), crate::adapters::SourcePipelineError> {
+    ) -> Result<(), crate::adapters::InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
@@ -79,7 +79,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::adapters::{CacheHitPlan, FoldContext, ParseContext, UnitMessageSource};
+    use crate::adapters::{CacheHitPlan, FoldContext, ParseContext, UnitMessagePayload};
     use crate::message_cache;
 
     const PI_CONTENT: &str = r#"{"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
@@ -117,9 +117,9 @@ mod tests {
     }
 
     fn fold_with_adapter(
-        adapter: &'static dyn LocalSourceAdapter,
-        units: Vec<SourceUnit>,
-        cache: &mut message_cache::SourceMessageCache,
+        adapter: &'static dyn LocalInputAdapter,
+        units: Vec<InputUnit>,
+        cache: &mut message_cache::InputMessageCache,
     ) -> Vec<crate::UnifiedMessage> {
         let parsed = adapter.parse_checked(units, &ParseContext { pricing: None });
         let mut sink = Vec::new();
@@ -166,8 +166,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("pi.jsonl");
         write_file(&path, PI_CONTENT);
-        let units = vec![SourceUnit::plain_file(ClientId::Pi, path.clone())];
-        let mut cache = message_cache::SourceMessageCache::default();
+        let units = vec![InputUnit::plain_file(ClientId::Pi, path.clone())];
+        let mut cache = message_cache::InputMessageCache::default();
 
         let actual = fold_with_adapter(&PI_ADAPTER, units, &mut cache);
         let mut expected = sessions::pi::parse_pi_file(&path).unwrap().messages;
@@ -177,26 +177,26 @@ mod tests {
     }
 
     #[test]
-    fn pi_adapter_reports_missing_source_with_typed_context() {
+    fn pi_adapter_reports_missing_input_with_typed_context() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("missing.jsonl");
 
         let parsed = PI_ADAPTER.parse_checked(
-            vec![SourceUnit::plain_file(ClientId::Pi, path.clone())],
+            vec![InputUnit::plain_file(ClientId::Pi, path.clone())],
             &ParseContext { pricing: None },
         );
 
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].source_health();
+        let health = parsed[0].input_health();
         assert_eq!(health.client, ClientId::Pi);
         assert_eq!(health.path, path);
-        let failure = health.status.failure().expect("source must be unavailable");
-        assert_eq!(failure.operation, "snapshot source metadata and content");
+        let failure = health.status.failure().expect("input must be unavailable");
+        assert_eq!(failure.operation, "snapshot input metadata and content");
         assert!(failure.message.contains(path.to_str().unwrap()));
     }
 
     #[test]
-    fn pi_adapter_reports_malformed_record_and_keeps_source_complete() {
+    fn pi_adapter_reports_malformed_record_and_keeps_input_complete() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("malformed.jsonl");
         write_file(
@@ -208,17 +208,17 @@ mod tests {
         );
 
         let parsed = PI_ADAPTER.parse_checked(
-            vec![SourceUnit::plain_file(ClientId::Pi, path.clone())],
+            vec![InputUnit::plain_file(ClientId::Pi, path.clone())],
             &ParseContext { pricing: None },
         );
 
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].source_health();
+        let health = parsed[0].input_health();
         assert_eq!(health.client, ClientId::Pi);
         assert_eq!(health.path, path);
         assert!(matches!(
             &health.status,
-            crate::source_health::SourceStatus::Complete
+            crate::input_health::InputStatus::Complete
         ));
         assert_eq!(health.rejections.total(), 1);
     }
@@ -228,16 +228,16 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("partial.jsonl");
         write_file(&path, PI_CONTENT);
-        let unit = SourceUnit::plain_file(ClientId::Pi, path.clone()).with_parser_version(
+        let unit = InputUnit::plain_file(ClientId::Pi, path.clone()).with_parser_version(
             ParserVersion::new(ParserId::Pi, PI_RECORD_REJECTION_REVISION),
         );
 
         let parsed = adapter_cache::load_or_scan_unit_with(
             unit,
             &ParseContext { pricing: None },
-            |source_path| {
-                let mut scanned = sessions::pi::parse_pi_file(source_path)?;
-                scanned.interrupted = Some(crate::source_health::SourceFailure::new(
+            |input_path| {
+                let mut scanned = sessions::pi::parse_pi_file(input_path)?;
+                scanned.interrupted = Some(crate::input_health::InputFailure::new(
                     "read injected Pi suffix",
                     "injected interruption after confirmed prefix",
                 ));
@@ -245,14 +245,14 @@ mod tests {
             },
         );
 
-        assert_eq!(parsed.source_health().path, path);
+        assert_eq!(parsed.input_health().path, path);
         assert!(matches!(
-            &parsed.source_health().status,
-            crate::source_health::SourceStatus::Partial { .. }
+            &parsed.input_health().status,
+            crate::input_health::InputStatus::Partial { .. }
         ));
         assert!(matches!(
             &parsed.messages,
-            UnitMessageSource::Fresh(messages) if messages.len() == 1
+            UnitMessagePayload::Fresh(messages) if messages.len() == 1
         ));
         assert!(parsed.cache_write.is_none());
         assert!(parsed.invalidate_cache);
@@ -268,8 +268,8 @@ mod tests {
 
         let path = dir.path().join("pi.jsonl");
         write_file(&path, PI_CONTENT);
-        let units = vec![SourceUnit::plain_file(ClientId::Pi, path.clone())];
-        let mut cache = message_cache::SourceMessageCache::load().unwrap();
+        let units = vec![InputUnit::plain_file(ClientId::Pi, path.clone())];
+        let mut cache = message_cache::InputMessageCache::load().unwrap();
 
         let first = fold_with_adapter(&PI_ADAPTER, units.clone(), &mut cache);
         let planned = PI_ADAPTER
@@ -281,7 +281,7 @@ mod tests {
         };
         assert!(matches!(
             parsed[0].messages,
-            UnitMessageSource::CacheHit(ref plan) if plan.path() == path
+            UnitMessagePayload::CacheHit(ref plan) if plan.path() == path
         ));
 
         let mut second = Vec::new();
@@ -294,9 +294,9 @@ mod tests {
     }
 
     #[test]
-    fn source_unit_plain_file_digest_is_just_path() {
+    fn input_unit_plain_file_digest_is_just_path() {
         let path = PathBuf::from("/tmp/pi.jsonl");
-        let unit = SourceUnit::plain_file(ClientId::Pi, path.clone());
+        let unit = InputUnit::plain_file(ClientId::Pi, path.clone());
 
         assert_eq!(unit.digest_paths(), vec![path]);
     }

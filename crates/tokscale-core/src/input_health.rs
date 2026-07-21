@@ -1,9 +1,9 @@
-//! Source health model.
+//! Scan-input health model.
 //!
-//! Third-party source data can be damaged in ways tokscale cannot fix. The
+//! Third-party input data can be damaged in ways tokscale cannot fix. The
 //! contract here is isolation without silence: a bad record is rejected and
-//! counted, a broken source is skipped and reported, and neither may erase
-//! data that other records or sources produced. Only tokscale's own pipeline
+//! counted, a broken input is skipped and reported, and neither may erase
+//! data that other records or inputs produced. Only tokscale's own pipeline
 //! invariants remain hard errors. See ADR 0020.
 
 use std::collections::BTreeMap;
@@ -15,7 +15,7 @@ use crate::clients::ClientId;
 use crate::sessions::error::SessionParseError;
 use crate::UnifiedMessage;
 
-/// Why a single record inside an otherwise readable source was rejected.
+/// Why a single record inside an otherwise readable input was rejected.
 ///
 /// Reasons intentionally stay coarse: integrity projections need the kind and
 /// frequency of damage, not a per-record forensic log.
@@ -44,9 +44,6 @@ impl RecordRejectionReason {
     pub fn label_for_key(key: &str) -> &str {
         match key {
             "missing-model" => "Missing model",
-            // Retained only to render older persisted summaries. New parsers
-            // cannot classify missing provider metadata as record rejection.
-            "missing-provider" => "Missing provider",
             "unverified-usage-owner" => "Unverified usage owner",
             "missing-timestamp" => "Missing timestamp",
             "malformed-record" => "Malformed record",
@@ -55,7 +52,7 @@ impl RecordRejectionReason {
     }
 }
 
-/// Aggregated record rejections for one source unit.
+/// Aggregated record rejections for one input unit.
 ///
 /// Stores only per-reason counts. Raw paths, parser messages, and record
 /// samples are intentionally discarded once the parser classifies damage.
@@ -112,15 +109,15 @@ pub struct RejectionEntry<'a> {
     pub count: u64,
 }
 
-/// A transient source-level failure used while a parser or adapter classifies
+/// A transient input-level failure used while a parser or adapter classifies
 /// an interrupted scan. It is deliberately absent from `HealthReport`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceFailure {
+pub struct InputFailure {
     pub operation: String,
     pub message: String,
 }
 
-impl SourceFailure {
+impl InputFailure {
     pub fn new(operation: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             operation: operation.into(),
@@ -129,7 +126,7 @@ impl SourceFailure {
     }
 }
 
-impl From<&SessionParseError> for SourceFailure {
+impl From<&SessionParseError> for InputFailure {
     fn from(error: &SessionParseError) -> Self {
         Self {
             operation: error.operation().to_string(),
@@ -138,23 +135,23 @@ impl From<&SessionParseError> for SourceFailure {
     }
 }
 
-/// Availability of one source unit's data in the current report.
+/// Availability of one input unit's data in the current report.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum SourceStatus {
-    /// The source was scanned to the end. Its messages (possibly zero) and
+pub enum InputStatus {
+    /// The input was scanned to the end. Its messages (possibly zero) and
     /// rejection counts are authoritative and cacheable.
     #[default]
     Complete,
-    /// The scan was interrupted mid-source. Records confirmed before the
+    /// The scan was interrupted mid-input. Records confirmed before the
     /// interruption are kept; the number of affected records is unknown and
     /// the result must not be cached.
-    Partial { failure: SourceFailure },
-    /// The source could not be read at all. No data was produced.
-    Unavailable { failure: SourceFailure },
+    Partial { failure: InputFailure },
+    /// The input could not be read at all. No data was produced.
+    Unavailable { failure: InputFailure },
 }
 
-impl SourceStatus {
-    pub fn failure(&self) -> Option<&SourceFailure> {
+impl InputStatus {
+    pub fn failure(&self) -> Option<&InputFailure> {
         match self {
             Self::Complete => None,
             Self::Partial { failure } | Self::Unavailable { failure } => Some(failure),
@@ -162,131 +159,131 @@ impl SourceStatus {
     }
 }
 
-/// Health of one source unit: identity plus status plus rejection counts.
+/// Health of one input unit: client identity plus status plus rejection counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceHealth {
+pub struct InputHealth {
     pub client: ClientId,
     pub path: PathBuf,
-    pub status: SourceStatus,
+    pub status: InputStatus,
     pub rejections: RejectionSummary,
 }
 
-impl SourceHealth {
+impl InputHealth {
     pub fn is_clean(&self) -> bool {
-        matches!(self.status, SourceStatus::Complete) && self.rejections.is_empty()
+        matches!(self.status, InputStatus::Complete) && self.rejections.is_empty()
     }
 }
 
-/// Aggregated health for one report load. Clean sources are not retained;
+/// Aggregated health for one report load. Clean inputs are not retained;
 /// their count is derivable from load metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DataHealth {
-    sources: Vec<SourceHealth>,
-    examined_sources: usize,
-    source_data_bytes: u64,
+    inputs: Vec<InputHealth>,
+    examined_inputs: usize,
+    input_data_bytes: u64,
 }
 
 impl DataHealth {
-    /// Retain a source's health only when there is something to report.
-    pub fn record(&mut self, health: SourceHealth) {
-        self.examined_sources += 1;
+    /// Retain an input's health only when there is something to report.
+    pub fn record(&mut self, health: InputHealth) {
+        self.examined_inputs += 1;
         if !health.is_clean() {
-            self.sources.push(health);
+            self.inputs.push(health);
         }
     }
 
     pub fn merge(&mut self, other: DataHealth) {
-        self.sources.extend(other.sources);
-        self.examined_sources += other.examined_sources;
-        self.source_data_bytes = self
-            .source_data_bytes
-            .checked_add(other.source_data_bytes)
-            .expect("source data size must fit in u64");
+        self.inputs.extend(other.inputs);
+        self.examined_inputs += other.examined_inputs;
+        self.input_data_bytes = self
+            .input_data_bytes
+            .checked_add(other.input_data_bytes)
+            .expect("input data size must fit in u64");
     }
 
-    pub fn set_source_data_bytes(&mut self, source_data_bytes: u64) {
-        self.source_data_bytes = source_data_bytes;
+    pub fn set_input_data_bytes(&mut self, input_data_bytes: u64) {
+        self.input_data_bytes = input_data_bytes;
     }
 
-    pub fn source_data_bytes(&self) -> u64 {
-        self.source_data_bytes
+    pub fn input_data_bytes(&self) -> u64 {
+        self.input_data_bytes
     }
 
-    pub fn sources(&self) -> &[SourceHealth] {
-        &self.sources
+    pub fn inputs(&self) -> &[InputHealth] {
+        &self.inputs
     }
 
     pub fn is_empty(&self) -> bool {
-        self.sources.is_empty()
+        self.inputs.is_empty()
     }
 
     pub fn rejected_records(&self) -> u64 {
-        self.sources
+        self.inputs
             .iter()
-            .map(|source| source.rejections.total())
+            .map(|input| input.rejections.total())
             .sum()
     }
 
-    pub fn partial_sources(&self) -> usize {
-        self.sources
+    pub fn partial_inputs(&self) -> usize {
+        self.inputs
             .iter()
-            .filter(|source| matches!(source.status, SourceStatus::Partial { .. }))
+            .filter(|input| matches!(input.status, InputStatus::Partial { .. }))
             .count()
     }
 
-    pub fn failed_sources(&self) -> usize {
-        self.sources
+    pub fn failed_inputs(&self) -> usize {
+        self.inputs
             .iter()
-            .filter(|source| matches!(source.status, SourceStatus::Unavailable { .. }))
+            .filter(|input| matches!(input.status, InputStatus::Unavailable { .. }))
             .count()
     }
 
-    pub fn clean_sources(&self) -> usize {
-        self.examined_sources.saturating_sub(self.sources.len())
+    pub fn clean_inputs(&self) -> usize {
+        self.examined_inputs.saturating_sub(self.inputs.len())
     }
 
-    pub fn degraded_sources(&self) -> usize {
-        self.sources
+    pub fn degraded_inputs(&self) -> usize {
+        self.inputs
             .iter()
-            .filter(|source| {
-                matches!(source.status, SourceStatus::Complete) && !source.rejections.is_empty()
+            .filter(|input| {
+                matches!(input.status, InputStatus::Complete) && !input.rejections.is_empty()
             })
             .count()
     }
 
     /// Total issue count: every rejected record plus every partial or
-    /// unavailable source counts as one issue.
+    /// unavailable input counts as one issue.
     pub fn issue_count(&self) -> u64 {
-        self.rejected_records() + (self.partial_sources() + self.failed_sources()) as u64
+        self.rejected_records() + (self.partial_inputs() + self.failed_inputs()) as u64
     }
 
     /// Serializable summary for report payloads, exports, and the TUI cache.
     ///
-    /// Detailed parser failures and representative source paths stop at this
+    /// Detailed parser failures and representative input paths stop at this
     /// boundary. User-visible health contains only stable issue classes and
     /// aggregate counts.
     pub fn to_report(&self) -> HealthReport {
         let mut grouped = BTreeMap::<(String, String, String, String), HealthIssueReport>::new();
-        for source in &self.sources {
-            let source_name = source.client.as_str().to_string();
+        for input in &self.inputs {
+            let client_name = input.client.as_str().to_string();
 
-            for rejection in source.rejections.entries() {
+            for rejection in input.rejections.entries() {
                 let entry = grouped
                     .entry((
                         "warning".to_string(),
-                        source_name.clone(),
+                        client_name.clone(),
                         rejection.key.to_string(),
                         "record-skipped".to_string(),
                     ))
                     .or_insert_with(|| HealthIssueReport {
                         level: "warning".to_string(),
-                        source: source_name.clone(),
+                        client: client_name.clone(),
                         issue: rejection.key.to_string(),
-                        affected_sources: 0,
+                        affected_inputs: 0,
                         rejected_records: Some(0),
                         handling: "record-skipped".to_string(),
                     });
-                entry.affected_sources += 1;
+                entry.affected_inputs += 1;
                 let rejected_records = entry
                     .rejected_records
                     .as_mut()
@@ -296,58 +293,58 @@ impl DataHealth {
                     .expect("aggregated rejected record count must fit in u64");
             }
 
-            let source_issue = match source.status {
-                SourceStatus::Partial { .. } => Some(("partial-source", "confirmed-data-kept")),
-                SourceStatus::Unavailable { .. } => Some(("source-unavailable", "source-skipped")),
-                SourceStatus::Complete => None,
+            let input_issue = match input.status {
+                InputStatus::Partial { .. } => Some(("partial-input", "confirmed-data-kept")),
+                InputStatus::Unavailable { .. } => Some(("input-unavailable", "input-skipped")),
+                InputStatus::Complete => None,
             };
-            if let Some((issue, handling)) = source_issue {
+            if let Some((issue, handling)) = input_issue {
                 let entry = grouped
                     .entry((
                         "error".to_string(),
-                        source_name.clone(),
+                        client_name.clone(),
                         issue.to_string(),
                         handling.to_string(),
                     ))
                     .or_insert_with(|| HealthIssueReport {
                         level: "error".to_string(),
-                        source: source_name.clone(),
+                        client: client_name.clone(),
                         issue: issue.to_string(),
-                        affected_sources: 0,
+                        affected_inputs: 0,
                         rejected_records: None,
                         handling: handling.to_string(),
                     });
-                entry.affected_sources += 1;
+                entry.affected_inputs += 1;
             }
         }
 
         HealthReport {
             complete: self.is_empty(),
-            clean_sources: self.clean_sources(),
-            degraded_sources: self.degraded_sources(),
+            clean_inputs: self.clean_inputs(),
+            degraded_inputs: self.degraded_inputs(),
             rejected_records: self.rejected_records(),
-            partial_sources: self.partial_sources(),
-            failed_sources: self.failed_sources(),
-            source_data_bytes: self.source_data_bytes,
+            partial_inputs: self.partial_inputs(),
+            failed_inputs: self.failed_inputs(),
+            input_data_bytes: self.input_data_bytes,
             issues: grouped.into_values().collect(),
         }
     }
 }
 
 /// Serializable health summary carried by report payloads. `complete: true`
-/// with no issues means every scanned source was healthy.
+/// with no issues means every scanned input was healthy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct HealthReport {
     pub complete: bool,
-    pub clean_sources: usize,
-    pub degraded_sources: usize,
+    pub clean_inputs: usize,
+    pub degraded_inputs: usize,
     pub rejected_records: u64,
-    pub partial_sources: usize,
-    pub failed_sources: usize,
-    /// Deduplicated on-disk size of source inputs at the latest inventory
+    pub partial_inputs: usize,
+    pub failed_inputs: usize,
+    /// Deduplicated on-disk size of scan inputs at the latest inventory
     /// snapshot. Tokscale's own cache files are not included.
-    pub source_data_bytes: u64,
+    pub input_data_bytes: u64,
     #[serde(default)]
     pub issues: Vec<HealthIssueReport>,
 }
@@ -356,12 +353,12 @@ impl Default for HealthReport {
     fn default() -> Self {
         Self {
             complete: true,
-            clean_sources: 0,
-            degraded_sources: 0,
+            clean_inputs: 0,
+            degraded_inputs: 0,
             rejected_records: 0,
-            partial_sources: 0,
-            failed_sources: 0,
-            source_data_bytes: 0,
+            partial_inputs: 0,
+            failed_inputs: 0,
+            input_data_bytes: 0,
             issues: Vec::new(),
         }
     }
@@ -369,67 +366,67 @@ impl Default for HealthReport {
 
 impl HealthReport {
     /// Total issue count: every rejected record plus every partial or
-    /// unavailable source counts as one issue.
+    /// unavailable input counts as one issue.
     pub fn issue_count(&self) -> u64 {
-        self.rejected_records + (self.partial_sources + self.failed_sources) as u64
+        self.rejected_records + (self.partial_inputs + self.failed_inputs) as u64
     }
 
-    /// Source-level failures may be transient even when the source inventory
+    /// Input-level failures may be transient even when the input inventory
     /// fingerprint is unchanged, so callers should retry those scans.
-    pub fn requires_source_retry(&self) -> bool {
-        self.partial_sources > 0 || self.failed_sources > 0
+    pub fn requires_input_retry(&self) -> bool {
+        self.partial_inputs > 0 || self.failed_inputs > 0
     }
 
-    pub fn record_unavailable_source(&mut self, source: &str) {
+    pub fn record_unavailable_input(&mut self, client: &str) {
         self.complete = false;
         if self.issues.iter().any(|issue| {
-            issue.source == source
-                && issue.issue == "source-unavailable"
-                && issue.handling == "source-skipped"
+            issue.client == client
+                && issue.issue == "input-unavailable"
+                && issue.handling == "input-skipped"
         }) {
             return;
         }
-        self.failed_sources += 1;
+        self.failed_inputs += 1;
         self.issues.push(HealthIssueReport {
             level: "error".to_string(),
-            source: source.to_string(),
-            issue: "source-unavailable".to_string(),
-            affected_sources: 1,
+            client: client.to_string(),
+            issue: "input-unavailable".to_string(),
+            affected_inputs: 1,
             rejected_records: None,
-            handling: "source-skipped".to_string(),
+            handling: "input-skipped".to_string(),
         });
     }
 }
 
 /// Stable, aggregate-only issue exposed by report JSON and the TUI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HealthIssueReport {
     pub level: String,
-    pub source: String,
+    pub client: String,
     pub issue: String,
-    /// Number of source units represented by this issue class.
-    pub affected_sources: u64,
+    /// Number of input units represented by this issue class.
+    pub affected_inputs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected_records: Option<u64>,
     pub handling: String,
 }
 
-/// What a session parser produced from scanning one source unit.
+/// What a session parser produced from scanning one input unit.
 ///
-/// `Err(SessionParseError)` from a parser now means "the source could not be
+/// `Err(SessionParseError)` from a parser now means "the input could not be
 /// read at all". Damage inside individual records must be recorded in
 /// `rejections` instead of failing the scan, and damage that interrupts an
 /// in-progress scan sets `interrupted` while keeping the records confirmed
 /// so far.
 #[derive(Debug, Default)]
-pub struct ScannedSource {
+pub struct ScannedInput {
     pub messages: Vec<UnifiedMessage>,
     pub rejections: RejectionSummary,
-    pub interrupted: Option<SourceFailure>,
+    pub interrupted: Option<InputFailure>,
 }
 
-impl ScannedSource {
+impl ScannedInput {
     pub fn complete(messages: Vec<UnifiedMessage>) -> Self {
         Self {
             messages,
@@ -443,8 +440,8 @@ impl ScannedSource {
 mod tests {
     use super::*;
 
-    fn health(status: SourceStatus, rejections: RejectionSummary) -> SourceHealth {
-        SourceHealth {
+    fn health(status: InputStatus, rejections: RejectionSummary) -> InputHealth {
+        InputHealth {
             client: ClientId::Zed,
             path: PathBuf::from("/tmp/threads.db"),
             status,
@@ -488,12 +485,12 @@ mod tests {
         let report = HealthReport::default();
 
         assert!(report.complete);
-        assert_eq!(report.clean_sources, 0);
-        assert_eq!(report.degraded_sources, 0);
+        assert_eq!(report.clean_inputs, 0);
+        assert_eq!(report.degraded_inputs, 0);
         assert_eq!(report.rejected_records, 0);
-        assert_eq!(report.partial_sources, 0);
-        assert_eq!(report.failed_sources, 0);
-        assert_eq!(report.source_data_bytes, 0);
+        assert_eq!(report.partial_inputs, 0);
+        assert_eq!(report.failed_inputs, 0);
+        assert_eq!(report.input_data_bytes, 0);
         assert!(report.issues.is_empty());
     }
 
@@ -509,27 +506,52 @@ mod tests {
         let value = serde_json::to_value(HealthReport::default()).unwrap();
 
         assert_eq!(value["complete"], true);
-        assert_eq!(value["cleanSources"], 0);
-        assert_eq!(value["degradedSources"], 0);
-        assert!(value.get("healthySources").is_none());
+        assert_eq!(value["cleanInputs"], 0);
+        assert_eq!(value["degradedInputs"], 0);
+        assert!(value.get("healthyInputs").is_none());
         assert_eq!(value["rejectedRecords"], 0);
-        assert_eq!(value["partialSources"], 0);
-        assert_eq!(value["failedSources"], 0);
-        assert_eq!(value["sourceDataBytes"], 0);
+        assert_eq!(value["partialInputs"], 0);
+        assert_eq!(value["failedInputs"], 0);
+        assert_eq!(value["inputDataBytes"], 0);
         assert_eq!(value["issues"], serde_json::json!([]));
-        assert!(value.get("sources").is_none());
+        for retired in [
+            "cleanSources",
+            "degradedSources",
+            "partialSources",
+            "failedSources",
+            "sourceDataBytes",
+            "sources",
+        ] {
+            assert!(value.get(retired).is_none());
+        }
     }
 
     #[test]
-    fn health_report_issue_count_includes_records_and_source_failures() {
+    fn retired_health_fields_are_rejected_instead_of_ignored() {
+        for retired in [
+            r#"{"cleanSources":1}"#,
+            r#"{"degradedSources":1}"#,
+            r#"{"partialSources":1}"#,
+            r#"{"failedSources":1}"#,
+            r#"{"sourceDataBytes":1}"#,
+            r#"{"sources":[]}"#,
+        ] {
+            let error = serde_json::from_str::<HealthReport>(retired)
+                .expect_err("retired health fields must not deserialize");
+            assert!(error.to_string().contains("unknown field"));
+        }
+    }
+
+    #[test]
+    fn health_report_issue_count_includes_records_and_input_failures() {
         let report = HealthReport {
             complete: false,
-            clean_sources: 4,
-            degraded_sources: 1,
+            clean_inputs: 4,
+            degraded_inputs: 1,
             rejected_records: 3,
-            partial_sources: 2,
-            failed_sources: 1,
-            source_data_bytes: 1_024,
+            partial_inputs: 2,
+            failed_inputs: 1,
+            input_data_bytes: 1_024,
             issues: Vec::new(),
         };
 
@@ -537,75 +559,75 @@ mod tests {
     }
 
     #[test]
-    fn supplementary_unavailable_source_does_not_duplicate_existing_issue() {
+    fn supplementary_unavailable_input_does_not_duplicate_existing_issue() {
         let mut report = HealthReport::default();
 
-        report.record_unavailable_source("claude");
-        report.record_unavailable_source("claude");
+        report.record_unavailable_input("claude");
+        report.record_unavailable_input("claude");
 
-        assert_eq!(report.failed_sources, 1);
+        assert_eq!(report.failed_inputs, 1);
         assert_eq!(report.issues.len(), 1);
-        assert_eq!(report.issues[0].affected_sources, 1);
+        assert_eq!(report.issues[0].affected_inputs, 1);
     }
 
     #[test]
-    fn data_health_classifies_sources_into_clean_degraded_partial_and_failed() {
+    fn data_health_classifies_inputs_into_clean_degraded_partial_and_failed() {
         let mut data_health = DataHealth::default();
-        data_health.record(health(SourceStatus::Complete, RejectionSummary::default()));
+        data_health.record(health(InputStatus::Complete, RejectionSummary::default()));
         assert!(data_health.is_empty());
 
         let mut rejections = RejectionSummary::default();
         rejections.record(RecordRejectionReason::MissingModel);
         rejections.record(RecordRejectionReason::UnverifiedUsageOwner);
-        data_health.record(health(SourceStatus::Complete, rejections));
+        data_health.record(health(InputStatus::Complete, rejections));
         data_health.record(health(
-            SourceStatus::Unavailable {
-                failure: SourceFailure::new("open SQLite source read-only", "corrupt header"),
+            InputStatus::Unavailable {
+                failure: InputFailure::new("open SQLite input read-only", "corrupt header"),
             },
             RejectionSummary::default(),
         ));
         data_health.record(health(
-            SourceStatus::Partial {
-                failure: SourceFailure::new("scan rows", "disk I/O error mid-scan"),
+            InputStatus::Partial {
+                failure: InputFailure::new("scan rows", "disk I/O error mid-scan"),
             },
             RejectionSummary::default(),
         ));
 
         assert_eq!(data_health.rejected_records(), 2);
-        assert_eq!(data_health.clean_sources(), 1);
-        assert_eq!(data_health.degraded_sources(), 1);
-        assert_eq!(data_health.failed_sources(), 1);
-        assert_eq!(data_health.partial_sources(), 1);
+        assert_eq!(data_health.clean_inputs(), 1);
+        assert_eq!(data_health.degraded_inputs(), 1);
+        assert_eq!(data_health.failed_inputs(), 1);
+        assert_eq!(data_health.partial_inputs(), 1);
         assert_eq!(data_health.issue_count(), 4);
     }
 
     #[test]
-    fn merging_data_health_preserves_clean_and_degraded_source_counts() {
+    fn merging_data_health_preserves_clean_and_degraded_input_counts() {
         let mut left = DataHealth::default();
-        left.set_source_data_bytes(1_024);
-        left.record(health(SourceStatus::Complete, RejectionSummary::default()));
+        left.set_input_data_bytes(1_024);
+        left.record(health(InputStatus::Complete, RejectionSummary::default()));
         let mut rejected = RejectionSummary::default();
         rejected.record(RecordRejectionReason::MissingModel);
-        left.record(health(SourceStatus::Complete, rejected));
+        left.record(health(InputStatus::Complete, rejected));
 
         let mut right = DataHealth::default();
-        right.set_source_data_bytes(2_048);
-        right.record(health(SourceStatus::Complete, RejectionSummary::default()));
+        right.set_input_data_bytes(2_048);
+        right.record(health(InputStatus::Complete, RejectionSummary::default()));
         right.record(health(
-            SourceStatus::Unavailable {
-                failure: SourceFailure::new("open source", "missing"),
+            InputStatus::Unavailable {
+                failure: InputFailure::new("open input", "missing"),
             },
             RejectionSummary::default(),
         ));
 
         left.merge(right);
 
-        assert_eq!(left.clean_sources(), 2);
-        assert_eq!(left.degraded_sources(), 1);
-        assert_eq!(left.sources().len(), 2);
-        assert_eq!(left.failed_sources(), 1);
+        assert_eq!(left.clean_inputs(), 2);
+        assert_eq!(left.degraded_inputs(), 1);
+        assert_eq!(left.inputs().len(), 2);
+        assert_eq!(left.failed_inputs(), 1);
         assert_eq!(left.rejected_records(), 1);
-        assert_eq!(left.source_data_bytes(), 3_072);
+        assert_eq!(left.input_data_bytes(), 3_072);
     }
 
     #[test]
@@ -614,20 +636,20 @@ mod tests {
         for path in ["/sessions/first.jsonl", "/sessions/second.jsonl"] {
             let mut rejections = RejectionSummary::default();
             rejections.record(RecordRejectionReason::MalformedRecord);
-            data_health.record(SourceHealth {
+            data_health.record(InputHealth {
                 client: ClientId::Codex,
                 path: PathBuf::from(path),
-                status: SourceStatus::Complete,
+                status: InputStatus::Complete,
                 rejections,
             });
         }
 
         for path in ["/sessions/third.jsonl", "/sessions/fourth.jsonl"] {
-            data_health.record(SourceHealth {
+            data_health.record(InputHealth {
                 client: ClientId::Codex,
                 path: PathBuf::from(path),
-                status: SourceStatus::Unavailable {
-                    failure: SourceFailure::new("read JSONL", format!("failed: {path}")),
+                status: InputStatus::Unavailable {
+                    failure: InputFailure::new("read JSONL", format!("failed: {path}")),
                 },
                 rejections: RejectionSummary::default(),
             });
@@ -635,10 +657,10 @@ mod tests {
 
         let report = data_health.to_report();
 
-        assert_eq!(report.clean_sources, 0);
-        assert_eq!(report.degraded_sources, 2);
+        assert_eq!(report.clean_inputs, 0);
+        assert_eq!(report.degraded_inputs, 2);
         assert_eq!(report.rejected_records, 2);
-        assert_eq!(report.failed_sources, 2);
+        assert_eq!(report.failed_inputs, 2);
         assert_eq!(report.issues.len(), 2);
 
         let records = report
@@ -647,21 +669,21 @@ mod tests {
             .find(|issue| issue.issue == "malformed-record")
             .unwrap();
         assert_eq!(records.level, "warning");
-        assert_eq!(records.source, "codex");
-        assert_eq!(records.affected_sources, 2);
+        assert_eq!(records.client, "codex");
+        assert_eq!(records.affected_inputs, 2);
         assert_eq!(records.rejected_records, Some(2));
         assert_eq!(records.handling, "record-skipped");
 
         let failures = report
             .issues
             .iter()
-            .find(|issue| issue.issue == "source-unavailable")
+            .find(|issue| issue.issue == "input-unavailable")
             .unwrap();
         assert_eq!(failures.level, "error");
-        assert_eq!(failures.source, "codex");
-        assert_eq!(failures.affected_sources, 2);
+        assert_eq!(failures.client, "codex");
+        assert_eq!(failures.affected_inputs, 2);
         assert_eq!(failures.rejected_records, None);
-        assert_eq!(failures.handling, "source-skipped");
+        assert_eq!(failures.handling, "input-skipped");
     }
 
     #[test]
@@ -669,17 +691,17 @@ mod tests {
         let mut data_health = DataHealth::default();
         let mut rejections = RejectionSummary::default();
         rejections.record(RecordRejectionReason::MissingModel);
-        data_health.record(SourceHealth {
+        data_health.record(InputHealth {
             client: ClientId::Zed,
             path: PathBuf::from("/private/zed/threads.db"),
-            status: SourceStatus::Complete,
+            status: InputStatus::Complete,
             rejections,
         });
-        data_health.record(SourceHealth {
+        data_health.record(InputHealth {
             client: ClientId::Kiro,
             path: PathBuf::from("/private/kiro/session.jsonl"),
-            status: SourceStatus::Unavailable {
-                failure: SourceFailure::new("decode private source", "raw parser failure"),
+            status: InputStatus::Unavailable {
+                failure: InputFailure::new("decode private input", "raw parser failure"),
             },
             rejections: RejectionSummary::default(),
         });
@@ -687,11 +709,11 @@ mod tests {
         let value = serde_json::to_value(data_health.to_report()).unwrap();
         let encoded = serde_json::to_string(&value).unwrap();
 
-        assert!(value.get("sources").is_none());
+        assert!(value.get("inputs").is_none());
         assert_eq!(value["issues"].as_array().unwrap().len(), 2);
         assert!(!encoded.contains("/private/"));
         assert!(!encoded.contains("raw rejection detail"));
-        assert!(!encoded.contains("decode private source"));
+        assert!(!encoded.contains("decode private input"));
         assert!(!encoded.contains("raw parser failure"));
     }
 }

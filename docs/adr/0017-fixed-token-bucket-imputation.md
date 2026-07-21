@@ -1,17 +1,17 @@
-# ADR 0017: Fixed bucket allocation for total-only token sources
+# ADR 0017: Fixed bucket allocation for total-only usage records
 
 Status: Accepted
 
 ## Context
 
 Tokscale's local report model has five token buckets: input, output, cache
-read, cache write, and reasoning. Some local sources expose a positive token
+read, cache write, and reasoning. Some local inputs expose a positive token
 total with model/session attribution, but not the bucket split. Grok Build logs
 expose cumulative `totalTokens` deltas. Warp's local `warp.sqlite` exposes
 per-conversation, per-model totals in `conversation_usage_metadata.token_usage`
 but not input/output/cache/reasoning buckets.
 
-Adding an `unknown` bucket would spread this source limitation through
+Adding an `unknown` bucket would spread this storage limitation through
 aggregation, TUI views, pricing, cache serialization, and downstream reports.
 Dropping total-only rows would discard locally meaningful model/session usage.
 Putting all tokens in `input` preserves totals but makes this fork's reports
@@ -19,7 +19,7 @@ less representative of the maintainer's actual usage mix.
 
 ## Decision
 
-Total-only token sources that otherwise have accepted local attribution are
+Total-only usage records that otherwise have accepted client attribution are
 included in local reports by allocating the total across existing buckets with
 a fixed local-history ratio.
 
@@ -37,25 +37,26 @@ total-only (`commandcode`, `kiro`, `grok`, `zcode`):
 
 The denominator is `26,981,413,964`. Implementations must use integer
 arithmetic and deterministic largest-remainder rounding so the allocated bucket
-sum exactly equals the source total.
+sum exactly equals the recorded total.
 
-When a parser can see multiple total-only rows from one source unit, rounding
-is applied as a batch: each row's bucket sum must equal its source total, and
-the source unit's aggregate buckets must equal the fixed allocation for the
-source unit's aggregate total.
+When a parser can see multiple total-only rows from one input unit, rounding
+is applied as a batch: each row's bucket sum must equal its recorded total, and
+the input unit's aggregate buckets must equal the fixed allocation for the
+input unit's aggregate total.
 
 This allocation is a fixed projection, not a dynamic recalculation and not a
-claim that the source exposed real bucket data. Raw model ids still flow
+claim that the input exposed real bucket data. Raw model ids still flow
 through the normal report finalization path for model/provider canonicalization
 before grouping and pricing.
 
 ## Consequences
 
-- Total-only sources such as Grok Build and local Warp can contribute to normal
-  token reports without adding a new token bucket to the core model.
-- Per-model and per-provider grouping remains meaningful when the source
+- Clients with total-only inputs, such as Grok Build and local Warp, can
+  contribute to normal token reports without adding a new token bucket to the
+  core model.
+- Per-model and per-provider grouping remains meaningful when the input
   exposes model attribution, as Warp does.
-- Derived cost is approximate for imputed sources because pricing sees
-  projected buckets rather than source-reported buckets.
+- Derived cost is approximate for imputed inputs because pricing sees
+  projected buckets rather than input-reported buckets.
 - Changing the ratio is a semantic report change and requires an ADR update,
   focused tests, and parser/cache revision review.

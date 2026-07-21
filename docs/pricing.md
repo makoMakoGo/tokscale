@@ -22,14 +22,14 @@ Rows without positive token buckets are not usage rows. Cost-only or
 credits-only records are dropped instead of being converted into local token
 cost.
 
-Total-only token sources with accepted local attribution use the fixed bucket
+Total-only usage records with accepted client attribution use the fixed bucket
 allocation from [ADR 0017](adr/0017-fixed-token-bucket-imputation.md). Their
-derived cost is approximate because the source total is projected into buckets
+derived cost is approximate because the recorded total is projected into buckets
 before pricing.
 
 See [ADR 0013](adr/0013-pricing-source-authority.md).
 
-## Pricing source authority
+## Pricing Source authority
 
 Exact custom overrides from `custom-pricing.json` are checked first. Otherwise,
 Tokscale searches LiteLLM, OpenRouter, and models.dev using provider-aware exact
@@ -39,7 +39,7 @@ The public catalogs do not have a simple fixed global order. The resolver can
 choose among them based on provider-scoped paths, full keys, model-part matches,
 provider hints, version normalization, and tiered pricing support.
 
-Global private aliases are not a substitute for source parsing. Source-specific
+Global private aliases are not a substitute for input parsing. Client-specific
 model decoding may happen in the parser, but local report finalization,
 grouping, and pricing all use the core `canonicalize_model_id` path before
 pricing lookup.
@@ -47,7 +47,7 @@ pricing lookup.
 ### Model identity before pricing
 
 Local reports canonicalize parsed model ids before pricing lookup. Parsers may
-clean obvious source labels early, but the report finalization path still
+clean obvious observed model labels early, but the report finalization path still
 normalizes every `UnifiedMessage.model_id` through the core model canonicalizer
 before aggregation and `PricingService::calculate_cost_with_provider`.
 
@@ -72,7 +72,7 @@ Create `custom-pricing.json` in the Tokscale config directory:
       "input_cost_per_million_tokens": 2.0,
       "output_cost_per_million_tokens": 8.0,
       "cache_read_input_token_cost_per_million_tokens": 0.3,
-      "source": "https://docs.fireworks.ai/serverless/pricing",
+      "pricingSource": "https://docs.fireworks.ai/serverless/pricing",
       "notes": "Kimi K2.6 local report override"
     }
   }
@@ -86,7 +86,7 @@ present and positive. Cache-read and cache-creation prices are optional.
 Overrides are exact-only and case-insensitive:
 
 - Local reports match the canonical model id after model canonicalization, not
-  necessarily the raw source label emitted by a client or parser.
+  necessarily the raw observed label emitted by a client or parser.
 - For local report overrides, key the entry by that final canonical id unless a
   parser intentionally preserves the full route.
 - `tokscale pricing lookup <model>` matches the command argument as a catalog query.
@@ -111,13 +111,13 @@ lookup or report that needs pricing.
 
 ```bash
 tokscale pricing lookup claude-sonnet-4-5 --no-spinner
-tokscale pricing lookup grok-code --source openrouter --no-spinner
+tokscale pricing lookup grok-code --pricing-source openrouter --no-spinner
 tokscale pricing overrides --json
 ```
 
-Standalone lookup does not infer arbitrary source prefixes, route prefixes,
-private aliases, or reasoning-tier suffixes. It is a pricing catalog query, not
-a parser repair path.
+Standalone lookup does not infer arbitrary observed-model prefixes, route
+prefixes, private aliases, or reasoning-tier suffixes. It is a pricing catalog
+query, not a parser repair path.
 
 ## Subscription usage is separate
 

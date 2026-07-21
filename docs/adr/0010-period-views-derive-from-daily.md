@@ -39,7 +39,7 @@ The granularity boundary is the rule's hinge:
   per-message in the hot loop, because `daily` has already discarded that
   finer granularity. Minutely was removed rather than kept because its
   per-message, high-cardinality cost was not worth a niche view; hourly is
-  kept because it is broadly useful and there is no coarser source to
+  kept because it is broadly useful and there is no coarser projection to
   derive it from.
 
 Why from-daily, not per-message:

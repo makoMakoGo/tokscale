@@ -177,14 +177,14 @@ mod tests {
     }
 
     #[test]
-    fn imputed_total_always_matches_source_total() {
+    fn imputed_total_always_matches_reported_total() {
         for total in [1, 2, 3, 10, 999, 123_456_789] {
             assert_eq!(impute_total_only_token_breakdown(total).total(), total);
         }
     }
 
     #[test]
-    fn batch_imputation_preserves_row_totals_and_source_bucket_totals() {
+    fn batch_imputation_preserves_row_and_batch_bucket_totals() {
         let totals = [20_802_120, 13_108_837, 2_019_058, 1_182_533, 64_058, 28_239];
         let rows = impute_total_only_token_breakdowns(&totals);
 

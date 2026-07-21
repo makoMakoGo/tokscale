@@ -6,12 +6,10 @@ use super::error::{SessionParseError, SessionParseResult};
 use super::{
     normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
 };
-use crate::message_cache::{
-    source_file_identity_from_open_file, SourceInputPolicy, SourceInputSnapshot,
+use crate::input_health::{
+    InputFailure, InputStatus, RecordRejectionReason, RejectionSummary, ScannedInput,
 };
-use crate::source_health::{
-    RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure, SourceStatus,
-};
+use crate::message_cache::{input_file_identity_from_open_file, InputPolicy, InputSnapshot};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use rayon::prelude::*;
 use serde::Deserialize;
@@ -100,7 +98,7 @@ impl OmpParentTaskAgentIndex {
         self.parent_health()
             .into_iter()
             .filter(|health| {
-                !matches!(health.status, SourceStatus::Complete) || !health.rejections.is_empty()
+                !matches!(health.status, InputStatus::Complete) || !health.rejections.is_empty()
             })
             .collect()
     }
@@ -125,7 +123,7 @@ impl OmpParentTaskAgentIndex {
 struct OmpParentScan {
     task_agents: HashMap<String, String>,
     rejections: RejectionSummary,
-    status: SourceStatus,
+    status: InputStatus,
     cache_input: Option<OmpParentCacheInput>,
 }
 
@@ -158,7 +156,7 @@ impl<R: Read> Read for HashingReader<R> {
 #[derive(Debug)]
 pub(crate) struct OmpParentHealth {
     pub path: PathBuf,
-    pub status: SourceStatus,
+    pub status: InputStatus,
     pub rejections: RejectionSummary,
     pub cache_input: Option<OmpParentCacheInput>,
 }
@@ -166,7 +164,7 @@ pub(crate) struct OmpParentHealth {
 #[derive(Debug, Clone)]
 pub(crate) struct OmpParentCacheInput {
     pub content_hash: [u8; 32],
-    pub snapshot: SourceInputSnapshot,
+    pub snapshot: InputSnapshot,
 }
 
 /// Pi session header (first line of JSONL)
@@ -242,12 +240,12 @@ pub struct PiOrchestrationUsage {
 }
 
 /// Parse a Pi JSONL session file
-pub fn parse_pi_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_pi_file(path: &Path) -> SessionParseResult<ScannedInput> {
     parse_pi_format_file(path, "pi", None)
 }
 
 /// Parse an OMP JSONL session file.
-pub fn parse_omp_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_omp_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let parent_index = build_omp_parent_task_agent_index(&[path.to_path_buf()]);
     parse_pi_format_file(path, "omp", Some(&parent_index))
 }
@@ -255,7 +253,7 @@ pub fn parse_omp_file(path: &Path) -> SessionParseResult<ScannedSource> {
 pub fn parse_omp_file_with_parent_task_agent_index(
     path: &Path,
     parent_task_agent_index: &OmpParentTaskAgentIndex,
-) -> SessionParseResult<ScannedSource> {
+) -> SessionParseResult<ScannedInput> {
     parse_pi_format_file(path, "omp", Some(parent_task_agent_index))
 }
 
@@ -313,7 +311,7 @@ fn token_breakdown_from_pi_usage(
     let raw_output = required_usage_value(usage.output, "output", client)?;
     let cache_read = required_usage_value(usage.cache_read, "cacheRead", client)?;
     let cache_write = required_usage_value(usage.cache_write, "cacheWrite", client)?;
-    let source_total = required_usage_value(usage.total_tokens, "totalTokens", client)?;
+    let input_total = required_usage_value(usage.total_tokens, "totalTokens", client)?;
 
     let (
         reasoning_field,
@@ -364,7 +362,7 @@ fn token_breakdown_from_pi_usage(
         ("cacheRead", cache_read),
         ("cacheWrite", cache_write),
         (reasoning_field, reasoning),
-        ("totalTokens", source_total),
+        ("totalTokens", input_total),
         ("orchestration.input", orchestration_input),
         ("orchestration.output", orchestration_output),
         ("orchestration.cacheRead", orchestration_cache_read),
@@ -379,7 +377,7 @@ fn token_breakdown_from_pi_usage(
     // only the malformed breakdown instead of invalidating the entire JSONL.
     let reasoning = reasoning.min(raw_output);
 
-    let expected_source_total = checked_usage_sum(
+    let expected_input_total = checked_usage_sum(
         [
             input,
             raw_output,
@@ -389,14 +387,14 @@ fn token_breakdown_from_pi_usage(
             orchestration_output,
             orchestration_cache_read,
         ],
-        "source totalTokens",
+        "reported totalTokens",
         client,
     )?;
-    if source_total != expected_source_total {
+    if input_total != expected_input_total {
         return Err(SessionParseError::invalid(
             usage_validation_operation(client),
             format!(
-                "source totalTokens is {source_total}, expected {expected_source_total} from usage buckets"
+                "reported totalTokens is {input_total}, expected {expected_input_total} from usage buckets"
             ),
         ));
     }
@@ -426,11 +424,11 @@ fn token_breakdown_from_pi_usage(
             "normalized token total exceeds i64::MAX",
         )
     })?;
-    if normalized_total != source_total {
+    if normalized_total != input_total {
         return Err(SessionParseError::invalid(
             usage_validation_operation(client),
             format!(
-                "normalized token total is {normalized_total}, expected source totalTokens {source_total}"
+                "normalized token total is {normalized_total}, expected reported totalTokens {input_total}"
             ),
         ));
     }
@@ -548,8 +546,8 @@ pub fn build_omp_parent_task_agent_index(paths: &[PathBuf]) -> OmpParentTaskAgen
                     .parents
                     .entry(parent_path)
                     .or_insert_with(|| OmpParentScan {
-                        status: SourceStatus::Unavailable {
-                            failure: SourceFailure::from(&error),
+                        status: InputStatus::Unavailable {
+                            failure: InputFailure::from(&error),
                         },
                         ..OmpParentScan::default()
                     });
@@ -586,8 +584,8 @@ fn omp_task_agent_scan_from_parent(parent_path: &Path) -> OmpParentScan {
         .contains(parent_path)
     {
         return OmpParentScan {
-            status: SourceStatus::Unavailable {
-                failure: SourceFailure::new(
+            status: InputStatus::Unavailable {
+                failure: InputFailure::new(
                     "open OMP parent session",
                     "injected parent open failure",
                 ),
@@ -595,9 +593,9 @@ fn omp_task_agent_scan_from_parent(parent_path: &Path) -> OmpParentScan {
             ..OmpParentScan::default()
         };
     }
-    let input_policy = SourceInputPolicy::plain(parent_path);
+    let input_policy = InputPolicy::plain(parent_path);
     let before_snapshot = input_policy.snapshot().map_err(|source| {
-        SourceFailure::new(
+        InputFailure::new(
             "snapshot OMP parent session",
             format!("{}: {source}", parent_path.display()),
         )
@@ -607,39 +605,39 @@ fn omp_task_agent_scan_from_parent(parent_path: &Path) -> OmpParentScan {
         Err(source) => {
             let error = SessionParseError::at_path(parent_path, "open OMP parent session", source);
             return OmpParentScan {
-                status: SourceStatus::Unavailable {
-                    failure: SourceFailure::from(&error),
+                status: InputStatus::Unavailable {
+                    failure: InputFailure::from(&error),
                 },
                 ..OmpParentScan::default()
             };
         }
     };
-    let opened_identity = source_file_identity_from_open_file(&file).map_err(|source| {
-        SourceFailure::new(
+    let opened_identity = input_file_identity_from_open_file(&file).map_err(|source| {
+        InputFailure::new(
             "identify OMP parent session",
             format!("{}: {source}", parent_path.display()),
         )
     });
     let mut reader = BufReader::new(HashingReader::new(file));
     let mut scan = omp_task_agent_scan_from_reader(parent_path, &mut reader);
-    if matches!(scan.status, SourceStatus::Complete) {
+    if matches!(scan.status, InputStatus::Complete) {
         let content_hash = reader.into_inner().finish();
         let cache_input = before_snapshot.and_then(|snapshot| {
             let opened_identity = opened_identity?;
             if snapshot.primary_identity() != Some(opened_identity) {
-                return Err(SourceFailure::new(
+                return Err(InputFailure::new(
                     "validate OMP parent session snapshot",
                     format!("{} changed before it was opened", parent_path.display()),
                 ));
             }
             let current_snapshot = input_policy.snapshot().map_err(|source| {
-                SourceFailure::new(
+                InputFailure::new(
                     "snapshot OMP parent session after scan",
                     format!("{}: {source}", parent_path.display()),
                 )
             })?;
             if current_snapshot != snapshot {
-                return Err(SourceFailure::new(
+                return Err(InputFailure::new(
                     "validate OMP parent session snapshot",
                     format!("{} changed while it was scanned", parent_path.display()),
                 ));
@@ -651,7 +649,7 @@ fn omp_task_agent_scan_from_parent(parent_path: &Path) -> OmpParentScan {
         });
         match cache_input {
             Ok(cache_input) => scan.cache_input = Some(cache_input),
-            Err(failure) => scan.status = SourceStatus::Partial { failure },
+            Err(failure) => scan.status = InputStatus::Partial { failure },
         }
     }
     scan
@@ -694,8 +692,8 @@ fn omp_task_agent_scan_from_reader(parent_path: &Path, reader: &mut impl BufRead
         let line = match line {
             Ok(line) => line,
             Err(source) => {
-                scan.status = SourceStatus::Partial {
-                    failure: SourceFailure::new(
+                scan.status = InputStatus::Partial {
+                    failure: InputFailure::new(
                         "read OMP parent JSONL line",
                         format!("{} line {line_number}: {source}", parent_path.display()),
                     ),
@@ -852,14 +850,14 @@ fn parse_pi_format_file(
     path: &Path,
     client: &'static str,
     omp_parent_task_agent_index: Option<&OmpParentTaskAgentIndex>,
-) -> SessionParseResult<ScannedSource> {
+) -> SessionParseResult<ScannedInput> {
     let file = std::fs::File::open(path)
-        .map_err(|source| SessionParseError::new("open Pi JSONL source", source))?;
+        .map_err(|source| SessionParseError::new("open Pi JSONL input", source))?;
 
     let reader = BufReader::new(file);
-    let mut scanned = ScannedSource {
+    let mut scanned = ScannedInput {
         messages: Vec::with_capacity(64),
-        ..ScannedSource::default()
+        ..ScannedInput::default()
     };
     let mut buffer = Vec::with_capacity(4096);
     let child_stem = path
@@ -911,7 +909,7 @@ fn parse_pi_format_file(
                 return Err(SessionParseError::new("read Pi JSONL line", source));
             }
             Err(source) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "read Pi JSONL line",
                     format!("{} line {line_number}: {source}", path.display()),
                 ));
@@ -999,10 +997,10 @@ fn parse_pi_format_file(
                 .record(RecordRejectionReason::MissingModel);
             continue;
         };
-        let model = model_aliases::canonicalize_source_model_id(&raw_model)
+        let model = model_aliases::canonicalize_observed_model_id(&raw_model)
             .unwrap_or_else(|| raw_model.trim().to_string());
 
-        let provider = provider_identity::source_provider_id(
+        let provider = provider_identity::observed_provider_id(
             message.provider.as_deref().unwrap_or_default(),
             &model,
         );
@@ -1045,14 +1043,14 @@ fn parse_pi_format_file(
 
     if session_id.is_none() {
         return Err(SessionParseError::invalid(
-            "validate Pi JSONL source",
+            "validate Pi JSONL input",
             "session header is missing",
         ));
     }
     Ok(scanned)
 }
 
-fn record_pi_rejection(scanned: &mut ScannedSource) {
+fn record_pi_rejection(scanned: &mut ScannedInput) {
     scanned
         .rejections
         .record(RecordRejectionReason::MalformedRecord);
@@ -1329,7 +1327,7 @@ mod tests {
         let session_dir = dir.path().join(".omp/agent/sessions/project");
         std::fs::create_dir_all(&session_dir).unwrap();
 
-        let parent_stem = "138-SourceIntegritySweep";
+        let parent_stem = "138-InputIntegritySweep";
         let session_root = session_dir.join(parent_stem);
         std::fs::write(
             session_root.with_extension("jsonl"),
@@ -1353,7 +1351,7 @@ mod tests {
         assert_eq!(messages[0].agent.as_deref(), Some("OMP Code Reviewer"));
         assert_eq!(
             messages[0].agent_instance.as_deref(),
-            Some("138-SourceIntegritySweep.0-ReviewFindings")
+            Some("138-InputIntegritySweep.0-ReviewFindings")
         );
     }
 
@@ -1435,7 +1433,7 @@ mod tests {
         assert_eq!(parent_health[0].path, parent_path);
         assert!(matches!(
             &parent_health[0].status,
-            SourceStatus::Partial { .. }
+            InputStatus::Partial { .. }
         ));
         assert_eq!(
             parent_health[0].status.failure().unwrap().operation,
@@ -1463,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_omp_parent_open_failure_is_owned_by_parent_source() {
+    fn test_parse_omp_parent_open_failure_is_owned_by_parent_input() {
         let child_content = r#"{"type":"session","id":"child-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#;
         let child_file = create_test_file(child_content);
@@ -1486,7 +1484,7 @@ mod tests {
         assert_eq!(parent_health[0].path, parent_path);
         assert!(matches!(
             &parent_health[0].status,
-            SourceStatus::Unavailable { .. }
+            InputStatus::Unavailable { .. }
         ));
         assert_eq!(
             parent_health[0].status.failure().unwrap().operation,
@@ -1786,12 +1784,12 @@ not valid json
     }
 
     #[test]
-    fn test_parse_pi_reports_missing_source() {
+    fn test_parse_pi_reports_missing_input() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("missing.jsonl");
 
         let error = parse_pi_file(&path).unwrap_err();
 
-        assert!(error.to_string().contains("open Pi JSONL source"));
+        assert!(error.to_string().contains("open Pi JSONL input"));
     }
 }

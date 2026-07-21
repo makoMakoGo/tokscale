@@ -62,12 +62,12 @@ projections, not an ADR-frozen TUI or JSON layout:
   "data": {},
   "health": {
     "complete": true,
-    "cleanSources": 0,
-    "degradedSources": 0,
+    "cleanInputs": 0,
+    "degradedInputs": 0,
     "rejectedRecords": 0,
-    "partialSources": 0,
-    "failedSources": 0,
-    "sourceDataBytes": 0,
+    "partialInputs": 0,
+    "failedInputs": 0,
+    "inputDataBytes": 0,
     "issues": []
   },
   "metadata": {
@@ -156,7 +156,7 @@ contains only the final path and operational details use stderr.
 
 Graph usage does not depend on pricing availability. Pricing data is loaded
 once per process; on-disk pricing caches are valid for one hour, so `graph` does
-not contact pricing sources on every invocation. Missing or expired caches may
+not contact Pricing Sources on every invocation. Missing or expired caches may
 trigger a refresh. If that refresh fails, Tokscale uses an older cache when one
 exists; without any usable pricing, it still emits every token and leaves
 unpriceable cost at `0.0`.
@@ -204,8 +204,8 @@ tokscale cache prune
 ```
 
 `cache warm` explicitly builds the TUI aggregate cache for its client scope.
-Report commands never modify that aggregate cache. Scan-input message shards remain
-an internal derived cache and are written automatically while parsing.
+Report commands never modify that aggregate cache. Scan-input message shards
+remain an internal derived cache and are written automatically while parsing.
 
 `cache prune` traverses scan-input message shards, removes orphaned inputs and
 superseded parser revisions, and prints scanned, removed, and retained counts.
@@ -216,15 +216,15 @@ instead of reporting partial success.
 
 ```bash
 tokscale pricing lookup claude-sonnet-4-5 --no-spinner
-tokscale pricing lookup grok-code --source openrouter --no-spinner
+tokscale pricing lookup grok-code --pricing-source openrouter --no-spinner
 tokscale pricing lookup claude-sonnet-4-5 --json
 tokscale pricing overrides
 tokscale pricing overrides --json
 ```
 
-`--source` selects a pricing catalog and is distinct from a model's provider.
-Standalone lookup is a catalog query; it does not replay arbitrary cleanup from
-a local input parser.
+`--pricing-source` selects a pricing catalog and is distinct from a model's
+provider. Standalone lookup is a catalog query; it does not replay arbitrary
+cleanup from a local input parser.
 
 ## Integration and usage commands
 

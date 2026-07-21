@@ -4,7 +4,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
-use crate::source_health::{RecordRejectionReason, ScannedSource};
+use crate::input_health::{RecordRejectionReason, ScannedInput};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -154,11 +154,11 @@ fn normalize_model_name(model: &str) -> String {
         collapsed
     };
 
-    model_aliases::canonicalize_source_model_id(&claude_prefixed).unwrap_or(claude_prefixed)
+    model_aliases::canonicalize_observed_model_id(&claude_prefixed).unwrap_or(claude_prefixed)
 }
 
 fn get_provider_from_model_and_lock(model: &str, provider_lock: Option<&str>) -> String {
-    provider_identity::source_provider_id(provider_lock.unwrap_or_default(), model)
+    provider_identity::observed_provider_id(provider_lock.unwrap_or_default(), model)
 }
 
 fn invalid_at_path(
@@ -366,7 +366,7 @@ pub(crate) fn droid_agent_dependency_path(path: &Path) -> Option<PathBuf> {
 }
 
 /// Parse a Droid settings.json file
-pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let data = std::fs::read(path)
         .map_err(|error| SessionParseError::at_path(path, "read file", error))?;
 
@@ -379,10 +379,10 @@ pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedSource> {
     // Skip if no token usage data
     let usage = match settings.token_usage {
         Some(u) => u,
-        None => return Ok(ScannedSource::default()),
+        None => return Ok(ScannedInput::default()),
     };
 
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     let tokens = TokenBreakdown {
         input: usage.input_tokens.unwrap_or(0),
         output: usage.output_tokens.unwrap_or(0),

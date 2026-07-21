@@ -144,12 +144,12 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
             PricingSubcommand::Lookup {
                 model_id,
                 json,
-                source,
+                pricing_source,
                 no_spinner,
             } => run_pricing_lookup(
                 &model_id,
                 json,
-                source.map(PricingSource::as_str),
+                pricing_source.map(PricingSource::as_str),
                 effective_no_spinner(json, no_spinner),
             ),
             PricingSubcommand::Overrides { json } => run_pricing_list_overrides(json),

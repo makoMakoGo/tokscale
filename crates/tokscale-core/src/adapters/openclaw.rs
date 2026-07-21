@@ -3,8 +3,8 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit,
+    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
+    LocalInputAdapter, MessageSink, ParseContext, ParsedUnit,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -15,7 +15,7 @@ pub(crate) struct OpenClawAdapter;
 const OPENCLAW_RECORD_REJECTION_REVISION: u32 =
     crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 2;
 
-impl LocalSourceAdapter for OpenClawAdapter {
+impl LocalInputAdapter for OpenClawAdapter {
     fn client(&self) -> ClientId {
         ClientId::OpenClaw
     }
@@ -23,7 +23,7 @@ impl LocalSourceAdapter for OpenClawAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let def = ClientId::OpenClaw
             .local_def()
             .expect("OpenClaw adapter must have local scan policy");
@@ -38,7 +38,7 @@ impl LocalSourceAdapter for OpenClawAdapter {
             ctx,
         )?);
 
-        Ok(adapter_discover::source_units_from_paths(
+        Ok(adapter_discover::input_units_from_paths(
             ClientId::OpenClaw,
             adapter_discover::scan_roots(ClientId::OpenClaw, roots, def.pattern)?,
             FingerprintPolicy::PlainFile,
@@ -53,7 +53,7 @@ impl LocalSourceAdapter for OpenClawAdapter {
         .collect())
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -66,10 +66,10 @@ impl LocalSourceAdapter for OpenClawAdapter {
 
     fn plan_cache_hit(
         &self,
-        unit: SourceUnit,
-        source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
-        adapter_cache::plan_cache_hit(unit, source_cache)
+        unit: InputUnit,
+        input_cache: &crate::message_cache::InputMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::InputPlanningError> {
+        adapter_cache::plan_cache_hit(unit, input_cache)
     }
 
     fn fold(
@@ -77,7 +77,7 @@ impl LocalSourceAdapter for OpenClawAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), crate::adapters::SourcePipelineError> {
+    ) -> Result<(), crate::adapters::InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
 }

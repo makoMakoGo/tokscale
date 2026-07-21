@@ -83,7 +83,7 @@ const MIN_FUZZY_MATCH_LEN: usize = 5;
 #[derive(Clone)]
 struct CachedResult {
     pricing: ModelPricing,
-    source: String,
+    pricing_source: String,
     matched_key: String,
 }
 
@@ -116,7 +116,7 @@ pub struct PricingLookup {
 
 pub struct LookupResult {
     pub pricing: ModelPricing,
-    pub source: String,
+    pub pricing_source: String,
     pub matched_key: String,
 }
 
@@ -242,12 +242,12 @@ impl PricingLookup {
         {
             return cached.map(|c| LookupResult {
                 pricing: c.pricing,
-                source: c.source,
+                pricing_source: c.pricing_source,
                 matched_key: c.matched_key,
             });
         }
 
-        let result = self.lookup_with_source_and_provider(model_id, None, provider_id);
+        let result = self.lookup_with_pricing_source_and_provider(model_id, None, provider_id);
 
         if let Ok(mut cache) = self.lookup_cache.write() {
             if cache.len() >= MAX_LOOKUP_CACHE_ENTRIES {
@@ -264,7 +264,7 @@ impl PricingLookup {
                 cache_key,
                 result.as_ref().map(|r| CachedResult {
                     pricing: r.pricing.clone(),
-                    source: r.source.clone(),
+                    pricing_source: r.pricing_source.clone(),
                     matched_key: r.matched_key.clone(),
                 }),
             );
@@ -273,26 +273,26 @@ impl PricingLookup {
         result
     }
 
-    pub fn lookup_with_source(
+    pub fn lookup_with_pricing_source(
         &self,
         model_id: &str,
-        force_source: Option<&str>,
+        forced_pricing_source: Option<&str>,
     ) -> Option<LookupResult> {
-        self.lookup_with_source_and_provider(model_id, force_source, None)
+        self.lookup_with_pricing_source_and_provider(model_id, forced_pricing_source, None)
     }
 
-    pub fn lookup_with_source_and_provider(
+    pub fn lookup_with_pricing_source_and_provider(
         &self,
         model_id: &str,
-        force_source: Option<&str>,
+        forced_pricing_source: Option<&str>,
         provider_id: Option<&str>,
     ) -> Option<LookupResult> {
         let provider_id = normalize_provider_hint(provider_id);
         let lower = model_id.to_lowercase();
         let lower_ref: &str = &lower;
 
-        // Helper to perform lookup with the given source constraint
-        let do_lookup = |id: &str| match force_source {
+        // Helper to perform lookup with the given pricing_source constraint
+        let do_lookup = |id: &str| match forced_pricing_source {
             Some("litellm") => self.lookup_litellm_only(id, provider_id),
             Some("openrouter") => self.lookup_openrouter_only(id, provider_id),
             Some("models.dev") | Some("modelsdev") | Some("models_dev") => {
@@ -372,7 +372,7 @@ impl PricingLookup {
                     return Some(result);
                 }
             } else {
-                if let Some(result) = choose_best_source_result(
+                if let Some(result) = choose_best_pricing_source_result(
                     self.exact_match_litellm_for_provider(stripped, provider_id),
                     self.exact_match_openrouter_for_provider(stripped, provider_id),
                     provider_id,
@@ -390,7 +390,7 @@ impl PricingLookup {
             }
         }
 
-        if let Some(result) = choose_best_source_result(
+        if let Some(result) = choose_best_pricing_source_result(
             self.exact_match_litellm_for_provider(model_id, provider_id),
             self.exact_match_openrouter_for_provider(model_id, provider_id),
             provider_id,
@@ -430,7 +430,7 @@ impl PricingLookup {
             return Some(result);
         }
 
-        // Separator-normalized exact passes against the canonical sources
+        // Separator-normalized exact passes against the canonical Pricing Sources
         // (LiteLLM + OpenRouter) run BEFORE the models.dev model-part pass so
         // ids like `claude-opus-4-6-fast` hit the canonical
         // `anthropic/claude-opus-4.6-fast` key instead of a reseller's
@@ -439,7 +439,7 @@ impl PricingLookup {
         // for UNhinted lookups: the provider-scoped passes above and below
         // keep provider-hinted resolutions pinned to the hinted provider.
         if let Some(version_normalized) = normalize_version_separator(model_id) {
-            if let Some(result) = choose_best_source_result(
+            if let Some(result) = choose_best_pricing_source_result(
                 self.exact_match_litellm_for_provider(&version_normalized, provider_id),
                 self.exact_match_openrouter_for_provider(&version_normalized, provider_id),
                 provider_id,
@@ -473,7 +473,7 @@ impl PricingLookup {
         }
 
         if let Some(normalized) = normalize_model_name(model_id) {
-            if let Some(result) = choose_best_source_result(
+            if let Some(result) = choose_best_pricing_source_result(
                 self.exact_match_litellm_for_provider(&normalized, provider_id),
                 self.exact_match_openrouter_for_provider(&normalized, provider_id),
                 provider_id,
@@ -522,7 +522,7 @@ impl PricingLookup {
         let litellm_result = self.fuzzy_match_litellm(model_id, provider_id);
         let openrouter_result = self.fuzzy_match_openrouter(model_id, provider_id);
 
-        choose_best_source_result(litellm_result, openrouter_result, provider_id)
+        choose_best_pricing_source_result(litellm_result, openrouter_result, provider_id)
     }
 
     fn exact_or_normalized_litellm(
@@ -685,7 +685,7 @@ impl PricingLookup {
             return None;
         }
 
-        choose_best_source_result(
+        choose_best_pricing_source_result(
             self.lookup_provider_scoped_path_litellm(model_id, provider_id),
             self.lookup_provider_scoped_path_openrouter(model_id, provider_id),
             Some(scoped.provider),
@@ -1501,12 +1501,12 @@ fn has_any_usable_pricing(pricing: &ModelPricing) -> bool {
 
 fn lookup_result_if_usable(
     pricing: &ModelPricing,
-    source: &str,
+    pricing_source: &str,
     matched_key: &str,
 ) -> Option<LookupResult> {
     has_any_usable_pricing(pricing).then(|| LookupResult {
         pricing: pricing.clone(),
-        source: source.into(),
+        pricing_source: pricing_source.into(),
         matched_key: matched_key.into(),
     })
 }
@@ -1679,13 +1679,13 @@ fn is_reseller_provider(key: &str) -> bool {
 fn select_best_match(
     matches: &[&String],
     dataset: &HashMap<String, ModelPricing>,
-    source: &str,
+    pricing_source: &str,
     provider_id: Option<&str>,
 ) -> Option<LookupResult> {
     select_best_match_with_pricing_filter(
         matches,
         dataset,
-        source,
+        pricing_source,
         provider_id,
         has_any_usable_pricing,
     )
@@ -1694,7 +1694,7 @@ fn select_best_match(
 fn select_best_match_with_pricing_filter(
     matches: &[&String],
     dataset: &HashMap<String, ModelPricing>,
-    source: &str,
+    pricing_source: &str,
     provider_id: Option<&str>,
     has_pricing: fn(&ModelPricing) -> bool,
 ) -> Option<LookupResult> {
@@ -1760,7 +1760,7 @@ fn select_best_match_with_pricing_filter(
         key.and_then(|k| {
             dataset.get(k.as_str()).map(|pricing| LookupResult {
                 pricing: pricing.clone(),
-                source: source.into(),
+                pricing_source: pricing_source.into(),
                 matched_key: (*k).clone(),
             })
         })
@@ -1856,7 +1856,7 @@ fn model_part_matches_exact(model_part: &str, model_id: &str) -> bool {
     false
 }
 
-fn choose_best_source_result(
+fn choose_best_pricing_source_result(
     litellm_result: Option<LookupResult>,
     openrouter_result: Option<LookupResult>,
     provider_id: Option<&str>,
@@ -1906,7 +1906,7 @@ fn exact_match_with_provider_prefixes(
     provider_id: Option<&str>,
     key_parts: &[KeyModelPart],
     dataset: &HashMap<String, ModelPricing>,
-    source: &str,
+    pricing_source: &str,
 ) -> Option<LookupResult> {
     let provider_id = provider_id?;
     let hint_tags = provider_identity::provider_tags(provider_id);
@@ -1924,7 +1924,7 @@ fn exact_match_with_provider_prefixes(
         return None;
     }
 
-    select_best_match(&matches, dataset, source, Some(provider_id))
+    select_best_match(&matches, dataset, pricing_source, Some(provider_id))
 }
 
 #[cfg(test)]

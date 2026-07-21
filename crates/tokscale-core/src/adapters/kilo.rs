@@ -3,8 +3,8 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FoldContext, LocalSourceAdapter, MessageSink, ParseContext, ParsedUnit,
-    SourceDiscoveryError, SourceUnit, UnitMessageSource,
+    AdapterScanContext, FoldContext, InputDiscoveryError, InputUnit, LocalInputAdapter,
+    MessageSink, ParseContext, ParsedUnit, UnitMessagePayload,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -14,7 +14,7 @@ const KILO_RECORD_REJECTION_REVISION: u32 = 5;
 
 pub(crate) struct KiloAdapter;
 
-impl LocalSourceAdapter for KiloAdapter {
+impl LocalInputAdapter for KiloAdapter {
     fn client(&self) -> ClientId {
         ClientId::Kilo
     }
@@ -22,7 +22,7 @@ impl LocalSourceAdapter for KiloAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let def = ClientId::Kilo
             .local_def()
             .expect("Kilo adapter must have local scan policy");
@@ -35,14 +35,14 @@ impl LocalSourceAdapter for KiloAdapter {
         Ok(paths
             .into_iter()
             .map(|path| {
-                SourceUnit::sqlite_with_wal(ClientId::Kilo, path).with_parser_version(
+                InputUnit::sqlite_with_wal(ClientId::Kilo, path).with_parser_version(
                     ParserVersion::new(ParserId::Kilo, KILO_RECORD_REJECTION_REVISION),
                 )
             })
             .collect())
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -56,10 +56,10 @@ impl LocalSourceAdapter for KiloAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), crate::adapters::SourcePipelineError> {
+    ) -> Result<(), crate::adapters::InputPipelineError> {
         for unit in parsed {
-            ctx.health.record(unit.source_health());
-            if let UnitMessageSource::Fresh(messages) = unit.messages {
+            ctx.health.record(unit.input_health());
+            if let UnitMessagePayload::Fresh(messages) = unit.messages {
                 sink.extend_messages(messages);
             }
         }

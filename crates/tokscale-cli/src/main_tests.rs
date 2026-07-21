@@ -309,23 +309,41 @@ fn test_pricing_source_accepts_known_values() {
         "pricing",
         "lookup",
         "gpt-4o",
-        "--source",
+        "--pricing-source",
         "openrouter",
     ])
-    .expect("source parses");
+    .expect("Pricing Source parses");
     let Some(Commands::Pricing {
-        subcommand: PricingSubcommand::Lookup { source, .. },
+        subcommand: PricingSubcommand::Lookup { pricing_source, .. },
     }) = cli.command
     else {
         panic!("expected pricing command");
     };
-    assert_eq!(source, Some(PricingSource::Openrouter));
+    assert_eq!(pricing_source, Some(PricingSource::Openrouter));
 }
 
 #[test]
 fn test_pricing_source_rejects_unknown_values() {
     assert!(Cli::try_parse_from([
-        "tokscale", "pricing", "lookup", "gpt-4o", "--source", "unknown",
+        "tokscale",
+        "pricing",
+        "lookup",
+        "gpt-4o",
+        "--pricing-source",
+        "unknown",
+    ])
+    .is_err());
+}
+
+#[test]
+fn retired_pricing_source_flag_is_not_an_alias() {
+    assert!(Cli::try_parse_from([
+        "tokscale",
+        "pricing",
+        "lookup",
+        "gpt-4o",
+        "--source",
+        "openrouter",
     ])
     .is_err());
 }
@@ -956,7 +974,7 @@ fn antigravity_is_a_local_client_without_an_integration_command_namespace() {
 }
 
 #[test]
-fn antigravity_local_source_uses_home_when_env_roots_are_disabled() {
+fn antigravity_local_input_uses_home_when_env_roots_are_disabled() {
     let def = ClientId::Antigravity.local_def().unwrap();
     assert_eq!(
         def.resolve_path_with_env_strategy("/tmp/home", false),
@@ -966,7 +984,7 @@ fn antigravity_local_source_uses_home_when_env_roots_are_disabled() {
 
 #[test]
 #[serial_test::serial]
-fn antigravity_local_source_falls_back_for_blank_env() {
+fn antigravity_local_input_falls_back_for_blank_env() {
     let previous = std::env::var("GEMINI_CLI_HOME").ok();
     unsafe { std::env::set_var("GEMINI_CLI_HOME", "   ") };
 

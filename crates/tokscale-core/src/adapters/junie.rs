@@ -3,8 +3,8 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit, EXPLICIT_TOKEN_OVERFLOW_REVISION,
+    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
+    LocalInputAdapter, MessageSink, ParseContext, ParsedUnit, EXPLICIT_TOKEN_OVERFLOW_REVISION,
 };
 use crate::message_cache::{ParserId, ParserVersion};
 use crate::{sessions, ClientId};
@@ -13,7 +13,7 @@ pub(crate) struct JunieAdapter;
 
 const JUNIE_RECORD_REJECTION_REVISION: u32 = EXPLICIT_TOKEN_OVERFLOW_REVISION + 2;
 
-impl LocalSourceAdapter for JunieAdapter {
+impl LocalInputAdapter for JunieAdapter {
     fn client(&self) -> ClientId {
         ClientId::Junie
     }
@@ -21,7 +21,7 @@ impl LocalSourceAdapter for JunieAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let units = adapter_discover::discover_default_scanned_units(
             ClientId::Junie,
             ctx,
@@ -38,7 +38,7 @@ impl LocalSourceAdapter for JunieAdapter {
         Ok(units)
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
@@ -51,10 +51,10 @@ impl LocalSourceAdapter for JunieAdapter {
 
     fn plan_cache_hit(
         &self,
-        unit: SourceUnit,
-        source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
-        adapter_cache::plan_cache_hit(unit, source_cache)
+        unit: InputUnit,
+        input_cache: &crate::message_cache::InputMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::InputPlanningError> {
+        adapter_cache::plan_cache_hit(unit, input_cache)
     }
 
     fn fold(
@@ -62,7 +62,7 @@ impl LocalSourceAdapter for JunieAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), crate::adapters::SourcePipelineError> {
+    ) -> Result<(), crate::adapters::InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
@@ -111,8 +111,8 @@ mod tests {
     }
 
     fn fold_with_adapter(
-        units: Vec<SourceUnit>,
-        cache: &mut message_cache::SourceMessageCache,
+        units: Vec<InputUnit>,
+        cache: &mut message_cache::InputMessageCache,
         pricing: Option<&PricingService>,
     ) -> Vec<sessions::UnifiedMessage> {
         let parsed = JUNIE_ADAPTER.parse_checked(units, &ParseContext { pricing });
@@ -162,10 +162,10 @@ mod tests {
     fn adapter_output_matches_parser() {
         let home = tempfile::TempDir::new().unwrap();
         let path = write_session(home.path());
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
 
         let actual = fold_with_adapter(
-            vec![SourceUnit::plain_file(ClientId::Junie, path.clone())],
+            vec![InputUnit::plain_file(ClientId::Junie, path.clone())],
             &mut cache,
             None,
         );
@@ -183,8 +183,8 @@ mod tests {
         unsafe { std::env::set_var("TOKSCALE_CONFIG_DIR", cache_home.path()) };
 
         let path = write_session(home.path());
-        let mut cache = message_cache::SourceMessageCache::load().unwrap();
-        let units = vec![SourceUnit::plain_file(ClientId::Junie, path.clone())];
+        let mut cache = message_cache::InputMessageCache::load().unwrap();
+        let units = vec![InputUnit::plain_file(ClientId::Junie, path.clone())];
 
         let fresh = fold_with_adapter(units.clone(), &mut cache, None);
         let planned = JUNIE_ADAPTER
@@ -218,10 +218,10 @@ mod tests {
         )
         .unwrap();
         let pricing = pricing_service();
-        let mut cache = message_cache::SourceMessageCache::default();
+        let mut cache = message_cache::InputMessageCache::default();
 
         let messages = fold_with_adapter(
-            vec![SourceUnit::plain_file(ClientId::Junie, path)],
+            vec![InputUnit::plain_file(ClientId::Junie, path)],
             &mut cache,
             Some(&pricing),
         );

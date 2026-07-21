@@ -8,7 +8,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;
 use super::UnifiedMessage;
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::path::Path;
@@ -36,7 +36,7 @@ fn parse_model_config(path: &Path, json: &str) -> SessionParseResult<String> {
 }
 
 fn resolved_provider(provider_name: Option<String>, model_id: &str) -> String {
-    provider_identity::source_provider_id(provider_name.as_deref().unwrap_or_default(), model_id)
+    provider_identity::observed_provider_id(provider_name.as_deref().unwrap_or_default(), model_id)
 }
 
 fn parse_created_at(s: &str) -> Option<i64> {
@@ -50,7 +50,7 @@ fn parse_created_at(s: &str) -> Option<i64> {
     None
 }
 
-pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
     let conn = open_readonly_sqlite(db_path).map_err(|source| {
         SessionParseError::at_path(db_path, "open Goose database read-only", source)
     })?;
@@ -78,7 +78,7 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         SessionParseError::at_path(db_path, "execute Goose session query", error)
     })?;
 
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     loop {
         let row = match rows.next() {
             Ok(Some(row)) => row,
@@ -86,7 +86,7 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             Err(error) => {
                 let error =
                     SessionParseError::at_path(db_path, "iterate Goose session rows", error);
-                scanned.interrupted = Some(SourceFailure::from(&error));
+                scanned.interrupted = Some(InputFailure::from(&error));
                 break;
             }
         };
@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_goose_sqlite_reports_missing_schema_as_source_error() {
+    fn parse_goose_sqlite_reports_missing_schema_as_input_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sessions.db");
         drop(Connection::open(&path).unwrap());
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_goose_sqlite_preserves_model_config_decode_source() {
+    fn parse_goose_sqlite_preserves_model_config_decode_cause() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sessions.db");
         let conn = create_goose_db(&path);

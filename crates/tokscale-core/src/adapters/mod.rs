@@ -28,14 +28,12 @@ use std::path::PathBuf;
 use rayon::prelude::*;
 
 use crate::clients::ClientId;
-use crate::message_cache::{ParserId, ParserRevision, ParserVersion, SourceFileIdentity};
-use crate::source_health::{
-    DataHealth, RejectionSummary, SourceFailure, SourceHealth, SourceStatus,
-};
+use crate::input_health::{DataHealth, InputFailure, InputHealth, InputStatus, RejectionSummary};
+use crate::message_cache::{InputFileIdentity, ParserId, ParserRevision, ParserVersion};
 use crate::{message_cache, pricing, scanner, UnifiedMessage};
 
 pub(crate) use error::{
-    SourceDiscoveryError, SourceParseError, SourcePipelineError, SourcePlanningError,
+    InputDiscoveryError, InputParseError, InputPipelineError, InputPlanningError,
 };
 
 pub(crate) const MODEL_ID_CANONICALIZATION_REVISION: ParserRevision = 3;
@@ -49,21 +47,21 @@ pub(crate) const ZED_RECORD_FILTER_REVISION: ParserRevision = EXPLICIT_TOKEN_OVE
 pub(crate) const CODEX_EXEC_IDENTITY_REVISION: ParserRevision =
     MODEL_ID_CANONICALIZATION_REVISION + 3;
 
-pub(crate) trait LocalSourceAdapter: Sync {
+pub(crate) trait LocalInputAdapter: Sync {
     fn client(&self) -> ClientId;
 
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError>;
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError>;
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit>;
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit>;
 
     fn plan_cache_hit(
         &self,
-        unit: SourceUnit,
-        _source_cache: &message_cache::SourceMessageCache,
-    ) -> Result<CacheHitPlan, SourcePlanningError> {
+        unit: InputUnit,
+        _input_cache: &message_cache::InputMessageCache,
+    ) -> Result<CacheHitPlan, InputPlanningError> {
         Ok(CacheHitPlan::Miss(unit))
     }
 
@@ -72,14 +70,14 @@ pub(crate) trait LocalSourceAdapter: Sync {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), SourcePipelineError>;
+    ) -> Result<(), InputPipelineError>;
 
     fn fold_batches(
         &self,
-        batches: &mut ParsedBatchSource<'_>,
+        batches: &mut ParsedBatchInput<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), SourcePipelineError> {
+    ) -> Result<(), InputPipelineError> {
         while let Some(parsed) = batches.next(ctx)? {
             self.fold(parsed, ctx, sink)?;
         }
@@ -98,18 +96,18 @@ pub(crate) struct ParseContext<'a> {
 }
 
 pub(crate) struct FoldContext<'a> {
-    pub source_cache: &'a mut message_cache::SourceMessageCache,
+    pub input_cache: &'a mut message_cache::InputMessageCache,
     pub pricing: Option<&'a pricing::PricingService>,
     pub health: DataHealth,
 }
 
 impl<'a> FoldContext<'a> {
     pub(crate) fn new(
-        source_cache: &'a mut message_cache::SourceMessageCache,
+        input_cache: &'a mut message_cache::InputMessageCache,
         pricing: Option<&'a pricing::PricingService>,
     ) -> Self {
         Self {
-            source_cache,
+            input_cache,
             pricing,
             health: DataHealth::default(),
         }
@@ -133,26 +131,26 @@ impl MessageSink for Vec<UnifiedMessage> {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SourceUnit {
+pub(crate) struct InputUnit {
     pub client: ClientId,
     pub path: PathBuf,
     pub fingerprint_policy: FingerprintPolicy,
-    pub meta: SourceUnitMeta,
+    pub meta: InputUnitMeta,
     pub parser_version: ParserVersion,
-    prepared_snapshot: Option<message_cache::SourceInputSnapshot>,
+    prepared_snapshot: Option<message_cache::InputSnapshot>,
     snapshot_confirmed_for_execution: bool,
-    planned_cache_meta: Option<message_cache::CachedSourceMeta>,
+    planned_cache_meta: Option<message_cache::CachedInputMeta>,
     cache_lookup_completed_no_hit: bool,
 }
 
-impl SourceUnit {
+impl InputUnit {
     pub(crate) fn plain_file(client: ClientId, path: PathBuf) -> Self {
         Self {
             client,
             path,
             fingerprint_policy: FingerprintPolicy::PlainFile,
-            meta: SourceUnitMeta::None,
-            parser_version: SourceUnitMeta::None.parser_version(client),
+            meta: InputUnitMeta::None,
+            parser_version: InputUnitMeta::None.parser_version(client),
             prepared_snapshot: None,
             snapshot_confirmed_for_execution: false,
             planned_cache_meta: None,
@@ -165,8 +163,8 @@ impl SourceUnit {
             client,
             path,
             fingerprint_policy: FingerprintPolicy::SqliteWithWal,
-            meta: SourceUnitMeta::None,
-            parser_version: SourceUnitMeta::None.parser_version(client),
+            meta: InputUnitMeta::None,
+            parser_version: InputUnitMeta::None.parser_version(client),
             prepared_snapshot: None,
             snapshot_confirmed_for_execution: false,
             planned_cache_meta: None,
@@ -179,8 +177,8 @@ impl SourceUnit {
             client,
             path,
             fingerprint_policy: FingerprintPolicy::NoMessageCache,
-            meta: SourceUnitMeta::None,
-            parser_version: SourceUnitMeta::None.parser_version(client),
+            meta: InputUnitMeta::None,
+            parser_version: InputUnitMeta::None.parser_version(client),
             prepared_snapshot: None,
             snapshot_confirmed_for_execution: false,
             planned_cache_meta: None,
@@ -196,8 +194,8 @@ impl SourceUnit {
                 home_dir,
                 parent_session_path: None,
             },
-            meta: SourceUnitMeta::None,
-            parser_version: SourceUnitMeta::None.parser_version(client),
+            meta: InputUnitMeta::None,
+            parser_version: InputUnitMeta::None.parser_version(client),
             prepared_snapshot: None,
             snapshot_confirmed_for_execution: false,
             planned_cache_meta: None,
@@ -205,7 +203,7 @@ impl SourceUnit {
         }
     }
 
-    pub(crate) fn with_meta(mut self, meta: SourceUnitMeta) -> Self {
+    pub(crate) fn with_meta(mut self, meta: InputUnitMeta) -> Self {
         self.parser_version = meta.parser_version(self.client);
         self.meta = meta;
         self
@@ -219,7 +217,7 @@ impl SourceUnit {
     pub(crate) fn with_dependency(mut self, dependency_path: PathBuf) -> Self {
         self.fingerprint_policy = FingerprintPolicy::PrimaryWithDependency {
             dependency_path,
-            related_failure_policy: message_cache::RelatedInputFailurePolicy::FailSource,
+            related_failure_policy: message_cache::RelatedInputFailurePolicy::FailInput,
         };
         self
     }
@@ -260,28 +258,28 @@ impl SourceUnit {
         self
     }
 
-    pub(crate) fn prepare_snapshot(mut self) -> Result<Self, message_cache::SourceSnapshotError> {
+    pub(crate) fn prepare_snapshot(mut self) -> Result<Self, message_cache::InputSnapshotError> {
         if self.prepared_snapshot.is_none() {
-            self.prepared_snapshot = Some(self.source_input_policy().snapshot()?);
+            self.prepared_snapshot = Some(self.input_policy().snapshot()?);
         }
         Ok(self)
     }
 
     pub(crate) fn revalidate_snapshot_for_cache_decision(
         &mut self,
-    ) -> Result<(), message_cache::SourceSnapshotError> {
+    ) -> Result<(), message_cache::InputSnapshotError> {
         if self.snapshot_confirmed_for_execution {
             return Ok(());
         }
-        self.prepared_snapshot = Some(self.source_input_policy().snapshot()?);
+        self.prepared_snapshot = Some(self.input_policy().snapshot()?);
         self.snapshot_confirmed_for_execution = true;
         Ok(())
     }
 
     pub(crate) fn refresh_prepared_snapshot_for_inventory_probe(
         &mut self,
-    ) -> Result<(), message_cache::SourceSnapshotError> {
-        self.prepared_snapshot = Some(self.source_input_policy().snapshot()?);
+    ) -> Result<(), message_cache::InputSnapshotError> {
+        self.prepared_snapshot = Some(self.input_policy().snapshot()?);
         // An inventory probe may decide that no execution is needed. If this
         // unit is executed, pricing or another await can still follow, so the
         // cache-hit planner must confirm the snapshot again at its boundary.
@@ -291,22 +289,20 @@ impl SourceUnit {
 
     #[cfg(test)]
     pub(crate) fn digest_paths(&self) -> Vec<PathBuf> {
-        self.source_input_policy().paths()
+        self.input_policy().paths()
     }
 
-    pub(crate) fn take_source_input_snapshot(
+    pub(crate) fn take_input_snapshot(
         &mut self,
-    ) -> Result<message_cache::SourceInputSnapshot, message_cache::SourceSnapshotError> {
+    ) -> Result<message_cache::InputSnapshot, message_cache::InputSnapshotError> {
         self.snapshot_confirmed_for_execution = false;
         match self.prepared_snapshot.take() {
             Some(snapshot) => Ok(snapshot),
-            None => self.source_input_policy().snapshot(),
+            None => self.input_policy().snapshot(),
         }
     }
 
-    pub(crate) fn prepared_source_input_snapshot(
-        &self,
-    ) -> Option<&message_cache::SourceInputSnapshot> {
+    pub(crate) fn prepared_input_snapshot(&self) -> Option<&message_cache::InputSnapshot> {
         self.prepared_snapshot.as_ref()
     }
 
@@ -315,11 +311,11 @@ impl SourceUnit {
         self.snapshot_confirmed_for_execution = false;
     }
 
-    pub(crate) fn set_planned_cache_meta(&mut self, meta: message_cache::CachedSourceMeta) {
+    pub(crate) fn set_planned_cache_meta(&mut self, meta: message_cache::CachedInputMeta) {
         self.planned_cache_meta = Some(meta);
     }
 
-    pub(crate) fn take_planned_cache_meta(&mut self) -> Option<message_cache::CachedSourceMeta> {
+    pub(crate) fn take_planned_cache_meta(&mut self) -> Option<message_cache::CachedInputMeta> {
         self.planned_cache_meta.take()
     }
 
@@ -337,7 +333,7 @@ impl SourceUnit {
         let snapshot = self
             .prepared_snapshot
             .as_ref()
-            .expect("inventory units must carry a prepared source snapshot");
+            .expect("inventory units must carry a prepared input snapshot");
         message_cache::hash_inventory_bytes(hasher, self.client.as_str().as_bytes());
         message_cache::hash_inventory_bytes(
             hasher,
@@ -346,7 +342,7 @@ impl SourceUnit {
         hasher.update(self.parser_version.revision.to_le_bytes());
         self.update_meta_inventory_signature(hasher);
         self.update_policy_inventory_signature(hasher);
-        self.source_input_policy()
+        self.input_policy()
             .update_inventory_signature(snapshot, hasher);
     }
 
@@ -354,28 +350,28 @@ impl SourceUnit {
         use sha2::Digest;
 
         let mut hasher = sha2::Sha256::new();
-        message_cache::hash_inventory_bytes(&mut hasher, b"tokscale/source-inventory-unit");
+        message_cache::hash_inventory_bytes(&mut hasher, b"tokscale/input-inventory-unit");
         self.update_inventory_signature(&mut hasher);
         hasher.finalize().into()
     }
 
     fn update_meta_inventory_signature(&self, hasher: &mut sha2::Sha256) {
         let (name, detail) = match self.meta {
-            SourceUnitMeta::None => ("none", None),
-            SourceUnitMeta::OpenCodeSqlite => ("opencode-sqlite", None),
-            SourceUnitMeta::AntigravityCliSqlite => ("antigravity-cli-sqlite", None),
-            SourceUnitMeta::KiroFile => ("kiro-file", None),
-            SourceUnitMeta::KiroSqlite => ("kiro-sqlite", None),
-            SourceUnitMeta::KiroGlobalStorage => ("kiro-global-storage", None),
-            SourceUnitMeta::CodeBuddyJsonl => ("codebuddy-jsonl", None),
-            SourceUnitMeta::CodeBuddyExtensionLog { source } => (
+            InputUnitMeta::None => ("none", None),
+            InputUnitMeta::OpenCodeSqlite => ("opencode-sqlite", None),
+            InputUnitMeta::AntigravityCliSqlite => ("antigravity-cli-sqlite", None),
+            InputUnitMeta::KiroFile => ("kiro-file", None),
+            InputUnitMeta::KiroSqlite => ("kiro-sqlite", None),
+            InputUnitMeta::KiroGlobalStorage => ("kiro-global-storage", None),
+            InputUnitMeta::CodeBuddyJsonl => ("codebuddy-jsonl", None),
+            InputUnitMeta::CodeBuddyExtensionLog { origin } => (
                 "codebuddy-extension-log",
-                Some(match source {
-                    CodeBuddyLogSource::Extension => "extension",
-                    CodeBuddyLogSource::Host => "host",
+                Some(match origin {
+                    CodeBuddyLogOrigin::Extension => "extension",
+                    CodeBuddyLogOrigin::Host => "host",
                 }),
             ),
-            SourceUnitMeta::Codex => ("codex", None),
+            InputUnitMeta::Codex => ("codex", None),
         };
         message_cache::hash_inventory_bytes(hasher, name.as_bytes());
         message_cache::hash_inventory_bytes(hasher, detail.unwrap_or("").as_bytes());
@@ -416,7 +412,7 @@ impl SourceUnit {
                 message_cache::hash_inventory_bytes(
                     hasher,
                     match related_failure_policy {
-                        message_cache::RelatedInputFailurePolicy::FailSource => b"fail-source",
+                        message_cache::RelatedInputFailurePolicy::FailInput => b"fail-input",
                         message_cache::RelatedInputFailurePolicy::PreservePrimary => {
                             b"preserve-primary"
                         }
@@ -435,7 +431,7 @@ impl SourceUnit {
                 message_cache::hash_inventory_bytes(
                     hasher,
                     match related_failure_policy {
-                        message_cache::RelatedInputFailurePolicy::FailSource => b"fail-source",
+                        message_cache::RelatedInputFailurePolicy::FailInput => b"fail-input",
                         message_cache::RelatedInputFailurePolicy::PreservePrimary => {
                             b"preserve-primary"
                         }
@@ -449,43 +445,36 @@ impl SourceUnit {
         }
     }
 
-    pub(crate) fn source_input_policy(&self) -> message_cache::SourceInputPolicy {
+    pub(crate) fn input_policy(&self) -> message_cache::InputPolicy {
         match &self.fingerprint_policy {
             FingerprintPolicy::PlainFile | FingerprintPolicy::NoMessageCache => {
-                message_cache::SourceInputPolicy::plain(&self.path)
+                message_cache::InputPolicy::plain(&self.path)
             }
             FingerprintPolicy::SqliteWithWal => {
-                message_cache::SourceInputPolicy::sqlite_with_wal(&self.path)
+                message_cache::InputPolicy::sqlite_with_wal(&self.path)
             }
             FingerprintPolicy::ClaudeCodeWithHome {
                 parent_session_path,
                 ..
-            } => message_cache::SourceInputPolicy::claude_code(
-                &self.path,
-                parent_session_path.clone(),
-            ),
+            } => message_cache::InputPolicy::claude_code(&self.path, parent_session_path.clone()),
             FingerprintPolicy::PrimaryWithSiblings {
                 sibling_names,
                 related_failure_policy,
-            } => message_cache::SourceInputPolicy::with_siblings(
-                &self.path,
-                sibling_names.iter().copied(),
-            )
-            .with_related_failure_policy(*related_failure_policy),
+            } => {
+                message_cache::InputPolicy::with_siblings(&self.path, sibling_names.iter().copied())
+                    .with_related_failure_policy(*related_failure_policy)
+            }
             FingerprintPolicy::PrimaryWithDependency {
                 dependency_path,
                 related_failure_policy,
-            } => message_cache::SourceInputPolicy::with_dependency(
-                &self.path,
-                dependency_path.clone(),
-            )
-            .with_related_failure_policy(*related_failure_policy),
+            } => message_cache::InputPolicy::with_dependency(&self.path, dependency_path.clone())
+                .with_related_failure_policy(*related_failure_policy),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum SourceUnitMeta {
+pub(crate) enum InputUnitMeta {
     #[default]
     None,
     OpenCodeSqlite,
@@ -495,18 +484,18 @@ pub(crate) enum SourceUnitMeta {
     KiroGlobalStorage,
     CodeBuddyJsonl,
     CodeBuddyExtensionLog {
-        source: CodeBuddyLogSource,
+        origin: CodeBuddyLogOrigin,
     },
     Codex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CodeBuddyLogSource {
+pub(crate) enum CodeBuddyLogOrigin {
     Extension,
     Host,
 }
 
-impl SourceUnitMeta {
+impl InputUnitMeta {
     fn parser_version(&self, client: ClientId) -> ParserVersion {
         match self {
             Self::None => ParserVersion::new(
@@ -592,37 +581,37 @@ pub(crate) enum FingerprintPolicy {
 }
 
 #[derive(Debug)]
-pub(crate) enum UnitMessageSource {
+pub(crate) enum UnitMessagePayload {
     Fresh(Vec<UnifiedMessage>),
     CodexFresh(Vec<UnifiedMessage>),
     CacheHit(message_cache::CacheReadPlan),
     CodexCacheHit(message_cache::CacheReadPlan),
-    CodexAppend(Box<codex::CodexAppendSource>),
+    CodexAppend(Box<codex::CodexAppendInput>),
 }
 
 /// Scan status and record rejections for one parsed unit, boxed to keep
-/// `ParsedUnit`'s inline size close to `SourceUnit`'s.
+/// `ParsedUnit`'s inline size close to `InputUnit`'s.
 #[derive(Debug, Default)]
 pub(crate) struct UnitScanHealth {
-    pub status: SourceStatus,
+    pub status: InputStatus,
     pub rejections: RejectionSummary,
 }
 
 #[derive(Debug)]
 pub(crate) struct ParsedUnit {
-    pub unit: SourceUnit,
-    pub messages: UnitMessageSource,
+    pub unit: InputUnit,
+    pub messages: UnitMessagePayload,
     pub cache_write: Option<Box<message_cache::CacheWritePlan>>,
     pub invalidate_cache: bool,
     pub health: Box<UnitScanHealth>,
 }
 
 impl ParsedUnit {
-    /// A unit whose scan finished without source-level damage. Record-level
+    /// A unit whose scan finished without input-level damage. Record-level
     /// rejections, if any, are attached separately by the scan seam.
     pub(crate) fn healthy(
-        unit: SourceUnit,
-        messages: UnitMessageSource,
+        unit: InputUnit,
+        messages: UnitMessagePayload,
         cache_write: Option<Box<message_cache::CacheWritePlan>>,
         invalidate_cache: bool,
     ) -> Self {
@@ -635,26 +624,26 @@ impl ParsedUnit {
         }
     }
 
-    /// A unit whose source could not be read at all. It contributes no
+    /// A unit whose input could not be read at all. It contributes no
     /// messages and leaves any previously cached shard untouched: that shard
-    /// is only served again if the source's fingerprint matches, in which
+    /// is only served again if the input's fingerprint matches, in which
     /// case its content is still authoritative.
-    pub(crate) fn unavailable(mut unit: SourceUnit, failure: SourceFailure) -> Self {
+    pub(crate) fn unavailable(mut unit: InputUnit, failure: InputFailure) -> Self {
         unit.release_prepared_snapshot();
         Self {
             unit,
-            messages: UnitMessageSource::Fresh(Vec::new()),
+            messages: UnitMessagePayload::Fresh(Vec::new()),
             cache_write: None,
             invalidate_cache: false,
             health: Box::new(UnitScanHealth {
-                status: SourceStatus::Unavailable { failure },
+                status: InputStatus::Unavailable { failure },
                 rejections: RejectionSummary::default(),
             }),
         }
     }
 
-    pub(crate) fn source_health(&self) -> SourceHealth {
-        SourceHealth {
+    pub(crate) fn input_health(&self) -> InputHealth {
+        InputHealth {
             client: self.unit.client,
             path: self.unit.path.clone(),
             status: self.health.status.clone(),
@@ -663,7 +652,7 @@ impl ParsedUnit {
     }
 }
 
-static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
+static LOCAL_INPUT_ADAPTERS: [&dyn LocalInputAdapter; 29] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
@@ -695,12 +684,12 @@ static LOCAL_SOURCE_ADAPTERS: [&dyn LocalSourceAdapter; 29] = [
     &warp::WARP_ADAPTER,
 ];
 
-pub(crate) fn local_source_adapters() -> &'static [&'static dyn LocalSourceAdapter] {
-    &LOCAL_SOURCE_ADAPTERS
+pub(crate) fn local_input_adapters() -> &'static [&'static dyn LocalInputAdapter] {
+    &LOCAL_INPUT_ADAPTERS
 }
 
-pub(crate) fn adapter_for(client: ClientId) -> Option<&'static dyn LocalSourceAdapter> {
-    local_source_adapters()
+pub(crate) fn adapter_for(client: ClientId) -> Option<&'static dyn LocalInputAdapter> {
+    local_input_adapters()
         .iter()
         .copied()
         .find(|adapter| adapter.client() == client)
@@ -708,7 +697,7 @@ pub(crate) fn adapter_for(client: ClientId) -> Option<&'static dyn LocalSourceAd
 
 pub(crate) fn selected_adapters(
     clients: &[String],
-) -> Result<Vec<&'static dyn LocalSourceAdapter>, String> {
+) -> Result<Vec<&'static dyn LocalInputAdapter>, String> {
     let include_all = clients.is_empty();
     let requested = requested_client_ids(clients)?;
 
@@ -717,48 +706,48 @@ pub(crate) fn selected_adapters(
     });
     if let Some(client) = missing {
         return Err(format!(
-            "catalog client `{}` is missing a local source adapter",
+            "catalog client `{}` is missing a local input adapter",
             client.as_str()
         ));
     }
 
-    Ok(local_source_adapters()
+    Ok(local_input_adapters()
         .iter()
         .copied()
         .filter(|adapter| include_all || requested.contains(&adapter.client()))
         .collect())
 }
 
-pub(crate) struct PreparedAdapterSources {
-    pub adapter: &'static dyn LocalSourceAdapter,
-    pub units: Vec<SourceUnit>,
+pub(crate) struct PreparedAdapterInputs {
+    pub adapter: &'static dyn LocalInputAdapter,
+    pub units: Vec<InputUnit>,
 }
 
-pub(crate) struct ConfirmedAdapterSources {
+pub(crate) struct ConfirmedAdapterInputs {
     pub client: ClientId,
     pub unit_digests: Vec<[u8; 32]>,
-    pub present_files: Vec<(SourceFileIdentity, u64)>,
+    pub present_files: Vec<(InputFileIdentity, u64)>,
 }
 
-pub(crate) struct ParsedBatchSource<'a> {
-    adapter: &'a dyn LocalSourceAdapter,
-    units: Option<Vec<SourceUnit>>,
-    planned: VecDeque<PlannedSourceUnit>,
+pub(crate) struct ParsedBatchInput<'a> {
+    adapter: &'a dyn LocalInputAdapter,
+    units: Option<Vec<InputUnit>>,
+    planned: VecDeque<PlannedInputUnit>,
     confirmed_inventory_digests: Vec<[u8; 32]>,
-    confirmed_present_files: HashMap<SourceFileIdentity, u64>,
-    failed_health: Vec<SourceHealth>,
+    confirmed_present_files: HashMap<InputFileIdentity, u64>,
+    failed_health: Vec<InputHealth>,
     batch_width: usize,
 }
 
-enum PlannedSourceUnit {
+enum PlannedInputUnit {
     Hit(ParsedUnit),
-    Miss(SourceUnit),
+    Miss(InputUnit),
 }
 
 #[derive(Debug)]
 pub(crate) enum CacheHitPlan {
     Hit(ParsedUnit),
-    Miss(SourceUnit),
+    Miss(InputUnit),
 }
 
 enum BatchSlot {
@@ -766,8 +755,8 @@ enum BatchSlot {
     Miss,
 }
 
-impl<'a> ParsedBatchSource<'a> {
-    fn new(adapter: &'a dyn LocalSourceAdapter, units: Vec<SourceUnit>) -> Self {
+impl<'a> ParsedBatchInput<'a> {
+    fn new(adapter: &'a dyn LocalInputAdapter, units: Vec<InputUnit>) -> Self {
         Self {
             adapter,
             units: Some(units),
@@ -782,7 +771,7 @@ impl<'a> ParsedBatchSource<'a> {
     fn next(
         &mut self,
         ctx: &FoldContext<'_>,
-    ) -> Result<Option<Vec<ParsedUnit>>, SourcePipelineError> {
+    ) -> Result<Option<Vec<ParsedUnit>>, InputPipelineError> {
         self.plan_remaining_units(ctx)?;
         if self.planned.is_empty() {
             return Ok(None);
@@ -792,19 +781,19 @@ impl<'a> ParsedBatchSource<'a> {
         let mut hit_units = VecDeque::new();
         let mut miss_units = Vec::new();
         while let Some(next) = self.planned.front() {
-            if matches!(next, PlannedSourceUnit::Miss(_)) && miss_units.len() == self.batch_width {
+            if matches!(next, PlannedInputUnit::Miss(_)) && miss_units.len() == self.batch_width {
                 break;
             }
 
             let next = self.planned.pop_front().ok_or_else(|| {
-                SourcePipelineError::contract("planned source disappeared before batching")
+                InputPipelineError::contract("planned input disappeared before batching")
             })?;
             match next {
-                PlannedSourceUnit::Hit(parsed) => {
+                PlannedInputUnit::Hit(parsed) => {
                     hit_units.push_back(parsed);
                     slots.push(BatchSlot::Hit);
                 }
-                PlannedSourceUnit::Miss(unit) => {
+                PlannedInputUnit::Miss(unit) => {
                     miss_units.push(unit);
                     slots.push(BatchSlot::Miss);
                 }
@@ -825,25 +814,25 @@ impl<'a> ParsedBatchSource<'a> {
         let mut parsed = Vec::with_capacity(slots.len());
         for slot in slots {
             let unit = match slot {
-                BatchSlot::Hit => hit_units.pop_front().ok_or_else(|| {
-                    SourcePipelineError::contract("planned cache hit disappeared")
-                })?,
+                BatchSlot::Hit => hit_units
+                    .pop_front()
+                    .ok_or_else(|| InputPipelineError::contract("planned cache hit disappeared"))?,
                 BatchSlot::Miss => parsed_misses.next().ok_or_else(|| {
-                    SourcePipelineError::contract(
-                        "adapter returned fewer parsed units than source misses",
+                    InputPipelineError::contract(
+                        "adapter returned fewer parsed units than input misses",
                     )
                 })?,
             };
             parsed.push(unit);
         }
         if !hit_units.is_empty() {
-            return Err(SourcePipelineError::contract(
+            return Err(InputPipelineError::contract(
                 "planned cache-hit count did not match batch slots",
             ));
         }
         if parsed_misses.next().is_some() {
-            return Err(SourcePipelineError::contract(
-                "adapter returned more parsed units than source misses",
+            return Err(InputPipelineError::contract(
+                "adapter returned more parsed units than input misses",
             ));
         }
         Ok(Some(parsed))
@@ -852,14 +841,14 @@ impl<'a> ParsedBatchSource<'a> {
     fn take_all_planned_units(
         &mut self,
         ctx: &FoldContext<'_>,
-    ) -> Result<Vec<CacheHitPlan>, SourcePipelineError> {
+    ) -> Result<Vec<CacheHitPlan>, InputPipelineError> {
         self.plan_remaining_units(ctx)?;
         Ok(self
             .planned
             .drain(..)
             .map(|planned| match planned {
-                PlannedSourceUnit::Hit(parsed) => CacheHitPlan::Hit(parsed),
-                PlannedSourceUnit::Miss(unit) => CacheHitPlan::Miss(unit),
+                PlannedInputUnit::Hit(parsed) => CacheHitPlan::Hit(parsed),
+                PlannedInputUnit::Miss(unit) => CacheHitPlan::Miss(unit),
             })
             .collect())
     }
@@ -868,23 +857,23 @@ impl<'a> ParsedBatchSource<'a> {
         self.batch_width
     }
 
-    fn take_failed_health(&mut self) -> Vec<SourceHealth> {
+    fn take_failed_health(&mut self) -> Vec<InputHealth> {
         std::mem::take(&mut self.failed_health)
     }
 
-    fn plan_remaining_units(&mut self, ctx: &FoldContext<'_>) -> Result<(), SourcePipelineError> {
+    fn plan_remaining_units(&mut self, ctx: &FoldContext<'_>) -> Result<(), InputPipelineError> {
         let Some(units) = self.units.take() else {
             return Ok(());
         };
-        // A unit whose source snapshot fails is isolated as unavailable. A
+        // A unit whose input snapshot fails is isolated as unavailable. A
         // cache-planning failure belongs to tokscale's cache infrastructure
         // and must remain a pipeline error instead of being attributed to
-        // third-party source data.
+        // third-party input data.
         #[allow(clippy::large_enum_variant)] // transient per-unit planning slot
         enum PlannedOrFailed {
-            Planned(PlannedSourceUnit, [u8; 32], Vec<(SourceFileIdentity, u64)>),
-            Failed(SourceHealth),
-            PipelineError(SourcePlanningError),
+            Planned(PlannedInputUnit, [u8; 32], Vec<(InputFileIdentity, u64)>),
+            Failed(InputHealth),
+            PipelineError(InputPlanningError),
         }
         let planned: Vec<PlannedOrFailed> = units
             .into_par_iter()
@@ -892,12 +881,12 @@ impl<'a> ParsedBatchSource<'a> {
                 let client = unit.client;
                 let path = unit.path.clone();
                 if let Err(source) = unit.revalidate_snapshot_for_cache_decision() {
-                    return PlannedOrFailed::Failed(SourceHealth {
+                    return PlannedOrFailed::Failed(InputHealth {
                         client,
                         path,
-                        status: SourceStatus::Unavailable {
-                            failure: SourceFailure::new(
-                                "snapshot source metadata for cache planning",
+                        status: InputStatus::Unavailable {
+                            failure: InputFailure::new(
+                                "snapshot input metadata for cache planning",
                                 source.to_string(),
                             ),
                         },
@@ -906,14 +895,14 @@ impl<'a> ParsedBatchSource<'a> {
                 }
                 let inventory_digest = unit.inventory_signature_digest();
                 let mut present_files = Vec::new();
-                unit.prepared_source_input_snapshot()
-                    .expect("revalidated source unit must retain its confirmed snapshot")
+                unit.prepared_input_snapshot()
+                    .expect("revalidated input unit must retain its confirmed snapshot")
                     .visit_present_files(|identity, size| present_files.push((identity, size)));
-                match self.adapter.plan_cache_hit(unit, &*ctx.source_cache) {
+                match self.adapter.plan_cache_hit(unit, &*ctx.input_cache) {
                     Ok(plan) => {
                         let planned = match plan {
-                            CacheHitPlan::Hit(parsed) => PlannedSourceUnit::Hit(parsed),
-                            CacheHitPlan::Miss(unit) => PlannedSourceUnit::Miss(unit),
+                            CacheHitPlan::Hit(parsed) => PlannedInputUnit::Hit(parsed),
+                            CacheHitPlan::Miss(unit) => PlannedInputUnit::Miss(unit),
                         };
                         PlannedOrFailed::Planned(planned, inventory_digest, present_files)
                     }
@@ -938,23 +927,23 @@ impl<'a> ParsedBatchSource<'a> {
     }
 }
 
-pub(crate) fn run_prepared_local_source_adapters(
-    prepared: Vec<PreparedAdapterSources>,
-    source_cache: &mut message_cache::SourceMessageCache,
+pub(crate) fn run_prepared_local_input_adapters(
+    prepared: Vec<PreparedAdapterInputs>,
+    input_cache: &mut message_cache::InputMessageCache,
     pricing: Option<&pricing::PricingService>,
     sink: &mut dyn MessageSink,
     health: &mut DataHealth,
-) -> Result<Vec<ConfirmedAdapterSources>, SourcePipelineError> {
+) -> Result<Vec<ConfirmedAdapterInputs>, InputPipelineError> {
     let mut confirmed = Vec::with_capacity(prepared.len());
-    for PreparedAdapterSources { adapter, units } in prepared {
-        let mut batches = ParsedBatchSource::new(adapter, units);
-        let mut fold_ctx = FoldContext::new(source_cache, pricing);
+    for PreparedAdapterInputs { adapter, units } in prepared {
+        let mut batches = ParsedBatchInput::new(adapter, units);
+        let mut fold_ctx = FoldContext::new(input_cache, pricing);
         adapter.fold_batches(&mut batches, &mut fold_ctx, sink)?;
         health.merge(std::mem::take(&mut fold_ctx.health));
         for failed in batches.take_failed_health() {
             health.record(failed);
         }
-        confirmed.push(ConfirmedAdapterSources {
+        confirmed.push(ConfirmedAdapterInputs {
             client: adapter.client(),
             unit_digests: batches.confirmed_inventory_digests,
             present_files: batches.confirmed_present_files.into_iter().collect(),
@@ -995,7 +984,7 @@ mod tests {
 
     #[test]
     fn local_adapter_registry_is_unique_and_covers_catalog() {
-        let adapters: Vec<ClientId> = local_source_adapters()
+        let adapters: Vec<ClientId> = local_input_adapters()
             .iter()
             .map(|adapter| adapter.client())
             .collect();
@@ -1005,15 +994,15 @@ mod tests {
         assert_eq!(
             adapters.len(),
             unique.len(),
-            "each catalog client must have exactly one local source adapter"
+            "each catalog client must have exactly one local input adapter"
         );
         assert_eq!(
             unique, catalog,
-            "catalog and local source adapter registry must cover the same clients"
+            "catalog and local input adapter registry must cover the same clients"
         );
     }
 
-    impl LocalSourceAdapter for RecordingAdapter {
+    impl LocalInputAdapter for RecordingAdapter {
         fn client(&self) -> ClientId {
             ClientId::Amp
         }
@@ -1021,15 +1010,11 @@ mod tests {
         fn discover_checked(
             &self,
             _ctx: &AdapterScanContext<'_>,
-        ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
-            unreachable!("test adapter does not discover sources")
+        ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
+            unreachable!("test adapter does not discover inputs")
         }
 
-        fn parse_checked(
-            &self,
-            units: Vec<SourceUnit>,
-            _ctx: &ParseContext<'_>,
-        ) -> Vec<ParsedUnit> {
+        fn parse_checked(&self, units: Vec<InputUnit>, _ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
             self.batch_sizes.lock().unwrap().push(units.len());
             units
                 .into_iter()
@@ -1044,7 +1029,7 @@ mod tests {
                         crate::TokenBreakdown::default(),
                         0.0,
                     );
-                    ParsedUnit::healthy(unit, UnitMessageSource::Fresh(vec![message]), None, false)
+                    ParsedUnit::healthy(unit, UnitMessagePayload::Fresh(vec![message]), None, false)
                 })
                 .collect()
         }
@@ -1054,12 +1039,12 @@ mod tests {
             parsed: Vec<ParsedUnit>,
             ctx: &mut FoldContext<'_>,
             sink: &mut dyn MessageSink,
-        ) -> Result<(), SourcePipelineError> {
+        ) -> Result<(), InputPipelineError> {
             cache::fold_units(parsed, ctx, sink)
         }
     }
 
-    impl LocalSourceAdapter for BatchLifetimeAdapter {
+    impl LocalInputAdapter for BatchLifetimeAdapter {
         fn client(&self) -> ClientId {
             ClientId::Amp
         }
@@ -1067,15 +1052,11 @@ mod tests {
         fn discover_checked(
             &self,
             _ctx: &AdapterScanContext<'_>,
-        ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
-            unreachable!("test adapter does not discover sources")
+        ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
+            unreachable!("test adapter does not discover inputs")
         }
 
-        fn parse_checked(
-            &self,
-            units: Vec<SourceUnit>,
-            _ctx: &ParseContext<'_>,
-        ) -> Vec<ParsedUnit> {
+        fn parse_checked(&self, units: Vec<InputUnit>, _ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
             let mut previous = self.previous_batch_message.lock().unwrap();
             assert!(
                 previous
@@ -1100,7 +1081,7 @@ mod tests {
                 message.session_id = session_id;
                 parsed.push(ParsedUnit::healthy(
                     unit,
-                    UnitMessageSource::Fresh(vec![message]),
+                    UnitMessagePayload::Fresh(vec![message]),
                     None,
                     false,
                 ));
@@ -1113,12 +1094,12 @@ mod tests {
             parsed: Vec<ParsedUnit>,
             ctx: &mut FoldContext<'_>,
             sink: &mut dyn MessageSink,
-        ) -> Result<(), SourcePipelineError> {
+        ) -> Result<(), InputPipelineError> {
             cache::fold_units(parsed, ctx, sink)
         }
     }
 
-    impl LocalSourceAdapter for PlannedWeaveAdapter {
+    impl LocalInputAdapter for PlannedWeaveAdapter {
         fn client(&self) -> ClientId {
             ClientId::Amp
         }
@@ -1126,15 +1107,11 @@ mod tests {
         fn discover_checked(
             &self,
             _ctx: &AdapterScanContext<'_>,
-        ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
-            unreachable!("test adapter does not discover sources")
+        ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
+            unreachable!("test adapter does not discover inputs")
         }
 
-        fn parse_checked(
-            &self,
-            units: Vec<SourceUnit>,
-            _ctx: &ParseContext<'_>,
-        ) -> Vec<ParsedUnit> {
+        fn parse_checked(&self, units: Vec<InputUnit>, _ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
             self.parse_batch_sizes.lock().unwrap().push(units.len());
             units
                 .into_iter()
@@ -1151,18 +1128,18 @@ mod tests {
                         },
                         0.0,
                     );
-                    ParsedUnit::healthy(unit, UnitMessageSource::Fresh(vec![message]), None, false)
+                    ParsedUnit::healthy(unit, UnitMessagePayload::Fresh(vec![message]), None, false)
                 })
                 .collect()
         }
 
         fn plan_cache_hit(
             &self,
-            unit: SourceUnit,
-            source_cache: &message_cache::SourceMessageCache,
-        ) -> Result<CacheHitPlan, SourcePlanningError> {
+            unit: InputUnit,
+            input_cache: &message_cache::InputMessageCache,
+        ) -> Result<CacheHitPlan, InputPlanningError> {
             self.planner_calls.fetch_add(1, Ordering::Relaxed);
-            cache::plan_cache_hit(unit, source_cache)
+            cache::plan_cache_hit(unit, input_cache)
         }
 
         fn fold(
@@ -1170,7 +1147,7 @@ mod tests {
             parsed: Vec<ParsedUnit>,
             ctx: &mut FoldContext<'_>,
             sink: &mut dyn MessageSink,
-        ) -> Result<(), SourcePipelineError> {
+        ) -> Result<(), InputPipelineError> {
             cache::fold_units(parsed, ctx, sink)
         }
     }
@@ -1192,23 +1169,23 @@ mod tests {
                 batch_sizes: Mutex::new(Vec::new()),
             };
             let dir = tempfile::TempDir::new().unwrap();
-            let source_paths: Vec<_> = (0..7)
+            let input_paths: Vec<_> = (0..7)
                 .map(|index| {
                     let path = dir.path().join(index.to_string());
-                    std::fs::write(&path, format!("source {index}")).unwrap();
+                    std::fs::write(&path, format!("input {index}")).unwrap();
                     path
                 })
                 .collect();
-            let units = source_paths
+            let units = input_paths
                 .iter()
                 .cloned()
-                .map(|path| SourceUnit::plain_file(ClientId::Amp, path))
+                .map(|path| InputUnit::plain_file(ClientId::Amp, path))
                 .collect();
 
             let sessions = pool.install(|| {
-                let mut cache = message_cache::SourceMessageCache::default();
+                let mut cache = message_cache::InputMessageCache::default();
                 let mut sink = Vec::new();
-                let mut batches = ParsedBatchSource::new(&adapter, units);
+                let mut batches = ParsedBatchInput::new(&adapter, units);
                 adapter
                     .fold_batches(
                         &mut batches,
@@ -1224,7 +1201,7 @@ mod tests {
             assert_eq!(*adapter.batch_sizes.lock().unwrap(), expected_batch_sizes);
             assert_eq!(
                 sessions,
-                source_paths
+                input_paths
                     .iter()
                     .map(|path| path.to_string_lossy().into_owned())
                     .collect::<Vec<_>>()
@@ -1246,12 +1223,12 @@ mod tests {
                 let units = (0..5)
                     .map(|index| {
                         let path = dir.path().join(index.to_string());
-                        std::fs::write(&path, format!("source {index}")).unwrap();
-                        SourceUnit::plain_file(ClientId::Amp, path)
+                        std::fs::write(&path, format!("input {index}")).unwrap();
+                        InputUnit::plain_file(ClientId::Amp, path)
                     })
                     .collect();
-                let mut cache = message_cache::SourceMessageCache::default();
-                let mut batches = ParsedBatchSource::new(&adapter, units);
+                let mut cache = message_cache::InputMessageCache::default();
+                let mut batches = ParsedBatchInput::new(&adapter, units);
                 adapter
                     .fold_batches(
                         &mut batches,
@@ -1263,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn one_planning_pass_weaves_hits_with_bounded_misses_in_source_order() {
+    fn one_planning_pass_weaves_hits_with_bounded_misses_in_input_order() {
         rayon::ThreadPoolBuilder::new()
             .num_threads(2)
             .build()
@@ -1273,8 +1250,8 @@ mod tests {
                 let units: Vec<_> = (0..6)
                     .map(|index| {
                         let path = dir.path().join(index.to_string());
-                        std::fs::write(&path, format!("source {index}")).unwrap();
-                        SourceUnit::plain_file(ClientId::Amp, path)
+                        std::fs::write(&path, format!("input {index}")).unwrap();
+                        InputUnit::plain_file(ClientId::Amp, path)
                             .prepare_snapshot()
                             .unwrap()
                     })
@@ -1283,13 +1260,13 @@ mod tests {
                     parse_batch_sizes: Mutex::new(Vec::new()),
                     planner_calls: AtomicUsize::new(0),
                 };
-                let mut cache = message_cache::SourceMessageCache::default();
+                let mut cache = message_cache::InputMessageCache::default();
                 for index in [0, 2, 4] {
                     let unit = &units[index];
-                    cache.insert(message_cache::CachedSourceEntry::new_with_version(
+                    cache.insert(message_cache::CachedInputEntry::new_with_version(
                         &unit.path,
                         unit.parser_version,
-                        unit.source_input_policy().fingerprint().unwrap(),
+                        unit.input_policy().fingerprint().unwrap(),
                         vec![UnifiedMessage::new(
                             "amp",
                             "model",
@@ -1306,7 +1283,7 @@ mod tests {
                     ));
                 }
                 let mut sink = Vec::new();
-                let mut batches = ParsedBatchSource::new(&adapter, units);
+                let mut batches = ParsedBatchInput::new(&adapter, units);
                 adapter
                     .fold_batches(
                         &mut batches,
@@ -1337,8 +1314,8 @@ mod tests {
                 let units: Vec<_> = (0..4)
                     .map(|index| {
                         let path = dir.path().join(index.to_string());
-                        std::fs::write(&path, format!("source {index}")).unwrap();
-                        SourceUnit::plain_file(ClientId::Amp, path)
+                        std::fs::write(&path, format!("input {index}")).unwrap();
+                        InputUnit::plain_file(ClientId::Amp, path)
                             .prepare_snapshot()
                             .unwrap()
                     })
@@ -1347,12 +1324,12 @@ mod tests {
                     parse_batch_sizes: Mutex::new(Vec::new()),
                     planner_calls: AtomicUsize::new(0),
                 };
-                let mut cache = message_cache::SourceMessageCache::default();
+                let mut cache = message_cache::InputMessageCache::default();
                 for (index, unit) in units.iter().enumerate() {
-                    cache.insert(message_cache::CachedSourceEntry::new_with_version(
+                    cache.insert(message_cache::CachedInputEntry::new_with_version(
                         &unit.path,
                         unit.parser_version,
-                        unit.source_input_policy().fingerprint().unwrap(),
+                        unit.input_policy().fingerprint().unwrap(),
                         vec![UnifiedMessage::new(
                             "amp",
                             "model",
@@ -1367,10 +1344,10 @@ mod tests {
                         )],
                         None,
                     ));
-                    message_cache::reset_source_read_stats(&unit.path);
+                    message_cache::reset_input_read_stats(&unit.path);
                 }
                 let mut sink = Vec::new();
-                let mut batches = ParsedBatchSource::new(&adapter, units);
+                let mut batches = ParsedBatchInput::new(&adapter, units);
                 adapter
                     .fold_batches(
                         &mut batches,
@@ -1392,22 +1369,22 @@ mod tests {
 
     #[test]
     fn future_cache_format_reparses_across_batch_planning() {
-        let source_dir = tempfile::TempDir::new().unwrap();
+        let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
-        let path = source_dir.path().join("future-cache-source");
-        std::fs::write(&path, b"source").unwrap();
-        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone())
+        let path = input_dir.path().join("future-cache-input");
+        std::fs::write(&path, b"input").unwrap();
+        let unit = InputUnit::plain_file(ClientId::Amp, path.clone())
             .prepare_snapshot()
             .unwrap();
         let adapter = PlannedWeaveAdapter {
             parse_batch_sizes: Mutex::new(Vec::new()),
             planner_calls: AtomicUsize::new(0),
         };
-        let mut seeded = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        seeded.insert(message_cache::CachedSourceEntry::new_with_version(
+        let mut seeded = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
+        seeded.insert(message_cache::CachedInputEntry::new_with_version(
             &path,
             unit.parser_version,
-            unit.source_input_policy().fingerprint().unwrap(),
+            unit.input_policy().fingerprint().unwrap(),
             vec![UnifiedMessage::new(
                 "amp",
                 "model",
@@ -1426,8 +1403,8 @@ mod tests {
             unit.parser_version,
         );
 
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        let mut batches = ParsedBatchSource::new(&adapter, vec![unit]);
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
+        let mut batches = ParsedBatchInput::new(&adapter, vec![unit]);
         adapter
             .fold_batches(
                 &mut batches,
@@ -1438,18 +1415,18 @@ mod tests {
     }
 
     #[test]
-    fn direct_parse_adapter_ignores_seeded_source_shard() {
+    fn direct_parse_adapter_ignores_seeded_input_shard() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("direct-source");
-        std::fs::write(&path, b"direct source").unwrap();
-        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone())
+        let path = dir.path().join("direct-input");
+        std::fs::write(&path, b"direct input").unwrap();
+        let unit = InputUnit::plain_file(ClientId::Amp, path.clone())
             .prepare_snapshot()
             .unwrap();
-        let mut cache = message_cache::SourceMessageCache::default();
-        cache.insert(message_cache::CachedSourceEntry::new_with_version(
+        let mut cache = message_cache::InputMessageCache::default();
+        cache.insert(message_cache::CachedInputEntry::new_with_version(
             &path,
             unit.parser_version,
-            unit.source_input_policy().fingerprint().unwrap(),
+            unit.input_policy().fingerprint().unwrap(),
             vec![UnifiedMessage::new(
                 "amp",
                 "model",
@@ -1468,7 +1445,7 @@ mod tests {
             batch_sizes: Mutex::new(Vec::new()),
         };
         let mut sink = Vec::new();
-        let mut batches = ParsedBatchSource::new(&adapter, vec![unit]);
+        let mut batches = ParsedBatchInput::new(&adapter, vec![unit]);
 
         adapter
             .fold_batches(
@@ -1486,14 +1463,14 @@ mod tests {
     #[test]
     fn custom_batch_planning_records_confirmed_inventory_digests() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("source.jsonl");
-        std::fs::write(&path, b"source").unwrap();
+        let path = dir.path().join("input.jsonl");
+        std::fs::write(&path, b"input").unwrap();
         let adapter = RecordingAdapter {
             batch_sizes: Mutex::new(Vec::new()),
         };
         let mut batches =
-            ParsedBatchSource::new(&adapter, vec![SourceUnit::plain_file(ClientId::Amp, path)]);
-        let mut cache = message_cache::SourceMessageCache::default();
+            ParsedBatchInput::new(&adapter, vec![InputUnit::plain_file(ClientId::Amp, path)]);
+        let mut cache = message_cache::InputMessageCache::default();
         let fold_context = FoldContext::new(&mut cache, None);
 
         let planned = batches.take_all_planned_units(&fold_context).unwrap();
@@ -1510,9 +1487,9 @@ mod tests {
     }
 
     #[test]
-    fn plain_db_source_does_not_guess_a_wal_input() {
+    fn plain_db_input_does_not_guess_a_wal_input() {
         let path = PathBuf::from("/tmp/plain-history.db");
-        let unit = SourceUnit::plain_file(ClientId::Amp, path.clone());
+        let unit = InputUnit::plain_file(ClientId::Amp, path.clone());
 
         assert_eq!(unit.digest_paths(), vec![path]);
     }
@@ -1524,7 +1501,7 @@ mod tests {
         let dependency = dir.path().join("parent.jsonl");
         std::fs::write(&primary, b"child").unwrap();
 
-        let mut unit = SourceUnit::plain_file(ClientId::Omp, primary.clone())
+        let mut unit = InputUnit::plain_file(ClientId::Omp, primary.clone())
             .with_dependency(dependency.clone());
         assert_eq!(
             unit.digest_paths(),
@@ -1556,7 +1533,7 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_uses_one_adapter_for_all_local_sources() {
+    fn antigravity_uses_one_adapter_for_all_local_inputs() {
         let adapters = selected_adapters(&["antigravity".to_string()]).unwrap();
 
         assert_eq!(adapters.len(), 1);

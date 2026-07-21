@@ -101,13 +101,11 @@ want a fresh local rebuild:
 - `fonts/`
 - `images/`
 
-Scan-input message cache writes use the v7 shard envelope and stable explicit
-parser keys. Ordinary reports read and write current v7 shards without
-traversing, migrating, or deleting legacy v1 through v6 shards. Run `tokscale
+Scan-input message cache writes use the v8 shard envelope and stable explicit
+parser keys. Ordinary reports read and write current v8 shards without
+traversing, migrating, or deleting legacy v1 through v7 shards. Run `tokscale
 cache prune` when you explicitly want a full traversal that removes classified
-legacy shards; there is no automatic migration. Retired
-`source-message-cache.bin` and `source-message-cache.lock` files are not current
-cache inputs.
+legacy shards; there is no automatic migration.
 
 The TUI aggregate cache is separate from scan-input message shards. Reports never
 write it; use `tokscale cache warm` when you intentionally want to prebuild it.

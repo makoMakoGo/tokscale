@@ -72,7 +72,7 @@ emit one common envelope:
 }
 ```
 
-Third-party record or source damage remains in `health` under ADR 0020 and
+Third-party record or input damage remains in `health` under ADR 0020 and
 does not change a successfully produced report's exit code. Invalid CLI usage
 or environment is exit code `2`; internal, I/O, network, and authentication
 failures are exit code `1`; user interruption remains `130` where the child or
@@ -93,7 +93,7 @@ stdout; with `--output` it writes the file and prints only the final path to
 stdout.
 
 Pricing is `pricing lookup <model>` or `pricing overrides`; the lookup's
-catalog selector is named `--source`. Cache maintenance is `cache warm` or
+catalog selector is named `--pricing-source`. Cache maintenance is `cache warm` or
 `cache prune`. Reports never write the TUI aggregate cache, and the removed
 `--write-cache`, `--no-write-cache`, and `light.writeCache` controls have no
 replacement inside a report command. Tokscale does not expose a subprocess

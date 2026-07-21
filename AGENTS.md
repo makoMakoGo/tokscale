@@ -1,6 +1,6 @@
 **Note:** This is a locally maintained fork of the upstream tokscale repository. User requirements take precedence.
 
-**Note:** When merging or porting new commits from upstream, record them in docs/upstream/yyyy-mm-dd.md to document the content, source, scope of changes, and any significant context or decisions. Keep these logs concise but informative, focusing on user-visible impact and details relevant to maintainers.
+**Note:** When merging or porting new commits from upstream, record them in docs/upstream/yyyy-mm-dd.md to document the content, upstream commit, scope of changes, and any significant context or decisions. Keep these logs concise but informative, focusing on user-visible impact and details relevant to maintainers.
 
 **Note:** When a user explicitly requests breaking changes that diverge from upstream or major disagreements arise, remind them to record the decision and its rationale in docs/adr/xxxx-title.md. Keep ADRs concise, focusing on the decision, the "why", and any important context or trade-offs.
 
@@ -20,7 +20,7 @@ Tokscale is a Rust workspace with Bun-managed JavaScript packages. Core parsing,
 
 ## Coding Style & Naming Conventions
 
-Use Rust 2021 conventions and keep code `rustfmt`-clean. Prefer explicit, domain-oriented names such as `model_id`, `provider`, `source`, and `session`; preserve raw model observations for diagnostics, then use the canonical model ID for grouping and pricing. TypeScript packages are ESM and should keep source under `src/` and build output under `dist/`.
+Use Rust 2021 conventions and keep code `rustfmt`-clean. Prefer explicit, domain-oriented names such as `model_id`, `provider`, `client`, and `session`; preserve raw model observations for diagnostics, then use the canonical model ID for grouping and pricing. TypeScript packages are ESM and should keep source under `src/` and build output under `dist/`.
 
 ## Testing Guidelines
 
@@ -59,7 +59,7 @@ matching the split documented in `docs/development.md`.
 - Read `docs/adr/0001-no-silent-fallback.md` before classifying behavior as a
   fallback. The policy prohibits hidden failure and invented success; it does
   not prohibit documented normalization, reconciliation, migrations, report
-  projections, or explicit source-priority rules.
+  projections, or explicit authority-priority rules.
 - Do not remove existing behavior merely because an identifier or comment uses
   the word `fallback`. Identify the authoritative contract and a concrete
   masked failure first.
@@ -69,7 +69,7 @@ matching the split documented in `docs/development.md`.
 - Provider attribution is optional usage metadata: retain valid model/token
   records, infer centrally, and use `unknown` when inference fails. Only an
   explicitly documented ownership/filter/dedup field may gate eligibility; see
-  ADR 0020 and the Zed source boundary.
+  ADR 0020 and the Zed ownership boundary.
 
 ## Git Identity & Merge Discipline
 

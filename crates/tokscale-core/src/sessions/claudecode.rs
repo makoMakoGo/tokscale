@@ -5,7 +5,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{extract_i64, extract_string, parse_timestamp_value};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary, ScannedInput};
 use crate::{checked_token_add, model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
@@ -138,26 +138,26 @@ impl ClaudeProjectResolver {
         &self,
         project_key: &str,
         candidates: &ClaudeProjectCandidates,
-        source_path: &Path,
+        input_path: &Path,
         parent_session_id: Option<&str>,
     ) -> (ClaudeProjectResolution, ClaudeProjectDependency) {
         let local_match = match_project_candidate_tiers(project_key, candidates);
         if !matches!(local_match, CandidateMatch::None) {
             return (
-                self.finish_match(project_key, local_match, source_path),
+                self.finish_match(project_key, local_match, input_path),
                 ClaudeProjectDependency::None,
             );
         }
 
         if let Some(parent_session_id) = parent_session_id {
-            match find_parent_session_path(source_path, parent_session_id) {
+            match find_parent_session_path(input_path, parent_session_id) {
                 Ok(Some(parent_path)) => {
                     let parent_candidates = self.parent_candidates(&parent_path);
                     let parent_match =
                         match_project_candidate_tiers(project_key, &parent_candidates);
                     if !matches!(parent_match, CandidateMatch::None) {
                         return (
-                            self.finish_match(project_key, parent_match, source_path),
+                            self.finish_match(project_key, parent_match, input_path),
                             ClaudeProjectDependency::ParentSession,
                         );
                     }
@@ -165,7 +165,7 @@ impl ClaudeProjectResolver {
                 Ok(None) => {}
                 Err(error) => tracing::warn!(
                     code = "claude_project_parent_unreadable",
-                    source = %source_path.display(),
+                    input = %input_path.display(),
                     error = %error,
                     "could not inspect Claude parent session while resolving project path"
                 ),
@@ -180,7 +180,7 @@ impl ClaudeProjectResolver {
                 .map(String::as_str),
         );
         (
-            self.finish_match(project_key, external_match, source_path),
+            self.finish_match(project_key, external_match, input_path),
             ClaudeProjectDependency::ExternalMetadata,
         )
     }
@@ -189,16 +189,16 @@ impl ClaudeProjectResolver {
         &self,
         project_key: &str,
         candidate_match: CandidateMatch,
-        source_path: &Path,
+        input_path: &Path,
     ) -> ClaudeProjectResolution {
         match candidate_match {
             CandidateMatch::Unique(path) => resolved_workspace(&path),
             CandidateMatch::Ambiguous => {
-                self.report_once(project_key, "claude_project_path_ambiguous", source_path);
+                self.report_once(project_key, "claude_project_path_ambiguous", input_path);
                 ClaudeProjectResolution::Ambiguous
             }
             CandidateMatch::None => {
-                self.report_once(project_key, "claude_project_path_unresolved", source_path);
+                self.report_once(project_key, "claude_project_path_unresolved", input_path);
                 ClaudeProjectResolution::Unresolved
             }
         }
@@ -218,7 +218,7 @@ impl ClaudeProjectResolver {
         let candidates = read_project_candidates_from_jsonl(parent_path).unwrap_or_else(|error| {
             tracing::warn!(
                 code = "claude_project_parent_unreadable",
-                source = %parent_path.display(),
+                    input = %parent_path.display(),
                 error = %error,
                 "could not read Claude parent session while resolving project path"
             );
@@ -242,7 +242,7 @@ impl ClaudeProjectResolver {
         })
     }
 
-    fn report_once(&self, project_key: &str, code: &'static str, source_path: &Path) {
+    fn report_once(&self, project_key: &str, code: &'static str, input_path: &Path) {
         let inserted = self
             .reported_diagnostics
             .lock()
@@ -252,7 +252,7 @@ impl ClaudeProjectResolver {
             tracing::warn!(
                 code,
                 project_key,
-                source = %source_path.display(),
+                    input = %input_path.display(),
                 "Claude project path could not be resolved uniquely; usage is retained without workspace metadata"
             );
         }
@@ -312,11 +312,8 @@ fn resolve_subagent_name(
         None => {
             return Err(SessionParseError::at_path(
                 path,
-                "validate Claude sidechain source path",
-                std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    "source file name is not valid UTF-8",
-                ),
+                "validate Claude sidechain input path",
+                std::io::Error::new(ErrorKind::InvalidData, "input file name is not valid UTF-8"),
             ));
         }
     };
@@ -689,7 +686,7 @@ fn extract_agent_id_from_text(text: &str) -> Option<String> {
 }
 
 /// Parse a Claude Code JSONL file
-pub fn parse_claude_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_claude_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let home_dir = dirs::home_dir();
     parse_claude_file_with_home(path, home_dir.as_deref())
 }
@@ -697,7 +694,7 @@ pub fn parse_claude_file(path: &Path) -> SessionParseResult<ScannedSource> {
 pub fn parse_claude_file_with_home(
     path: &Path,
     home_dir: Option<&Path>,
-) -> SessionParseResult<ScannedSource> {
+) -> SessionParseResult<ScannedInput> {
     let mut parent_cache = ParentSubagentTypeCache::new();
     let project_resolver = ClaudeProjectResolver::new(home_dir);
     parse_claude_file_with_cache_home_and_resolver(path, &mut parent_cache, &project_resolver)
@@ -707,7 +704,7 @@ pub fn parse_claude_file_with_home(
 pub(crate) fn parse_claude_file_with_project_resolver(
     path: &Path,
     project_resolver: &ClaudeProjectResolver,
-) -> SessionParseResult<(ScannedSource, ClaudeProjectDependency)> {
+) -> SessionParseResult<(ScannedInput, ClaudeProjectDependency)> {
     let mut parent_cache = ParentSubagentTypeCache::new();
     parse_claude_file_with_cache_home_and_resolver(path, &mut parent_cache, project_resolver)
 }
@@ -716,10 +713,10 @@ fn parse_claude_file_with_cache_home_and_resolver(
     path: &Path,
     parent_cache: &mut ParentSubagentTypeCache,
     project_resolver: &ClaudeProjectResolver,
-) -> SessionParseResult<(ScannedSource, ClaudeProjectDependency)> {
+) -> SessionParseResult<(ScannedInput, ClaudeProjectDependency)> {
     if is_workflow_journal(path) {
         return Ok((
-            ScannedSource::complete(Vec::new()),
+            ScannedInput::complete(Vec::new()),
             ClaudeProjectDependency::None,
         ));
     }
@@ -737,10 +734,10 @@ fn parse_claude_file_with_cache_home_and_resolver(
         .ok_or_else(|| {
             SessionParseError::at_path(
                 path,
-                "validate Claude session source path",
+                "validate Claude session input path",
                 std::io::Error::new(
                     ErrorKind::InvalidData,
-                    "source file stem is missing or not valid UTF-8",
+                    "input file stem is missing or not valid UTF-8",
                 ),
             )
         })?
@@ -785,7 +782,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
                         format!("line {}: {source}", line_index + 1),
                     ),
                 );
-                interrupted = Some(SourceFailure::from(&error));
+                interrupted = Some(InputFailure::from(&error));
                 break;
             }
         };
@@ -813,7 +810,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     RecordRejectionReason::MalformedRecord,
                     &error,
                 );
-                interrupted = Some(SourceFailure::from(&error));
+                interrupted = Some(InputFailure::from(&error));
                 break;
             }
         };
@@ -934,7 +931,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     match extract_claude_tool_result_message(
                         trimmed,
                         ClaudeToolResultContext {
-                            source_path: path,
+                            input_path: path,
                             line_number: line_index + 1,
                             entry: &entry,
                             last_model: last_model.as_deref(),
@@ -1269,7 +1266,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
     );
 
     Ok((
-        ScannedSource {
+        ScannedInput {
             messages,
             rejections,
             interrupted,
@@ -1357,7 +1354,7 @@ fn apply_resolved_project_workspace(
     resolver: &ClaudeProjectResolver,
     project_key: Option<&str>,
     candidates: &ClaudeProjectCandidates,
-    source_path: &Path,
+    input_path: &Path,
     parent_session_id: Option<&str>,
     messages: &mut [UnifiedMessage],
 ) -> ClaudeProjectDependency {
@@ -1366,7 +1363,7 @@ fn apply_resolved_project_workspace(
     };
 
     let (resolution, dependency) =
-        resolver.resolve(project_key, candidates, source_path, parent_session_id);
+        resolver.resolve(project_key, candidates, input_path, parent_session_id);
     let workspace = match resolution {
         ClaudeProjectResolution::Resolved(workspace) => Some(workspace),
         ClaudeProjectResolution::Unresolved | ClaudeProjectResolution::Ambiguous => {
@@ -1507,14 +1504,14 @@ fn unsigned_to_base36(mut value: u64) -> String {
 
 fn read_project_candidates_from_jsonl(path: &Path) -> SessionParseResult<ClaudeProjectCandidates> {
     let file = std::fs::File::open(path).map_err(|source| {
-        SessionParseError::at_path(path, "open Claude project candidate source", source)
+        SessionParseError::at_path(path, "open Claude project candidate input", source)
     })?;
     let mut candidates = ClaudeProjectCandidates::default();
     for (line_index, line) in BufReader::new(file).lines().enumerate() {
         let line = line.map_err(|source| {
             SessionParseError::at_path(
                 path,
-                "read Claude project candidate source",
+                "read Claude project candidate input",
                 std::io::Error::new(source.kind(), format!("line {}: {source}", line_index + 1)),
             )
         })?;
@@ -1524,7 +1521,7 @@ fn read_project_candidates_from_jsonl(path: &Path) -> SessionParseResult<ClaudeP
         let entry: ClaudeEntry = serde_json::from_str(&line).map_err(|source| {
             SessionParseError::at_path(
                 path,
-                "decode Claude project candidate source",
+                "decode Claude project candidate input",
                 std::io::Error::new(
                     ErrorKind::InvalidData,
                     format!("line {}: {source}", line_index + 1),
@@ -1549,12 +1546,12 @@ fn read_external_project_candidates(home_dir: &Path) -> ClaudeProjectCandidates 
                     Ok(line) => line,
                     Err(error) => {
                         tracing::warn!(
-                            code = "claude_project_history_unreadable",
-                            source = %history_path.display(),
-                            line = line_index + 1,
-                            error = %error,
-                            "could not read Claude history project metadata"
-                        );
+                                code = "claude_project_history_unreadable",
+                        input = %history_path.display(),
+                                line = line_index + 1,
+                                error = %error,
+                                "could not read Claude history project metadata"
+                            );
                         break;
                     }
                 };
@@ -1564,7 +1561,7 @@ fn read_external_project_candidates(home_dir: &Path) -> ClaudeProjectCandidates 
                     }
                     Err(error) => tracing::warn!(
                         code = "claude_project_history_invalid",
-                        source = %history_path.display(),
+                    input = %history_path.display(),
                         line = line_index + 1,
                         error = %error,
                         "could not decode Claude history project metadata"
@@ -1575,7 +1572,7 @@ fn read_external_project_candidates(home_dir: &Path) -> ClaudeProjectCandidates 
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => tracing::warn!(
             code = "claude_project_history_unreadable",
-            source = %history_path.display(),
+                    input = %history_path.display(),
             error = %error,
             "could not open Claude history project metadata"
         ),
@@ -1593,7 +1590,7 @@ fn read_external_project_candidates(home_dir: &Path) -> ClaudeProjectCandidates 
             }
             Err(error) => tracing::warn!(
                 code = "claude_project_config_invalid",
-                source = %config_path.display(),
+                    input = %config_path.display(),
                 error = %error,
                 "could not decode Claude project configuration"
             ),
@@ -1601,7 +1598,7 @@ fn read_external_project_candidates(home_dir: &Path) -> ClaudeProjectCandidates 
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => tracing::warn!(
             code = "claude_project_config_unreadable",
-            source = %config_path.display(),
+                    input = %config_path.display(),
             error = %error,
             "could not read Claude project configuration"
         ),
@@ -1693,7 +1690,7 @@ struct ClaudeToolResultUsage {
 }
 
 struct ClaudeToolResultContext<'a> {
-    source_path: &'a Path,
+    input_path: &'a Path,
     line_number: usize,
     entry: &'a ClaudeEntry,
     last_model: Option<&'a str>,
@@ -1714,7 +1711,7 @@ fn extract_claude_tool_result_message(
 ) -> SessionParseResult<Option<UnifiedMessage>> {
     let value: Value = serde_json::from_str(line).map_err(|source| {
         SessionParseError::at_path(
-            context.source_path,
+            context.input_path,
             "decode Claude tool-result line",
             std::io::Error::new(
                 ErrorKind::InvalidData,
@@ -1738,7 +1735,7 @@ fn extract_claude_tool_result_message(
         None if context.suppress_unattributed => return Ok(None),
         None => context.last_model.map(str::to_string).ok_or_else(|| {
             SessionParseError::at_path(
-                context.source_path,
+                context.input_path,
                 "validate Claude tool-result model",
                 std::io::Error::new(
                     ErrorKind::InvalidData,
@@ -1769,19 +1766,19 @@ fn extract_claude_tool_result_message(
     let provider_choice =
         claude_provider_choice_for_models(&raw_model, &model, provider_hint.as_deref());
     let timestamp = parse_claude_entry_timestamp_checked(
-        context.source_path,
+        context.input_path,
         context.line_number,
         context.entry.timestamp.as_deref(),
     )?
     .or(extract_claude_timestamp_checked(
         &value,
-        context.source_path,
+        context.input_path,
         Some(context.line_number),
         "validate Claude tool-result timestamp",
     )?)
     .ok_or_else(|| {
         SessionParseError::at_path(
-            context.source_path,
+            context.input_path,
             "validate Claude tool-result timestamp",
             std::io::Error::new(
                 ErrorKind::InvalidData,
@@ -2004,7 +2001,7 @@ fn is_claude_synthetic_placeholder_model(model: &str) -> bool {
 }
 
 fn canonicalize_claude_model(model: &str) -> String {
-    model_aliases::canonicalize_source_model_id(model).unwrap_or_else(|| model.trim().to_string())
+    model_aliases::canonicalize_observed_model_id(model).unwrap_or_else(|| model.trim().to_string())
 }
 
 /// Internal Claude Code system/tool tags that should NOT be counted as human turns.
@@ -2226,17 +2223,17 @@ fn extract_claude_timestamp_checked(
                     ErrorKind::InvalidData,
                     format!(
                         "{}: invalid timestamp value {raw_timestamp}",
-                        claude_source_location(line_number)
+                        claude_input_location(line_number)
                     ),
                 ),
             )
         })
 }
 
-fn claude_source_location(line_number: Option<usize>) -> String {
+fn claude_input_location(line_number: Option<usize>) -> String {
     line_number
         .map(|line_number| format!("line {line_number}"))
-        .unwrap_or_else(|| "JSON source".to_string())
+        .unwrap_or_else(|| "JSON input".to_string())
 }
 
 #[cfg(test)]
@@ -2313,7 +2310,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_primary_source_reports_its_path() {
+    fn missing_primary_input_reports_its_path() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("missing.jsonl");
 
@@ -2464,7 +2461,7 @@ mod tests {
         let failure = scanned
             .interrupted
             .as_ref()
-            .expect("unknown malformed event state must mark the source partial");
+            .expect("unknown malformed event state must mark the input partial");
         assert_eq!(failure.operation, "decode Claude session line");
         assert!(failure.message.contains("line 2"));
     }
@@ -3394,18 +3391,18 @@ mod tests {
     #[test]
     fn test_project_resolution_does_not_reuse_local_candidate_between_files() {
         let resolver = ClaudeProjectResolver::new(None);
-        let source = Path::new("/home/travis/.claude/projects/-home-travis-a-b/session.jsonl");
+        let input = Path::new("/home/travis/.claude/projects/-home-travis-a-b/session.jsonl");
         let mut hyphenated = ClaudeProjectCandidates::default();
         hyphenated.record(Some("/home/travis/a-b"), None);
         let mut nested = ClaudeProjectCandidates::default();
         nested.record(Some("/home/travis/a/b"), None);
 
-        let first = resolver.resolve("-home-travis-a-b", &hyphenated, source, None);
-        let second = resolver.resolve("-home-travis-a-b", &nested, source, None);
+        let first = resolver.resolve("-home-travis-a-b", &hyphenated, input, None);
+        let second = resolver.resolve("-home-travis-a-b", &nested, input, None);
         let metadata_less = resolver.resolve(
             "-home-travis-a-b",
             &ClaudeProjectCandidates::default(),
-            source,
+            input,
             None,
         );
 

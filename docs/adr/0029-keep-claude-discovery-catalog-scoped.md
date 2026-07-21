@@ -17,13 +17,13 @@ contract.
   is attributed to the catalog client `claude`.
 - Bump the Claude parser revision so previously derived shards cannot preserve
   retired attribution behavior.
-- Accept only TUI cache schema 42. Besides the projection changes, schema 42
-  serializes the identity fields as `clientUniverse`, `clientSpace`,
-  `clientBreakdown`, and session `client`; schema 41 is an explicit cache miss
-  and is rebuilt from accepted inputs.
+- Accept only TUI cache schema 43. It serializes the identity fields as
+  `clientUniverse`, `clientSpace`, `clientBreakdown`, and session `client`,
+  and uses `inputInventorySignature` for acquisition freshness. Every older
+  schema is an explicit cache miss and is rebuilt from accepted inputs.
 
 ## Consequences
 
 No supported client behavior changes. Claude rows, provider inference, and
-ordinary Claude transcript discovery remain intact. Existing schema 41 TUI
-caches rebuild once, and the historical upstream port log remains unchanged.
+ordinary Claude transcript discovery remain intact. Existing older TUI caches
+rebuild once, and the historical upstream port log remains unchanged.

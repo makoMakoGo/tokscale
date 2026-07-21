@@ -1,11 +1,11 @@
 //! OpenClaw session parser
 //!
 //! Parses OpenClaw transcript JSONL files from agent directories.
-//! Current-format sources are individual transcript files.
+//! Current-format inputs are individual transcript files.
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -53,7 +53,7 @@ struct OpenClawUsage {
     total_tokens: Option<i64>,
 }
 
-pub fn parse_openclaw_transcript(transcript_path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_openclaw_transcript(transcript_path: &Path) -> SessionParseResult<ScannedInput> {
     let session_id = match transcript_path
         .file_name()
         .and_then(|n| {
@@ -78,7 +78,7 @@ pub fn parse_openclaw_transcript(transcript_path: &Path) -> SessionParseResult<S
 fn parse_openclaw_session(
     session_path: &Path,
     session_id: &str,
-) -> SessionParseResult<ScannedSource> {
+) -> SessionParseResult<ScannedInput> {
     if session_id.trim().is_empty() {
         return Err(SessionParseError::invalid(
             "validate OpenClaw session",
@@ -89,9 +89,9 @@ fn parse_openclaw_session(
         .map_err(|error| SessionParseError::new("open OpenClaw transcript", error))?;
 
     let reader = BufReader::new(file);
-    let mut scanned = ScannedSource {
+    let mut scanned = ScannedInput {
         messages: Vec::with_capacity(64),
-        ..ScannedSource::default()
+        ..ScannedInput::default()
     };
     let mut current_model: Option<String> = None;
     let mut current_provider: Option<String> = None;
@@ -102,7 +102,7 @@ fn parse_openclaw_session(
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "read OpenClaw JSONL line",
                     format!("{} line {line_number}: {error}", session_path.display()),
                 ));
@@ -217,7 +217,7 @@ fn parse_openclaw_session(
                             .record(RecordRejectionReason::MissingModel);
                         continue;
                     };
-                    let provider = provider_identity::source_provider_id(
+                    let provider = provider_identity::observed_provider_id(
                         raw_provider.as_deref().unwrap_or_default(),
                         &model,
                     );
@@ -277,7 +277,7 @@ fn openclaw_token_breakdown(usage: &OpenClawUsage) -> Result<Option<TokenBreakdo
 }
 
 fn canonicalize_openclaw_model(model: &str) -> String {
-    model_aliases::canonicalize_source_model_id(model).unwrap_or_else(|| model.trim().to_string())
+    model_aliases::canonicalize_observed_model_id(model).unwrap_or_else(|| model.trim().to_string())
 }
 
 fn explicit_openclaw_identity(
@@ -289,7 +289,7 @@ fn explicit_openclaw_identity(
         .map(|model| canonicalize_openclaw_model(&model))
         .ok_or(RecordRejectionReason::MissingModel)?;
     let provider =
-        provider_identity::source_provider_id(provider.as_deref().unwrap_or_default(), &model);
+        provider_identity::observed_provider_id(provider.as_deref().unwrap_or_default(), &model);
     Ok((model, provider))
 }
 
@@ -599,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_transcript_remains_a_source_error() {
+    fn missing_transcript_remains_a_input_error() {
         let dir = TempDir::new().unwrap();
 
         let error =

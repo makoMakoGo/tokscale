@@ -53,7 +53,7 @@ use tokscale_core::ClientId;
 fn decide_initial_data(load_result: CacheResult) -> (Option<LoadedTuiCache>, bool, Option<u64>) {
     match load_result {
         CacheResult::Fresh(snapshot) => {
-            let digest = snapshot.source_inventory_signature.process_digest();
+            let digest = snapshot.input_inventory_signature.process_digest();
             (Some(snapshot), false, Some(digest))
         }
         CacheResult::Stale(snapshot) => (Some(snapshot), true, None),
@@ -72,9 +72,9 @@ fn background_data_loader(
 
 fn should_force_input_reload(
     explicitly_requested: bool,
-    health: &tokscale_core::source_health::HealthReport,
+    health: &tokscale_core::input_health::HealthReport,
 ) -> bool {
-    explicitly_requested || health.requires_source_retry()
+    explicitly_requested || health.requires_input_retry()
 }
 
 /// Background loader result: a full reload, or proof that no scan input changed.
@@ -96,7 +96,7 @@ enum BackgroundLoad {
         /// records it so exports describe the loaded rows, not a pending
         /// picker selection.
         group_by: tokscale_core::GroupBy,
-        source_inventory_signature: tokscale_core::SourceInventorySignature,
+        input_inventory_signature: tokscale_core::InputInventorySignature,
         pricing_diagnostics: Vec<String>,
         cache_persistence_warning: Option<String>,
     },
@@ -120,7 +120,7 @@ fn load_background_data(
 ) -> Result<BackgroundLoad> {
     let mut prepared = loader.prepare(clients)?;
     let digest = prepared
-        .refresh_source_inventory_signature()?
+        .refresh_input_inventory_signature()?
         .process_digest();
     if !force && last_digest == Some(digest) {
         return Ok(BackgroundLoad::Unchanged);
@@ -137,7 +137,7 @@ fn load_background_data(
             projection_backend: Box::new(ProjectionBackend::Memory(result.accumulator)),
             digest: result.input_digest,
             group_by: group_by.clone(),
-            source_inventory_signature: result.source_inventory_signature,
+            input_inventory_signature: result.input_inventory_signature,
             pricing_diagnostics: result.pricing_diagnostics,
             cache_persistence_warning: None,
         }
@@ -157,7 +157,7 @@ fn persist_background_load(
         projection_backend,
         digest,
         group_by,
-        source_inventory_signature,
+        input_inventory_signature,
         pricing_diagnostics,
         cache_persistence_warning: _,
     } = result
@@ -182,7 +182,7 @@ fn persist_background_load(
         &health,
         client_universe,
         report_scope,
-        source_inventory_signature,
+        input_inventory_signature,
     ) {
         Ok(store) => {
             // The worker thread owns the parse accumulator and the temporary
@@ -217,7 +217,7 @@ fn persist_background_load(
                 projection_backend: Box::new(ProjectionBackend::Memory(accumulator)),
                 digest,
                 group_by,
-                source_inventory_signature,
+                input_inventory_signature,
                 pricing_diagnostics,
                 cache_persistence_warning: Some(format!("Cache persistence warning: {diagnostic}")),
             })
@@ -259,7 +259,7 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
                     }
                 }
             }
-            let digest = cached.source_inventory_signature.process_digest();
+            let digest = cached.input_inventory_signature.process_digest();
             app.install_tui_snapshot(
                 cached.data,
                 cached.sessions,
@@ -279,7 +279,7 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
             mut projection_backend,
             digest,
             group_by,
-            source_inventory_signature: _,
+            input_inventory_signature: _,
             pricing_diagnostics,
             cache_persistence_warning,
         }) => {
@@ -922,7 +922,7 @@ mod tests {
 
     fn save_test_snapshot(
         home: &std::path::Path,
-        signature: tokscale_core::SourceInventorySignature,
+        signature: tokscale_core::InputInventorySignature,
     ) -> LoadedTuiCache {
         let clients = HashSet::from([ClientId::Amp]);
         let scope = cache_scope(home);
@@ -947,7 +947,7 @@ mod tests {
         client_space: std::collections::BTreeMap<String, u64>,
         accumulator: tokscale_core::TuiAcc,
         group_by: tokscale_core::GroupBy,
-        signature: tokscale_core::SourceInventorySignature,
+        signature: tokscale_core::InputInventorySignature,
     ) -> BackgroundLoad {
         BackgroundLoad::Loaded {
             data: Box::new(data),
@@ -956,7 +956,7 @@ mod tests {
             projection_backend: Box::new(ProjectionBackend::Memory(accumulator)),
             digest: signature.process_digest(),
             group_by,
-            source_inventory_signature: signature,
+            input_inventory_signature: signature,
             pricing_diagnostics: Vec::new(),
             cache_persistence_warning: None,
         }
@@ -967,7 +967,7 @@ mod tests {
     fn fresh_unified_snapshot_renders_all_tabs_without_background_load() {
         let home = TempDir::new().unwrap();
         let _guard = EnvGuard::set(home.path());
-        let signature = tokscale_core::SourceInventorySignature::from_bytes([1; 32]);
+        let signature = tokscale_core::InputInventorySignature::from_bytes([1; 32]);
         let snapshot = save_test_snapshot(home.path(), signature);
 
         let (cached_data, needs_background_load, digest) =
@@ -987,7 +987,7 @@ mod tests {
         let _guard = EnvGuard::set(home.path());
         let snapshot = save_test_snapshot(
             home.path(),
-            tokscale_core::SourceInventorySignature::from_bytes([2; 32]),
+            tokscale_core::InputInventorySignature::from_bytes([2; 32]),
         );
 
         let (cached_data, needs_background_load, digest) =
@@ -1010,8 +1010,8 @@ mod tests {
 
     #[test]
     fn degraded_health_forces_reload_even_when_inventory_is_unchanged() {
-        let health = tokscale_core::source_health::HealthReport {
-            failed_sources: 1,
+        let health = tokscale_core::input_health::HealthReport {
+            failed_inputs: 1,
             complete: false,
             ..Default::default()
         };
@@ -1019,11 +1019,11 @@ mod tests {
         assert!(should_force_input_reload(false, &health));
         assert!(!should_force_input_reload(
             false,
-            &tokscale_core::source_health::HealthReport::default()
+            &tokscale_core::input_health::HealthReport::default()
         ));
         assert!(should_force_input_reload(
             true,
-            &tokscale_core::source_health::HealthReport::default()
+            &tokscale_core::input_health::HealthReport::default()
         ));
     }
 
@@ -1050,7 +1050,7 @@ mod tests {
         let loader = background_data_loader(None, None, None, None);
         let clients = [ClientId::Amp];
         let mut prepared = loader.prepare(&clients).unwrap();
-        let signature_a = prepared.refresh_source_inventory_signature().unwrap();
+        let signature_a = prepared.refresh_input_inventory_signature().unwrap();
         let cached = save_test_snapshot(home.path(), signature_a);
         let (_, needs_load, baseline) = decide_initial_data(CacheResult::Fresh(cached));
         assert!(!needs_load);
@@ -1144,8 +1144,8 @@ mod tests {
 
     #[test]
     fn loaded_result_replaces_usage_sessions_and_projection_backend_together() {
-        let old_signature = tokscale_core::SourceInventorySignature::from_bytes([3; 32]);
-        let new_signature = tokscale_core::SourceInventorySignature::from_bytes([4; 32]);
+        let old_signature = tokscale_core::InputInventorySignature::from_bytes([3; 32]);
+        let new_signature = tokscale_core::InputInventorySignature::from_bytes([4; 32]);
         let mut app = app_on(Tab::Models);
         apply_background_result(
             &mut app,
@@ -1195,7 +1195,7 @@ mod tests {
 
     #[test]
     fn unchanged_probe_does_not_replace_any_snapshot_component() {
-        let signature = tokscale_core::SourceInventorySignature::from_bytes([9; 32]);
+        let signature = tokscale_core::InputInventorySignature::from_bytes([9; 32]);
         let mut app = app_on(Tab::Models);
         apply_background_result(
             &mut app,
@@ -1282,7 +1282,7 @@ mod tests {
         let mut prepared = loader.prepare(&clients).unwrap();
         let baseline = Some(
             prepared
-                .refresh_source_inventory_signature()
+                .refresh_input_inventory_signature()
                 .unwrap()
                 .process_digest(),
         );
@@ -1345,7 +1345,7 @@ mod tests {
         let blocked_config = home.path().join("config-is-a-file");
         std::fs::write(&blocked_config, b"not a directory").unwrap();
         let _guard = EnvGuard::set(&blocked_config);
-        let signature = tokscale_core::SourceInventorySignature::from_bytes([7; 32]);
+        let signature = tokscale_core::InputInventorySignature::from_bytes([7; 32]);
         let digest = signature.process_digest();
         let accumulator = tokscale_core::build_tui_accumulator(
             &[tokscale_core::UnifiedMessage::new(
@@ -1448,14 +1448,14 @@ mod tests {
             .session_snapshot
             .client_summaries()
             .iter()
-            .map(|source| {
+            .map(|summary| {
                 (
-                    source.client.clone(),
-                    source.main_session_count,
-                    source.session_count,
-                    source.workspace_count,
-                    source.last_seen,
-                    source.space_bytes,
+                    summary.client.clone(),
+                    summary.main_session_count,
+                    summary.session_count,
+                    summary.workspace_count,
+                    summary.last_seen,
+                    summary.space_bytes,
                 )
             })
             .collect::<Vec<_>>();
@@ -1483,14 +1483,14 @@ mod tests {
             app.session_snapshot
                 .client_summaries()
                 .iter()
-                .map(|source| {
+                .map(|summary| {
                     (
-                        source.client.clone(),
-                        source.main_session_count,
-                        source.session_count,
-                        source.workspace_count,
-                        source.last_seen,
-                        source.space_bytes,
+                        summary.client.clone(),
+                        summary.main_session_count,
+                        summary.session_count,
+                        summary.workspace_count,
+                        summary.last_seen,
+                        summary.space_bytes,
                     )
                 })
                 .collect::<Vec<_>>(),
@@ -1524,7 +1524,7 @@ mod tests {
             settings::Settings::default(),
         )
         .unwrap();
-        let signature = tokscale_core::SourceInventorySignature::from_bytes([9; 32]);
+        let signature = tokscale_core::InputInventorySignature::from_bytes([9; 32]);
         let digest = signature.process_digest();
 
         apply_background_result(
@@ -1541,7 +1541,7 @@ mod tests {
                 )),
                 digest,
                 group_by: tokscale_core::GroupBy::Model,
-                source_inventory_signature: signature,
+                input_inventory_signature: signature,
                 pricing_diagnostics: Vec::new(),
                 cache_persistence_warning: Some(
                     "Cache persistence warning: permission denied".to_string(),

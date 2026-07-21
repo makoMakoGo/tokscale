@@ -19,9 +19,9 @@ use crate::{
 
 use super::{finish_graph_result, views::AgentUsage};
 
-fn add_token_breakdown(target: &mut TokenBreakdown, source: &TokenBreakdown) {
+fn add_token_breakdown(target: &mut TokenBreakdown, addition: &TokenBreakdown) {
     *target = target
-        .checked_add(source)
+        .checked_add(addition)
         .expect("token buckets exceed i64::MAX while aggregating usage");
 }
 

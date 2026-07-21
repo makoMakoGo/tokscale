@@ -4,7 +4,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::UnifiedMessage;
-use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource};
+use crate::input_health::{RecordRejectionReason, RejectionSummary, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::path::Path;
@@ -113,7 +113,7 @@ impl AmpUsageRecord {
     }
 
     fn into_unified(self, thread_id: &str) -> UnifiedMessage {
-        let provider = provider_identity::source_provider_id("", &self.model);
+        let provider = provider_identity::observed_provider_id("", &self.model);
         UnifiedMessage::new(
             "amp",
             &self.model,
@@ -339,7 +339,7 @@ fn build_amp_messages(records: Vec<AmpUsageRecord>, thread_id: &str) -> Vec<Unif
 }
 
 /// Parse an Amp thread JSON file
-pub fn parse_amp_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_amp_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let content = std::fs::read(path)
         .map_err(|error| SessionParseError::at_path(path, "read file", error))?;
 
@@ -363,7 +363,7 @@ pub fn parse_amp_file(path: &Path) -> SessionParseResult<ScannedSource> {
     if ledger_records.is_empty() {
         let mut message_records = message_records;
         message_records.sort_by_key(|record| record.timestamp);
-        return Ok(ScannedSource {
+        return Ok(ScannedInput {
             messages: build_amp_messages(message_records, &thread_id),
             rejections,
             interrupted: None,
@@ -389,7 +389,7 @@ pub fn parse_amp_file(path: &Path) -> SessionParseResult<ScannedSource> {
 
     ledger_records.extend(unmatched_message_records);
     ledger_records.sort_by_key(|record| record.timestamp);
-    Ok(ScannedSource {
+    Ok(ScannedInput {
         messages: build_amp_messages(ledger_records, &thread_id),
         rejections,
         interrupted: None,

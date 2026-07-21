@@ -152,7 +152,7 @@ fn production_shaped_messages() -> &'static [UnifiedMessage] {
 
 /// Deterministic 100,000-message corpus where each WorkspaceModel group merges
 /// exactly two canonical fine keys. Pair members differ by session while sharing
-/// workspace, model, client/source, provider, timestamp, and local day.
+/// workspace, model, client, provider, timestamp, and local day.
 fn synthetic_pair_heavy_messages() -> Vec<UnifiedMessage> {
     const FINE_KEYS_PER_GROUP: usize = 2;
 
@@ -458,11 +458,11 @@ fn bench_tui_accumulator_project_for_clients(c: &mut Criterion) {
     let mut group = c.benchmark_group("tui_accumulator_project_for_clients");
     group.throughput(Throughput::Elements(MESSAGE_COUNT as u64));
 
-    let single_source = HashSet::from([ClientId::Claude]);
-    let multi_source = HashSet::from([ClientId::Claude, ClientId::Codex]);
+    let single_client = HashSet::from([ClientId::Claude]);
+    let multi_client = HashSet::from([ClientId::Claude, ClientId::Codex]);
     let cases = [
-        ("production_shaped_single_source_model_100k", &single_source),
-        ("production_shaped_multi_source_model_100k", &multi_source),
+        ("production_shaped_single_client_model_100k", &single_client),
+        ("production_shaped_multi_client_model_100k", &multi_client),
     ];
     let messages = production_shaped_messages();
 

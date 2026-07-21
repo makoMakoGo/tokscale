@@ -5,15 +5,15 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourcePipelineError, SourceUnit,
+    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputPipelineError,
+    InputUnit, LocalInputAdapter, MessageSink, ParseContext, ParsedUnit,
     MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
+use crate::input_health::ScannedInput;
 use crate::message_cache::{ParserId, ParserVersion, RelatedInputFailurePolicy};
 use crate::sessions;
 use crate::sessions::error::SessionParseResult;
-use crate::source_health::ScannedSource;
 
 const ROO_FAMILY_SIBLINGS: &[&str] = &["api_conversation_history.json"];
 const ROO_FAMILY_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 3;
@@ -21,14 +21,14 @@ const ROO_FAMILY_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVI
 pub(crate) struct VscodeTaskAdapter {
     client: ClientId,
     parser_version: ParserVersion,
-    parse: fn(&Path) -> SessionParseResult<ScannedSource>,
+    parse: fn(&Path) -> SessionParseResult<ScannedInput>,
 }
 
 impl VscodeTaskAdapter {
     pub(crate) const fn new(
         client: ClientId,
         parser_id: ParserId,
-        parse: fn(&Path) -> SessionParseResult<ScannedSource>,
+        parse: fn(&Path) -> SessionParseResult<ScannedInput>,
     ) -> Self {
         Self {
             client,
@@ -38,7 +38,7 @@ impl VscodeTaskAdapter {
     }
 }
 
-impl LocalSourceAdapter for VscodeTaskAdapter {
+impl LocalInputAdapter for VscodeTaskAdapter {
     fn client(&self) -> ClientId {
         self.client
     }
@@ -46,7 +46,7 @@ impl LocalSourceAdapter for VscodeTaskAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let def = self
             .client
             .local_def()
@@ -59,12 +59,12 @@ impl LocalSourceAdapter for VscodeTaskAdapter {
         });
         roots.extend(adapter_discover::extra_roots_for_client(self.client, ctx)?);
 
-        Ok(adapter_discover::source_units_from_paths(
+        Ok(adapter_discover::input_units_from_paths(
             self.client,
             adapter_discover::scan_roots(self.client, roots, def.pattern)?,
             FingerprintPolicy::PrimaryWithSiblings {
                 sibling_names: ROO_FAMILY_SIBLINGS,
-                related_failure_policy: RelatedInputFailurePolicy::FailSource,
+                related_failure_policy: RelatedInputFailurePolicy::FailInput,
             },
         )?
         .into_iter()
@@ -72,7 +72,7 @@ impl LocalSourceAdapter for VscodeTaskAdapter {
         .collect())
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         let parse = self.parse;
         units
             .into_par_iter()
@@ -82,10 +82,10 @@ impl LocalSourceAdapter for VscodeTaskAdapter {
 
     fn plan_cache_hit(
         &self,
-        unit: SourceUnit,
-        source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
-        adapter_cache::plan_cache_hit(unit, source_cache)
+        unit: InputUnit,
+        input_cache: &crate::message_cache::InputMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::InputPlanningError> {
+        adapter_cache::plan_cache_hit(unit, input_cache)
     }
 
     fn fold(
@@ -93,7 +93,7 @@ impl LocalSourceAdapter for VscodeTaskAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), SourcePipelineError> {
+    ) -> Result<(), InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
@@ -195,7 +195,7 @@ mod tests {
             units[0].fingerprint_policy,
             FingerprintPolicy::PrimaryWithSiblings {
                 sibling_names: ROO_FAMILY_SIBLINGS,
-                related_failure_policy: RelatedInputFailurePolicy::FailSource,
+                related_failure_policy: RelatedInputFailurePolicy::FailInput,
             }
         );
         assert_eq!(
@@ -257,15 +257,15 @@ mod tests {
             );
 
             let cache_dir = tempfile::TempDir::new().unwrap();
-            let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+            let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
             let parsed = adapter.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
             assert_eq!(parsed.len(), 1);
-            let health = parsed[0].source_health();
+            let health = parsed[0].input_health();
             assert_eq!(health.client, client);
             assert_eq!(health.path, path);
             assert!(matches!(
                 health.status,
-                crate::source_health::SourceStatus::Complete
+                crate::input_health::InputStatus::Complete
             ));
             assert_eq!(health.rejections.total(), 1);
             assert_eq!(
@@ -280,12 +280,12 @@ mod tests {
             assert_eq!(fold_ctx.health.rejected_records(), 1);
             cache.save_if_dirty().unwrap();
 
-            let warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+            let warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
             let warm = adapter.plan_cache_hit(unit, &warm_cache).unwrap();
             let crate::adapters::CacheHitPlan::Hit(warm) = warm else {
                 panic!("unchanged {client:?} all-bad scan must use its cached health");
             };
-            let warm_health = warm.source_health();
+            let warm_health = warm.input_health();
             assert_eq!(warm_health.client, client);
             assert_eq!(warm_health.rejections.total(), 1);
             assert_eq!(

@@ -65,7 +65,7 @@ pub(crate) fn legacy_invocation_hint(arguments: &[String]) -> Option<String> {
                 return valid_replacement_hint(replacement);
             }
             Some("lookup") if contains_long_option(arguments, "provider") => {
-                return Some("replace `--provider` with `--source`".to_string());
+                return Some("replace `--provider` with `--pricing-source`".to_string());
             }
             Some(value) if !value.starts_with('-') && value != "lookup" && value != "overrides" => {
                 let mut replacement = vec!["pricing".to_string(), "lookup".to_string()];
@@ -544,8 +544,8 @@ pub(crate) enum PricingSubcommand {
         model_id: String,
         #[arg(long, help = "Output as JSON")]
         json: bool,
-        #[arg(long, value_enum, help = "Use one pricing data source")]
-        source: Option<PricingSource>,
+        #[arg(long = "pricing-source", value_enum, help = "Use one Pricing Source")]
+        pricing_source: Option<PricingSource>,
         #[arg(long, help = "Disable progress animation")]
         no_spinner: bool,
     },

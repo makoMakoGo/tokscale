@@ -6,7 +6,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::{dedup_hash_str, normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use chrono::TimeZone;
 use serde::Deserialize;
@@ -192,19 +192,19 @@ fn checked_codebuddy_token_total(tokens: &TokenBreakdown) -> SessionParseResult<
     })
 }
 
-pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::new("open CodeBuddy JSONL file", error))?;
     let mut keyed_indices: HashMap<u64, usize> = HashMap::new();
     let mut keyed_totals: HashMap<u64, i64> = HashMap::new();
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
 
     for (line_index, line) in BufReader::new(file).lines().enumerate() {
         let line_number = line_index + 1;
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "read CodeBuddy JSONL line",
                     format!("{} line {line_number}: {error}", path.display()),
                 ));
@@ -287,7 +287,7 @@ pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<Scan
             continue;
         };
         let model_id = model_id.to_string();
-        let provider_id = provider_identity::source_provider_id("", &model_id);
+        let provider_id = provider_identity::observed_provider_id("", &model_id);
         let Some(session_id) = item
             .session_id
             .filter(|session_id| !session_id.trim().is_empty())
@@ -344,19 +344,19 @@ pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<Scan
     Ok(scanned)
 }
 
-pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::new("open CodeBuddy extension log", error))?;
 
     let mut models_by_agent: HashMap<String, String> = HashMap::new();
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
 
     for (line_index, line) in BufReader::new(file).lines().enumerate() {
         let line_number = line_index + 1;
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "read CodeBuddy extension log line",
                     format!("{} line {line_number}: {error}", path.display()),
                 ));
@@ -438,7 +438,7 @@ pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> SessionParseRes
                 .record(RecordRejectionReason::MissingModel);
             continue;
         };
-        let provider_id = provider_identity::source_provider_id("", &model_id);
+        let provider_id = provider_identity::observed_provider_id("", &model_id);
         let mut message = UnifiedMessage::new_with_dedup(
             CLIENT_ID,
             model_id,
@@ -929,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_files_remain_source_errors() {
+    fn missing_files_remain_input_errors() {
         let dir = tempfile::tempdir().unwrap();
         assert!(super::parse_codebuddy_jsonl_file(&dir.path().join("missing.jsonl")).is_err());
         assert!(

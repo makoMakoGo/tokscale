@@ -3,7 +3,7 @@ use anyhow::Result;
 use tokscale_core::ClientId;
 
 pub(crate) fn run_input_cache_prune() -> Result<()> {
-    let stats = tokscale_core::prune_source_message_cache()?;
+    let stats = tokscale_core::prune_input_message_cache()?;
     println!(
         "Input cache prune: scanned {}, removed {}, retained {}.",
         stats.scanned, stats.removed, stats.retained
@@ -40,7 +40,7 @@ pub(crate) fn run_warm_tui_cache(
         &health,
         &enabled_set,
         &report_scope,
-        result.source_inventory_signature,
+        result.input_inventory_signature,
     )?;
     println!("TUI cache warmed.");
     Ok(())

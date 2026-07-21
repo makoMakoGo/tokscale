@@ -520,7 +520,7 @@ fn status_row_line(app: &App) -> Line<'static> {
         spans.extend(scanner_spans);
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
-            get_phase_message("parsing-sources"),
+            get_phase_message("parsing-inputs"),
             Style::default().fg(app.theme.muted),
         ));
     } else if app.background_loading {
@@ -534,7 +534,7 @@ fn status_row_line(app: &App) -> Line<'static> {
             spans.extend(scanner_spans);
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                get_phase_message("parsing-sources"),
+                get_phase_message("parsing-inputs"),
                 Style::default().fg(app.theme.muted),
             ));
         }

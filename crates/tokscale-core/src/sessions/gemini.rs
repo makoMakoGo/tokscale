@@ -6,7 +6,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{extract_i64, extract_string, parse_timestamp_value};
 use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
-use crate::source_health::{RecordRejectionReason, RejectionSummary, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary, ScannedInput};
 use crate::{checked_token_add, checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
@@ -194,11 +194,11 @@ pub struct GeminiTokens {
 }
 
 /// Parse a Gemini session file.
-pub fn parse_gemini_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_gemini_file(path: &Path) -> SessionParseResult<ScannedInput> {
     parse_gemini_file_inner(path)
 }
 
-fn parse_gemini_file_inner(path: &Path) -> SessionParseResult<ScannedSource> {
+fn parse_gemini_file_inner(path: &Path) -> SessionParseResult<ScannedInput> {
     if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
         return parse_gemini_jsonl(path);
     }
@@ -207,10 +207,7 @@ fn parse_gemini_file_inner(path: &Path) -> SessionParseResult<ScannedSource> {
     // `tmp/<project>/chats/<file>.json` layout. Other JSON files under the
     // broad Gemini discovery root are unrelated state and are ignored.
     let file_name_os = path.file_name().ok_or_else(|| {
-        SessionParseError::invalid(
-            "validate source path",
-            "Gemini source path has no file name",
-        )
+        SessionParseError::invalid("validate input path", "Gemini input path has no file name")
     })?;
 
     use std::ffi::OsStr;
@@ -233,7 +230,7 @@ fn parse_gemini_file_inner(path: &Path) -> SessionParseResult<ScannedSource> {
         }
     }
     if !is_current_chat {
-        return Ok(ScannedSource::default());
+        return Ok(ScannedInput::default());
     }
 
     let data = std::fs::read(path)
@@ -252,10 +249,10 @@ fn parse_gemini_file_inner(path: &Path) -> SessionParseResult<ScannedSource> {
     Ok(parse_gemini_usage_value(&value, session_id.as_deref()))
 }
 
-fn parse_gemini_session(session: GeminiSessionEnvelope) -> SessionParseResult<ScannedSource> {
-    let mut scanned = ScannedSource {
+fn parse_gemini_session(session: GeminiSessionEnvelope) -> SessionParseResult<ScannedInput> {
+    let mut scanned = ScannedInput {
         messages: Vec::with_capacity(session.messages.len()),
-        ..ScannedSource::default()
+        ..ScannedInput::default()
     };
     let session_id = session.session_id.trim();
     if session_id.is_empty() {
@@ -436,16 +433,16 @@ fn parse_direct_gemini_token_message(
     )))
 }
 
-fn parse_gemini_jsonl(path: &Path) -> SessionParseResult<ScannedSource> {
+fn parse_gemini_jsonl(path: &Path) -> SessionParseResult<ScannedInput> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
 
     let mut session_id: Option<String> = None;
     let mut current_model: Option<String> = None;
     let mut reader = BufReader::new(file);
-    let mut scanned = ScannedSource {
+    let mut scanned = ScannedInput {
         messages: Vec::with_capacity(64),
-        ..ScannedSource::default()
+        ..ScannedInput::default()
     };
     let mut direct_message_indices: HashMap<String, usize> = HashMap::new();
     let mut line_buffer = Vec::with_capacity(4096);
@@ -457,7 +454,7 @@ fn parse_gemini_jsonl(path: &Path) -> SessionParseResult<ScannedSource> {
         let bytes_read = match reader.read_until(b'\n', &mut line_buffer) {
             Ok(bytes_read) => bytes_read,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "read JSONL line",
                     format!("{} after line {line_number}: {error}", path.display()),
                 ));
@@ -479,7 +476,7 @@ fn parse_gemini_jsonl(path: &Path) -> SessionParseResult<ScannedSource> {
         let value: Value = match simd_json::from_slice(&mut json_buffer) {
             Ok(value) => value,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "decode JSONL line",
                     format!("{} line {line_number}: {error}", path.display()),
                 ));
@@ -633,8 +630,8 @@ fn trim_ascii_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
-fn parse_gemini_usage_value(value: &Value, session_id: Option<&str>) -> ScannedSource {
-    let mut scanned = ScannedSource::default();
+fn parse_gemini_usage_value(value: &Value, session_id: Option<&str>) -> ScannedInput {
+    let mut scanned = ScannedInput::default();
     if value.get("tokens").is_some() {
         match parse_direct_gemini_token_message(value, None, session_id) {
             Ok(Some(message)) => scanned.messages.push(message),

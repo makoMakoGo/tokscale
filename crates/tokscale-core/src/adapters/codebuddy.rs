@@ -6,9 +6,9 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, CodeBuddyLogSource, FingerprintPolicy, FoldContext, LocalSourceAdapter,
-    MessageSink, ParseContext, ParsedBatchSource, ParsedUnit, SourceDiscoveryError, SourceUnit,
-    SourceUnitMeta,
+    AdapterScanContext, CodeBuddyLogOrigin, FingerprintPolicy, FoldContext, InputDiscoveryError,
+    InputUnit, InputUnitMeta, LocalInputAdapter, MessageSink, ParseContext, ParsedBatchInput,
+    ParsedUnit,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -23,7 +23,7 @@ const CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION: u32 =
 
 pub(crate) struct CodeBuddyAdapter;
 
-impl LocalSourceAdapter for CodeBuddyAdapter {
+impl LocalInputAdapter for CodeBuddyAdapter {
     fn client(&self) -> ClientId {
         ClientId::CodeBuddy
     }
@@ -31,7 +31,7 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let def = ClientId::CodeBuddy
             .local_def()
             .expect("CodeBuddy adapter must have local scan policy");
@@ -45,14 +45,14 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
             def.pattern,
         )?);
 
-        let mut units = adapter_discover::source_units_from_paths(
+        let mut units = adapter_discover::input_units_from_paths(
             ClientId::CodeBuddy,
             jsonl_paths,
             FingerprintPolicy::PlainFile,
         )?
         .into_iter()
         .map(|unit| {
-            unit.with_meta(SourceUnitMeta::CodeBuddyJsonl)
+            unit.with_meta(InputUnitMeta::CodeBuddyJsonl)
                 .with_parser_version(ParserVersion::new(
                     ParserId::CodeBuddy,
                     CODEBUDDY_JSONL_RECORD_REJECTION_REVISION,
@@ -69,31 +69,31 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
         Ok(units)
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| match unit.meta {
-                SourceUnitMeta::CodeBuddyJsonl => {
+                InputUnitMeta::CodeBuddyJsonl => {
                     adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
                         sessions::codebuddy::parse_codebuddy_jsonl_file(path)
                     })
                 }
-                SourceUnitMeta::CodeBuddyExtensionLog { .. } => {
+                InputUnitMeta::CodeBuddyExtensionLog { .. } => {
                     adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
                         sessions::codebuddy::parse_codebuddy_extension_log_file(path)
                     })
                 }
-                _ => unreachable!("unexpected CodeBuddy source unit meta"),
+                _ => unreachable!("unexpected CodeBuddy input unit meta"),
             })
             .collect()
     }
 
     fn plan_cache_hit(
         &self,
-        unit: SourceUnit,
-        source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
-        adapter_cache::plan_cache_hit(unit, source_cache)
+        unit: InputUnit,
+        input_cache: &crate::message_cache::InputMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::InputPlanningError> {
+        adapter_cache::plan_cache_hit(unit, input_cache)
     }
 
     fn fold(
@@ -101,7 +101,7 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), crate::adapters::SourcePipelineError> {
+    ) -> Result<(), crate::adapters::InputPipelineError> {
         let mut deduper = CodeBuddyDeduper::default();
         adapter_cache::fold_units_with_filter(parsed, ctx, sink, |unit, messages| {
             deduper.filter(unit, messages)
@@ -110,10 +110,10 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
 
     fn fold_batches(
         &self,
-        batches: &mut ParsedBatchSource<'_>,
+        batches: &mut ParsedBatchInput<'_>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), crate::adapters::SourcePipelineError> {
+    ) -> Result<(), crate::adapters::InputPipelineError> {
         let mut deduper = CodeBuddyDeduper::default();
         while let Some(parsed) = batches.next(ctx)? {
             adapter_cache::fold_units_with_filter(parsed, ctx, sink, |unit, messages| {
@@ -127,27 +127,27 @@ impl LocalSourceAdapter for CodeBuddyAdapter {
 fn codebuddy_extension_log_units(
     home_dir: &str,
     use_env_roots: bool,
-) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+) -> Result<Vec<InputUnit>, InputDiscoveryError> {
     let home = PathBuf::from(home_dir);
     let mut roots = vec![
         (
             home.join("AppData/Local/CodeBuddyExtension/Logs/CodeBuddyIDE"),
-            CodeBuddyLogSource::Extension,
+            CodeBuddyLogOrigin::Extension,
             false,
         ),
         (
             home.join("AppData/Local/CodeBuddyExtension/Logs/VSCode"),
-            CodeBuddyLogSource::Extension,
+            CodeBuddyLogOrigin::Extension,
             false,
         ),
         (
             home.join("AppData/Roaming/CodeBuddy CN/logs"),
-            CodeBuddyLogSource::Host,
+            CodeBuddyLogOrigin::Host,
             true,
         ),
         (
             home.join("AppData/Roaming/Code/logs"),
-            CodeBuddyLogSource::Host,
+            CodeBuddyLogOrigin::Host,
             true,
         ),
     ];
@@ -156,44 +156,44 @@ fn codebuddy_extension_log_units(
         if let Some(local_app_data) = dirs::data_local_dir() {
             roots.push((
                 local_app_data.join("CodeBuddyExtension/Logs/CodeBuddyIDE"),
-                CodeBuddyLogSource::Extension,
+                CodeBuddyLogOrigin::Extension,
                 false,
             ));
             roots.push((
                 local_app_data.join("CodeBuddyExtension/Logs/VSCode"),
-                CodeBuddyLogSource::Extension,
+                CodeBuddyLogOrigin::Extension,
                 false,
             ));
         }
         if let Some(roaming_app_data) = dirs::config_dir() {
             roots.push((
                 roaming_app_data.join("CodeBuddy CN/logs"),
-                CodeBuddyLogSource::Host,
+                CodeBuddyLogOrigin::Host,
                 true,
             ));
             roots.push((
                 roaming_app_data.join("Code/logs"),
-                CodeBuddyLogSource::Host,
+                CodeBuddyLogOrigin::Host,
                 true,
             ));
         }
     }
 
     let mut units = Vec::new();
-    for (root, source, require_extension_component) in roots {
+    for (root, origin, require_extension_component) in roots {
         let paths = adapter_discover::scan_roots(ClientId::CodeBuddy, [root], "*.log")?
             .into_iter()
             .filter(|path| !require_extension_component || has_codebuddy_extension_component(path))
             .collect::<Vec<_>>();
         units.extend(
-            adapter_discover::source_units_from_paths(
+            adapter_discover::input_units_from_paths(
                 ClientId::CodeBuddy,
                 paths,
                 FingerprintPolicy::PlainFile,
             )?
             .into_iter()
             .map(|unit| {
-                unit.with_meta(SourceUnitMeta::CodeBuddyExtensionLog { source })
+                unit.with_meta(InputUnitMeta::CodeBuddyExtensionLog { origin })
                     .with_parser_version(ParserVersion::new(
                         ParserId::CodeBuddy,
                         CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION,
@@ -204,15 +204,15 @@ fn codebuddy_extension_log_units(
     Ok(units)
 }
 
-fn dedup_units_by_canonical_path(units: &mut Vec<SourceUnit>) -> Result<(), SourceDiscoveryError> {
+fn dedup_units_by_canonical_path(units: &mut Vec<InputUnit>) -> Result<(), InputDiscoveryError> {
     let mut seen = HashSet::new();
     let mut keys = Vec::with_capacity(units.len());
     for unit in units.iter() {
         keys.push(std::fs::canonicalize(&unit.path).map_err(|source| {
-            SourceDiscoveryError::new(
+            InputDiscoveryError::new(
                 ClientId::CodeBuddy,
                 &unit.path,
-                "canonicalize discovered source",
+                "canonicalize discovered input",
                 source,
             )
         })?);
@@ -242,31 +242,31 @@ struct CodeBuddyDeduper {
 }
 
 impl CodeBuddyDeduper {
-    fn filter(&mut self, unit: &SourceUnit, messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
+    fn filter(&mut self, unit: &InputUnit, messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
         messages
             .into_iter()
             .filter(|message| self.keep(unit, message))
             .collect()
     }
 
-    fn keep(&mut self, unit: &SourceUnit, message: &UnifiedMessage) -> bool {
+    fn keep(&mut self, unit: &InputUnit, message: &UnifiedMessage) -> bool {
         if let Some(key) = message.dedup_key {
             return self.seen_keys.insert(key);
         }
 
-        let SourceUnitMeta::CodeBuddyExtensionLog { source } = unit.meta else {
+        let InputUnitMeta::CodeBuddyExtensionLog { origin } = unit.meta else {
             return true;
         };
         let signature = MirrorSignature::from_message(message);
         let events = self.mirror_events.entry(signature).or_default();
         if events.iter().any(|event| {
-            event.source != source
+            event.origin != origin
                 && event.timestamp_ms.abs_diff(message.timestamp) <= MIRROR_DEDUP_WINDOW_MS as u64
         }) {
             return false;
         }
         events.push(MirrorEvent {
-            source,
+            origin,
             timestamp_ms: message.timestamp,
         });
         true
@@ -301,7 +301,7 @@ impl MirrorSignature {
 }
 
 struct MirrorEvent {
-    source: CodeBuddyLogSource,
+    origin: CodeBuddyLogOrigin,
     timestamp_ms: i64,
 }
 
@@ -336,8 +336,8 @@ mod tests {
         messages
     }
 
-    fn fold_with_units(units: Vec<SourceUnit>) -> Vec<crate::UnifiedMessage> {
-        let mut cache = message_cache::SourceMessageCache::default();
+    fn fold_with_units(units: Vec<InputUnit>) -> Vec<crate::UnifiedMessage> {
+        let mut cache = message_cache::InputMessageCache::default();
         let parsed = CODEBUDDY_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
         let mut sink = Vec::new();
         CODEBUDDY_ADAPTER
@@ -374,8 +374,8 @@ mod tests {
         assert_eq!(paths, expected);
         for unit in &units {
             let revision = match unit.meta {
-                SourceUnitMeta::CodeBuddyJsonl => CODEBUDDY_JSONL_RECORD_REJECTION_REVISION,
-                SourceUnitMeta::CodeBuddyExtensionLog { .. } => {
+                InputUnitMeta::CodeBuddyJsonl => CODEBUDDY_JSONL_RECORD_REJECTION_REVISION,
+                InputUnitMeta::CodeBuddyExtensionLog { .. } => {
                     CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION
                 }
                 _ => unreachable!(),
@@ -388,12 +388,12 @@ mod tests {
         assert_eq!(
             metas,
             vec![
-                SourceUnitMeta::CodeBuddyJsonl,
-                SourceUnitMeta::CodeBuddyExtensionLog {
-                    source: CodeBuddyLogSource::Extension
+                InputUnitMeta::CodeBuddyJsonl,
+                InputUnitMeta::CodeBuddyExtensionLog {
+                    origin: CodeBuddyLogOrigin::Extension
                 },
-                SourceUnitMeta::CodeBuddyExtensionLog {
-                    source: CodeBuddyLogSource::Host
+                InputUnitMeta::CodeBuddyExtensionLog {
+                    origin: CodeBuddyLogOrigin::Host
                 },
             ]
         );
@@ -417,7 +417,7 @@ mod tests {
             .discover_checked(&ctx)
             .unwrap()
             .into_iter()
-            .filter(|unit| matches!(unit.meta, SourceUnitMeta::CodeBuddyExtensionLog { .. }))
+            .filter(|unit| matches!(unit.meta, InputUnitMeta::CodeBuddyExtensionLog { .. }))
             .collect::<Vec<_>>();
 
         assert_eq!(units.len(), 1);
@@ -430,14 +430,14 @@ mod tests {
         let path = dir.path().join("session.log");
         write_file(&path, "");
         let mut units = vec![
-            SourceUnit::plain_file(ClientId::CodeBuddy, path.clone()).with_meta(
-                SourceUnitMeta::CodeBuddyExtensionLog {
-                    source: CodeBuddyLogSource::Extension,
+            InputUnit::plain_file(ClientId::CodeBuddy, path.clone()).with_meta(
+                InputUnitMeta::CodeBuddyExtensionLog {
+                    origin: CodeBuddyLogOrigin::Extension,
                 },
             ),
-            SourceUnit::plain_file(ClientId::CodeBuddy, path.clone()).with_meta(
-                SourceUnitMeta::CodeBuddyExtensionLog {
-                    source: CodeBuddyLogSource::Extension,
+            InputUnit::plain_file(ClientId::CodeBuddy, path.clone()).with_meta(
+                InputUnitMeta::CodeBuddyExtensionLog {
+                    origin: CodeBuddyLogOrigin::Extension,
                 },
             ),
         ];
@@ -456,8 +456,8 @@ mod tests {
             &path,
             r#"{"id":"assistant-1","timestamp":1780000000100,"type":"message","role":"assistant","status":"completed","sessionId":"session-1","providerData":{"model":"glm-5.2","messageId":"msg-1"},"message":{"usage":{"input_tokens":10,"output_tokens":3}}}"#,
         );
-        let units = vec![SourceUnit::plain_file(ClientId::CodeBuddy, path.clone())
-            .with_meta(SourceUnitMeta::CodeBuddyJsonl)];
+        let units = vec![InputUnit::plain_file(ClientId::CodeBuddy, path.clone())
+            .with_meta(InputUnitMeta::CodeBuddyJsonl)];
 
         let actual = fold_with_units(units);
         let expected = finalized(
@@ -486,10 +486,10 @@ mod tests {
         );
         let units = [first, second]
             .into_iter()
-            .zip([CodeBuddyLogSource::Extension, CodeBuddyLogSource::Host])
-            .map(|(path, source)| {
-                SourceUnit::plain_file(ClientId::CodeBuddy, path)
-                    .with_meta(SourceUnitMeta::CodeBuddyExtensionLog { source })
+            .zip([CodeBuddyLogOrigin::Extension, CodeBuddyLogOrigin::Host])
+            .map(|(path, origin)| {
+                InputUnit::plain_file(ClientId::CodeBuddy, path)
+                    .with_meta(InputUnitMeta::CodeBuddyExtensionLog { origin })
             })
             .collect();
 
@@ -517,9 +517,9 @@ mod tests {
         let units = [first, second]
             .into_iter()
             .map(|path| {
-                SourceUnit::plain_file(ClientId::CodeBuddy, path).with_meta(
-                    SourceUnitMeta::CodeBuddyExtensionLog {
-                        source: CodeBuddyLogSource::Extension,
+                InputUnit::plain_file(ClientId::CodeBuddy, path).with_meta(
+                    InputUnitMeta::CodeBuddyExtensionLog {
+                        origin: CodeBuddyLogOrigin::Extension,
                     },
                 )
             })
@@ -533,8 +533,8 @@ mod tests {
     #[test]
     fn codebuddy_parse_cache_uses_codebuddy_parser_id() {
         let path = PathBuf::from("/tmp/codebuddy/session.jsonl");
-        let unit = SourceUnit::plain_file(ClientId::CodeBuddy, path)
-            .with_meta(SourceUnitMeta::CodeBuddyJsonl);
+        let unit = InputUnit::plain_file(ClientId::CodeBuddy, path)
+            .with_meta(InputUnitMeta::CodeBuddyJsonl);
 
         assert_eq!(unit.parser_version.parser_id, ParserId::CodeBuddy);
     }

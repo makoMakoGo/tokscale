@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn typed_operational_local_report_error_remains_operational() {
-        let error = LocalReportError::from("source cache unavailable".to_string());
+        let error = LocalReportError::from("input cache unavailable".to_string());
         let failure =
             CliFailure::from(anyhow::Error::new(error).context("generate local model report"));
 
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(failure.exit_code(), 1);
         assert_eq!(
             failure.to_string(),
-            "generate local model report: source cache unavailable"
+            "generate local model report: input cache unavailable"
         );
     }
 }

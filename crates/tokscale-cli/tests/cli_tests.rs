@@ -570,7 +570,7 @@ fn write_pricing_cache(base: &Path, timestamp: u64) {
     // where dirs::cache_dir() resolves outside the sandboxed HOME (e.g.
     // some Linux runners with XDG_CACHE_HOME set globally) miss the
     // pricing cache entirely and the report falls back to embedded
-    // source costs.
+    // input-record costs.
     for dir in [
         base.join(".config/tokscale/cache"),
         base.join("Library/Caches/tokscale"),
@@ -1110,10 +1110,8 @@ fn test_opencode_obsolete_sqlite_schema_reports_aggregate_health_only() {
         .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"failedSources\": 1"))
-        .stdout(predicate::str::contains(
-            "\"issue\": \"source-unavailable\"",
-        ))
+        .stdout(predicate::str::contains("\"failedInputs\": 1"))
+        .stdout(predicate::str::contains("\"issue\": \"input-unavailable\""))
         .stdout(predicate::str::contains("does not match the current session schema").not())
         .stderr(predicate::str::contains("1 failed input(s)"));
 }
@@ -1145,9 +1143,9 @@ fn test_opencode_invalid_sqlite_payload_is_rejected_without_losing_good_rows() {
         .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"degradedSources\": 1"))
+        .stdout(predicate::str::contains("\"degradedInputs\": 1"))
         .stdout(predicate::str::contains("\"rejectedRecords\": 1"))
-        .stdout(predicate::str::contains("\"failedSources\": 0"))
+        .stdout(predicate::str::contains("\"failedInputs\": 0"))
         .stdout(predicate::str::contains("gpt-5.5"))
         .stderr(predicate::str::contains(
             "Data health: 1 degraded input(s), 1 rejected record(s), 0 partial input(s), 0 failed input(s)",
@@ -1577,8 +1575,8 @@ fn test_time_metrics_reports_degraded_input_health_without_failing() {
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["health"]["complete"], false);
-    assert_eq!(json["health"]["degradedSources"], 0);
-    assert_eq!(json["health"]["failedSources"], 1);
+    assert_eq!(json["health"]["degradedInputs"], 0);
+    assert_eq!(json["health"]["failedInputs"], 1);
     assert!(
         String::from_utf8_lossy(&output.stderr)
             .contains("Data health: 0 degraded input(s), 0 rejected record(s), 0 partial input(s), 1 failed input(s)"),
@@ -2856,7 +2854,7 @@ fn test_pricing_command_json() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(json.get("modelId").is_some(), "Missing modelId");
     assert!(json.get("matchedKey").is_some(), "Missing matchedKey");
-    assert!(json.get("source").is_some(), "Missing source");
+    assert!(json.get("pricingSource").is_some(), "Missing pricingSource");
     assert!(json.get("pricing").is_some(), "Missing pricing");
 
     let pricing = &json["pricing"];
@@ -2865,14 +2863,14 @@ fn test_pricing_command_json() {
 }
 
 #[test]
-fn test_pricing_command_with_source() {
+fn test_pricing_command_with_pricing_source() {
     let tmp = create_pricing_fixture_dir();
     let mut cmd = cmd_with_home(tmp.path());
     cmd.args([
         "pricing",
         "lookup",
         "claude-sonnet-4-20250514",
-        "--source",
+        "--pricing-source",
         "litellm",
         "--no-spinner",
     ])
@@ -2881,15 +2879,15 @@ fn test_pricing_command_with_source() {
 }
 
 #[test]
-fn test_pricing_command_invalid_source() {
+fn test_pricing_command_invalid_pricing_source() {
     let tmp = create_pricing_fixture_dir();
     let mut cmd = cmd_with_home(tmp.path());
     cmd.args([
         "pricing",
         "lookup",
         "claude-sonnet-4-20250514",
-        "--source",
-        "invalid-source",
+        "--pricing-source",
+        "invalid-pricing-source",
         "--no-spinner",
     ])
     .assert()
@@ -3121,7 +3119,7 @@ fn test_clients_filter_does_not_discover_unselected_opencode() {
     let clients = json["data"]["clients"].as_array().unwrap();
     assert_eq!(clients.len(), 1);
     assert_eq!(clients[0]["client"], "claude");
-    assert_eq!(json["health"]["failedSources"], 0);
+    assert_eq!(json["health"]["failedInputs"], 0);
     assert!(!serde_json::to_string(&json["health"])
         .unwrap()
         .contains("opencode"));
@@ -3154,8 +3152,8 @@ fn test_clients_json_reports_degraded_input_health_without_losing_payload() {
         .as_array()
         .is_some_and(|rows| !rows.is_empty()));
     assert_eq!(json["health"]["complete"], false);
-    assert_eq!(json["health"]["degradedSources"], 0);
-    assert_eq!(json["health"]["failedSources"], 1);
+    assert_eq!(json["health"]["degradedInputs"], 0);
+    assert_eq!(json["health"]["failedInputs"], 1);
     assert!(
         String::from_utf8_lossy(&output.stderr)
             .contains("Data health: 0 degraded input(s), 0 rejected record(s), 0 partial input(s), 1 failed input(s)"),
@@ -3408,7 +3406,7 @@ fn test_clients_json_includes_settings_extra_paths() {
         codex["extraPaths"][0]["origin"],
         serde_json::json!("settings")
     );
-    assert!(codex["extraPaths"][0].get("source").is_none());
+    assert!(codex["extraPaths"][0].get("pricingSource").is_none());
 }
 
 #[test]

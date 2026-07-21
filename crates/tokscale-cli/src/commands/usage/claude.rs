@@ -45,7 +45,7 @@ struct TokenRefresh {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum CredentialSource {
+enum CredentialOrigin {
     File,
     Keychain,
 }
@@ -60,19 +60,19 @@ pub fn has_credentials() -> bool {
         || super::helpers::read_keychain("Claude Code-credentials").is_ok()
 }
 
-fn read_credentials() -> Result<(Credentials, CredentialSource)> {
+fn read_credentials() -> Result<(Credentials, CredentialOrigin)> {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let path = home.join(".claude").join(".credentials.json");
     if path.exists() {
         if let Ok(content) = std::fs::read_to_string(&path) {
             if let Ok(creds) = serde_json::from_str::<Credentials>(&content) {
-                return Ok((creds, CredentialSource::File));
+                return Ok((creds, CredentialOrigin::File));
             }
         }
     }
     let content = read_keychain()?;
     let creds: Credentials = serde_json::from_str(&content)?;
-    Ok((creds, CredentialSource::Keychain))
+    Ok((creds, CredentialOrigin::Keychain))
 }
 
 fn save_credentials(
@@ -161,7 +161,7 @@ pub fn fetch() -> Result<UsageOutput> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let (creds, _source) = read_credentials()?;
+        let (creds, _origin) = read_credentials()?;
         let oauth = creds.claude_ai_oauth.ok_or_else(|| {
             anyhow::anyhow!("No Claude OAuth credentials. Run 'claude' to log in.")
         })?;

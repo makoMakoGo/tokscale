@@ -86,14 +86,14 @@ mod tests {
     fn exported_report_keeps_degraded_input_health() {
         let mut data = UsageData::default();
         data.health.complete = false;
-        data.health.degraded_sources = 1;
+        data.health.degraded_inputs = 1;
         data.health.rejected_records = 2;
-        data.health.failed_sources = 1;
-        data.health.issues = vec![tokscale_core::source_health::HealthIssueReport {
+        data.health.failed_inputs = 1;
+        data.health.issues = vec![tokscale_core::input_health::HealthIssueReport {
             level: "warning".to_string(),
-            source: "zed".to_string(),
+            client: "zed".to_string(),
             issue: "missing-model".to_string(),
-            affected_sources: 1,
+            affected_inputs: 1,
             rejected_records: Some(2),
             handling: "record-skipped".to_string(),
         }];
@@ -102,11 +102,12 @@ mod tests {
             serde_json::from_str(&build_export_json(&data, &GroupBy::Model).unwrap()).unwrap();
 
         assert_eq!(json["health"]["complete"], false);
-        assert_eq!(json["health"]["degradedSources"], 1);
+        assert_eq!(json["health"]["degradedInputs"], 1);
         assert_eq!(json["health"]["rejectedRecords"], 2);
-        assert_eq!(json["health"]["failedSources"], 1);
-        assert_eq!(json["health"]["issues"][0]["source"], "zed");
+        assert_eq!(json["health"]["failedInputs"], 1);
+        assert_eq!(json["health"]["issues"][0]["client"], "zed");
         assert_eq!(json["health"]["issues"][0]["issue"], "missing-model");
+        assert!(json["health"].get("inputs").is_none());
         assert!(json["health"].get("sources").is_none());
     }
 

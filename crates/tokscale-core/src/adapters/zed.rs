@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, LocalSourceAdapter, MessageSink,
-    ParseContext, ParsedUnit, SourceDiscoveryError, SourceUnit, ZED_RECORD_FILTER_REVISION,
+    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
+    LocalInputAdapter, MessageSink, ParseContext, ParsedUnit, ZED_RECORD_FILTER_REVISION,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -15,7 +15,7 @@ pub(crate) struct ZedAdapter;
 
 pub(crate) static ZED_ADAPTER: ZedAdapter = ZedAdapter;
 
-impl LocalSourceAdapter for ZedAdapter {
+impl LocalInputAdapter for ZedAdapter {
     fn client(&self) -> ClientId {
         ClientId::Zed
     }
@@ -23,7 +23,7 @@ impl LocalSourceAdapter for ZedAdapter {
     fn discover_checked(
         &self,
         ctx: &AdapterScanContext<'_>,
-    ) -> Result<Vec<SourceUnit>, SourceDiscoveryError> {
+    ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let def = ClientId::Zed
             .local_def()
             .expect("Zed adapter must have local scan policy");
@@ -64,7 +64,7 @@ impl LocalSourceAdapter for ZedAdapter {
             def.pattern,
         )?);
 
-        let units = adapter_discover::source_units_from_paths(
+        let units = adapter_discover::input_units_from_paths(
             ClientId::Zed,
             paths,
             FingerprintPolicy::SqliteWithWal,
@@ -80,7 +80,7 @@ impl LocalSourceAdapter for ZedAdapter {
         Ok(units)
     }
 
-    fn parse_checked(&self, units: Vec<SourceUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
+    fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         use rayon::prelude::*;
 
         units
@@ -95,10 +95,10 @@ impl LocalSourceAdapter for ZedAdapter {
 
     fn plan_cache_hit(
         &self,
-        unit: SourceUnit,
-        source_cache: &crate::message_cache::SourceMessageCache,
-    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::SourcePlanningError> {
-        adapter_cache::plan_cache_hit(unit, source_cache)
+        unit: InputUnit,
+        input_cache: &crate::message_cache::InputMessageCache,
+    ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::InputPlanningError> {
+        adapter_cache::plan_cache_hit(unit, input_cache)
     }
 
     fn fold(
@@ -106,7 +106,7 @@ impl LocalSourceAdapter for ZedAdapter {
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
-    ) -> Result<(), crate::adapters::SourcePipelineError> {
+    ) -> Result<(), crate::adapters::InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn zed_adapter_surfaces_record_rejections_as_source_health() {
+    fn zed_adapter_surfaces_record_rejections_as_input_health() {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("threads.db");
         let conn = create_threads_db(&db_path);
@@ -239,8 +239,8 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let units = vec![SourceUnit::sqlite_with_wal(ClientId::Zed, db_path.clone())];
-        let mut cache = message_cache::SourceMessageCache::default();
+        let units = vec![InputUnit::sqlite_with_wal(ClientId::Zed, db_path.clone())];
+        let mut cache = message_cache::InputMessageCache::default();
         let parsed = ZED_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
         let mut sink = Vec::new();
         let mut fold_ctx = FoldContext::new(&mut cache, None);
@@ -249,12 +249,12 @@ mod tests {
         assert_eq!(sink.len(), 1);
         assert_eq!(sink[0].session_id.as_ref(), "zed-thread-good");
         assert_eq!(fold_ctx.health.rejected_records(), 1);
-        assert_eq!(fold_ctx.health.failed_sources(), 0);
-        assert_eq!(fold_ctx.health.partial_sources(), 0);
-        let source = &fold_ctx.health.sources()[0];
-        assert_eq!(source.client, ClientId::Zed);
-        assert_eq!(source.path, db_path);
-        let entries: Vec<_> = source.rejections.entries().collect();
+        assert_eq!(fold_ctx.health.failed_inputs(), 0);
+        assert_eq!(fold_ctx.health.partial_inputs(), 0);
+        let input = &fold_ctx.health.inputs()[0];
+        assert_eq!(input.client, ClientId::Zed);
+        assert_eq!(input.path, db_path);
+        let entries: Vec<_> = input.rejections.entries().collect();
         assert_eq!(entries[0].key, "missing-model");
     }
 
@@ -278,8 +278,8 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let mut cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
-        let unit = SourceUnit::sqlite_with_wal(ClientId::Zed, db_path.clone())
+        let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
+        let unit = InputUnit::sqlite_with_wal(ClientId::Zed, db_path.clone())
             .with_parser_version(ParserVersion::new(
                 ParserId::Zed,
                 ZED_RECORD_FILTER_REVISION,
@@ -293,17 +293,17 @@ mod tests {
         assert_eq!(fold_ctx.health.rejected_records(), 1);
         cache.save_if_dirty().unwrap();
 
-        let warm_cache = message_cache::SourceMessageCache::with_cache_dir(cache_dir.path());
+        let warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let planned = ZED_ADAPTER
             .plan_cache_hit(unit, &warm_cache)
             .expect("warm planning must succeed");
         let hit = match planned {
             crate::adapters::CacheHitPlan::Hit(parsed) => parsed,
             crate::adapters::CacheHitPlan::Miss(_) => {
-                panic!("unchanged source with cached scan must plan a warm hit")
+                panic!("unchanged input with cached scan must plan a warm hit")
             }
         };
-        let health = hit.source_health();
+        let health = hit.input_health();
         assert_eq!(health.rejections.total(), 1);
         let entries: Vec<_> = health.rejections.entries().collect();
         assert_eq!(entries[0].key, "missing-model");
@@ -317,8 +317,8 @@ mod tests {
         insert_thread(&conn, "zed-thread-1", "claude-sonnet-4-5");
         drop(conn);
 
-        let units = vec![SourceUnit::sqlite_with_wal(ClientId::Zed, db_path.clone())];
-        let mut cache = message_cache::SourceMessageCache::default();
+        let units = vec![InputUnit::sqlite_with_wal(ClientId::Zed, db_path.clone())];
+        let mut cache = message_cache::InputMessageCache::default();
         let parsed = ZED_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
         let mut actual = Vec::new();
         ZED_ADAPTER

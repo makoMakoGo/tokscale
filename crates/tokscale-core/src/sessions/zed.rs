@@ -7,12 +7,12 @@
 //!
 //! Only Zed-hosted model rows (`provider == "zed.dev"`) are counted. External
 //! ACP agents are billed and logged by their own providers/CLIs, and counting
-//! their Zed UI rows would duplicate those sources.
+//! their Zed UI rows would duplicate those usage records.
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{open_readonly_sqlite, parse_timestamp_str};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::TokenBreakdown;
 use serde_json::Value;
 use std::io::Read;
@@ -35,12 +35,12 @@ struct ZedThreadRow {
 /// What one thread row contributed to the scan.
 enum ThreadOutcome {
     Message(Box<UnifiedMessage>),
-    /// Skipped by the source contract (imported, non-hosted, zero usage).
+    /// Skipped by the input contract (imported, non-hosted, zero usage).
     Filtered,
     Rejected(RecordRejectionReason, String),
 }
 
-pub fn parse_zed_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_zed_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
     let conn = open_readonly_sqlite(db_path)?;
 
     let query = "SELECT id, updated_at, created_at, folder_paths, folder_paths_order, data_type, data FROM threads";
@@ -52,7 +52,7 @@ pub fn parse_zed_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
         .query([])
         .map_err(|error| SessionParseError::new("execute Zed thread query", error))?;
 
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     let mut row_number = 0_u64;
     loop {
         let row = match rows.next() {
@@ -62,10 +62,8 @@ pub fn parse_zed_sqlite(db_path: &Path) -> SessionParseResult<ScannedSource> {
             // many further rows are affected is unknown, so the confirmed
             // records are kept and the scan is declared interrupted.
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
-                    "read Zed thread rows",
-                    error.to_string(),
-                ));
+                scanned.interrupted =
+                    Some(InputFailure::new("read Zed thread rows", error.to_string()));
                 break;
             }
         };
@@ -729,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn all_bad_records_still_scan_to_a_complete_empty_source() {
+    fn all_bad_records_still_scan_to_a_complete_empty_input() {
         let dir = TempDir::new().unwrap();
         let (db_path, conn) = create_threads_db(&dir);
         insert_thread(
@@ -867,7 +865,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("missing.db");
         let error = super::parse_zed_sqlite(&missing).unwrap_err();
-        assert_eq!(error.operation(), "open SQLite source read-only");
+        assert_eq!(error.operation(), "open SQLite input read-only");
         fs::create_dir_all(dir.path().join("threads")).unwrap();
     }
 }

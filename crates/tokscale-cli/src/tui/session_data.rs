@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_builds_client_summaries_and_keeps_empty_sources() {
+    fn snapshot_builds_client_summaries_and_keeps_empty_clients() {
         let snapshot = SessionSnapshot::new(
             vec![
                 session("codex", "c-1", true, Some("repo-a"), None, 10),

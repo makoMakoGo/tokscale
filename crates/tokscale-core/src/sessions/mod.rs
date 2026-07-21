@@ -46,7 +46,7 @@ pub struct UnifiedMessage {
     pub provider_id: std::sync::Arc<str>,
     #[serde(deserialize_with = "intern::de_intern")]
     pub session_id: std::sync::Arc<str>,
-    /// Whether the source directly identifies this usage as belonging to a
+    /// Whether the input record directly identifies this usage as belonging to a
     /// top-level session. `session_id` remains the legacy Total grouping key.
     #[serde(default = "default_true")]
     pub is_main_session: bool,
@@ -81,7 +81,7 @@ const fn default_true() -> bool {
 }
 
 /// Stable FNV-1a over a dedup key string. The value is persisted in the
-/// source-message cache, so the algorithm must never change across releases
+/// input-message cache, so the algorithm must never change across releases
 /// (it would silently break dedup between cached and freshly parsed
 /// messages). Hash inputs keep their legacy string formats.
 ///

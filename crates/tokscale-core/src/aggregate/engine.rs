@@ -181,7 +181,7 @@ impl AggregationEngine {
         };
 
         AggregatedViews {
-            health: crate::source_health::DataHealth::default(),
+            health: crate::input_health::DataHealth::default(),
             tui_usage,
             model_report,
             monthly_report,

@@ -31,6 +31,10 @@ struct RawCustomPricingFile {
 
 #[derive(Deserialize)]
 struct CustomModelPricing {
+    #[serde(rename = "pricingSource")]
+    _pricing_source: Option<String>,
+    #[serde(flatten)]
+    extra_fields: HashMap<String, Value>,
     input_cost_per_million_tokens: Option<f64>,
     input_cost_per_million_tokens_above_128k_tokens: Option<f64>,
     input_cost_per_million_tokens_above_200k_tokens: Option<f64>,
@@ -65,6 +69,10 @@ struct CustomModelPricing {
 
 impl CustomModelPricing {
     fn into_model_pricing(self) -> Result<ModelPricing, String> {
+        if self.extra_fields.contains_key("source") {
+            return Err("retired `source` field is not supported; use `pricingSource`".into());
+        }
+
         let input_cost_per_token = base_price(
             self.input_cost_per_million_tokens,
             self.input_cost_per_token,
@@ -459,7 +467,7 @@ mod tests {
                         "input_cost_per_million_tokens": 2.00,
                         "output_cost_per_million_tokens": 8.00,
                         "cache_read_input_token_cost_per_million_tokens": 0.30,
-                        "source": "https://docs.fireworks.ai/serverless/pricing",
+                        "pricingSource": "https://docs.fireworks.ai/serverless/pricing",
                         "notes": "Fireworks Kimi K2.6 Turbo"
                     }
                 }
@@ -521,7 +529,7 @@ mod tests {
                         "input_cost_per_token": 0.000002,
                         "output_cost_per_token": 0.000008,
                         "cache_read_input_token_cost": 0.0000003,
-                        "source": "copied from LiteLLM-shaped JSON"
+                        "pricingSource": "copied from LiteLLM-shaped JSON"
                     }
                 }
             }"#,
@@ -794,7 +802,7 @@ mod tests {
                     "annotated": {
                         "input_cost_per_million_tokens": 2.00,
                         "output_cost_per_million_tokens": 8.00,
-                        "source": "https://example.com/pricing",
+                        "pricingSource": "https://example.com/pricing",
                         "notes": "kept for the user, ignored by tokscale"
                     }
                 }
@@ -807,6 +815,34 @@ mod tests {
         assert_eq!(
             loaded.lookup("annotated").unwrap().input_cost_per_token,
             Some(0.000002)
+        );
+    }
+
+    #[test]
+    fn retired_source_field_is_rejected_instead_of_aliased() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("custom-pricing.json");
+        fs::write(
+            &path,
+            r#"{
+                "models": {
+                    "retired-field": {
+                        "input_cost_per_million_tokens": 2.00,
+                        "output_cost_per_million_tokens": 8.00,
+                        "source": "https://example.com/pricing"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let mut diagnostics = Vec::new();
+
+        let loaded = CustomPricing::load_from_path_with_diagnostics(&path, &mut diagnostics);
+
+        assert!(loaded.lookup("retired-field").is_none());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0].contains("retired `source` field is not supported; use `pricingSource`")
         );
     }
 

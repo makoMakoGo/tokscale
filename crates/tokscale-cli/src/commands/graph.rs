@@ -319,14 +319,14 @@ mod tests {
             years: Vec::new(),
             contributions: Vec::new(),
             time_metrics: None,
-            health: tokscale_core::source_health::HealthReport {
+            health: tokscale_core::input_health::HealthReport {
                 complete: false,
-                clean_sources: 4,
-                degraded_sources: 1,
+                clean_inputs: 4,
+                degraded_inputs: 1,
                 rejected_records: 2,
-                partial_sources: 1,
-                failed_sources: 0,
-                source_data_bytes: 12_345,
+                partial_inputs: 1,
+                failed_inputs: 0,
+                input_data_bytes: 12_345,
                 issues: Vec::new(),
             },
         };
@@ -339,11 +339,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(json["health"]["complete"], false);
-        assert_eq!(json["health"]["cleanSources"], 4);
-        assert_eq!(json["health"]["degradedSources"], 1);
+        assert_eq!(json["health"]["cleanInputs"], 4);
+        assert_eq!(json["health"]["degradedInputs"], 1);
         assert_eq!(json["health"]["rejectedRecords"], 2);
-        assert_eq!(json["health"]["partialSources"], 1);
-        assert_eq!(json["health"]["sourceDataBytes"], 12_345);
+        assert_eq!(json["health"]["partialInputs"], 1);
+        assert_eq!(json["health"]["inputDataBytes"], 12_345);
         assert_eq!(
             json["data"]["meta"]["pricingStatus"],
             serde_json::json!("cachedFallback")

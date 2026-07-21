@@ -76,11 +76,11 @@ pub(crate) fn open_readonly_sqlite(path: &Path) -> SessionParseResult<Connection
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(|source| SessionParseError::new("open SQLite source read-only", source))
+    .map_err(|source| SessionParseError::new("open SQLite input read-only", source))
 }
 
 pub(crate) fn read_file(path: &Path) -> SessionParseResult<Vec<u8>> {
-    std::fs::read(path).map_err(|source| SessionParseError::new("read source file", source))
+    std::fs::read(path).map_err(|source| SessionParseError::new("read input file", source))
 }
 
 #[cfg(test)]

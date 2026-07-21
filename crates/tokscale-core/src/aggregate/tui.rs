@@ -83,7 +83,7 @@ fn sane_cost(cost: f64) -> f64 {
 }
 
 fn add_unified_tokens(target: &mut UsageTokenBreakdown, src: &crate::TokenBreakdown) {
-    let source = UsageTokenBreakdown {
+    let addition = UsageTokenBreakdown {
         input: src.input.max(0) as u64,
         output: src.output.max(0) as u64,
         cache_read: src.cache_read.max(0) as u64,
@@ -91,7 +91,7 @@ fn add_unified_tokens(target: &mut UsageTokenBreakdown, src: &crate::TokenBreakd
         reasoning: src.reasoning.max(0) as u64,
     };
     *target = target
-        .checked_add(&source)
+        .checked_add(&addition)
         .expect("TUI token buckets exceed u64::MAX while aggregating usage");
 }
 
@@ -126,9 +126,9 @@ struct PeriodDescriptor {
     end_date: NaiveDate,
 }
 
-fn add_tokens(target: &mut UsageTokenBreakdown, source: &UsageTokenBreakdown) {
+fn add_tokens(target: &mut UsageTokenBreakdown, addition: &UsageTokenBreakdown) {
     *target = target
-        .checked_add(source)
+        .checked_add(addition)
         .expect("TUI token buckets exceed u64::MAX while aggregating usage");
 }
 
@@ -2757,15 +2757,15 @@ mod tests {
             assert_eq!(left.message_count, right.message_count);
             assert_eq!(left.turn_count, right.turn_count);
             assert_eq!(left.client_breakdown.len(), right.client_breakdown.len());
-            for ((left_client, left_source), (right_client, right_source)) in
+            for ((left_client, left_info), (right_client, right_info)) in
                 left.client_breakdown.iter().zip(&right.client_breakdown)
             {
                 assert_eq!(left_client, right_client);
-                assert_tokens_eq(&left_source.tokens, &right_source.tokens);
-                assert_eq!(left_source.cost.to_bits(), right_source.cost.to_bits());
-                assert_eq!(left_source.models.len(), right_source.models.len());
+                assert_tokens_eq(&left_info.tokens, &right_info.tokens);
+                assert_eq!(left_info.cost.to_bits(), right_info.cost.to_bits());
+                assert_eq!(left_info.models.len(), right_info.models.len());
                 for ((left_key, left_model), (right_key, right_model)) in
-                    left_source.models.iter().zip(&right_source.models)
+                    left_info.models.iter().zip(&right_info.models)
                 {
                     assert_eq!(left_key, right_key);
                     assert_eq!(left_model.provider, right_model.provider);

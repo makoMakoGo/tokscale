@@ -12,8 +12,8 @@ small client changes expensive and makes upstream merges harder to reason about.
 
 An additional boundary is needed between provider-owned usage artifacts and
 Tokscale-owned state. Launching a provider CLI only to copy its structured
-stdout into a second Tokscale session tree creates two competing sources for
-the same run. It also makes Tokscale responsible for child-process flags,
+stdout into a second Tokscale session tree creates two competing authorities
+for the same run. It also makes Tokscale responsible for child-process flags,
 timeouts, exit codes, and cross-format deduplication even when the provider
 already persists an authoritative session record.
 
@@ -37,11 +37,11 @@ Provider-owned local artifacts are authoritative:
   as a parallel usage log, and does not create or scan a shadow session tree
   for that purpose.
 - A Tokscale-owned sync cache is acceptable only for an explicit integration
-  whose supported source has no stable directly readable artifact. Such a
+  whose provider has no stable directly readable artifact. Such a
   workflow must have one documented authority and must not duplicate provider
   credentials or an already available usage record.
 - Regenerable parser and report caches may mirror derived data for performance,
-  but they are never an additional semantic source.
+  but they are never an additional semantic authority.
 
 ## Consequences
 
@@ -50,8 +50,9 @@ rewrite. Each implementation PR should migrate one proven slice and delete the
 duplicated behavior it replaces.
 
 The former `headless` command, `TOKSCALE_HEADLESS_DIR`, and
-`~/.config/tokscale/headless` scan root violate the provider-source boundary and
-are removed. Captured structured-stdout streams are not local session sources.
+`~/.config/tokscale/headless` scan root violate the provider-artifact boundary
+and are removed. Captured structured-stdout streams are not local session
+inputs.
 Existing files under that old root are ignored and may be deleted. Normal
 provider-owned Codex and Gemini non-interactive session records continue to be
 discovered. Removing the shadow capture path also removes the possibility of

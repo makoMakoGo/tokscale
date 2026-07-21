@@ -33,9 +33,9 @@ pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
     let mut models_set = std::collections::HashSet::with_capacity(20);
 
     for contribution in contributions {
-        for source in &contribution.clients {
-            clients_set.insert(source.client.clone());
-            models_set.insert(source.model_id.clone());
+        for client in &contribution.clients {
+            clients_set.insert(client.client.clone());
+            models_set.insert(client.model_id.clone());
         }
     }
 

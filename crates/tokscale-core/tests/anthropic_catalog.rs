@@ -148,7 +148,7 @@ fn key_has_version(matched_lower: &str, version: &str) -> bool {
 }
 
 /// Build the lookup exactly as `PricingService` does for cached datasets
-/// (filter github_copilot and include models.dev as the long-tail source).
+/// (filter github_copilot and include models.dev as the long-tail Pricing Source).
 fn load_lookup() -> PricingLookup {
     let litellm_data =
         litellm::load_cached_any_age().expect("LiteLLM pricing cache required for catalog test");

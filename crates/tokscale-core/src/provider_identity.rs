@@ -104,12 +104,12 @@ pub(crate) fn finalized_provider_id(raw_provider: &str, model_id: &str) -> Strin
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Resolve optional provider attribution while a source record is being
-/// parsed. A non-empty source value is preserved because it may encode a
+/// Resolve optional provider attribution while a usage record is being
+/// parsed. A non-empty observed value is preserved because it may encode a
 /// router or reseller path; absent attribution is inferred from the model and
 /// otherwise represented as `unknown`. Provider resolution must not decide
 /// whether an otherwise valid usage record exists.
-pub(crate) fn source_provider_id(raw_provider: &str, model_id: &str) -> String {
+pub(crate) fn observed_provider_id(raw_provider: &str, model_id: &str) -> String {
     let raw_provider = raw_provider.trim();
     if !raw_provider.is_empty()
         && !raw_provider.eq_ignore_ascii_case("unknown")
@@ -636,18 +636,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_provider_resolution_never_gates_usage_identity() {
+    fn observed_provider_resolution_never_gates_usage_identity() {
         assert_eq!(
-            source_provider_id("bedrock/anthropic", "claude-opus-4.6"),
+            observed_provider_id("bedrock/anthropic", "claude-opus-4.6"),
             "bedrock/anthropic"
         );
-        assert_eq!(source_provider_id("", "gpt-5.5"), "openai");
-        assert_eq!(source_provider_id("", "k3"), "kimi");
+        assert_eq!(observed_provider_id("", "gpt-5.5"), "openai");
+        assert_eq!(observed_provider_id("", "k3"), "kimi");
         assert_eq!(
-            source_provider_id("unknown", "claude-opus-4.6"),
+            observed_provider_id("unknown", "claude-opus-4.6"),
             "anthropic"
         );
-        assert_eq!(source_provider_id("", "private-preview"), "unknown");
+        assert_eq!(observed_provider_id("", "private-preview"), "unknown");
     }
 
     #[test]

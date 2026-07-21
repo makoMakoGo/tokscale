@@ -21,7 +21,7 @@ pub(crate) fn is_deepseek_v4_beta_alias(model: &str) -> bool {
     )
 }
 
-/// Canonical model-id source of truth for report grouping, finalization, and pricing.
+/// Canonical model-id authority for report grouping, finalization, and pricing.
 pub(crate) fn canonicalize_model_id(model_id: &str) -> String {
     let normalized = normalized_terminal_model_id(model_id);
     let normalized_id = normalized.as_ref();
@@ -30,14 +30,14 @@ pub(crate) fn canonicalize_model_id(model_id: &str) -> String {
     }
 
     let lexically_normalized = strip_global_suffixes_to_stable(normalized);
-    canonicalize_source_specific_model_id(&lexically_normalized)
+    canonicalize_known_model_alias(&lexically_normalized)
         .unwrap_or_else(|| lexically_normalized.into_owned())
 }
 
 /// Parser convenience shim; not the authoritative model identity boundary.
 ///
 /// Returns `Some` only when canonicalization changes the normalized terminal id.
-pub(crate) fn canonicalize_source_model_id(model: &str) -> Option<String> {
+pub(crate) fn canonicalize_observed_model_id(model: &str) -> Option<String> {
     let normalized = normalized_terminal_model_id(model);
     let canonical = canonicalize_model_id(model);
     if canonical == normalized.as_ref() {
@@ -64,58 +64,58 @@ fn strip_custom_model_prefix(model_id: &str) -> &str {
     model_id.strip_prefix("custom:").unwrap_or(model_id)
 }
 
-fn canonicalize_source_specific_model_id(model: &str) -> Option<String> {
+fn canonicalize_known_model_alias(model: &str) -> Option<String> {
     if let Some(display_slug) = normalized_human_display_model_slug(model) {
         if display_slug != model {
-            if let Some(canonical) = canonicalize_source_specific_model_id(&display_slug) {
+            if let Some(canonical) = canonicalize_known_model_alias(&display_slug) {
                 return Some(canonical);
             }
-            if is_openai_gpt_source_base_model(&display_slug) {
+            if is_openai_gpt_observed_base_model(&display_slug) {
                 return Some(display_slug);
             }
         }
     }
 
-    if is_claude_source_candidate(model) {
-        if let Some(canonical) = canonicalize_modern_claude_source_model(model) {
+    if is_claude_observed_candidate(model) {
+        if let Some(canonical) = canonicalize_modern_claude_observed_model(model) {
             return Some(canonical);
         }
     }
     if model.starts_with("gpt-") {
-        return canonicalize_openai_source_model(model);
+        return canonicalize_openai_observed_model(model);
     }
     if model.starts_with("glm-") {
-        if let Some(canonical) = canonicalize_glm_source_model(model) {
+        if let Some(canonical) = canonicalize_glm_observed_model(model) {
             return Some(canonical.to_string());
         }
     }
     if model.starts_with("qwen") {
-        if let Some(canonical) = canonicalize_qwen_source_model(model) {
+        if let Some(canonical) = canonicalize_qwen_observed_model(model) {
             return Some(canonical);
         }
     }
     if model.starts_with("kimi") || model.starts_with("k2") {
-        if let Some(canonical) = canonicalize_kimi_source_model(model) {
+        if let Some(canonical) = canonicalize_kimi_observed_model(model) {
             return Some(canonical);
         }
     }
     if model.starts_with("grok") {
-        if let Some(canonical) = canonicalize_grok_source_model(model) {
+        if let Some(canonical) = canonicalize_grok_observed_model(model) {
             return Some(canonical);
         }
     }
     if model.starts_with("mimo-") {
-        if let Some(canonical) = canonicalize_mimo_source_model(model) {
+        if let Some(canonical) = canonicalize_mimo_observed_model(model) {
             return Some(canonical);
         }
     }
     if model.starts_with("deepseek-") {
-        if let Some(canonical) = canonicalize_deepseek_source_model(model) {
+        if let Some(canonical) = canonicalize_deepseek_observed_model(model) {
             return Some(canonical);
         }
     }
     if model.starts_with("longcat-") {
-        if let Some(canonical) = canonicalize_longcat_source_model(model) {
+        if let Some(canonical) = canonicalize_longcat_observed_model(model) {
             return Some(canonical.to_string());
         }
     }
@@ -216,7 +216,7 @@ fn stripped_free_channel_tag(model: &str, strip: GlobalSuffixStrip) -> String {
     }
 }
 
-fn is_claude_source_candidate(model: &str) -> bool {
+fn is_claude_observed_candidate(model: &str) -> bool {
     model.contains("claude") || CLAUDE_FAMILIES.iter().any(|family| model.contains(family))
 }
 
@@ -228,15 +228,15 @@ fn canonical_model_segment(model: &str) -> &str {
         .unwrap_or(model)
 }
 
-fn canonicalize_openai_source_model(model: &str) -> Option<String> {
+fn canonicalize_openai_observed_model(model: &str) -> Option<String> {
     let model = canonical_model_segment(model);
 
     if let Some(canonical) = canonical_gpt_5_6_base(model) {
         return (canonical != model).then(|| canonical.to_string());
     }
     if model == "gpt-4.1"
-        || is_openai_gpt_4o_source_base_model(model)
-        || is_openai_gpt_source_base_model(model)
+        || is_openai_gpt_4o_observed_base_model(model)
+        || is_openai_gpt_observed_base_model(model)
     {
         return None;
     }
@@ -244,8 +244,8 @@ fn canonicalize_openai_source_model(model: &str) -> Option<String> {
     if let Some(base) = strip_full_release_date_suffix(model) {
         let canonical_base = canonical_gpt_5_6_base(base).unwrap_or(base);
         if canonical_base == "gpt-4.1"
-            || is_openai_gpt_4o_source_base_model(canonical_base)
-            || is_openai_gpt_source_base_model(canonical_base)
+            || is_openai_gpt_4o_observed_base_model(canonical_base)
+            || is_openai_gpt_observed_base_model(canonical_base)
         {
             return Some(canonical_base.to_string());
         }
@@ -265,7 +265,7 @@ fn canonicalize_openai_source_model(model: &str) -> Option<String> {
         };
         let canonical_base = canonical_gpt_5_6_base(base).unwrap_or(base);
         if (tier == "fast" || is_openai_reasoning_effort_for_model(canonical_base, tier))
-            && is_openai_gpt_source_base_model(canonical_base)
+            && is_openai_gpt_observed_base_model(canonical_base)
         {
             return Some(canonical_base.to_string());
         }
@@ -281,7 +281,7 @@ fn strip_parenthesized_openai_reasoning_tier(model: &str) -> Option<&str> {
         base.trim_end_matches(|ch: char| ch.is_ascii_whitespace() || matches!(ch, '-' | '_'));
     let canonical_base = canonical_gpt_5_6_base(base).unwrap_or(base);
     if is_openai_reasoning_effort_for_model(canonical_base, tier)
-        && is_openai_gpt_source_base_model(canonical_base)
+        && is_openai_gpt_observed_base_model(canonical_base)
     {
         Some(canonical_base)
     } else {
@@ -303,11 +303,11 @@ fn canonical_gpt_5_6_base(model: &str) -> Option<&'static str> {
     }
 }
 
-fn is_openai_gpt_4o_source_base_model(model: &str) -> bool {
+fn is_openai_gpt_4o_observed_base_model(model: &str) -> bool {
     matches!(model, "gpt-4o" | "gpt-4o-mini")
 }
 
-fn is_openai_gpt_source_base_model(model: &str) -> bool {
+fn is_openai_gpt_observed_base_model(model: &str) -> bool {
     if canonical_gpt_5_6_base(model).is_some() {
         return true;
     }
@@ -346,7 +346,7 @@ fn is_openai_gpt_version(value: &str) -> bool {
     )
 }
 
-fn canonicalize_glm_source_model(model: &str) -> Option<&'static str> {
+fn canonicalize_glm_observed_model(model: &str) -> Option<&'static str> {
     let model = canonical_model_segment(model);
     if matches!(model, "glm-4.7-free" | "glm-4.7:free" | "glm-4.7 (free)") {
         return Some("glm-4.7");
@@ -371,7 +371,7 @@ fn canonicalize_glm_source_model(model: &str) -> Option<&'static str> {
     }
 }
 
-fn canonicalize_qwen_source_model(model: &str) -> Option<String> {
+fn canonicalize_qwen_observed_model(model: &str) -> Option<String> {
     let model = canonical_model_segment(model);
     if !model.starts_with("qwen") {
         return None;
@@ -380,7 +380,7 @@ fn canonicalize_qwen_source_model(model: &str) -> Option<String> {
     strip_release_suffix(model).map(str::to_string)
 }
 
-fn canonicalize_kimi_source_model(model: &str) -> Option<String> {
+fn canonicalize_kimi_observed_model(model: &str) -> Option<String> {
     let model = canonical_model_segment(model);
     if let Some(base) = strip_release_suffix(model)
         .filter(|base| *base == "kimi-k2" || base.starts_with("kimi-k2-"))
@@ -402,7 +402,7 @@ fn canonicalize_kimi_source_model(model: &str) -> Option<String> {
     }
 }
 
-fn canonicalize_grok_source_model(model: &str) -> Option<String> {
+fn canonicalize_grok_observed_model(model: &str) -> Option<String> {
     let model = canonical_model_segment(model);
     if let Some(base) = strip_release_suffix(model) {
         if base == "grok-code-fast-1" {
@@ -417,7 +417,7 @@ fn canonicalize_grok_source_model(model: &str) -> Option<String> {
     }
 }
 
-fn canonicalize_mimo_source_model(model: &str) -> Option<String> {
+fn canonicalize_mimo_observed_model(model: &str) -> Option<String> {
     let model = canonical_model_segment(model);
     if !model.starts_with("mimo-") {
         return None;
@@ -426,7 +426,7 @@ fn canonicalize_mimo_source_model(model: &str) -> Option<String> {
     strip_release_suffix(model).map(str::to_string)
 }
 
-fn canonicalize_deepseek_source_model(model: &str) -> Option<String> {
+fn canonicalize_deepseek_observed_model(model: &str) -> Option<String> {
     let model = canonical_model_segment(model);
     if !model.starts_with("deepseek-") {
         return None;
@@ -443,7 +443,7 @@ fn canonicalize_deepseek_source_model(model: &str) -> Option<String> {
     strip_release_suffix(model).map(str::to_string)
 }
 
-pub(crate) fn canonicalize_longcat_source_model(model: &str) -> Option<&'static str> {
+pub(crate) fn canonicalize_longcat_observed_model(model: &str) -> Option<&'static str> {
     let model = canonical_model_segment(model);
     if model == "longcat-flash-3b" {
         return Some("longcat-flash-3b");
@@ -455,7 +455,7 @@ pub(crate) fn canonicalize_longcat_source_model(model: &str) -> Option<&'static 
         .map(|_| "longcat-flash-3b")
 }
 
-fn canonicalize_modern_claude_source_model(model: &str) -> Option<String> {
+fn canonicalize_modern_claude_observed_model(model: &str) -> Option<String> {
     let model = canonical_model_segment(model);
     let model = model.strip_suffix("-thinking").unwrap_or(model);
     let parts: Vec<&str> = model
@@ -585,7 +585,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonicalizes_modern_claude_source_models_to_dotted_ids() {
+    fn canonicalizes_modern_claude_observed_models_to_dotted_ids() {
         let cases = [
             ("claude-opus-4-6", Some("claude-opus-4.6")),
             ("claude-opus-4.6", None),
@@ -602,7 +602,7 @@ mod tests {
         ];
 
         for (raw, expected) in cases {
-            assert_eq!(canonicalize_source_model_id(raw).as_deref(), expected);
+            assert_eq!(canonicalize_observed_model_id(raw).as_deref(), expected);
         }
     }
 
@@ -625,9 +625,9 @@ mod tests {
 
     #[test]
     fn does_not_canonicalize_legacy_claude_three_line() {
-        assert_eq!(canonicalize_source_model_id("claude-3-5-sonnet"), None);
+        assert_eq!(canonicalize_observed_model_id("claude-3-5-sonnet"), None);
         assert_eq!(
-            canonicalize_source_model_id("claude-3-5-sonnet-20241022").as_deref(),
+            canonicalize_observed_model_id("claude-3-5-sonnet-20241022").as_deref(),
             Some("claude-3-5-sonnet")
         );
     }
@@ -635,55 +635,55 @@ mod tests {
     #[test]
     fn canonicalizes_parser_shim_aliases_and_global_cleanup() {
         assert_eq!(
-            canonicalize_source_model_id("k2p5").as_deref(),
+            canonicalize_observed_model_id("k2p5").as_deref(),
             Some("kimi-k2.5")
         );
         assert_eq!(
-            canonicalize_source_model_id("k2p6").as_deref(),
+            canonicalize_observed_model_id("k2p6").as_deref(),
             Some("kimi-k2.6")
         );
         assert_eq!(
-            canonicalize_source_model_id("kimi-for-coding/k2p6").as_deref(),
+            canonicalize_observed_model_id("kimi-for-coding/k2p6").as_deref(),
             Some("kimi-k2.6")
         );
         assert_eq!(
-            canonicalize_source_model_id("kimi-k2-instruct-0905").as_deref(),
+            canonicalize_observed_model_id("kimi-k2-instruct-0905").as_deref(),
             Some("kimi-k2-instruct")
         );
         assert_eq!(
-            canonicalize_source_model_id("kimi-k2-0711").as_deref(),
+            canonicalize_observed_model_id("kimi-k2-0711").as_deref(),
             Some("kimi-k2")
         );
         assert_eq!(
-            canonicalize_source_model_id("moonshotai/kimi-k2-0711").as_deref(),
+            canonicalize_observed_model_id("moonshotai/kimi-k2-0711").as_deref(),
             Some("kimi-k2")
         );
         assert_eq!(
-            canonicalize_source_model_id("kimi-k20-0711").as_deref(),
+            canonicalize_observed_model_id("kimi-k20-0711").as_deref(),
             Some("kimi-k20")
         );
         assert_eq!(
-            canonicalize_source_model_id("grok-composer-2.5-fast").as_deref(),
+            canonicalize_observed_model_id("grok-composer-2.5-fast").as_deref(),
             Some("composer-2.5-fast")
         );
         assert_eq!(
-            canonicalize_source_model_id("grok-code-fast-1-0825").as_deref(),
+            canonicalize_observed_model_id("grok-code-fast-1-0825").as_deref(),
             Some("grok-code-fast-1")
         );
         assert_eq!(
-            canonicalize_source_model_id("grok-code-fast-1-0901").as_deref(),
+            canonicalize_observed_model_id("grok-code-fast-1-0901").as_deref(),
             Some("grok-code-fast-1")
         );
         assert_eq!(
-            canonicalize_source_model_id("mimo-v2-pro-20260318").as_deref(),
+            canonicalize_observed_model_id("mimo-v2-pro-20260318").as_deref(),
             Some("mimo-v2-pro")
         );
         assert_eq!(
-            canonicalize_source_model_id("gpt-4o-mini-2024-07-18").as_deref(),
+            canonicalize_observed_model_id("gpt-4o-mini-2024-07-18").as_deref(),
             Some("gpt-4o-mini")
         );
         assert_eq!(
-            canonicalize_source_model_id("nemotron-3-ultra-free").as_deref(),
+            canonicalize_observed_model_id("nemotron-3-ultra-free").as_deref(),
             Some("nemotron-3-ultra")
         );
     }
@@ -736,18 +736,21 @@ mod tests {
         ];
 
         for (raw, expected) in cases {
-            assert_eq!(canonicalize_source_model_id(raw).as_deref(), Some(expected));
+            assert_eq!(
+                canonicalize_observed_model_id(raw).as_deref(),
+                Some(expected)
+            );
         }
 
-        assert_eq!(canonicalize_source_model_id("gpt-5.3-codex-spark"), None);
-        assert_eq!(canonicalize_source_model_id("gpt-4o-high"), None);
+        assert_eq!(canonicalize_observed_model_id("gpt-5.3-codex-spark"), None);
+        assert_eq!(canonicalize_observed_model_id("gpt-4o-high"), None);
         assert_eq!(
-            canonicalize_source_model_id("mistral-small-2603").as_deref(),
+            canonicalize_observed_model_id("mistral-small-2603").as_deref(),
             Some("mistral-small")
         );
-        assert_eq!(canonicalize_source_model_id("qwen-模型abcdef"), None);
+        assert_eq!(canonicalize_observed_model_id("qwen-模型abcdef"), None);
         assert_eq!(
-            canonicalize_source_model_id("gpt-5.3-codex-spark-lite"),
+            canonicalize_observed_model_id("gpt-5.3-codex-spark-lite"),
             None
         );
     }

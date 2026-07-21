@@ -1,4 +1,4 @@
-# ADR 0013: Pricing source authority
+# ADR 0013: Pricing Source authority
 
 Status: Accepted
 
@@ -11,7 +11,7 @@ prices for unreleased or reseller-documented models, and route-decoration
 cleanup in the pricing resolver.
 
 Those shortcuts make missing price coverage look like precise accounting. They
-also hide parser bugs because dirty source model ids can still appear priced
+also hide parser bugs because dirty observed model ids can still appear priced
 after the resolver silently maps them to another model.
 
 ## Identity Boundary
@@ -37,32 +37,32 @@ as a separate dimension.
 - Finalization clears any parser- or cache-provided cost, then derives local
   cost only from the canonical model and token buckets. If no pricing match
   exists, tokens remain intact and cost is `0.0`.
-- Cost-only or credits-only rows are not local usage. Total-only token sources
+- Cost-only or credits-only rows are not local usage. Total-only usage records
   may contribute only through the fixed allocation contract in ADR 0017.
-- Custom pricing is the highest-priority source. In local reports, it matches
-  the final canonical model key exactly, case-insensitively.
+- Custom pricing is the highest-priority Pricing Source. In local reports, it
+  matches the final canonical model key exactly, case-insensitively.
 - Built-in private price overrides are not allowed. Models such as `model1`,
   `model2`, and `big-pickle` are priced only when a user custom entry or an
-  upstream catalog source contains the exact model identity being queried.
+  upstream pricing catalog contains the exact model identity being queried.
 - Global pricing aliases that map one model identity to another are not
   allowed.
-- Public catalog sources are LiteLLM, OpenRouter, and models.dev. Catalog rows
+- Public Pricing Sources are LiteLLM, OpenRouter, and models.dev. Catalog rows
   with explicit `0.0` prices are valid zero-price rows. Rows with no price
   fields are not price data.
-- Source/parser decoding and final model canonicalization happen before
+- Parser-side decoding and final model canonicalization happen before
   pricing. The pricing resolver is not a route cleanup layer.
 - Model canonicalization may intentionally be lossy when this branch treats
-  multiple source labels as one report model. Release dates, free-channel tags,
-  reasoning or service-tier decorations, and selected source route names may be
-  removed before grouping and pricing.
+  multiple raw observed labels as one report model. Release dates, free-channel
+  tags, reasoning or service-tier decorations, and selected client route names
+  may be removed before grouping and pricing.
 - Syntactic decoding of a recognized model is distinct from an opaque global
   alias. A parser may decode `glm-4.7-free` as `glm-4.7`; the pricing resolver
   must not guess that `big-pickle` means `glm-4.7`.
 - Exact custom and catalog matching in local reports applies to the canonical
   model id produced by the core model canonicalizer, not necessarily the raw
-  source label.
+  observed label.
 - Explicit zero-price catalog rows remain valid when selected by exact or
-  provider-aware lookup. Their existence does not require a source parser to
+  provider-aware lookup. Their existence does not require a client parser to
   preserve every raw `free` decoration as a distinct report model.
 - Service tier is not currently represented as a separate pricing dimension.
   OpenCode labels such as `gpt-5.5-fast` are currently folded into the base
@@ -70,8 +70,8 @@ as a separate dimension.
   into a separate report identity. Route-tier billing differences are an
   accepted current limitation.
 - Standalone `tokscale pricing <model>` is a catalog query. It does not infer
-  arbitrary source prefixes, route prefixes, private aliases, or reasoning-tier
-  decorations.
+  arbitrary observed-model prefixes, route prefixes, private aliases, or
+  reasoning-tier decorations.
 - If no custom or catalog price matches, token usage is preserved and derived
   cost remains `0.0`.
 
@@ -90,7 +90,7 @@ as a separate dimension.
   model ids. That is intentional; pricing confidence is more important than
   pretending a guessed model is authoritative.
 - Local reports intentionally produce one model row and one derived price for
-  source labels that collapse to the same canonical model id.
+  raw observed labels that collapse to the same canonical model id.
 - A custom override keyed by a raw label that `canonicalize_model_id`
   canonicalizes away will not affect local reports. Use the final canonical id.
 - Derived cost may differ from an invoice when service-tier or route-specific

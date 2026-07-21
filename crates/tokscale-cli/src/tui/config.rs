@@ -17,18 +17,20 @@ pub struct TokscaleConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ColorsConfig {
     #[serde(default)]
     pub providers: HashMap<String, String>,
-    #[serde(default, alias = "sources")]
+    #[serde(default)]
     pub clients: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DisplayNamesConfig {
     #[serde(default)]
     pub providers: HashMap<String, String>,
-    #[serde(default, alias = "sources")]
+    #[serde(default)]
     pub clients: HashMap<String, String>,
 }
 
@@ -139,6 +141,18 @@ mod tests {
         assert!(read_diagnostic.contains("failed to read"));
         assert!(read_diagnostic.contains(&directory.path().display().to_string()));
         assert!(read_error.source().is_some());
+    }
+
+    #[test]
+    fn retired_sources_key_is_rejected_instead_of_aliased() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("legacy.toml");
+        fs::write(&path, "[colors.sources]\nclaude = '#fff'\n").unwrap();
+
+        let error = TokscaleConfig::load_from_path(&path)
+            .expect_err("retired Sources terminology must not remain a config alias");
+
+        assert!(format!("{error:#}").contains("unknown field `sources`"));
     }
 
     #[test]

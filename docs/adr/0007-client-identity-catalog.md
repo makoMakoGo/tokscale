@@ -49,12 +49,12 @@ only when naming the upstream product, its files, parser, or credentials.
 Filesystem paths and databases acquired by a client are `Input` or `Scan
 Input`. Their diagnostics live under `Data Health`. Provider attribution is
 `Provider`, and pricing provenance must use the qualified term `Pricing
-Source`. Compatibility field names such as `SourceHealth` and
-`sourceDataBytes` may remain internal or in established machine-readable
-health payloads, but they do not define a second UI identity dimension. The
-Overview fact label `Sources Healthy` is a compact health metric, not a Group
-By dimension. Additional scan-path provenance in `clients --json` is `origin`,
-not another `source` identity.
+Source`. These names apply to UI labels, CLI arguments, serialized report
+fields, cache metadata, configuration, and maintained internal APIs. Retired
+names are never mapped to current names: strict configuration surfaces reject
+them, report serializers do not emit them, and old cache schemas are explicit
+misses. The Overview fact label is `Inputs Healthy`. Additional scan-path
+provenance in `clients --json` is `origin`.
 
 ## Persisted client ID migrations
 

@@ -92,7 +92,7 @@ not recursive scan roots:
 `scanner.opencodeDbPaths` is the only persistent custom OpenCode input.
 `scanner.extraScanPaths.opencode` and `TOKSCALE_EXTRA_DIRS` entries for
 OpenCode are ignored. Its configured file paths are authoritative, so missing
-or unreadable paths appear as `source-unavailable` in report health. Legacy
+or unreadable paths appear as `input-unavailable` in report health. Legacy
 `storage/message/**/*.json` data is not read. `NotFound` during automatic
 discovery is treated as absent; every other discovery I/O failure remains
 visible in health. Databases without the current session schema, or with
@@ -124,7 +124,7 @@ then infers a provider or records `unknown`. Request transport is not treated as
 model ownership. The
 older root-level Kimi CLI session format is not supported. See
 [the verified Kimi storage facts](facts/kimi-code.md) and
-[ADR 0020](adr/0020-strict-source-identity-and-error-contract.md).
+[ADR 0020](adr/0020-input-ingestion-and-integrity-contract.md).
 
 Antigravity is not a cache-backed integration. Reports and the TUI read current
 AGY CLI databases directly; there is no sync command. Historical

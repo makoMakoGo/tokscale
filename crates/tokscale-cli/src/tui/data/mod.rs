@@ -9,8 +9,8 @@ use chrono::NaiveDate;
 #[cfg(test)]
 use tokscale_core::GroupBy;
 use tokscale_core::{
-    load_prepared_tui_bundle_with_diagnostics, prepare_local_sources, ClientId, DataHealth,
-    LocalParseOptions, PreparedLocalSources, SourceInventorySignature, TuiAcc, TuiSessionEntry,
+    load_prepared_tui_bundle_with_diagnostics, prepare_local_inputs, ClientId, DataHealth,
+    InputInventorySignature, LocalParseOptions, PreparedLocalInputs, TuiAcc, TuiSessionEntry,
 };
 
 // The TUI view types live in core (`tokscale_core::usage_views`) so the
@@ -81,19 +81,19 @@ pub struct TuiBundleLoadResult {
     pub sessions: Vec<TuiSessionEntry>,
     pub client_space: std::collections::BTreeMap<String, u64>,
     pub pricing_diagnostics: Vec<String>,
-    pub source_inventory_signature: SourceInventorySignature,
+    pub input_inventory_signature: InputInventorySignature,
     pub input_digest: u64,
     pub health: DataHealth,
 }
 
 pub struct PreparedDataLoad {
-    inputs: PreparedLocalSources,
+    inputs: PreparedLocalInputs,
 }
 
 impl PreparedDataLoad {
-    pub fn refresh_source_inventory_signature(&mut self) -> Result<SourceInventorySignature> {
+    pub fn refresh_input_inventory_signature(&mut self) -> Result<InputInventorySignature> {
         self.inputs
-            .refresh_source_inventory_signature()
+            .refresh_input_inventory_signature()
             .map_err(anyhow::Error::msg)
     }
 }
@@ -140,7 +140,7 @@ impl DataLoader {
             scanner_settings: data_loader_scanner_settings(&self.home_dir)?,
         };
 
-        prepare_local_sources(opts)
+        prepare_local_inputs(opts)
             .map(|inputs| PreparedDataLoad { inputs })
             .map_err(anyhow::Error::new)
     }
@@ -171,8 +171,8 @@ impl DataLoader {
             sessions: result.sessions,
             client_space: result.client_space,
             pricing_diagnostics: result.pricing_diagnostics,
-            source_inventory_signature: result.source_inventory_signature,
-            input_digest: result.source_inventory_signature.process_digest(),
+            input_inventory_signature: result.input_inventory_signature,
+            input_digest: result.input_inventory_signature.process_digest(),
             health: result.health,
         })
     }

@@ -6,8 +6,8 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::model_aliases;
-use crate::source_health::{RecordRejectionReason, ScannedSource, SourceFailure};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -44,15 +44,15 @@ const DEFAULT_PROVIDER: &str = "qwen";
 /// Parse a Qwen CLI JSONL file.
 ///
 /// A malformed record is rejected without erasing messages from other lines.
-/// File-open failures remain source-level errors, while an I/O error during
+/// File-open failures remain input-level errors, while an I/O error during
 /// iteration marks the scan partial and preserves messages confirmed earlier.
-pub fn parse_qwen_file(path: &Path) -> SessionParseResult<ScannedSource> {
+pub fn parse_qwen_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::at_path(path, "open file", error))?;
     let (workspace_key, workspace_label) = qwen_workspace_from_path(path);
 
     let reader = BufReader::new(file);
-    let mut scanned = ScannedSource::default();
+    let mut scanned = ScannedInput::default();
     let mut message_index = 0usize;
 
     for (line_index, line) in reader.lines().enumerate() {
@@ -60,7 +60,7 @@ pub fn parse_qwen_file(path: &Path) -> SessionParseResult<ScannedSource> {
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                scanned.interrupted = Some(SourceFailure::new(
+                scanned.interrupted = Some(InputFailure::new(
                     "read Qwen JSONL line",
                     format!("{} line {line_number}: {error}", path.display()),
                 ));
@@ -136,7 +136,7 @@ pub fn parse_qwen_file(path: &Path) -> SessionParseResult<ScannedSource> {
                 .record(RecordRejectionReason::MissingModel);
             continue;
         };
-        let model = model_aliases::canonicalize_source_model_id(raw_model)
+        let model = model_aliases::canonicalize_observed_model_id(raw_model)
             .unwrap_or_else(|| raw_model.to_string());
 
         let Some(line_session_id) = qwen_line
@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_qwen_open_failure_remains_a_source_error() {
+    fn test_parse_qwen_open_failure_remains_a_input_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.jsonl");
 
