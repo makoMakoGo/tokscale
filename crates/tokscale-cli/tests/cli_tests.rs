@@ -3406,7 +3406,7 @@ fn test_clients_json_includes_settings_extra_paths() {
         codex["extraPaths"][0]["origin"],
         serde_json::json!("settings")
     );
-    assert!(codex["extraPaths"][0].get("pricingSource").is_none());
+    assert!(codex["extraPaths"][0].get("source").is_none());
 }
 
 #[test]

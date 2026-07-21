@@ -495,6 +495,14 @@ mod tests {
     }
 
     #[test]
+    fn report_projection_preserves_nonzero_input_data_bytes() {
+        let mut health = DataHealth::default();
+        health.set_input_data_bytes(3_072);
+
+        assert_eq!(health.to_report().input_data_bytes, 3_072);
+    }
+
+    #[test]
     fn empty_health_json_deserializes_as_a_complete_load() {
         let report: HealthReport = serde_json::from_str("{}").unwrap();
 
