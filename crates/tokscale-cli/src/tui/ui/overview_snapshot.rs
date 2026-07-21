@@ -67,11 +67,11 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(26),
+                Constraint::Percentage(30),
                 Constraint::Length(1),
-                Constraint::Percentage(48),
+                Constraint::Percentage(45),
                 Constraint::Length(1),
-                Constraint::Percentage(26),
+                Constraint::Percentage(25),
             ])
             .split(inner);
         render_left(frame, app, section_area(columns[0]), &data);
@@ -219,44 +219,117 @@ fn render_middle(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) 
 }
 
 fn render_right(frame: &mut Frame, app: &App, area: Rect) {
+    // Title, hero percentage, and a segmented health bar read as one gauge;
+    // the exact per-state counts stay in the legend below.
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(1), // section title
+            Constraint::Length(1), // hero percentage
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // health bar
+            Constraint::Length(1), // spacer
+            Constraint::Min(0),    // legend
+        ])
         .split(area);
     frame.render_widget(
         Paragraph::new(section_title(app, "Sources")).alignment(Alignment::Center),
         rows[0],
     );
-
-    let body = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(65), Constraint::Min(0)])
-        .split(rows[1]);
-    let donut = DonutChart::new(
-        source_state_buckets(app)
-            .into_iter()
-            .map(|(_, value, color)| DonutSegment::new(value, color))
-            .collect(),
-    )
-    .center(vec![Line::from(Span::styled(
-        health_percentage(app),
-        Style::default()
-            .fg(health_color(app))
-            .add_modifier(Modifier::BOLD),
-    ))])
-    .background(app.theme.background)
-    .empty_color(app.theme.muted);
-    frame.render_widget(donut, body[0]);
-
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            health_percentage(app),
+            Style::default()
+                .fg(health_color(app))
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Center),
+        rows[1],
+    );
+    frame.render_widget(
+        Paragraph::new(health_bar(app, rows[3].width as usize)),
+        rows[3],
+    );
     frame.render_widget(
         Paragraph::new(
-            source_legend_rows(app, body[1].width as usize)
+            source_legend_rows(app, rows[5].width as usize)
                 .into_iter()
-                .take(body[1].height as usize)
+                .take(rows[5].height as usize)
                 .collect::<Vec<_>>(),
         ),
-        body[1],
+        rows[5],
     );
+}
+
+/// One segmented source-health bar: each non-zero source state occupies a
+/// proportional run of cells (at least one, so tiny states stay visible),
+/// colored like the Sources legend. Source states are an ordered severity
+/// spectrum, so a linear bar fits them better than a ring ever did. Zero
+/// total renders an empty track.
+fn health_bar(app: &App, width: usize) -> Line<'static> {
+    if width == 0 {
+        return Line::default();
+    }
+    let states = source_state_buckets(app);
+    let total: u64 = states.iter().map(|(_, value, _)| *value).sum();
+    if total == 0 {
+        return Line::from(Span::styled(
+            "░".repeat(width),
+            app.theme.subtle_text_style(),
+        ));
+    }
+
+    let mut cells: Vec<usize> = states
+        .iter()
+        .map(|(_, value, _)| {
+            if *value == 0 {
+                0
+            } else {
+                (*value as u128 * width as u128 / total as u128) as usize
+            }
+        })
+        .collect();
+    // One-cell minimum per non-zero state, then reconcile against the width.
+    for (index, (_, value, _)) in states.iter().enumerate() {
+        if *value > 0 && cells[index] == 0 {
+            cells[index] = 1;
+        }
+    }
+    loop {
+        let sum: usize = cells.iter().sum();
+        if sum == width {
+            break;
+        }
+        if sum > width {
+            let Some((index, _)) = cells
+                .iter()
+                .enumerate()
+                .filter(|(_, count)| **count > 1)
+                .max_by_key(|(_, count)| *count)
+            else {
+                break;
+            };
+            cells[index] -= 1;
+        } else {
+            let (index, _) = cells
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, count)| *count)
+                .expect("non-zero total has a non-zero state");
+            cells[index] += 1;
+        }
+    }
+
+    Line::from(
+        states
+            .iter()
+            .zip(cells)
+            .filter(|(_, count)| *count > 0)
+            .map(|((_, _, color), count)| {
+                Span::styled("█".repeat(count), Style::default().fg(*color))
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn section_title(app: &App, title: &'static str) -> Line<'static> {
@@ -321,8 +394,6 @@ fn left_lines(app: &App, data: &SnapshotData, width: usize, height: usize) -> Ve
         })
         .map(|(name, _)| get_client_display_name(name))
         .unwrap_or_else(|| "—".to_string());
-    let health = health_percentage(app);
-    let health_color = health_color(app);
     let favorite_width = width.saturating_sub(METRIC_LABEL_WIDTH).clamp(1, 28);
     let active_days = app
         .data
@@ -367,7 +438,9 @@ fn left_lines(app: &App, data: &SnapshotData, width: usize, height: usize) -> Ve
                 format_bytes(app.data.health.source_data_bytes),
                 app.theme.foreground,
             ),
-            metric_line(app, "Source Health", health, health_color),
+            // Source health lives in the Sources section's hero gauge; Active
+            // Days takes its place so every group stays a pair.
+            metric_line(app, "Active Days", active_days.to_string(), Color::Cyan),
         ],
         vec![
             metric_line(
@@ -397,12 +470,6 @@ fn left_lines(app: &App, data: &SnapshotData, width: usize, height: usize) -> Ve
                 app.theme.foreground,
             ),
         ],
-        vec![metric_line(
-            app,
-            "Active Days",
-            active_days.to_string(),
-            Color::Cyan,
-        )],
     ];
 
     let separator = separator_line(app, width);
@@ -416,7 +483,7 @@ fn left_lines(app: &App, data: &SnapshotData, width: usize, height: usize) -> Ve
         lines.extend(group);
     }
     // Overflow policy: drop separator lines bottom-up (never metric rows),
-    // then clip the tail, so every metric row survives while height >= 11.
+    // then clip the tail, so every metric row survives while height >= 10.
     while lines.len() > height {
         if let Some(position) = separators.pop() {
             lines.remove(position);
@@ -649,23 +716,23 @@ mod tests {
         (dividers[2] as u16 + 1, dividers[3] as u16)
     }
 
-    /// Foreground colors of the braille ring cells inside the given columns.
-    /// Legend markers, center text, and labels are not braille, so only donut
-    /// dots contribute colors here.
-    fn ring_colors_in_columns(buffer: &Buffer, x_start: u16, x_end: u16) -> Vec<Color> {
-        let mut colors = Vec::new();
-        for y in 0..buffer.area.height {
-            for x in x_start..x_end {
-                let cell = &buffer[(x, y)];
-                let Some(glyph) = cell.symbol().chars().next() else {
-                    continue;
-                };
-                if ('\u{2800}'..='\u{28ff}').contains(&glyph) {
-                    colors.push(cell.fg);
-                }
-            }
-        }
-        colors
+    /// Foreground colors of the '█' health-bar cells inside the given columns,
+    /// sampled on the bar row (three rows under the Sources title).
+    fn bar_colors_in_columns(
+        lines: &[String],
+        buffer: &Buffer,
+        x_start: u16,
+        x_end: u16,
+    ) -> Vec<Color> {
+        let title_y = lines
+            .iter()
+            .position(|line| line.contains("Sources"))
+            .expect("Sources title should render") as u16;
+        let bar_y = title_y + 3;
+        (x_start..x_end)
+            .filter(|x| buffer[(*x, bar_y)].symbol() == "█")
+            .map(|x| buffer[(x, bar_y)].fg)
+            .collect()
     }
 
     fn line_width(line: &Line<'_>) -> usize {
@@ -825,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn sources_donut_shows_tiny_non_zero_health_segments() {
+    fn sources_bar_shows_every_non_zero_state() {
         let width = 200;
         let height = 50;
         // The dusk accent is an RGB color, distinct from the Yellow/LightMagenta/Red
@@ -836,7 +903,7 @@ mod tests {
         app.data.health.partial_sources = 1;
         app.data.health.failed_sources = 1;
         // Non-zero on purpose: rejected records count parser records, not
-        // sources, so they must not become a donut segment even when plenty
+        // sources, so they must not become a bar segment even when plenty
         // of them exist.
         app.data.health.rejected_records = 7;
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -845,20 +912,21 @@ mod tests {
             .draw(|frame| render(frame, &mut app, frame.area()))
             .unwrap();
 
-        let (x_start, x_end) = sources_column_range(&buffer_lines(&terminal));
-        let colors = ring_colors_in_columns(terminal.backend().buffer(), x_start, x_end);
-        assert!(!colors.is_empty(), "Sources donut should render ring cells");
+        let lines = buffer_lines(&terminal);
+        let (x_start, x_end) = sources_column_range(&lines);
+        let colors = bar_colors_in_columns(&lines, terminal.backend().buffer(), x_start, x_end);
+        assert!(!colors.is_empty(), "Sources bar should render segments");
         for expected in [app.theme.accent, Color::Yellow, PARTIAL_COLOR, Color::Red] {
             assert!(
                 colors.contains(&expected),
-                "expected {expected:?} ring cells in the Sources donut"
+                "expected {expected:?} cells in the Sources bar"
             );
         }
         assert!(
             !colors.contains(&Color::DarkGray),
-            "rejected records are not a source state and stay out of the donut"
+            "rejected records are not a source state and stay out of the bar"
         );
-        let legend_row = buffer_lines(&terminal)
+        let legend_row = lines
             .into_iter()
             .find(|line| line.contains("Rejected"))
             .expect("sources legend should list Rejected");
@@ -866,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn sources_donut_stays_single_colored_when_all_sources_are_clean() {
+    fn sources_bar_is_single_color_when_all_sources_are_clean() {
         let width = 200;
         let height = 50;
         let mut app = make_app_with_theme(width, "dusk");
@@ -877,32 +945,48 @@ mod tests {
             .draw(|frame| render(frame, &mut app, frame.area()))
             .unwrap();
 
-        let (x_start, x_end) = sources_column_range(&buffer_lines(&terminal));
-        let colors = ring_colors_in_columns(terminal.backend().buffer(), x_start, x_end);
-        assert!(!colors.is_empty(), "Sources donut should render ring cells");
+        let lines = buffer_lines(&terminal);
+        let (x_start, x_end) = sources_column_range(&lines);
+        let colors = bar_colors_in_columns(&lines, terminal.backend().buffer(), x_start, x_end);
+        assert!(!colors.is_empty(), "Sources bar should render segments");
         assert!(
             colors.iter().all(|color| *color == app.theme.accent),
-            "expected a single-colored ring, got {colors:?}"
+            "expected a single-colored bar, got {colors:?}"
         );
     }
 
     #[test]
-    fn left_metrics_use_dashed_separators_and_end_with_active_days() {
+    fn sources_bar_renders_an_empty_track_without_sources() {
+        let app = make_app(120);
+        assert_eq!(
+            line_text(&health_bar(&app, 20)),
+            "░".repeat(20),
+            "zero sources render an empty track"
+        );
+    }
+
+    #[test]
+    fn left_metrics_pair_active_days_with_source_data() {
         let app = make_app(120);
         let data = SnapshotData::default();
-        let lines = left_lines(&app, &data, 54, 16);
+        let lines = left_lines(&app, &data, 54, 14);
         let text = lines.iter().map(line_text).collect::<Vec<_>>();
 
-        assert_eq!(text.len(), 16);
-        for index in [2, 5, 8, 11, 14] {
+        assert_eq!(text.len(), 14);
+        for index in [2, 5, 8, 11] {
             assert_eq!(text[index], "-".repeat(54), "separator at {index}");
         }
         assert!(text[0].starts_with("Total Tokens"));
+        assert!(text[6].starts_with("Source Data"));
+        assert!(text[7].starts_with("Active Days"));
         assert!(text[9].starts_with("Models Used"));
         assert!(text[10].starts_with("Favorite Model"));
         assert!(text[12].starts_with("Harnesses Used"));
         assert!(text[13].starts_with("Favorite Harness"));
-        assert!(text[15].starts_with("Active Days"));
+        assert!(
+            text.iter().all(|line| !line.contains("Source Health")),
+            "source health moved to the Sources hero gauge"
+        );
     }
 
     #[test]
@@ -910,9 +994,9 @@ mod tests {
         let app = make_app(120);
         let data = SnapshotData::default();
 
-        let lines = left_lines(&app, &data, 54, 13);
+        let lines = left_lines(&app, &data, 54, 12);
         let text = lines.iter().map(line_text).collect::<Vec<_>>();
-        assert_eq!(text.len(), 13);
+        assert_eq!(text.len(), 12);
         assert_eq!(text[2], "-".repeat(54));
         assert_eq!(text[5], "-".repeat(54));
         assert_eq!(
@@ -921,19 +1005,20 @@ mod tests {
             "separators should be dropped bottom-up first"
         );
         assert!(text.iter().any(|line| line.starts_with("Total Tokens")));
-        assert!(text.iter().any(|line| line.starts_with("Active Days")));
+        assert!(text.iter().any(|line| line.starts_with("Favorite Harness")));
 
-        let lines = left_lines(&app, &data, 54, 11);
+        let lines = left_lines(&app, &data, 54, 10);
         let text = lines.iter().map(line_text).collect::<Vec<_>>();
-        assert_eq!(text.len(), 11);
+        assert_eq!(text.len(), 10);
         assert!(text.iter().all(|line| !line.starts_with('-')));
-        assert!(text.last().unwrap().starts_with("Active Days"));
+        assert!(text.last().unwrap().starts_with("Favorite Harness"));
 
         let lines = left_lines(&app, &data, 54, 8);
         let text = lines.iter().map(line_text).collect::<Vec<_>>();
         assert_eq!(text.len(), 8);
         assert!(text[0].starts_with("Total Tokens"));
-        assert!(text.iter().all(|line| !line.contains("Active Days")));
+        assert!(text.iter().any(|line| line.starts_with("Active Days")));
+        assert!(text.iter().all(|line| !line.contains("Favorite Harness")));
     }
 
     #[test]
