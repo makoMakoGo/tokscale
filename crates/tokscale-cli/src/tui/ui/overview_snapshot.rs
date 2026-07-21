@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use chrono::Datelike;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -66,26 +67,21 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     // Snapshot rows are ordered by display priority. Compact layouts intentionally
     // clip lower-priority rows from the tail so the Overview remains usable.
     if inner.width >= THREE_COLUMN_MIN_WIDTH {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
-            .split(inner);
         let columns = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(30),
+                Constraint::Percentage(28),
                 Constraint::Length(1),
-                Constraint::Percentage(45),
+                Constraint::Percentage(44),
                 Constraint::Length(1),
-                Constraint::Percentage(25),
+                Constraint::Percentage(28),
             ])
-            .split(rows[0]);
+            .split(inner);
         render_left_hero(frame, app, section_area(columns[0]), &data);
         render_divider(frame, app, columns[1]);
         render_middle_portrait(frame, app, section_area(columns[2]), &data);
         render_divider(frame, app, columns[3]);
         render_right(frame, app, section_area(columns[4]), &data);
-        render_ticker(frame, app, rows[1], &data);
     } else if inner.width >= TWO_COLUMN_MIN_WIDTH {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
@@ -189,6 +185,15 @@ fn render_left_hero(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDat
             format_bytes(app.data.health.source_data_bytes),
             app.theme.foreground,
         ),
+        metric_line(
+            app,
+            "Cache Read",
+            format!(
+                "{:.1}%",
+                share_percent(data.tokens.cache_read, data.tokens.total())
+            ),
+            Color::Cyan,
+        ),
         metric_line(app, "Active Days", active_days.to_string(), Color::Cyan),
         metric_line(
             app,
@@ -206,39 +211,47 @@ fn render_left_hero(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDat
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// The favorite model's kaomoji portrait with its share, plus the token-mix
-/// bar. Replaces the old donut: a ring reads as noise once one bucket
-/// dominates, while the portrait stays fun at any mix.
+/// The favorites showcase: the favorite model family's kaomoji portrait in
+/// its brand color, then every favorite field (model family, client, day of
+/// week) with its token share.
 fn render_middle_portrait(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
     let total = data.tokens.total();
-    let favorite = data
-        .models
+
+    // Aggregate per model family: gpt-5.5 and gpt-5.6 are one family, gpt.
+    let mut families: BTreeMap<portraits::Family, Aggregate> = BTreeMap::new();
+    for (model_id, aggregate) in &data.models {
+        let entry = families.entry(portraits::family_of(model_id)).or_default();
+        entry.tokens = entry.tokens.saturating_add(aggregate.tokens);
+        if aggregate.cost.is_finite() {
+            entry.cost += aggregate.cost.max(0.0);
+        }
+    }
+    let favorite_family = families
         .iter()
-        .max_by(|(left_name, left), (right_name, right)| {
+        .max_by(|(left_family, left), (right_family, right)| {
             left.tokens
                 .cmp(&right.tokens)
                 .then_with(|| left.cost.total_cmp(&right.cost))
-                .then_with(|| right_name.cmp(left_name))
+                .then_with(|| right_family.cmp(left_family))
         });
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    match favorite {
-        Some((name, aggregate)) => {
-            lines.extend(portraits::lines(app, portraits::family_of(name)));
+    match favorite_family {
+        Some((family, aggregate)) => {
+            let color = portraits::family_color(app, *family);
+            lines.extend(portraits::lines(app, *family));
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
-                name.clone(),
-                Style::default()
-                    .fg(app.model_color(name))
-                    .add_modifier(Modifier::BOLD),
+                portraits::display_name(*family).to_string(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
             )));
-            let share = if total > 0 {
-                aggregate.tokens as f64 / total as f64 * 100.0
-            } else {
-                0.0
-            };
             lines.push(Line::from(Span::styled(
-                format!("{share:.1}% of tokens · {}", format_cost(aggregate.cost)),
+                format!(
+                    "{} · {:.1}% · {}",
+                    format_tokens(aggregate.tokens),
+                    share_percent(aggregate.tokens, total),
+                    format_cost(aggregate.cost),
+                ),
                 Style::default().fg(app.theme.muted),
             )));
         }
@@ -251,9 +264,14 @@ fn render_middle_portrait(frame: &mut Frame, app: &App, area: Rect, data: &Snaps
             )));
         }
     }
-    lines.push(Line::default());
-    lines.push(mix_bar(app, data, area.width as usize));
-    lines.extend(token_legend_rows(app, data, area.width as usize));
+
+    if let Some((name, aggregate)) = favorite_harness(data) {
+        lines.push(Line::default());
+        lines.push(favorite_line(app, "client", &name, aggregate.tokens, total));
+    }
+    if let Some((weekday, tokens)) = favorite_weekday(app) {
+        lines.push(favorite_line(app, "day", weekday, tokens, total));
+    }
 
     let pad = area.height.saturating_sub(lines.len() as u16) as usize / 2;
     let mut padded = vec![Line::default(); pad];
@@ -263,43 +281,120 @@ fn render_middle_portrait(frame: &mut Frame, app: &App, area: Rect, data: &Snaps
     frame.render_widget(paragraph, area);
 }
 
-fn mix_bar(app: &App, data: &SnapshotData, width: usize) -> Line<'static> {
-    let buckets = token_buckets(app, data);
-    let total: u64 = buckets.iter().map(|(_, value, _)| *value).sum();
-    if width == 0 || total == 0 {
-        return Line::from(Span::styled(
-            "░".repeat(width),
-            app.theme.subtle_text_style(),
-        ));
+fn share_percent(tokens: u64, total: u64) -> f64 {
+    if total > 0 {
+        tokens as f64 / total as f64 * 100.0
+    } else {
+        0.0
     }
-    let values: Vec<u64> = buckets.iter().map(|(_, value, _)| *value).collect();
-    let cells = segment_cells(&values, width);
-    Line::from(
-        buckets
-            .iter()
-            .zip(cells)
-            .filter(|(_, count)| *count > 0)
-            .map(|((_, _, color), count)| {
-                Span::styled("█".repeat(count), Style::default().fg(*color))
-            })
-            .collect::<Vec<_>>(),
-    )
 }
 
-/// Scrolling fun-fact ticker across the bottom of the Snapshot panel.
-fn render_ticker(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
+fn favorite_harness(data: &SnapshotData) -> Option<(String, &Aggregate)> {
+    data.harnesses
+        .iter()
+        .max_by(|(left_name, left), (right_name, right)| {
+            left.tokens
+                .cmp(&right.tokens)
+                .then_with(|| left.cost.total_cmp(&right.cost))
+                .then_with(|| right_name.cmp(left_name))
+        })
+        .map(|(name, aggregate)| (get_client_display_name(name).to_string(), aggregate))
+}
+
+/// The weekday (Monday..Sunday) with the highest total token spend.
+fn favorite_weekday(app: &App) -> Option<(&'static str, u64)> {
+    const NAMES: [&str; 7] = [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ];
+    let mut by_weekday = [0u64; 7];
+    for day in &app.data.daily {
+        let index = day.date.weekday().num_days_from_monday() as usize;
+        by_weekday[index] = by_weekday[index].saturating_add(day.tokens.total());
+    }
+    let (index, tokens) = by_weekday
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, tokens)| *tokens)?;
+    if *tokens == 0 {
+        return None;
+    }
+    Some((NAMES[index], *tokens))
+}
+
+fn favorite_line(app: &App, label: &str, name: &str, tokens: u64, total: u64) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label}  "), Style::default().fg(app.theme.muted)),
+        Span::styled(
+            format!("{name}  "),
+            Style::default()
+                .fg(app.theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "{} · {:.1}%",
+                format_tokens(tokens),
+                share_percent(tokens, total)
+            ),
+            Style::default().fg(app.theme.muted),
+        ),
+    ])
+}
+
+/// One fun fact at a time in the right column's bottom box, flipping to the
+/// next with a one-line vertical roll every forty ticks.
+fn render_fact_box(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
     let facts = fun_facts(app, data);
-    if facts.is_empty() || area.width < 4 {
+    if facts.is_empty() || area.width < 6 || area.height < 2 {
         return;
     }
-    let text = facts.join("   ·   ") + "   ·   ";
-    let offset = app.ticker_tick as usize % text.chars().count().max(1);
-    let window = ticker_window(&text, area.width as usize - 2, offset);
-    let line = Line::from(vec![
-        Span::styled("▸ ", Style::default().fg(app.theme.accent)),
-        Span::styled(window, Style::default().fg(app.theme.muted)),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    let width = area.width as usize - 2;
+    let index = (app.ticker_tick as usize / 40) % facts.len();
+    let phase = app.ticker_tick % 40;
+    let current = split_cells(&facts[index], width);
+    let next = split_cells(&facts[(index + 1) % facts.len()], width);
+    let (first, second) = match phase {
+        38 => (current.1, next.0),
+        39 => (next.0, next.1),
+        _ => (current.0, current.1),
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("▸ ", Style::default().fg(app.theme.accent)),
+            Span::styled(first, Style::default().fg(app.theme.muted)),
+        ]),
+        Line::from(Span::styled(
+            format!("  {second}"),
+            Style::default().fg(app.theme.muted),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Splits a fact into at most two display-cell lines (CJK counts double).
+fn split_cells(text: &str, width: usize) -> (String, String) {
+    let mut first = String::new();
+    let mut second = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let cell = if (ch as u32) > 0x2E80 { 2 } else { 1 };
+        if used + cell > width * 2 {
+            break;
+        }
+        if used + cell <= width {
+            first.push(ch);
+        } else {
+            second.push(ch);
+        }
+        used += cell;
+    }
+    (first, second)
 }
 
 fn fun_facts(app: &App, data: &SnapshotData) -> Vec<String> {
@@ -307,33 +402,26 @@ fn fun_facts(app: &App, data: &SnapshotData) -> Vec<String> {
     let total = data.tokens.total();
     if total >= 1_000_000 {
         facts.push(format!(
-            "你的 {} tokens ≈ {} 部莎士比亚全集 · 莎翁看了要沉默",
+            "{} tokens ≈ {} 部莎翁全集",
             format_tokens(total),
             commafy(total / 1_100_000)
-        ));
-        facts.push(format!(
-            "≈ {} 本《战争与和平》 · 托尔斯泰直呼内行",
-            commafy(total / 750_000)
         ));
     }
     let cost = app.data.total_cost;
     if cost >= 1.0 {
         facts.push(format!(
-            "{} ≈ {} 块吮指原味鸡 · 疯狂星期四都救不了你",
+            "{} ≈ {} 块原味鸡",
             format_cost(cost),
             commafy((cost / 1.7) as u64)
         ));
-        facts.push(format!(
-            "≈ {} 杯奶茶 · 糖分摄入警告",
-            commafy((cost / 3.0) as u64)
-        ));
+        facts.push(format!("≈ {} 杯奶茶", commafy((cost / 3.0) as u64)));
     }
     if total > 0 {
-        let share = data.tokens.cache_read as f64 / total as f64 * 100.0;
+        let share = share_percent(data.tokens.cache_read, total);
         if share >= 80.0 {
-            facts.push(format!("缓存命中 {share:.1}% · 会过日子的典范"));
+            facts.push(format!("缓存命中 {share:.0}% · 会过日子"));
         } else if share < 50.0 {
-            facts.push(format!("缓存命中 {share:.1}% · 败家指数拉满"));
+            facts.push(format!("缓存命中 {share:.0}% · 败家指数拉满"));
         }
     }
     let active_days = app
@@ -343,9 +431,7 @@ fn fun_facts(app: &App, data: &SnapshotData) -> Vec<String> {
         .filter(|day| day.tokens.total() > 0)
         .count();
     if active_days >= 7 {
-        facts.push(format!(
-            "{active_days} 个活跃日 · 你和 AI 相处的时间超过大多数情侣"
-        ));
+        facts.push(format!("{active_days} 个活跃日 · 超过大多数情侣"));
     }
     if data.models.len() >= 5 {
         facts.push(format!(
@@ -356,42 +442,15 @@ fn fun_facts(app: &App, data: &SnapshotData) -> Vec<String> {
     }
     if data.peak_daily_tokens > 0 {
         facts.push(format!(
-            "峰值日 {} · 那天键盘冒烟了吗",
+            "峰值日 {} · 键盘冒烟",
             format_tokens(data.peak_daily_tokens)
-        ));
-    }
-    if app.data.health.source_data_bytes > 0 {
-        facts.push(format!(
-            "{} 会话数据 · 句句都是黑历史",
-            format_bytes(app.data.health.source_data_bytes)
         ));
     }
     let streak = achievements::streak_days(&app.data.daily);
     if streak >= 3 {
-        facts.push(format!("连击 {streak} 天 · 你和终端锁了"));
+        facts.push(format!("连击 {streak} 天 · 和终端锁了"));
     }
     facts
-}
-
-/// Cycles the ticker text through a display-cell window; CJK chars occupy
-/// two cells.
-fn ticker_window(text: &str, width: usize, offset: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return String::new();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for index in 0..chars.len() {
-        let ch = chars[(offset + index) % chars.len()];
-        let cell = if (ch as u32) > 0x2E80 { 2 } else { 1 };
-        if used + cell > width {
-            break;
-        }
-        out.push(ch);
-        used += cell;
-    }
-    out
 }
 
 fn commafy(value: u64) -> String {
@@ -475,6 +534,11 @@ fn render_middle(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) 
 }
 
 fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(2)])
+        .split(area);
+
     let items = achievements::build(
         app,
         data.tokens.total(),
@@ -509,11 +573,13 @@ fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
                 .fg(health_color(app))
                 .add_modifier(Modifier::BOLD),
         )));
-        lines.push(health_bar(app, area.width as usize));
-        lines.extend(source_legend_rows(app, area.width as usize));
+        lines.push(health_bar(app, rows[0].width as usize));
+        lines.extend(source_legend_rows(app, rows[0].width as usize));
     }
-    lines.truncate(area.height as usize);
-    frame.render_widget(Paragraph::new(lines), area);
+    lines.truncate(rows[0].height as usize);
+    frame.render_widget(Paragraph::new(lines), rows[0]);
+
+    render_fact_box(frame, app, rows[1], data);
 }
 
 /// One segmented source-health bar: each non-zero source state occupies a

@@ -62,7 +62,7 @@ const HARNESSES: TierSet = TierSet {
     ],
 };
 
-const TITLE_WIDTH: usize = 12;
+const TITLE_WIDTH: usize = 10;
 
 pub(super) struct Achievement {
     title: &'static str,
@@ -166,7 +166,7 @@ fn ladder_line(app: &App, achievement: &Achievement) -> Line<'static> {
 
     let mut spans = vec![
         Span::styled(achievement.title.to_string(), title_style),
-        Span::raw(" ".repeat(title_pad + 2)),
+        Span::raw(" ".repeat(title_pad + 1)),
     ];
     for (index, display) in achievement.ladder.iter().enumerate() {
         let tier = index as i8;

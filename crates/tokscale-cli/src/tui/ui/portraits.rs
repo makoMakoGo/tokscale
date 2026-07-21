@@ -1,11 +1,11 @@
-//! Kaomoji portraits for the Overview snapshot's favorite model: one
-//! original artwork per model family, colored through theme roles.
+//! Kaomoji portraits for the Overview snapshot's favorite model family:
+//! one original artwork per family, painted in the family's brand color.
 
 use ratatui::prelude::*;
 
 use crate::tui::app::App;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Family {
     Gpt,
     Claude,
@@ -14,8 +14,8 @@ pub(super) enum Family {
     Deepseek,
     Qwen,
     Kimi,
-    Llama,
-    Mistral,
+    Minimax,
+    Mimo,
     Unknown,
 }
 
@@ -33,10 +33,10 @@ pub(super) fn family_of(model_id: &str) -> Family {
         Family::Qwen
     } else if model.contains("kimi") || model.contains("moonshot") {
         Family::Kimi
-    } else if model.contains("llama") {
-        Family::Llama
-    } else if model.contains("mistral") || model.contains("mixtral") {
-        Family::Mistral
+    } else if model.contains("minimax") {
+        Family::Minimax
+    } else if model.contains("mimo") {
+        Family::Mimo
     } else if model.contains("gpt")
         || model.contains("codex")
         || model.contains("openai")
@@ -50,6 +50,39 @@ pub(super) fn family_of(model_id: &str) -> Family {
     }
 }
 
+pub(super) fn display_name(family: Family) -> &'static str {
+    match family {
+        Family::Gpt => "gpt",
+        Family::Claude => "claude",
+        Family::Gemini => "gemini",
+        Family::Glm => "glm",
+        Family::Deepseek => "deepseek",
+        Family::Qwen => "qwen",
+        Family::Kimi => "kimi",
+        Family::Minimax => "minimax",
+        Family::Mimo => "mimo",
+        Family::Unknown => "???",
+    }
+}
+
+/// Fixed brand color per family (logo primary colors), run through the
+/// theme's color-mode mapping so legacy terminals degrade gracefully.
+pub(super) fn family_color(app: &App, family: Family) -> Color {
+    let color = match family {
+        Family::Gpt => Color::Rgb(16, 163, 127),
+        Family::Claude => Color::Rgb(217, 119, 87),
+        Family::Gemini => Color::Rgb(142, 124, 240),
+        Family::Glm => Color::Rgb(232, 232, 232),
+        Family::Deepseek => Color::Rgb(77, 107, 254),
+        Family::Qwen => Color::Rgb(97, 92, 237),
+        Family::Kimi => Color::Rgb(192, 192, 192),
+        Family::Minimax => Color::Rgb(228, 58, 58),
+        Family::Mimo => Color::Rgb(255, 105, 0),
+        Family::Unknown => Color::Gray,
+    };
+    app.theme.color(color)
+}
+
 const GPT: &[&str] = &["      ✧", "   /\\_/\\", "  (｡♥‿♥｡)✧", "   /|⌨|\\"];
 const CLAUDE: &[&str] = &["    ✧", "  ╭────╮ ✧", "  (｡•ᴗ•｡)", "   \\∪∪/"];
 const GEMINI: &[&str] = &["  ✦    ✦", "  (◕‿◕)✦", "   /||\\"];
@@ -57,8 +90,8 @@ const GLM: &[&str] = &["   ___", "  (⌐■_■)▤", "   /|  |\\"];
 const DEEPSEEK: &[&str] = &["  ～～～", " (｡•́︿•̀｡)", "   ～|～"];
 const QWEN: &[&str] = &["   ☁", "  (｡•̀ᴗ•́｡)☁", "   /|\\"];
 const KIMI: &[&str] = &["   ☾", "  (｡･ω･｡)☾", "   /|\\"];
-const LLAMA: &[&str] = &["  (  )", "  (｡◕‿◕)♧", " /|    |\\"];
-const MISTRAL: &[&str] = &["   ≈", "  (｡•̀ᴗ-)✧", "   /|\\"];
+const MINIMAX: &[&str] = &["   /\\  /\\", "  (｡•̀ᴗ•́)◆", "   /|  |\\"];
+const MIMO: &[&str] = &["   ___", "  (｡•ω•｡)¤", "   /|  |\\"];
 const UNKNOWN: &[&str] = &["  [■_■]", "  (•_•)", "   /|\\"];
 
 pub(super) fn portrait(family: Family) -> &'static [&'static str] {
@@ -70,31 +103,27 @@ pub(super) fn portrait(family: Family) -> &'static [&'static str] {
         Family::Deepseek => DEEPSEEK,
         Family::Qwen => QWEN,
         Family::Kimi => KIMI,
-        Family::Llama => LLAMA,
-        Family::Mistral => MISTRAL,
+        Family::Minimax => MINIMAX,
+        Family::Mimo => MIMO,
         Family::Unknown => UNKNOWN,
     }
 }
 
-/// Accessories take the accent color, faces and bodies stay in the theme
-/// foreground, so the portraits follow every theme.
-const ACCENT_CHARS: &[char] = &['✧', '✦', '☾', '☁', '⌨', '♧', '▤', '～', '≈', '■'];
-
+/// Every line is padded to the family block's width so per-line centering
+/// cannot stagger the artwork (the pond learned this the hard way).
 pub(super) fn lines(app: &App, family: Family) -> Vec<Line<'static>> {
-    portrait(family)
-        .iter()
+    let art = portrait(family);
+    let block_width = art.iter().map(|row| row.chars().count()).max().unwrap_or(0);
+    let color = family_color(app, family);
+    art.iter()
         .map(|row| {
-            Line::from(
+            let left_pad = (block_width - row.chars().count()) / 2;
+            let mut spans = vec![Span::raw(" ".repeat(left_pad))];
+            spans.extend(
                 row.chars()
-                    .map(|ch| {
-                        if ACCENT_CHARS.contains(&ch) {
-                            Span::styled(ch.to_string(), Style::default().fg(app.theme.accent))
-                        } else {
-                            Span::styled(ch.to_string(), Style::default().fg(app.theme.foreground))
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-            )
+                    .map(|ch| Span::styled(ch.to_string(), Style::default().fg(color))),
+            );
+            Line::from(spans)
         })
         .collect()
 }
@@ -114,8 +143,9 @@ mod tests {
         assert_eq!(family_of("deepseek-v3.2"), Family::Deepseek);
         assert_eq!(family_of("qwen3-coder-plus"), Family::Qwen);
         assert_eq!(family_of("kimi-k2"), Family::Kimi);
-        assert_eq!(family_of("llama-4-scout"), Family::Llama);
-        assert_eq!(family_of("mistral-large-3"), Family::Mistral);
-        assert_eq!(family_of("some-future-model"), Family::Unknown);
+        assert_eq!(family_of("minimax-m3"), Family::Minimax);
+        assert_eq!(family_of("mimo-v2.5-pro"), Family::Mimo);
+        assert_eq!(family_of("llama-4-scout"), Family::Unknown);
+        assert_eq!(family_of("mistral-large-3"), Family::Unknown);
     }
 }
