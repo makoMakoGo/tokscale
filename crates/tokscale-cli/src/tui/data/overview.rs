@@ -219,12 +219,21 @@ mod tests {
     use crate::tui::data::{DailyClientInfo, DailyModelInfo, DailyUsage};
     use chrono::NaiveDate;
 
-    type TestModel<'a> = (&'a str, u64, f64);
+    type TestModel<'a> = (&'a str, TokenBreakdown, f64);
     type TestClient<'a> = (&'a str, Vec<TestModel<'a>>);
 
     fn tokens(input: u64) -> TokenBreakdown {
         TokenBreakdown {
             input,
+            ..TokenBreakdown::default()
+        }
+    }
+
+    fn cached_tokens(input: u64, cache_read: u64, cache_write: u64) -> TokenBreakdown {
+        TokenBreakdown {
+            input,
+            cache_read,
+            cache_write,
             ..TokenBreakdown::default()
         }
     }
@@ -238,9 +247,13 @@ mod tests {
             let mut client_models = BTreeMap::new();
             let mut client_tokens = TokenBreakdown::default();
             let mut client_cost = 0.0;
-            for (model_id, input, cost) in models {
-                client_tokens.input = client_tokens.input.saturating_add(input);
-                day_tokens.input = day_tokens.input.saturating_add(input);
+            for (model_id, model_tokens, cost) in models {
+                client_tokens = client_tokens
+                    .checked_add(&model_tokens)
+                    .expect("test client token buckets exceed u64::MAX");
+                day_tokens = day_tokens
+                    .checked_add(&model_tokens)
+                    .expect("test daily token buckets exceed u64::MAX");
                 if cost.is_finite() {
                     client_cost += cost;
                     day_cost += cost;
@@ -254,7 +267,7 @@ mod tests {
                         color_key: model_id.to_string(),
                         workspace_key: None,
                         workspace_label: None,
-                        tokens: tokens(input),
+                        tokens: model_tokens,
                         cost,
                         messages: 1,
                     },
@@ -288,10 +301,16 @@ mod tests {
                     "2026-07-20",
                     vec![(
                         "claude",
-                        vec![("gpt-5.5", 100, 2.0), ("qwq-32b", 50, f64::NAN)],
+                        vec![
+                            ("gpt-5.5", cached_tokens(100, 20, 5), 2.0),
+                            ("qwq-32b", tokens(50), f64::NAN),
+                        ],
                     )],
                 ),
-                day("2026-07-21", vec![("codex", vec![("gpt-5.5", 200, 3.0)])]),
+                day(
+                    "2026-07-21",
+                    vec![("codex", vec![("gpt-5.5", tokens(200), 3.0)])],
+                ),
                 day("2026-07-22", Vec::new()),
             ],
             ..UsageData::default()
@@ -299,7 +318,8 @@ mod tests {
 
         let summary = OverviewSummary::derive(&data, 7);
 
-        assert_eq!(summary.tokens.total(), 350);
+        assert_eq!(summary.tokens.total(), 375);
+        assert_eq!(summary.cache_rate, CacheRate::from_tokens(20, 375));
         assert_eq!(summary.active_days, 2);
         assert_eq!(summary.peak_daily_tokens, 200);
         assert_eq!(summary.peak_daily_cost, 3.0);
@@ -309,7 +329,7 @@ mod tests {
 
         let model = summary.favorite_model.unwrap();
         assert_eq!(model.id, "gpt-5.5");
-        assert_eq!(model.tokens, 300);
+        assert_eq!(model.tokens, 325);
         assert_eq!(model.cost, 5.0);
 
         let client = summary.favorite_client.unwrap();
@@ -318,7 +338,7 @@ mod tests {
 
         let family = summary.favorite_family.unwrap();
         assert_eq!(family.family, OverviewFamily::Gpt);
-        assert_eq!(family.tokens, 300);
+        assert_eq!(family.tokens, 325);
         assert_eq!(family.cost, 5.0);
     }
 
