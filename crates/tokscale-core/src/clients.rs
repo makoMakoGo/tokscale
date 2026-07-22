@@ -60,13 +60,6 @@ mod tests {
     }
 
     #[test]
-    fn catalog_hotkeys_are_unique() {
-        let hotkeys: Vec<char> = ClientId::iter().filter_map(ClientId::hotkey).collect();
-        let unique: HashSet<char> = hotkeys.iter().copied().collect();
-        assert_eq!(unique.len(), hotkeys.len());
-    }
-
-    #[test]
     fn synthetic_is_not_a_client_identity() {
         assert_eq!(ClientId::from_str("synthetic"), None);
         assert_eq!(ClientId::from_str("synthetic.new"), None);

@@ -28,11 +28,17 @@ Every TUI process has two distinct client sets:
   universe. The client picker lists exactly the universe and cannot enable a
   client outside it.
 
-Client-picker edits are transactional. Space and client hotkeys mutate a
-dialog-local draft; Enter commits the draft and closes the picker, while Esc
-or an outside click closes it without changing `selected_clients`. A commit
-reprojects once after the dialog closes, so picker input cannot leak through to
-the underlying view.
+Client-picker edits are transactional. Typing narrows the list by client name,
+the arrow keys navigate the matching rows, and Space toggles the highlighted
+client in a dialog-local draft. `*` inverts every row matched by the current
+filter, or the complete universe when the filter is empty. The draft may
+temporarily be empty so toggle and bulk operations compose predictably, but
+Enter rejects an empty draft with an explicit error. A valid Enter commits the
+draft and closes the picker, while Esc or an outside click closes it without
+changing `selected_clients`. The picker has no per-client hotkeys; catalog
+growth must not allocate from a global keyboard namespace. A commit reprojects
+once after the dialog closes, so picker input cannot leak through to the
+underlying view.
 
 The scanner produces one canonical, client-aware generation for the entire
 universe. `Clients` and `Group By` changes project that installed generation;

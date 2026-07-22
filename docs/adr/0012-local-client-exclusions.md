@@ -18,7 +18,7 @@ registry, cache schema, docs, and tests.
 - A local client is included only when it is wanted for this fork and can be
   represented by the current adapter/cache/aggregation architecture.
 - Crush is not included. Do not register a `crush` client, local scan
-  definition, adapter, parser module, logo, hotkey, README support row, or
+  definition, adapter, parser module, logo, README support row, or
   legacy submit policy.
 - MiMo Code/MiCode is not included. Do not register a `micode` client, local
   scan definition, adapter, parser module, README support row, or legacy submit

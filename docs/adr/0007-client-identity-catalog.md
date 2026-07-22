@@ -20,10 +20,11 @@ client identity and presentation facts:
 - Rust enum variant name.
 - Stable payload/filter/cache id.
 - Display and short labels.
-- TUI hotkey.
 - Logo URL, color, and optional text color.
 
 Rust `ClientId` and identity static data are generated at build time.
+Per-client keyboard shortcuts are not identity facts: the catalog and generated
+Rust API do not allocate or expose hotkeys.
 
 Local scanning and parsing facts stay outside this catalog. Roots, relative
 paths, filename patterns, parser choice, pricing behavior, aggregation, and

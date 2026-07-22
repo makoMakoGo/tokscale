@@ -787,13 +787,17 @@ mod tests {
         );
         assert!(app.dialog_stack.is_active());
 
-        let codex_hotkey = ClientId::Codex
-            .hotkey()
-            .expect("Codex must have a client picker hotkey");
+        for character in "codex".chars() {
+            dispatch_key_event(
+                app,
+                view_state,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
         dispatch_key_event(
             app,
             view_state,
-            KeyEvent::new(KeyCode::Char(codex_hotkey), KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
         );
         assert!(app.dialog_stack.is_active());
         assert!(view_state.session_detail_active());

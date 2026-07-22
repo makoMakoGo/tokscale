@@ -335,63 +335,6 @@ mod tests {
     }
 
     #[test]
-    fn test_client_key() {
-        assert_eq!(ClientId::hotkey(ClientId::OpenCode), Some('1'));
-        assert_eq!(ClientId::hotkey(ClientId::Claude), Some('2'));
-        assert_eq!(ClientId::hotkey(ClientId::Codex), Some('3'));
-        assert_eq!(ClientId::hotkey(ClientId::Copilot), Some('c'));
-        assert_eq!(ClientId::hotkey(ClientId::Gemini), Some('5'));
-        assert_eq!(ClientId::hotkey(ClientId::Amp), Some('6'));
-        assert_eq!(ClientId::hotkey(ClientId::Droid), Some('7'));
-        assert_eq!(ClientId::hotkey(ClientId::OpenClaw), Some('8'));
-        assert_eq!(ClientId::hotkey(ClientId::Pi), Some('9'));
-        assert_eq!(ClientId::hotkey(ClientId::Omp), Some('m'));
-        assert_eq!(ClientId::hotkey(ClientId::Kimi), Some('0'));
-        assert_eq!(ClientId::hotkey(ClientId::Qwen), Some('w'));
-        assert_eq!(ClientId::hotkey(ClientId::RooCode), Some('r'));
-        assert_eq!(ClientId::hotkey(ClientId::KiloCode), Some('k'));
-        assert_eq!(ClientId::hotkey(ClientId::Mux), Some('x'));
-        assert_eq!(ClientId::hotkey(ClientId::Kilo), Some('l'));
-        assert_eq!(ClientId::hotkey(ClientId::Hermes), Some('e'));
-        assert_eq!(ClientId::hotkey(ClientId::Codebuff), Some('b'));
-        assert_eq!(ClientId::hotkey(ClientId::CodeBuddy), Some('f'));
-        assert_eq!(ClientId::hotkey(ClientId::Antigravity), Some('a'));
-        assert_eq!(ClientId::hotkey(ClientId::Zed), Some('z'));
-        assert_eq!(ClientId::hotkey(ClientId::Zcode), Some('q'));
-        assert_eq!(ClientId::hotkey(ClientId::Kiro), Some('i'));
-        assert_eq!(ClientId::hotkey(ClientId::Cline), Some('n'));
-    }
-
-    #[test]
-    fn test_client_from_key() {
-        assert_eq!(ClientId::from_hotkey('1'), Some(ClientId::OpenCode));
-        assert_eq!(ClientId::from_hotkey('2'), Some(ClientId::Claude));
-        assert_eq!(ClientId::from_hotkey('3'), Some(ClientId::Codex));
-        assert_eq!(ClientId::from_hotkey('c'), Some(ClientId::Copilot));
-        assert_eq!(ClientId::from_hotkey('4'), None);
-        assert_eq!(ClientId::from_hotkey('5'), Some(ClientId::Gemini));
-        assert_eq!(ClientId::from_hotkey('6'), Some(ClientId::Amp));
-        assert_eq!(ClientId::from_hotkey('7'), Some(ClientId::Droid));
-        assert_eq!(ClientId::from_hotkey('8'), Some(ClientId::OpenClaw));
-        assert_eq!(ClientId::from_hotkey('9'), Some(ClientId::Pi));
-        assert_eq!(ClientId::from_hotkey('m'), Some(ClientId::Omp));
-        assert_eq!(ClientId::from_hotkey('0'), Some(ClientId::Kimi));
-        assert_eq!(ClientId::from_hotkey('w'), Some(ClientId::Qwen));
-        assert_eq!(ClientId::from_hotkey('r'), Some(ClientId::RooCode));
-        assert_eq!(ClientId::from_hotkey('k'), Some(ClientId::KiloCode));
-        assert_eq!(ClientId::from_hotkey('l'), Some(ClientId::Kilo));
-        assert_eq!(ClientId::from_hotkey('x'), Some(ClientId::Mux));
-        assert_eq!(ClientId::from_hotkey('e'), Some(ClientId::Hermes));
-        assert_eq!(ClientId::from_hotkey('b'), Some(ClientId::Codebuff));
-        assert_eq!(ClientId::from_hotkey('f'), Some(ClientId::CodeBuddy));
-        assert_eq!(ClientId::from_hotkey('a'), Some(ClientId::Antigravity));
-        assert_eq!(ClientId::from_hotkey('z'), Some(ClientId::Zed));
-        assert_eq!(ClientId::from_hotkey('q'), Some(ClientId::Zcode));
-        assert_eq!(ClientId::from_hotkey('i'), Some(ClientId::Kiro));
-        assert_eq!(ClientId::from_hotkey('y'), None);
-    }
-
-    #[test]
     fn test_token_breakdown_total() {
         let breakdown = TokenBreakdown {
             input: 100,

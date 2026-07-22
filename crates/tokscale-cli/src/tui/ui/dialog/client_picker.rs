@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -78,9 +78,9 @@ impl ClientPickerDialog {
         self.selected = next as usize;
     }
 
-    /// Toggle the currently highlighted client. Refuses to disable the
-    /// last enabled client (downstream code assumes at least one
-    /// filter is active when the picker is in use).
+    /// Toggle the currently highlighted client in the dialog-local draft.
+    /// The draft may be empty; the non-empty invariant is enforced only when
+    /// the user commits it.
     fn toggle_selected(&mut self) -> InteractionOutcome {
         if let Some(&idx) = self.filtered_indices.get(self.selected) {
             self.toggle(self.clients[idx])
@@ -93,24 +93,33 @@ impl ClientPickerDialog {
         if !self.clients.contains(&client) {
             return InteractionOutcome::Ignored("client outside loaded universe");
         }
-        let total = self.draft_enabled.len();
-        let is_enabled = self.draft_enabled.contains(&client);
 
-        if is_enabled && total > 1 {
-            self.draft_enabled.remove(&client);
-            self.last_error = None;
-            InteractionOutcome::Handled
-        } else if !is_enabled {
+        if !self.draft_enabled.remove(&client) {
             self.draft_enabled.insert(client);
-            self.last_error = None;
-            InteractionOutcome::Handled
-        } else {
-            self.last_error = Some("Cannot disable the last client");
-            InteractionOutcome::Ignored("last client")
         }
+        self.last_error = None;
+        InteractionOutcome::Handled
+    }
+
+    /// Invert every row matched by the current filter. With an empty filter,
+    /// `filtered_indices` contains the complete loaded client universe.
+    fn invert_filtered(&mut self) -> InteractionOutcome {
+        for &idx in &self.filtered_indices {
+            let client = self.clients[idx];
+            if !self.draft_enabled.remove(&client) {
+                self.draft_enabled.insert(client);
+            }
+        }
+        self.last_error = None;
+        InteractionOutcome::Handled
     }
 
     fn commit(&mut self) -> DialogResult {
+        if self.draft_enabled.is_empty() {
+            self.last_error = Some("Select at least one client");
+            return DialogResult::Handled;
+        }
+
         let selection_changed = *self.enabled.borrow() != self.draft_enabled;
         if selection_changed {
             *self.enabled.borrow_mut() = self.draft_enabled.clone();
@@ -190,6 +199,16 @@ fn client_picker_areas(area: Rect) -> ClientPickerAreas {
     }
 }
 
+fn client_picker_hint(width: u16) -> &'static str {
+    if width >= 43 {
+        "↑↓ • Space • * invert matches • Enter • Esc"
+    } else if width >= 38 {
+        "* invert matches • Space • Enter • Esc"
+    } else {
+        "* invert matches"
+    }
+}
+
 impl DialogContent for ClientPickerDialog {
     fn desired_size(&self, viewport: Rect) -> (u16, u16) {
         let width = 50u16.min(viewport.width.saturating_sub(4));
@@ -239,11 +258,10 @@ impl DialogContent for ClientPickerDialog {
             let is_enabled = self.draft_enabled.contains(&client);
 
             let checkbox = if is_enabled { "[●]" } else { "[ ]" };
-            let key_hint = format!("[{}]", hotkey(client));
             let name = display_name(client);
 
             let usable = list_area.width.saturating_sub(4) as usize;
-            let left = format!("{} {} {}", checkbox, key_hint, name);
+            let left = format!("{} {}", checkbox, name);
             let padding = usable.saturating_sub(left.chars().count());
 
             let base_style = if is_selected {
@@ -274,7 +292,7 @@ impl DialogContent for ClientPickerDialog {
 
         let hint_text = self
             .last_error
-            .unwrap_or("↑↓ navigate • Space toggle • Enter apply • Esc cancel");
+            .unwrap_or_else(|| client_picker_hint(rows.hint.width));
         let hint_style = if self.last_error.is_some() {
             Style::default().fg(Color::Yellow)
         } else {
@@ -299,6 +317,7 @@ impl DialogContent for ClientPickerDialog {
             }
             KeyCode::Enter => self.commit(),
             KeyCode::Char(' ') => self.toggle_selected().into(),
+            KeyCode::Char('*') => self.invert_filtered().into(),
             KeyCode::Backspace => {
                 self.filter.pop();
                 self.rebuild_filter();
@@ -306,18 +325,10 @@ impl DialogContent for ClientPickerDialog {
                 DialogResult::Handled
             }
             KeyCode::Char(c) => {
-                if key.modifiers.contains(KeyModifiers::ALT) {
-                    if let Some(client_id) = ClientId::from_hotkey(c) {
-                        self.toggle(client_id).into()
-                    } else {
-                        DialogResult::Ignored("unknown hotkey")
-                    }
-                } else {
-                    self.filter.push(c);
-                    self.rebuild_filter();
-                    self.last_error = None;
-                    DialogResult::Handled
-                }
+                self.filter.push(c);
+                self.rebuild_filter();
+                self.last_error = None;
+                DialogResult::Handled
             }
             _ => DialogResult::Ignored("unhandled key"),
         }
@@ -352,22 +363,16 @@ fn display_name(client: ClientId) -> &'static str {
     client.short_name()
 }
 
-fn hotkey(client: ClientId) -> char {
-    client
-        .hotkey()
-        .expect("client picker clients must have catalog hotkeys")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyModifiers;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    use crate::tui::themes::ThemeName;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
-    fn alt_key(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
     }
 
     fn click(column: u16, row: u16) -> MouseEvent {
@@ -386,11 +391,27 @@ mod tests {
         ClientPickerDialog::new(clients, enabled, changed)
     }
 
-    fn first_hotkey_client() -> (ClientId, char) {
-        let client = ClientId::iter()
-            .find(|client| client.hotkey().is_some())
-            .expect("catalog should expose at least one picker hotkey");
-        (client, hotkey(client))
+    fn make_dialog_for(clients: Vec<ClientId>) -> ClientPickerDialog {
+        let enabled = Rc::new(RefCell::new(clients.iter().copied().collect()));
+        let changed = Rc::new(RefCell::new(false));
+        ClientPickerDialog::new(clients, enabled, changed)
+    }
+
+    fn render_symbols(dialog: &ClientPickerDialog, area: Rect) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+        let frame = terminal
+            .draw(|frame| dialog.render(frame, area, &theme))
+            .unwrap();
+
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| frame.buffer.cell((x, y)).unwrap().symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -403,29 +424,15 @@ mod tests {
     }
 
     #[test]
-    fn client_picker_plain_hotkey_char_filters_instead_of_toggling() {
-        let (client, key_char) = first_hotkey_client();
+    fn client_picker_plain_char_filters_without_toggling_selection() {
         let mut dialog = make_dialog();
+        let draft_before = dialog.draft_enabled.clone();
 
-        let result = dialog.handle_key(key(KeyCode::Char(key_char)));
+        let result = dialog.handle_key(key(KeyCode::Char('c')));
 
         assert!(matches!(result, DialogResult::Handled));
-        assert_eq!(dialog.filter, key_char.to_string());
-        assert!(dialog.enabled.borrow().contains(&client));
-        assert!(dialog.draft_enabled.contains(&client));
-    }
-
-    #[test]
-    fn client_picker_alt_hotkey_toggles_only_the_draft() {
-        let (client, key_char) = first_hotkey_client();
-        let mut dialog = make_dialog();
-
-        let result = dialog.handle_key(alt_key(key_char));
-
-        assert!(matches!(result, DialogResult::Handled));
-        assert!(!dialog.draft_enabled.contains(&client));
-        assert!(dialog.enabled.borrow().contains(&client));
-        assert!(!*dialog.changed.borrow());
+        assert_eq!(dialog.filter, "c");
+        assert_eq!(dialog.draft_enabled, draft_before);
     }
 
     #[test]
@@ -445,6 +452,74 @@ mod tests {
         assert!(matches!(result, DialogResult::Close));
         assert!(!dialog.enabled.borrow().contains(&client));
         assert!(*dialog.changed.borrow());
+    }
+
+    #[test]
+    fn client_picker_inverts_only_filtered_matches() {
+        let mut dialog =
+            make_dialog_for(vec![ClientId::Claude, ClientId::Codex, ClientId::OpenCode]);
+        for c in "code".chars() {
+            dialog.handle_key(key(KeyCode::Char(c)));
+        }
+
+        let result = dialog.handle_key(key(KeyCode::Char('*')));
+
+        assert!(matches!(result, DialogResult::Handled));
+        assert_eq!(dialog.filter, "code");
+        assert_eq!(dialog.filtered_indices.len(), 2);
+        assert!(dialog.draft_enabled.contains(&ClientId::Claude));
+        assert!(!dialog.draft_enabled.contains(&ClientId::Codex));
+        assert!(!dialog.draft_enabled.contains(&ClientId::OpenCode));
+    }
+
+    #[test]
+    fn client_picker_empty_filter_inverts_the_entire_universe() {
+        let mut dialog = make_dialog_for(vec![ClientId::Claude, ClientId::Codex]);
+
+        assert!(matches!(
+            dialog.handle_key(key(KeyCode::Char('*'))),
+            DialogResult::Handled
+        ));
+        assert!(dialog.draft_enabled.is_empty());
+
+        dialog.handle_key(key(KeyCode::Char('*')));
+        assert_eq!(
+            dialog.draft_enabled,
+            HashSet::from([ClientId::Claude, ClientId::Codex])
+        );
+    }
+
+    #[test]
+    fn client_picker_space_can_leave_an_empty_draft() {
+        let mut dialog = make_dialog_for(vec![ClientId::Claude]);
+
+        let result = dialog.handle_key(key(KeyCode::Char(' ')));
+
+        assert!(matches!(result, DialogResult::Handled));
+        assert!(dialog.draft_enabled.is_empty());
+        assert!(dialog.last_error.is_none());
+    }
+
+    #[test]
+    fn client_picker_enter_rejects_an_empty_draft_without_committing() {
+        let mut dialog = make_dialog_for(vec![ClientId::Claude]);
+        dialog.handle_key(key(KeyCode::Char(' ')));
+
+        let result = dialog.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(result, DialogResult::Handled));
+        assert_eq!(dialog.last_error, Some("Select at least one client"));
+        assert_eq!(*dialog.enabled.borrow(), HashSet::from([ClientId::Claude]));
+        assert!(!*dialog.changed.borrow());
+    }
+
+    #[test]
+    fn client_picker_hint_keeps_invert_matches_visible_at_narrow_width() {
+        let dialog = make_dialog_for(vec![ClientId::Claude]);
+
+        let rendered = render_symbols(&dialog, Rect::new(0, 0, 42, 18));
+
+        assert!(rendered.contains("* invert matches • Space • Enter • Esc"));
     }
 
     #[test]
@@ -518,26 +593,5 @@ mod tests {
             DialogResult::Ignored("click outside rows")
         ));
         assert_eq!(dialog.draft_enabled, enabled_before);
-    }
-
-    #[test]
-    fn client_picker_rejects_hotkeys_outside_the_loaded_universe() {
-        let clients = vec![ClientId::Claude];
-        let enabled = Rc::new(RefCell::new(HashSet::from([ClientId::Claude])));
-        let changed = Rc::new(RefCell::new(false));
-        let mut dialog = ClientPickerDialog::new(clients, enabled, changed.clone());
-        let outside = ClientId::iter()
-            .find(|client| *client != ClientId::Claude && client.hotkey().is_some())
-            .expect("catalog should have a hotkey outside a one-client universe");
-
-        let result = dialog.handle_key(alt_key(hotkey(outside)));
-
-        assert!(matches!(
-            result,
-            DialogResult::Ignored("client outside loaded universe")
-        ));
-        assert!(!*changed.borrow());
-        assert_eq!(dialog.draft_enabled, HashSet::from([ClientId::Claude]));
-        assert_eq!(*dialog.enabled.borrow(), HashSet::from([ClientId::Claude]));
     }
 }
