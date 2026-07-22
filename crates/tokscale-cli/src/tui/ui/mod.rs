@@ -385,8 +385,11 @@ mod tests {
 
         let screen = render_screen(&mut app, 120, 32).join("\n");
 
+        // Low-priority Fact rows may be clipped on shorter terminals. The
+        // Snapshot header and hero total are the stable evidence that the
+        // installed generation remains visible behind a warm refresh.
         assert!(
-            screen.contains("Data Size"),
+            screen.contains("Snapshot") && screen.contains("77 tokens"),
             "installed generation must keep the tab content visible: {screen}"
         );
         assert!(

@@ -17,6 +17,7 @@ const TWO_COLUMN_MIN_WIDTH: u16 = 80;
 const ONE_COLUMN_MIN_WIDTH: u16 = 40;
 const METRIC_LABEL_WIDTH: usize = 20;
 const CONTENT_PADDING: u16 = 1;
+const EMPTY_FUN_THINGS_HEIGHT: usize = portraits::PORTRAIT_HEIGHT + 1;
 // Portrait plus section/favorite spacing, slogan and family stats.
 const FULL_FUN_THINGS_HEIGHT: usize = portraits::PORTRAIT_HEIGHT + 7;
 // Section title, portrait, slogan and family stats without blank rows.
@@ -98,12 +99,12 @@ fn section_area(area: Rect) -> Rect {
     })
 }
 
-/// The middle Core column: hero totals, then the Fact block. Fact rows are
-/// ordered to line up horizontally with the achievement ladders in the
-/// right column (Active Days↔streak, Data Size↔tokens, Cache Rate↔cache,
-/// Models Eaten↔models, Clients Used↔clients).
+/// The middle Core column: hero totals, then the Fact block. The first five
+/// Fact rows line up with the achievement ladders in the right column. Input
+/// health and data size stay together at the bottom as acquisition diagnostics,
+/// separated from the scoped facts when vertical space permits.
 fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary) {
-    let lines = vec![
+    let mut lines = vec![
         section_title(app, "Core"),
         Line::default(),
         Line::from(vec![
@@ -133,9 +134,9 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary)
         ),
         metric_line(
             app,
-            "Data Size",
-            format_bytes(app.data.health.input_data_bytes),
-            app.theme.foreground,
+            "Sessions Scanned",
+            data.main_session_count.to_string(),
+            Color::Cyan,
         ),
         metric_line(app, "Cache Rate", data.cache_rate.to_string(), Color::Cyan),
         metric_line(
@@ -150,14 +151,21 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary)
             data.client_count.to_string(),
             Color::Cyan,
         ),
+    ];
+    let diagnostics = [
         inputs_healthy_metric_line(app),
         metric_line(
             app,
-            "Sessions Scanned",
-            data.main_session_count.to_string(),
-            Color::Cyan,
+            "Data Size",
+            format_bytes(app.data.health.input_data_bytes),
+            app.theme.foreground,
         ),
     ];
+
+    if lines.len() + 1 + diagnostics.len() <= area.height as usize {
+        lines.push(Line::default());
+    }
+    lines.extend(diagnostics);
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -167,53 +175,42 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
     let total = data.tokens.total();
     let width = area.width as usize;
 
-    let mut favorite_label = None;
-    let portrait;
-    let slogan;
-    let mut family_stats = None;
-    match data.favorite_family.as_ref() {
-        Some(favorite) => {
-            let family = favorite.family;
-            let color = portraits::family_color(app, family);
-            favorite_label = Some(Line::from(Span::styled(
-                "Favorite Model",
+    let Some(favorite) = data.favorite_family.as_ref() else {
+        render_empty_fun_things(frame, app, area);
+        return;
+    };
+    let family = favorite.family;
+    let color = portraits::family_color(app, family);
+    let favorite_label = Some(Line::from(Span::styled(
+        "Favorite Model",
+        Style::default().fg(app.theme.muted),
+    )));
+    let portrait = portraits::lines(app, family).map(|line| center_line(line, width));
+    let slogan = Some(center_line(
+        Line::from(Span::styled(
+            portraits::slogan(family),
+            Style::default().fg(color),
+        )),
+        width,
+    ));
+    let family_stats = Some(center_line(
+        Line::from(vec![
+            Span::styled(
+                portraits::display_name(family),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "  {} · {:.1}% · {}",
+                    format_tokens(favorite.tokens),
+                    share_percent(favorite.tokens, total),
+                    format_cost(favorite.cost),
+                ),
                 Style::default().fg(app.theme.muted),
-            )));
-            portrait = portraits::lines(app, family).map(|line| center_line(line, width));
-            slogan = Some(center_line(
-                Line::from(Span::styled(
-                    portraits::slogan(family),
-                    Style::default().fg(color),
-                )),
-                width,
-            ));
-            family_stats = Some(center_line(
-                Line::from(vec![
-                    Span::styled(
-                        portraits::display_name(family),
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!(
-                            "  {} · {:.1}% · {}",
-                            format_tokens(favorite.tokens),
-                            share_percent(favorite.tokens, total),
-                            format_cost(favorite.cost),
-                        ),
-                        Style::default().fg(app.theme.muted),
-                    ),
-                ]),
-                width,
-            ));
-        }
-        None => {
-            portrait = portraits::lines(app, ModelFamily::Unknown);
-            slogan = Some(Line::from(Span::styled(
-                "no data yet",
-                Style::default().fg(app.theme.muted),
-            )));
-        }
-    }
+            ),
+        ]),
+        width,
+    ));
 
     let model_stats = data.favorite_model.as_ref().map(|favorite| {
         center_line(
@@ -306,9 +303,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
                 lines.push(model_stats);
             }
         }
-        if lines.len() + client_block.len() <= height {
-            lines.extend(client_block);
-        }
+        append_favorite_client_block(&mut lines, client_block, height);
     } else if height >= COMPACT_FUN_THINGS_HEIGHT {
         lines.push(section_title(app, "Fun"));
         lines.extend(portrait);
@@ -331,6 +326,57 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
     // No wrap: the center padding on the portrait block is meaningful and
     // `Wrap { trim: true }` would strip it.
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn append_favorite_client_block(
+    lines: &mut Vec<Line<'static>>,
+    mut block: Vec<Line<'static>>,
+    height: usize,
+) {
+    if block.is_empty() || lines.len() + block.len() > height {
+        return;
+    }
+
+    // Prefer a visual gap after the heading, but keep the compact section
+    // intact when that extra row would otherwise hide it.
+    if lines.len() + block.len() < height {
+        block.insert(2, Line::default());
+    }
+    lines.extend(block);
+}
+
+/// Keeps the section title anchored while centering the fixed four-line empty
+/// state inside the remaining body. Tiny bodies clip from the tail.
+fn render_empty_fun_things(frame: &mut Frame, app: &App, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+
+    let title_area = Rect {
+        height: area.height.min(1),
+        ..area
+    };
+    frame.render_widget(Paragraph::new(section_title(app, "Fun")), title_area);
+
+    let body = Rect {
+        y: area.y.saturating_add(1),
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let width = body.width as usize;
+    let height = body.height as usize;
+    let top_padding = height.saturating_sub(EMPTY_FUN_THINGS_HEIGHT) / 2;
+    let mut lines = vec![Line::default(); top_padding];
+    lines.extend(portraits::lines(app, ModelFamily::Unknown).map(|line| center_line(line, width)));
+    lines.push(center_line(
+        Line::from(Span::styled(
+            "no data yet",
+            Style::default().fg(app.theme.muted),
+        )),
+        width,
+    ));
+    lines.truncate(height);
+    frame.render_widget(Paragraph::new(lines), body);
 }
 
 /// Left-pads a line so it centers inside the given column width.
@@ -806,6 +852,153 @@ mod tests {
         let facts = fun_facts(&app, &OverviewSummary::default());
 
         assert!(facts.iter().any(|fact| fact.contains("连击 3 天")));
+    }
+
+    #[test]
+    fn empty_fun_state_centers_its_fixed_block_inside_the_body() {
+        let width = 40;
+        let height = 13;
+        let app = make_app(width);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        terminal
+            .draw(|frame| render_fun_things(frame, &app, frame.area(), &OverviewSummary::default()))
+            .unwrap();
+
+        let lines = buffer_lines(&terminal);
+        assert_eq!(lines[0].trim(), "Fun");
+
+        let body_height = height as usize - 1;
+        let first_block_row = 1 + (body_height - EMPTY_FUN_THINGS_HEIGHT) / 2;
+        let mut expected = portraits::lines(&app, ModelFamily::Unknown)
+            .map(|line| line_text(&center_line(line, width as usize)))
+            .to_vec();
+        expected.push(line_text(&center_line(
+            Line::from(Span::styled(
+                "no data yet",
+                Style::default().fg(app.theme.muted),
+            )),
+            width as usize,
+        )));
+
+        assert!(lines[1..first_block_row]
+            .iter()
+            .all(|line| line.trim().is_empty()));
+        for (offset, expected_line) in expected.iter().enumerate() {
+            let rendered = &lines[first_block_row + offset];
+            assert!(rendered.starts_with(expected_line), "{rendered:?}");
+        }
+        assert!(lines[first_block_row + EMPTY_FUN_THINGS_HEIGHT..]
+            .iter()
+            .all(|line| line.trim().is_empty()));
+    }
+
+    #[test]
+    fn favorite_client_heading_uses_extra_space_without_sacrificing_content() {
+        let block = || {
+            vec![
+                Line::default(),
+                Line::from("Favorite Client"),
+                Line::from("slogan"),
+                Line::from("stats"),
+            ]
+        };
+
+        let mut spacious = vec![Line::from("prior"); 11];
+        append_favorite_client_block(&mut spacious, block(), 16);
+        let spacious_tail = spacious[11..].iter().map(line_text).collect::<Vec<_>>();
+        assert_eq!(
+            spacious_tail,
+            ["", "Favorite Client", "", "slogan", "stats"]
+        );
+
+        let mut compact = vec![Line::from("prior"); 11];
+        append_favorite_client_block(&mut compact, block(), 15);
+        let compact_tail = compact[11..].iter().map(line_text).collect::<Vec<_>>();
+        assert_eq!(compact_tail, ["", "Favorite Client", "slogan", "stats"]);
+    }
+
+    #[test]
+    fn core_facts_keep_input_health_and_data_size_as_the_last_rows() {
+        let width = 60;
+        let height = 20;
+        let app = make_app(width);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        terminal
+            .draw(|frame| render_core(frame, &app, frame.area(), &OverviewSummary::default()))
+            .unwrap();
+
+        let lines = buffer_lines(&terminal);
+        let expected = [
+            "Active Days",
+            "Sessions Scanned",
+            "Cache Rate",
+            "Models Eaten",
+            "Clients Used",
+            "Inputs Healthy",
+            "Data Size",
+        ];
+        let rendered = lines
+            .iter()
+            .filter_map(|line| {
+                expected
+                    .iter()
+                    .find(|label| line.contains(**label))
+                    .copied()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, expected);
+        assert_eq!(
+            &rendered[rendered.len() - 2..],
+            ["Inputs Healthy", "Data Size"]
+        );
+
+        let clients_row = lines
+            .iter()
+            .position(|line| line.contains("Clients Used"))
+            .unwrap();
+        let inputs_row = lines
+            .iter()
+            .position(|line| line.contains("Inputs Healthy"))
+            .unwrap();
+        let data_size_row = lines
+            .iter()
+            .position(|line| line.contains("Data Size"))
+            .unwrap();
+        assert_eq!(inputs_row, clients_row + 2);
+        assert!(lines[clients_row + 1].trim().is_empty());
+        assert_eq!(data_size_row, inputs_row + 1);
+    }
+
+    #[test]
+    fn core_facts_drop_the_diagnostic_gap_before_clipping_metrics() {
+        let width = 60;
+        let height = 13;
+        let app = make_app(width);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        terminal
+            .draw(|frame| render_core(frame, &app, frame.area(), &OverviewSummary::default()))
+            .unwrap();
+
+        let lines = buffer_lines(&terminal);
+        let clients_row = lines
+            .iter()
+            .position(|line| line.contains("Clients Used"))
+            .unwrap();
+        let inputs_row = lines
+            .iter()
+            .position(|line| line.contains("Inputs Healthy"))
+            .unwrap();
+        let data_size_row = lines
+            .iter()
+            .position(|line| line.contains("Data Size"))
+            .unwrap();
+
+        assert_eq!(inputs_row, clients_row + 1);
+        assert_eq!(data_size_row, inputs_row + 1);
     }
 
     #[test]
