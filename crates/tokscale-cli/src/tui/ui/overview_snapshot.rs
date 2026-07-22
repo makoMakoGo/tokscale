@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthChar;
@@ -7,31 +5,21 @@ use unicode_width::UnicodeWidthChar;
 use super::achievements;
 use super::portraits;
 use super::sessions::format_bytes;
-use super::widgets::{format_cost, format_tokens, get_client_display_name};
+use super::widgets::{
+    format_cost, format_tokens, format_tokens_with_commas, get_client_display_name,
+};
 use crate::tui::app::App;
-use crate::tui::data::TokenBreakdown;
+use crate::tui::data::{OverviewFamily, OverviewSummary};
 
 const THREE_COLUMN_MIN_WIDTH: u16 = 110;
 const TWO_COLUMN_MIN_WIDTH: u16 = 80;
 const ONE_COLUMN_MIN_WIDTH: u16 = 40;
 const METRIC_LABEL_WIDTH: usize = 20;
 const CONTENT_PADDING: u16 = 1;
-
-#[derive(Debug, Clone, Default)]
-struct Aggregate {
-    tokens: u64,
-    cost: f64,
-}
-
-#[derive(Debug, Clone, Default)]
-struct SnapshotData {
-    models: BTreeMap<String, Aggregate>,
-    clients: BTreeMap<String, Aggregate>,
-    tokens: TokenBreakdown,
-    peak_daily_tokens: u64,
-    peak_daily_cost: f64,
-    main_session_count: usize,
-}
+// Portrait plus section/favorite spacing, slogan and family stats.
+const FULL_FUN_THINGS_HEIGHT: usize = portraits::PORTRAIT_HEIGHT + 7;
+// Section title, portrait, slogan and family stats without blank rows.
+const COMPACT_FUN_THINGS_HEIGHT: usize = portraits::PORTRAIT_HEIGHT + 3;
 
 pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let snapshot_area = super::overview::render(frame, app, area);
@@ -39,7 +27,7 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let data = collect_snapshot(app);
+    let data = app.overview_summary();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
@@ -69,11 +57,11 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 Constraint::Percentage(34),
             ])
             .split(inner);
-        render_fun_things(frame, app, section_area(columns[0]), &data);
+        render_fun_things(frame, app, section_area(columns[0]), data);
         render_divider(frame, app, columns[1]);
-        render_core(frame, app, section_area(columns[2]), &data);
+        render_core(frame, app, section_area(columns[2]), data);
         render_divider(frame, app, columns[3]);
-        render_right(frame, app, section_area(columns[4]), &data);
+        render_right(frame, app, section_area(columns[4]), data);
     } else if inner.width >= TWO_COLUMN_MIN_WIDTH {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
@@ -83,11 +71,11 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 Constraint::Percentage(55),
             ])
             .split(inner);
-        render_fun_things(frame, app, section_area(columns[0]), &data);
+        render_fun_things(frame, app, section_area(columns[0]), data);
         render_divider(frame, app, columns[1]);
-        render_core(frame, app, section_area(columns[2]), &data);
+        render_core(frame, app, section_area(columns[2]), data);
     } else if inner.width >= ONE_COLUMN_MIN_WIDTH {
-        render_core(frame, app, section_area(inner), &data);
+        render_core(frame, app, section_area(inner), data);
     } else {
         let inner = inner.inner(Margin {
             horizontal: CONTENT_PADDING,
@@ -95,7 +83,7 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         });
         let width = inner.width as usize;
         let height = inner.height as usize;
-        let mut lines = left_lines(app, &data, width, height);
+        let mut lines = left_lines(app, data, width, height);
         lines.truncate(height);
         frame.render_widget(Paragraph::new(lines), inner);
     }
@@ -109,58 +97,11 @@ fn section_area(area: Rect) -> Rect {
     })
 }
 
-fn collect_snapshot(app: &App) -> SnapshotData {
-    let mut data = SnapshotData {
-        main_session_count: app
-            .session_snapshot
-            .client_summaries()
-            .iter()
-            .filter(|summary| app.is_client_selected(&summary.client))
-            .map(|summary| summary.main_session_count)
-            .sum(),
-        ..SnapshotData::default()
-    };
-    for day in &app.data.daily {
-        data.tokens = data
-            .tokens
-            .checked_add(&day.tokens)
-            .expect("overview snapshot token buckets exceed u64::MAX");
-        data.peak_daily_tokens = data.peak_daily_tokens.max(day.tokens.total());
-        if day.cost.is_finite() {
-            data.peak_daily_cost = data.peak_daily_cost.max(day.cost.max(0.0));
-        }
-        for (client, client_info) in &day.client_breakdown {
-            let client_entry = data.clients.entry(client.clone()).or_default();
-            client_entry.tokens = client_entry
-                .tokens
-                .saturating_add(client_info.tokens.total());
-            if client_info.cost.is_finite() {
-                client_entry.cost += client_info.cost.max(0.0);
-            }
-
-            for model in client_info.models.values() {
-                let model_entry = data.models.entry(model.model_id.clone()).or_default();
-                model_entry.tokens = model_entry.tokens.saturating_add(model.tokens.total());
-                if model.cost.is_finite() {
-                    model_entry.cost += model.cost.max(0.0);
-                }
-            }
-        }
-    }
-    data
-}
-
 /// The middle Core column: hero totals, then the Fact block. Fact rows are
 /// ordered to line up horizontally with the achievement ladders in the
 /// right column (Active Days↔streak, Data Size↔tokens, Cache Rate↔cache,
 /// Models Eaten↔models, Clients Used↔clients).
-fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
-    let active_days = app
-        .data
-        .daily
-        .iter()
-        .filter(|day| day.tokens.total() > 0)
-        .count();
+fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary) {
     let lines = vec![
         section_title(app, "Core"),
         Line::default(),
@@ -183,32 +124,29 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
         separator_line(app, area.width as usize),
         section_title(app, "Fact"),
         Line::default(),
-        metric_line(app, "Active Days", active_days.to_string(), Color::Cyan),
+        metric_line(
+            app,
+            "Active Days",
+            data.active_days.to_string(),
+            Color::Cyan,
+        ),
         metric_line(
             app,
             "Data Size",
             format_bytes(app.data.health.input_data_bytes),
             app.theme.foreground,
         ),
-        metric_line(
-            app,
-            "Cache Rate",
-            format!(
-                "{:.1}%",
-                share_percent(data.tokens.cache_read, data.tokens.total())
-            ),
-            Color::Cyan,
-        ),
+        metric_line(app, "Cache Rate", data.cache_rate.to_string(), Color::Cyan),
         metric_line(
             app,
             "Models Eaten",
-            data.models.len().to_string(),
+            data.model_count.to_string(),
             Color::Cyan,
         ),
         metric_line(
             app,
             "Clients Used",
-            data.clients.len().to_string(),
+            data.client_count.to_string(),
             Color::Cyan,
         ),
         inputs_healthy_metric_line(app),
@@ -224,76 +162,42 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
 
 /// The Fun Things column: favorite model family's slogan, portrait and
 /// stats, then the favorite model, client (with its own slogan) and day.
-fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
+fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary) {
     let total = data.tokens.total();
-
-    // Aggregate per model family: gpt-5.5 and gpt-5.6 are one family, gpt.
-    let mut families: BTreeMap<portraits::Family, Aggregate> = BTreeMap::new();
-    for (model_id, aggregate) in &data.models {
-        let entry = families.entry(portraits::family_of(model_id)).or_default();
-        entry.tokens = entry.tokens.saturating_add(aggregate.tokens);
-        if aggregate.cost.is_finite() {
-            entry.cost += aggregate.cost.max(0.0);
-        }
-    }
-    let favorite_family = families
-        .iter()
-        .max_by(|(left_family, left), (right_family, right)| {
-            left.tokens
-                .cmp(&right.tokens)
-                .then_with(|| left.cost.total_cmp(&right.cost))
-                .then_with(|| right_family.cmp(left_family))
-        });
-    let favorite_model = data
-        .models
-        .iter()
-        .max_by(|(left_name, left), (right_name, right)| {
-            left.tokens
-                .cmp(&right.tokens)
-                .then_with(|| left.cost.total_cmp(&right.cost))
-                .then_with(|| right_name.cmp(left_name))
-        });
-
     let width = area.width as usize;
 
-    // Build the Fun Things blocks; how many of them survive depends on the
-    // available height (see the tiers below).
-    let mut model_block: Vec<Line<'static>> = Vec::new();
-    let mut family_line: Option<Line<'static>> = None;
-    let mut model_line: Option<Line<'static>> = None;
-    match favorite_family {
-        Some((family, aggregate)) => {
-            let color = portraits::family_color(app, *family);
-            model_block.push(Line::from(Span::styled(
+    let mut favorite_label = None;
+    let portrait;
+    let slogan;
+    let mut family_stats = None;
+    match data.favorite_family.as_ref() {
+        Some(favorite) => {
+            let family = favorite.family;
+            let color = portraits::family_color(app, family);
+            favorite_label = Some(Line::from(Span::styled(
                 "Favorite Model",
                 Style::default().fg(app.theme.muted),
             )));
-            model_block.push(Line::default());
-            model_block.extend(
-                portraits::lines(app, *family)
-                    .into_iter()
-                    .map(|line| center_line(line, width)),
-            );
-            model_block.push(Line::default());
-            model_block.push(center_line(
+            portrait = portraits::lines(app, family).map(|line| center_line(line, width));
+            slogan = Some(center_line(
                 Line::from(Span::styled(
-                    portraits::slogan(*family).to_string(),
+                    portraits::slogan(family),
                     Style::default().fg(color),
                 )),
                 width,
             ));
-            family_line = Some(center_line(
+            family_stats = Some(center_line(
                 Line::from(vec![
                     Span::styled(
-                        portraits::display_name(*family).to_string(),
+                        portraits::display_name(family),
                         Style::default().fg(color).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         format!(
                             "  {} · {:.1}% · {}",
-                            format_tokens(aggregate.tokens),
-                            share_percent(aggregate.tokens, total),
-                            format_cost(aggregate.cost),
+                            format_tokens(favorite.tokens),
+                            share_percent(favorite.tokens, total),
+                            format_cost(favorite.cost),
                         ),
                         Style::default().fg(app.theme.muted),
                     ),
@@ -302,38 +206,40 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
             ));
         }
         None => {
-            model_block.extend(portraits::lines(app, portraits::Family::Unknown));
-            model_block.push(Line::from(Span::styled(
+            portrait = portraits::lines(app, OverviewFamily::Unknown);
+            slogan = Some(Line::from(Span::styled(
                 "no data yet",
                 Style::default().fg(app.theme.muted),
             )));
         }
     }
-    if let Some((model_name, aggregate)) = favorite_model {
-        model_line = Some(center_line(
+
+    let model_stats = data.favorite_model.as_ref().map(|favorite| {
+        center_line(
             Line::from(vec![
                 Span::styled(
-                    model_name.clone(),
+                    favorite.id.clone(),
                     Style::default()
-                        .fg(app.model_color(model_name))
+                        .fg(app.model_color(&favorite.id))
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!(
                         "  {} · {:.1}% · {}",
-                        format_tokens(aggregate.tokens),
-                        share_percent(aggregate.tokens, total),
-                        format_cost(aggregate.cost),
+                        format_tokens(favorite.tokens),
+                        share_percent(favorite.tokens, total),
+                        format_cost(favorite.cost),
                     ),
                     Style::default().fg(app.theme.muted),
                 ),
             ]),
             width,
-        ));
-    }
+        )
+    });
 
-    let mut client_block: Vec<Line<'static>> = Vec::new();
-    if let Some((key, display, aggregate)) = favorite_client(data) {
+    let mut client_block = Vec::new();
+    if let Some(favorite) = data.favorite_client.as_ref() {
+        let display = get_client_display_name(&favorite.id).to_string();
         client_block.push(Line::default());
         client_block.push(Line::from(Span::styled(
             "Favorite Client",
@@ -341,7 +247,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
         )));
         client_block.push(center_line(
             Line::from(Span::styled(
-                client_slogan(key).to_string(),
+                client_slogan(&favorite.id),
                 Style::default().fg(app.theme.accent),
             )),
             width,
@@ -357,9 +263,9 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
                 Span::styled(
                     format!(
                         "  {} · {:.1}% · {}",
-                        format_tokens(aggregate.tokens),
-                        share_percent(aggregate.tokens, total),
-                        format_cost(aggregate.cost),
+                        format_tokens(favorite.tokens),
+                        share_percent(favorite.tokens, total),
+                        format_cost(favorite.cost),
                     ),
                     Style::default().fg(app.theme.muted),
                 ),
@@ -368,55 +274,59 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotDa
         ));
     }
 
-    // Height tiers: the portrait block is the anchor, everything else is
-    // shed from the tail as the column gets shorter.
-    let header: Vec<Line<'static>> = vec![section_title(app, "Fun Things"), Line::default()];
-    let full_height = header.len()
-        + model_block.len()
-        + family_line.is_some() as usize
-        + model_line.is_some() as usize
-        + client_block.len();
     let height = area.height as usize;
+    let has_favorite_label = favorite_label.is_some();
+    let full_height = if has_favorite_label {
+        FULL_FUN_THINGS_HEIGHT
+    } else {
+        COMPACT_FUN_THINGS_HEIGHT
+    };
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    if height >= full_height.min(10) {
-        lines.extend(header);
-        lines.extend(model_block);
-        if let Some(line) = family_line {
-            lines.push(line);
+    let mut lines = Vec::new();
+    if height >= full_height {
+        lines.push(section_title(app, "Fun Things"));
+        lines.push(Line::default());
+        if let Some(label) = favorite_label {
+            lines.push(label);
+            lines.push(Line::default());
         }
-        if height >= 11 {
-            if let Some(line) = model_line {
-                lines.push(line);
+        lines.extend(portrait);
+        if let Some(slogan) = slogan {
+            if has_favorite_label {
+                lines.push(Line::default());
+            }
+            lines.push(slogan);
+        }
+        if let Some(family_stats) = family_stats {
+            lines.push(family_stats);
+        }
+        if let Some(model_stats) = model_stats {
+            if lines.len() < height {
+                lines.push(model_stats);
             }
         }
-        if height >= full_height {
+        if lines.len() + client_block.len() <= height {
             lines.extend(client_block);
         }
-    } else if height >= 6 {
-        // Compact: title + portrait + slogan + family line.
+    } else if height >= COMPACT_FUN_THINGS_HEIGHT {
         lines.push(section_title(app, "Fun Things"));
-        if model_block.len() >= 7 {
-            lines.extend(model_block[2..7].iter().cloned());
-        } else {
-            lines.extend(model_block);
+        lines.extend(portrait);
+        if let Some(slogan) = slogan {
+            lines.push(slogan);
         }
-        if let Some(line) = family_line {
-            lines.push(line);
+        if let Some(family_stats) = family_stats {
+            lines.push(family_stats);
         }
     } else {
-        // Minimal: portrait + family line only.
-        if model_block.len() >= 5 {
-            lines.extend(model_block[2..5].iter().cloned());
-        } else {
-            lines.extend(model_block);
-        }
-        if let Some(line) = family_line {
-            lines.push(line);
+        lines.extend(portrait);
+        if let Some(family_stats) = family_stats {
+            lines.push(family_stats);
+        } else if let Some(slogan) = slogan {
+            lines.push(slogan);
         }
     }
+    lines.truncate(height);
 
-    lines.truncate(area.height as usize);
     // No wrap: the center padding on the portrait block is meaningful and
     // `Wrap { trim: true }` would strip it.
     frame.render_widget(Paragraph::new(lines), area);
@@ -434,8 +344,8 @@ fn center_line(line: Line<'static>, width: usize) -> Line<'static> {
 }
 
 /// Client slogans, keyed off the raw client id.
-fn client_slogan(client_key: &str) -> &'static str {
-    let key = client_key.to_ascii_lowercase();
+fn client_slogan(client_id: &str) -> &'static str {
+    let key = client_id.to_ascii_lowercase();
     if key == "pi" || key.contains("claude") {
         "夯"
     } else if key.contains("kimi")
@@ -462,7 +372,10 @@ fn client_slogan(client_key: &str) -> &'static str {
 fn inputs_healthy_metric_line(app: &App) -> Line<'static> {
     let inputs = total_inputs(app);
     let (value, color) = if inputs > 0 && app.data.health.clean_inputs == inputs {
-        (format!("✓ {} clean", commafy(inputs as u64)), Color::Green)
+        (
+            format!("✓ {} clean", format_tokens_with_commas(inputs as u64)),
+            Color::Green,
+        )
     } else {
         (health_percentage(app), health_color(app))
     };
@@ -477,21 +390,9 @@ fn share_percent(tokens: u64, total: u64) -> f64 {
     }
 }
 
-fn favorite_client(data: &SnapshotData) -> Option<(&String, String, &Aggregate)> {
-    data.clients
-        .iter()
-        .max_by(|(left_name, left), (right_name, right)| {
-            left.tokens
-                .cmp(&right.tokens)
-                .then_with(|| left.cost.total_cmp(&right.cost))
-                .then_with(|| right_name.cmp(left_name))
-        })
-        .map(|(name, aggregate)| (name, get_client_display_name(name).to_string(), aggregate))
-}
-
 /// One fun fact at a time in the right column's top box, flipping to the
 /// next with a one-line vertical roll every forty ticks.
-fn render_fact_box(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
+fn render_fact_box(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary) {
     let facts = fun_facts(app, data);
     if facts.is_empty() || area.width < 6 || area.height < 2 {
         return;
@@ -543,14 +444,14 @@ fn split_cells(text: &str, width: usize) -> (String, String) {
     (first, second)
 }
 
-fn fun_facts(app: &App, data: &SnapshotData) -> Vec<String> {
+fn fun_facts(app: &App, data: &OverviewSummary) -> Vec<String> {
     let mut facts = Vec::new();
     let total = data.tokens.total();
     if total >= 1_000_000 {
         facts.push(format!(
             "{} tokens ≈ {} 部莎翁全集",
             format_tokens(total),
-            commafy(total / 1_100_000)
+            format_tokens_with_commas(total / 1_100_000)
         ));
     }
     let cost = app.data.total_cost;
@@ -558,32 +459,27 @@ fn fun_facts(app: &App, data: &SnapshotData) -> Vec<String> {
         facts.push(format!(
             "{} ≈ {} 块原味鸡",
             format_cost(cost),
-            commafy((cost / 1.7) as u64)
+            format_tokens_with_commas((cost / 1.7) as u64)
         ));
-        facts.push(format!("≈ {} 杯奶茶", commafy((cost / 3.0) as u64)));
+        facts.push(format!(
+            "≈ {} 杯奶茶",
+            format_tokens_with_commas((cost / 3.0) as u64)
+        ));
     }
     if total > 0 {
-        let share = share_percent(data.tokens.cache_read, total);
-        if share >= 80.0 {
-            facts.push(format!("缓存命中 {share:.0}% · 会过日子"));
-        } else if share < 50.0 {
-            facts.push(format!("缓存命中 {share:.0}% · 败家指数拉满"));
+        if data.cache_rate.reaches(80) {
+            facts.push(format!("缓存命中 {} · 会过日子", data.cache_rate));
+        } else if !data.cache_rate.reaches(50) {
+            facts.push(format!("缓存命中 {} · 败家指数拉满", data.cache_rate));
         }
     }
-    let active_days = app
-        .data
-        .daily
-        .iter()
-        .filter(|day| day.tokens.total() > 0)
-        .count();
-    if active_days >= 7 {
-        facts.push(format!("{active_days} 个活跃日 · 超过大多数情侣"));
+    if data.active_days >= 7 {
+        facts.push(format!("{} 个活跃日 · 超过大多数情侣", data.active_days));
     }
-    if data.models.len() >= 5 {
+    if data.model_count >= 5 {
         facts.push(format!(
             "{} 个模型 · 后宫佳丽 {} 员",
-            data.models.len(),
-            data.models.len()
+            data.model_count, data.model_count
         ));
     }
     if data.peak_daily_tokens > 0 {
@@ -599,24 +495,12 @@ fn fun_facts(app: &App, data: &SnapshotData) -> Vec<String> {
     facts
 }
 
-fn commafy(value: u64) -> String {
-    let digits = value.to_string();
-    let mut out = String::new();
-    for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
-}
-
 fn render_divider(frame: &mut Frame, app: &App, area: Rect) {
     let divider = Line::from(Span::styled("│", Style::default().fg(app.theme.border)));
     frame.render_widget(Paragraph::new(vec![divider; area.height as usize]), area);
 }
 
-fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
+fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary) {
     // Roast facts sit on top so the Achievements title lines up with the
     // Core column's Fact title row.
     let rows = Layout::default()
@@ -634,9 +518,9 @@ fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &SnapshotData) {
     let items = achievements::build(
         app.data.current_streak,
         data.tokens.total(),
-        data.tokens.cache_read,
-        data.models.len(),
-        data.clients.len(),
+        data.cache_rate,
+        data.model_count,
+        data.client_count,
     );
     let mut lines = achievements::lines(app, &items);
     lines.truncate(rows[3].height as usize);
@@ -659,36 +543,23 @@ fn separator_line(app: &App, width: usize) -> Line<'static> {
     ))
 }
 
-fn left_lines(app: &App, data: &SnapshotData, width: usize, height: usize) -> Vec<Line<'static>> {
+fn left_lines(
+    app: &App,
+    data: &OverviewSummary,
+    width: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
     let favorite_model = data
-        .models
-        .iter()
-        .max_by(|(left_name, left), (right_name, right)| {
-            left.tokens
-                .cmp(&right.tokens)
-                .then_with(|| left.cost.total_cmp(&right.cost))
-                .then_with(|| right_name.cmp(left_name))
-        })
-        .map(|(name, _)| name.as_str())
+        .favorite_model
+        .as_ref()
+        .map(|favorite| favorite.id.as_str())
         .unwrap_or("—");
     let favorite_client = data
-        .clients
-        .iter()
-        .max_by(|(left_name, left), (right_name, right)| {
-            left.tokens
-                .cmp(&right.tokens)
-                .then_with(|| left.cost.total_cmp(&right.cost))
-                .then_with(|| right_name.cmp(left_name))
-        })
-        .map(|(name, _)| get_client_display_name(name))
+        .favorite_client
+        .as_ref()
+        .map(|favorite| get_client_display_name(&favorite.id))
         .unwrap_or_else(|| "—".to_string());
     let favorite_width = width.saturating_sub(METRIC_LABEL_WIDTH).clamp(1, 28);
-    let active_days = app
-        .data
-        .daily
-        .iter()
-        .filter(|day| day.tokens.total() > 0)
-        .count();
 
     let groups = [
         vec![
@@ -728,13 +599,18 @@ fn left_lines(app: &App, data: &SnapshotData, width: usize, height: usize) -> Ve
             ),
             // The narrow fallback omits input health; Active Days keeps this
             // group paired with Input Data.
-            metric_line(app, "Active Days", active_days.to_string(), Color::Cyan),
+            metric_line(
+                app,
+                "Active Days",
+                data.active_days.to_string(),
+                Color::Cyan,
+            ),
         ],
         vec![
             metric_line(
                 app,
                 "Models Eaten",
-                data.models.len().to_string(),
+                data.model_count.to_string(),
                 Color::Cyan,
             ),
             metric_line(
@@ -748,7 +624,7 @@ fn left_lines(app: &App, data: &SnapshotData, width: usize, height: usize) -> Ve
             metric_line(
                 app,
                 "Clients Used",
-                data.clients.len().to_string(),
+                data.client_count.to_string(),
                 Color::Cyan,
             ),
             metric_line(
@@ -847,8 +723,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::tui::app::TuiConfig;
-    use crate::tui::session_data::SessionSnapshot;
+    use crate::tui::app::{ProjectionBackend, TuiConfig};
     use ratatui::{backend::TestBackend, Terminal};
     use tokscale_core::{ClientId, TuiSessionEntry};
     use unicode_width::UnicodeWidthStr;
@@ -917,7 +792,7 @@ mod tests {
         let mut app = make_app(120);
         app.data.current_streak = 3;
 
-        let facts = fun_facts(&app, &SnapshotData::default());
+        let facts = fun_facts(&app, &OverviewSummary::default());
 
         assert!(facts.iter().any(|fact| fact.contains("连击 3 天")));
     }
@@ -1037,27 +912,30 @@ mod tests {
             is_main_session: true,
             ..TuiSessionEntry::default()
         };
-        app.session_snapshot = SessionSnapshot::new(
+        app.install_tui_snapshot(
+            crate::tui::data::UsageData::default(),
             vec![
                 main_session("claude", "claude-main"),
                 main_session("codex", "codex-main-1"),
                 main_session("codex", "codex-main-2"),
             ],
-            BTreeMap::new(),
+            Default::default(),
+            ProjectionBackend::Memory(tokscale_core::TuiAcc::new()),
+            tokscale_core::GroupBy::ClientModel,
         );
 
         assert_eq!(app.session_snapshot.client_summaries().len(), 2);
-        assert_eq!(collect_snapshot(&app).main_session_count, 3);
+        assert_eq!(app.overview_summary().main_session_count, 3);
 
         *app.selected_clients.borrow_mut() = HashSet::from([ClientId::Claude]);
+        app.update_data(crate::tui::data::UsageData::default());
 
-        let snapshot = collect_snapshot(&app);
         assert_eq!(app.session_snapshot.client_summaries().len(), 2);
-        assert_eq!(snapshot.main_session_count, 1);
+        assert_eq!(app.overview_summary().main_session_count, 1);
 
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
         terminal
-            .draw(|frame| render_core(frame, &app, frame.area(), &snapshot))
+            .draw(|frame| render_core(frame, &app, frame.area(), app.overview_summary()))
             .unwrap();
         let sessions_row = buffer_lines(&terminal)
             .into_iter()
@@ -1119,7 +997,7 @@ mod tests {
     #[test]
     fn left_metrics_pair_active_days_with_input_data() {
         let app = make_app(120);
-        let data = SnapshotData::default();
+        let data = OverviewSummary::default();
         let lines = left_lines(&app, &data, 54, 14);
         let text = lines.iter().map(line_text).collect::<Vec<_>>();
 
@@ -1143,7 +1021,7 @@ mod tests {
     #[test]
     fn left_metrics_drop_separators_before_metric_rows_when_space_is_tight() {
         let app = make_app(120);
-        let data = SnapshotData::default();
+        let data = OverviewSummary::default();
 
         let lines = left_lines(&app, &data, 54, 12);
         let text = lines.iter().map(line_text).collect::<Vec<_>>();
@@ -1175,7 +1053,7 @@ mod tests {
     #[test]
     fn wide_snapshot_lines_fit_their_columns() {
         let app = make_app(120);
-        let data = SnapshotData::default();
+        let data = OverviewSummary::default();
 
         assert!(left_lines(&app, &data, 29, 16)
             .iter()

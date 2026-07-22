@@ -3,6 +3,9 @@ use ratatui::widgets::Paragraph;
 
 use crate::tui::app::App;
 
+/// Canonical message for the cold-start acquisition state.
+pub(super) const SCANNING_SESSION_DATA: &str = "Scanning session data...";
+
 /// Braille spinner frames shared by every content-area loading state
 /// (cold-start scan, subscription fetch, ...).
 const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];

@@ -19,7 +19,7 @@ use super::cache::ProjectionStore;
 use super::colors::{get_provider_shade, provider_color_key};
 use super::data::{
     build_period_usage, AgentUsage, DailyClientInfo, DailyUsage, DataLoader, HourlyUsage,
-    ModelUsage, PeriodKind, PeriodUsage, TokenBreakdown, UsageData,
+    ModelUsage, OverviewSummary, PeriodKind, PeriodUsage, TokenBreakdown, UsageData,
 };
 use super::interaction::{
     InteractionOutcome, ListInteraction, MoveCommand, TextViewport, WrapMode,
@@ -439,6 +439,7 @@ pub struct App {
     pub theme: Theme,
     pub settings: Settings,
     pub data: UsageData,
+    overview_summary: OverviewSummary,
     pub data_loader: DataLoader,
 
     /// Immutable acquisition boundary chosen when this TUI process starts.
@@ -603,6 +604,7 @@ impl App {
         );
 
         let data = cached_data.unwrap_or_default();
+        let overview_summary = OverviewSummary::derive(&data, 0);
         let has_data = !data.models.is_empty();
         let dialog_stack = DialogStack::new(theme.clone());
         let dialog_client_changed = Rc::new(RefCell::new(false));
@@ -622,6 +624,7 @@ impl App {
             theme,
             settings,
             data,
+            overview_summary,
             data_loader,
             client_universe: client_universe.clone(),
             selected_clients: Rc::new(RefCell::new(client_universe.clone())),
@@ -710,11 +713,23 @@ impl App {
 
     pub fn set_background_loading(&mut self, loading: bool) {
         self.background_loading = loading;
-        // Don't set data.loading - let cached data remain visible during background refresh
+        // Keep the installed generation visible during a background refresh.
     }
 
     pub fn has_installed_generation(&self) -> bool {
         self.projection_backend.is_some()
+    }
+
+    pub(crate) fn is_cold_loading(&self) -> bool {
+        self.background_loading && !self.has_installed_generation()
+    }
+
+    pub(crate) fn is_cold_failed(&self) -> bool {
+        !self.background_loading && !self.has_installed_generation() && self.data.error.is_some()
+    }
+
+    pub(crate) fn overview_summary(&self) -> &OverviewSummary {
+        &self.overview_summary
     }
 
     pub fn has_enabled_subscription_providers(&self) -> bool {
@@ -878,6 +893,19 @@ impl App {
     }
 
     fn replace_usage_data(&mut self, data: UsageData, mark_refresh: bool) {
+        let overview_summary = OverviewSummary::derive(
+            &data,
+            self.selected_main_session_count_for(&self.session_snapshot),
+        );
+        self.replace_usage_data_and_summary(data, overview_summary, mark_refresh);
+    }
+
+    fn replace_usage_data_and_summary(
+        &mut self,
+        data: UsageData,
+        overview_summary: OverviewSummary,
+        mark_refresh: bool,
+    ) {
         if mark_refresh {
             self.clear_model_detail_state(true);
         }
@@ -886,6 +914,10 @@ impl App {
             .selected_graph_cell
             .and_then(|cell| self.graph_date_for_cell(cell));
         drop(std::mem::replace(&mut self.data, data));
+        drop(std::mem::replace(
+            &mut self.overview_summary,
+            overview_summary,
+        ));
         if mark_refresh {
             self.last_refresh = Instant::now();
         }
@@ -924,6 +956,15 @@ impl App {
         self.clamp_selection();
     }
 
+    fn selected_main_session_count_for(&self, snapshot: &SessionSnapshot) -> usize {
+        snapshot
+            .client_summaries()
+            .iter()
+            .filter(|summary| self.is_client_selected(&summary.client))
+            .map(|summary| summary.main_session_count)
+            .sum()
+    }
+
     pub(crate) fn install_tui_snapshot(
         &mut self,
         data: UsageData,
@@ -932,10 +973,15 @@ impl App {
         projection_backend: ProjectionBackend,
         group_by: tokscale_core::GroupBy,
     ) {
-        self.replace_usage_data(data, true);
+        let session_snapshot = SessionSnapshot::new(sessions, client_space);
+        let overview_summary = OverviewSummary::derive(
+            &data,
+            self.selected_main_session_count_for(&session_snapshot),
+        );
+        self.replace_usage_data_and_summary(data, overview_summary, true);
         drop(std::mem::replace(
             &mut self.session_snapshot,
-            SessionSnapshot::new(sessions, client_space),
+            session_snapshot,
         ));
         drop(self.projection_backend.replace(projection_backend));
         self.session_projection_status = SessionProjectionStatus::Ready;
@@ -984,15 +1030,6 @@ impl App {
 
     pub fn model_color(&self, model: &str) -> Color {
         self.model_color_for("", model)
-    }
-
-    pub fn has_visible_data(&self) -> bool {
-        !self.data.models.is_empty()
-            || !self.data.daily.is_empty()
-            || !self.data.agents.is_empty()
-            || self.data.graph.is_some()
-            || self.data.total_tokens > 0
-            || self.data.total_cost > 0.0
     }
 
     pub fn set_error(&mut self, error: Option<String>) {
@@ -4815,6 +4852,49 @@ mod tests {
             .unwrap()
             .iter()
             .all(|model| model.get("workspaceKey").is_some()));
+    }
+
+    #[test]
+    fn overview_summary_tracks_local_projection_without_digest_invalidation() {
+        let mut app = make_app();
+        app.last_input_digest = Some(42);
+        app.update_data(UsageData {
+            daily: vec![daily_usage(
+                "2026-07-20",
+                1.0,
+                vec![("gpt-5.5", "openai", 1.0)],
+            )],
+            ..UsageData::default()
+        });
+
+        assert_eq!(app.overview_summary().active_days, 1);
+        assert_eq!(app.overview_summary().model_count, 1);
+        assert_eq!(
+            app.overview_summary()
+                .favorite_model
+                .as_ref()
+                .map(|favorite| favorite.id.as_str()),
+            Some("gpt-5.5")
+        );
+
+        app.update_projected_data(UsageData {
+            daily: vec![
+                daily_usage("2026-07-20", 2.0, vec![("qwen3-coder-plus", "qwen", 2.0)]),
+                daily_usage("2026-07-21", 3.0, vec![("kimi-k2", "kimi", 3.0)]),
+            ],
+            ..UsageData::default()
+        });
+
+        assert_eq!(app.last_input_digest, Some(42));
+        assert_eq!(app.overview_summary().active_days, 2);
+        assert_eq!(app.overview_summary().model_count, 2);
+        assert_eq!(
+            app.overview_summary()
+                .favorite_model
+                .as_ref()
+                .map(|favorite| favorite.id.as_str()),
+            Some("kimi-k2")
+        );
     }
 
     #[test]

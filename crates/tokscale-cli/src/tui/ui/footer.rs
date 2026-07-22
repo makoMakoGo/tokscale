@@ -4,7 +4,6 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use super::spinner::{get_phase_message, get_scanner_spans};
 use super::widgets::{format_cost, format_tokens};
 use crate::tui::app::{App, ClickAction, SortField, Tab};
 use crate::tui::data::{build_period_usage, PeriodKind};
@@ -513,31 +512,19 @@ fn status_row_line(app: &App) -> Line<'static> {
         return usage_status_row_line(app);
     }
 
+    // Cold loading and cold failure already own the content area. Repeating
+    // their state here would duplicate the scan or paint an error as success.
+    if app.is_cold_loading() || app.is_cold_failed() {
+        return Line::default();
+    }
+
     let mut spans: Vec<Span> = Vec::new();
 
-    if app.data.loading {
-        let scanner_spans = get_scanner_spans(app.spinner_frame, &app.theme);
-        spans.extend(scanner_spans);
-        spans.push(Span::raw(" "));
+    if app.background_loading {
         spans.push(Span::styled(
-            get_phase_message("parsing-inputs"),
+            "Refreshing cached data in background...",
             Style::default().fg(app.theme.muted),
         ));
-    } else if app.background_loading {
-        if app.has_visible_data() {
-            spans.push(Span::styled(
-                "Refreshing cached data in background...",
-                Style::default().fg(app.theme.muted),
-            ));
-        } else {
-            let scanner_spans = get_scanner_spans(app.spinner_frame, &app.theme);
-            spans.extend(scanner_spans);
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                get_phase_message("parsing-inputs"),
-                Style::default().fg(app.theme.muted),
-            ));
-        }
     } else if let Some(ref msg) = app.status_message {
         spans.push(Span::styled(
             msg.clone(),
@@ -651,7 +638,7 @@ fn elapsed_label(elapsed: std::time::Duration) -> String {
 mod tests {
     use super::*;
     use crate::commands::usage::{UsageMetric, UsageOutput, UsageProviderId};
-    use crate::tui::app::TuiConfig;
+    use crate::tui::app::{ProjectionBackend, TuiConfig};
     use crate::tui::data::UsageData;
     use crate::tui::settings::Settings;
 
@@ -787,6 +774,30 @@ mod tests {
             let text = line_text(help_row_line(&app));
             assert_eq!(text.contains("[g]"), expected, "tab {tab:?}");
         }
+    }
+
+    #[test]
+    fn cold_local_generation_states_leave_the_footer_status_empty() {
+        let mut app = make_app_on(Tab::Overview);
+        app.set_background_loading(true);
+        assert_eq!(line_text(status_row_line(&app)), "");
+
+        app.set_background_loading(false);
+        app.set_error(Some("injected cold failure".to_string()));
+        app.set_local_report_status("Error: injected cold failure");
+        assert_eq!(line_text(status_row_line(&app)), "");
+    }
+
+    #[test]
+    fn empty_installed_generation_uses_the_warm_refresh_status() {
+        let mut app = make_app_on(Tab::Overview);
+        app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
+        app.set_background_loading(true);
+
+        assert_eq!(
+            line_text(status_row_line(&app)),
+            "Refreshing cached data in background..."
+        );
     }
 
     #[test]

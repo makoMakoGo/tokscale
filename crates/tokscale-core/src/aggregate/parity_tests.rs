@@ -797,7 +797,6 @@ fn contract_tui_view_materializes_usage_data() {
             .sum::<u64>(),
         "TUI total tokens should derive from finished model entries",
     );
-    assert!(!data.loading);
     assert!(data.error.is_none());
 }
 

@@ -196,7 +196,6 @@ pub struct UsageData {
     pub graph: Option<UsageGraphData>,
     pub total_tokens: u64,
     pub total_cost: f64,
-    pub loading: bool,
     pub error: Option<String>,
     pub current_streak: u32,
     pub longest_streak: u32,

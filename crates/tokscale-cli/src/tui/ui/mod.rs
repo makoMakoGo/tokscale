@@ -17,7 +17,6 @@ mod period;
 mod portraits;
 mod radar;
 mod sessions;
-pub mod spinner;
 mod stats;
 mod table_layout;
 mod usage;
@@ -56,16 +55,12 @@ pub(crate) fn render_with_state(frame: &mut Frame, app: &mut App, state: &mut Vi
     // Usage has an independent remote-fetch lifecycle and stays usable while
     // local acquisition is cold-loading or has failed.
     let local_generation_tab = app.current_tab.depends_on_local_generation();
-    let cold_failed =
-        local_generation_tab && !app.has_installed_generation() && app.data.error.is_some();
-    if local_generation_tab && app.data.loading && !app.background_loading {
-        render_loading(frame, app, chunks[1]);
-    } else if local_generation_tab && app.background_loading && !app.has_installed_generation() {
+    if local_generation_tab && app.is_cold_loading() {
         // Cold start: the first scan is still running and no cached
         // generation is installed, so there is nothing meaningful to show
         // yet — render the loading state instead of empty/zero tab states.
         render_loading(frame, app, chunks[1]);
-    } else if cold_failed {
+    } else if local_generation_tab && app.is_cold_failed() {
         render_cold_failed(frame, app, chunks[1]);
     } else {
         render_current_tab(frame, app, state, chunks[1]);
@@ -190,12 +185,7 @@ fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    loading::render(
-        frame,
-        app,
-        inner,
-        spinner::get_phase_message("parsing-inputs"),
-    );
+    loading::render(frame, app, inner, loading::SCANNING_SESSION_DATA);
 }
 
 #[cfg(test)]
@@ -257,7 +247,11 @@ mod tests {
 
         let screen = render_screen(&mut app, 120, 32).join("\n");
 
-        assert!(screen.contains("Scanning session data..."));
+        assert_eq!(
+            screen.matches("Scanning session data...").count(),
+            1,
+            "{screen}"
+        );
         assert!(screen.contains('~'), "fish pond should render: {screen}");
         assert!(screen.contains('°'), "fish pond should render: {screen}");
         assert!(!screen.contains("No session data available"));
@@ -271,7 +265,11 @@ mod tests {
 
         let screen = render_screen(&mut app, 40, 12).join("\n");
 
-        assert!(screen.contains("Scanning session data..."), "{screen}");
+        assert_eq!(
+            screen.matches("Scanning session data...").count(),
+            1,
+            "{screen}"
+        );
         assert!(!screen.contains('°'), "pond must degrade away: {screen}");
     }
 
@@ -292,6 +290,7 @@ mod tests {
         let mut app = make_app();
         let diagnostic = "injected cold failure with a deliberately long message that must wrap onto multiple lines inside the content area";
         app.set_error(Some(diagnostic.to_string()));
+        app.set_local_report_status(&format!("Error: {diagnostic}"));
 
         let lines = render_screen(&mut app, 120, 32);
         let screen = lines.join("\n");

@@ -1275,7 +1275,6 @@ impl TuiAcc {
             graph: Some(graph),
             total_tokens,
             total_cost: sane_cost(total_cost),
-            loading: false,
             error: None,
             current_streak,
             longest_streak,
