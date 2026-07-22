@@ -30,9 +30,8 @@ When using an installed binary, use `tokscale clients` instead.
 | `kimi` | Kimi | `$KIMI_CODE_HOME/sessions/**/agents/*/wire.jsonl` (`KIMI_CODE_HOME` defaults to `~/.kimi-code`) | Reads current-layout per-agent request and usage records. |
 | `qwen` | Qwen CLI | `~/.qwen/projects/**/*.jsonl` | Reads Qwen chat JSONL files. |
 | `roocode` | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/**/ui_messages.json` | Also scans VS Code server globalStorage where supported. |
-| `kilocode` | KiloCode | `~/.config/Code/User/globalStorage/kilocode.kilo-code/tasks/**/ui_messages.json` | Same task-log family as Roo Code. |
 | `mux` | Mux | `~/.mux/sessions/**/session-usage.json` | Reads per-session usage summaries. |
-| `kilo` | Kilo CLI | `~/.local/share/kilo/kilo.db` | Reads local SQLite data. |
+| `kilo` | Kilo | `~/.local/share/kilo/kilo.db` | Reads the current SQLite store shared by Kilo frontends running under the same OS user and data environment; see [verified storage facts](facts/kilo.md). |
 | `hermes` | Hermes Agent | `$HERMES_HOME/state.db`, fallback `~/.hermes/state.db` | Ignores app cost fields and derives cost from tokens. |
 | `copilot` | Copilot | `~/.copilot/otel/*.jsonl` or `COPILOT_OTEL_FILE_EXPORTER_PATH` | Requires Copilot OTEL file export. |
 | `goose` | Goose | `~/.local/share/goose/sessions/sessions.db` and platform legacy roots | `GOOSE_PATH_ROOT` can point at an alternate root. |

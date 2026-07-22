@@ -68,8 +68,16 @@ mod tests {
 
     #[test]
     fn removed_clients_are_not_client_identities() {
-        assert_eq!(ClientId::from_str("cursor"), None);
-        assert_eq!(ClientId::from_str("trae"), None);
+        for client in ["cursor", "trae", "kilocode"] {
+            assert_eq!(ClientId::from_str(client), None);
+        }
+    }
+
+    #[test]
+    fn kilo_is_the_only_current_kilo_identity() {
+        assert_eq!(ClientId::from_str("kilo"), Some(ClientId::Kilo));
+        assert_eq!(ClientId::Kilo.display_name(), "Kilo");
+        assert_eq!(ClientId::Kilo.short_name(), "Kilo");
     }
 
     #[test]

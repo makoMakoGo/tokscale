@@ -1902,31 +1902,6 @@ fn test_retain_for_requested_clients_keeps_original_client_matches() {
     ));
 }
 
-#[test]
-fn test_retain_for_requested_clients_preserves_kilo_split() {
-    let kilocode_only: HashSet<&str> = HashSet::from(["kilocode"]);
-    assert!(retain_for_requested_clients(
-        "kilocode",
-        "gpt-5",
-        "openai",
-        &kilocode_only
-    ));
-    assert!(!retain_for_requested_clients(
-        "kilo",
-        "gpt-5",
-        "openai",
-        &kilocode_only
-    ));
-
-    let kilo_only: HashSet<&str> = HashSet::from(["kilo"]);
-    assert!(retain_for_requested_clients(
-        "kilo", "gpt-5", "openai", &kilo_only
-    ));
-    assert!(!retain_for_requested_clients(
-        "kilocode", "gpt-5", "openai", &kilo_only
-    ));
-}
-
 fn write_kimi_code_usage_fixture(input_home: &std::path::Path) {
     let kimi_home = input_home.join(".kimi-code");
     std::fs::create_dir_all(&kimi_home).unwrap();

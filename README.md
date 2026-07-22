@@ -120,7 +120,7 @@ The canonical client identity list lives in
 Current catalog entries include:
 
 OpenCode, Claude, Codex CLI, Gemini CLI, Amp, Droid, OpenClaw,
-Pi, OMP, Kimi, Qwen CLI, Roo Code, KiloCode, Mux, Kilo CLI,
+Pi, OMP, Kimi, Qwen CLI, Roo Code, Mux, Kilo,
 Hermes Agent, Copilot, Goose, Codebuff, CodeBuddy, Antigravity, Zed Agent,
 ZCode, Kiro, Junie, Warp, Cline, Command Code, and Grok Build.
 

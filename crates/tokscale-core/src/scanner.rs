@@ -525,11 +525,11 @@ fn is_opencode_db_filename(name: &str) -> bool {
 }
 
 fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
-    // OpenCode custom databases use only `scanner.opencodeDbPaths`. Kilo CLI
-    // and Goose currently load fixed SQLite database locations.
-    // Roo/KiloCode require local + remote and server task roots. Hermes/Zed
-    // profile databases are named consistently enough for `scan_directory` to
-    // find them from user-provided roots.
+    // OpenCode custom databases use only `scanner.opencodeDbPaths`. Kilo and
+    // Goose currently load fixed SQLite database locations. Roo Code requires
+    // local + remote and server task roots. Hermes/Zed profile databases are
+    // named consistently enough for `scan_directory` to find them from
+    // user-provided roots.
     !matches!(
         client_id,
         ClientId::OpenCode | ClientId::Kilo | ClientId::Goose
@@ -1240,6 +1240,22 @@ mod tests {
     fn test_parse_extra_dirs_invalid_client() {
         let enabled: HashSet<ClientId> = ClientId::iter().collect();
         let error = parse_extra_dirs("nonexistent:/tmp/foo", &enabled).unwrap_err();
+        assert!(error.to_string().contains("unknown client"));
+    }
+
+    #[test]
+    fn retired_kilocode_id_is_rejected_by_scanner_configuration() {
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": { "kilocode": ["/tmp/kilo"] }
+        }))
+        .unwrap();
+        assert!(matches!(
+            settings.validate(),
+            Err(ScannerSettingsError::UnknownClient { client }) if client == "kilocode"
+        ));
+
+        let enabled: HashSet<ClientId> = ClientId::iter().collect();
+        let error = parse_extra_dirs("kilocode:/tmp/kilo", &enabled).unwrap_err();
         assert!(error.to_string().contains("unknown client"));
     }
 }

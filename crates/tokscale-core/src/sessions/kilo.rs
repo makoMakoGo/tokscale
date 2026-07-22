@@ -1,9 +1,9 @@
-//! Kilo CLI session parser
+//! Kilo session parser
 //!
 //! Parses messages from:
 //! - SQLite database: ~/.local/share/kilo/kilo.db
 //!
-//! Kilo CLI uses a SQLite database similar to OpenCode.
+//! Kilo uses a SQLite database similar to OpenCode.
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;

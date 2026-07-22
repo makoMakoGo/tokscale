@@ -5,6 +5,9 @@ Status: Accepted
 This ADR owns only the current-format storage boundary. ADR 0020 owns usage
 eligibility, failure containment, and cache correctness.
 
+ADR 0032 applies this boundary to Kilo and defines its single current-runtime
+client identity.
+
 ## Context
 
 Supporting retired local storage formats makes discovery, precedence,
