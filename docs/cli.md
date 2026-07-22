@@ -25,9 +25,9 @@ for example, `tokscale | jq` fails and points to `tokscale models --json`
 instead of changing into a report command.
 
 Available `--tab` values are `overview`, `models`, `monthly`, `weekly`,
-`daily`, `hourly`, `stats`, `agents`, and `usage`. Requesting the Usage tab
-while `usageTabEnabled` is false is an error; Tokscale does not silently open
-Overview.
+`daily`, `hourly`, `stats`, `agents`, `usage`, and `sessions`. Requesting the
+Usage tab while `usageTabEnabled` is false is an error; Tokscale does not
+silently open Overview.
 
 CLI options override settings for the current TUI process and do not rewrite
 `settings.json`. The TUI captures normal mouse input; use the terminal's
@@ -101,13 +101,15 @@ back to the process home or client-specific environment roots.
 
 Report commands scan the resolved scope for that invocation. The TUI fixes it
 as the process-wide client universe: its Clients picker initially checks every
-member and can apply only a session-local, non-persisted subset. Space toggles
-the draft selection, Enter applies it, and Esc cancels it. Picker and Group By
-changes reproject the installed generation without scanning, writing the cache,
-or resetting automatic refresh. Manual and automatic refresh scan the original
-universe. Usage and Sessions follow the selected subset, while Data Health
-diagnostics continue to describe the complete universe so a view filter cannot
-conceal an acquisition failure.
+member and can apply only a session-local, non-persisted subset. Search filters
+the list, arrows navigate matches, Space toggles one match, and `*` inverts all
+current matches. Enter applies one non-empty draft; Esc or a click outside the
+picker cancels it. Picker and Group By changes reproject the installed
+generation without scanning, writing the cache, or resetting automatic
+refresh. Manual and automatic refresh scan the original universe. Local report
+rows, charts, agents, and Sessions follow the committed subset. Data Health and
+scanned input bytes continue to describe the complete universe, while the
+remote Subscription Usage tab has an independent lifecycle.
 
 Date boundaries are inclusive and use the local timezone:
 

@@ -3,9 +3,10 @@
 Status: Accepted
 
 ADR 0020 owns input failure containment, input-dependency completeness,
-snapshot revalidation, and usage identity. ADR 0028 owns the fixed TUI client
-universe and session-local client selection. This ADR owns the single-copy
-pipeline, cache-envelope/pruning contract, and atomic TUI generation lifecycle.
+snapshot revalidation, and usage identity. ADR 0028 owns the TUI client scope,
+generation lifecycle, projection, presentation, and action contract. This ADR
+owns the single-copy pipeline, cache-envelope/pruning contract, and atomic
+storage mechanics used to publish a TUI generation.
 
 ## Context
 
@@ -78,10 +79,10 @@ The parse pipeline must hold at most one owned copy of any message.
   A reader pins the opened bundle inode, so a view switch cannot mix data from
   different refreshes even while a newer generation is being published.
 - Startup treats that generation as one logical bundle. A fresh bundle serves
-  every tab, including Sessions, without scanning inputs. A stale bundle
-  remains wholly visible while one background fold prepares its replacement.
-  A cold miss keeps the UI responsive while one background fold builds usage,
-  sessions, and all grouping projections together.
+  every local-report tab, including Sessions, without scanning inputs. A stale
+  bundle remains wholly visible while one background fold prepares its
+  replacement. A cold miss keeps the UI responsive while one background fold
+  builds local usage, sessions, and all grouping projections together.
 - A successful automatic or manual refresh atomically replaces usage,
   sessions, and every Group By projection with one generation. A failed
   refresh preserves the prior complete generation and reports an explicit

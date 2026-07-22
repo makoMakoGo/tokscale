@@ -1,98 +1,149 @@
-# ADR 0028: Separate the TUI client universe from view selection
+# ADR 0028: TUI generation, projection, and presentation contract
 
 Status: Accepted
 
 ## Context
 
-The TUI previously used one mutable `enabled_clients` set as the scanner
-scope, cache identity, client-picker state, and refresh input. Toggling a
-checkbox therefore forced a complete input scan and rewrote the cache even
-though the choice was only a temporary presentation filter. Group By had a
-similar scanner fallback when its local projection backend was unavailable or
-failed.
+The TUI has four different responsibilities that must not infer one another's
+state: acquiring local inputs, installing a coherent data generation,
+projecting that generation for the current view, and presenting the result.
+Treating a client selection, an empty collection, or a refresh as if it were
+one of the other responsibilities creates rescans, contradictory empty pages,
+and controls that advertise operations the current view cannot perform.
 
-This mixed an acquisition boundary with view state. It also made a temporary
-picker choice capable of replacing the immutable generation that the other
-tabs were reading.
+This ADR defines the complete contract for those responsibilities.
 
 ## Decision
 
-Every TUI process has two distinct client sets:
+### Client scope
 
-- `ClientUniverse` is fixed at startup. An explicit `--client` list wins,
-  otherwise `defaultClients` applies, and without either the universe is the
-  complete accepted client catalog. Cold load, cache identity, inventory
-  probes, manual refresh, and automatic refresh all use this same universe.
-- `selected_clients` is a session-local view filter. It starts equal to the
-  universe, is never persisted, and must remain a non-empty subset of the
-  universe. The client picker lists exactly the universe and cannot enable a
-  client outside it.
+Each TUI process resolves one immutable `ClientUniverse` at startup. An
+explicit `--client` list wins, otherwise `defaultClients` applies, and without
+either the universe is the complete accepted local client catalog. Every local
+scan, cache identity, inventory probe, manual refresh, and automatic refresh
+uses this universe.
 
-Client-picker edits are transactional. Typing narrows the list by client name,
-the arrow keys navigate the matching rows, and Space toggles the highlighted
-client in a dialog-local draft. `*` inverts every row matched by the current
-filter, or the complete universe when the filter is empty. The draft may
-temporarily be empty so toggle and bulk operations compose predictably, but
-Enter rejects an empty draft with an explicit error. A valid Enter commits the
-draft and closes the picker, while Esc or an outside click closes it without
-changing `selected_clients`. The picker has no per-client hotkeys; catalog
-growth must not allocate from a global keyboard namespace. A commit reprojects
-once after the dialog closes, so picker input cannot leak through to the
-underlying view.
+`selected_clients` is a non-persisted, non-empty subset used only to project
+the installed generation. `data_clients` is the authoritative scope paired
+with the currently installed projection; rendering must not read a picker
+draft or a selection that has not yet been projected.
 
-The scanner produces one canonical, client-aware generation for the entire
-universe. `Clients` and `Group By` changes project that installed generation;
-they never start a scanner, alter the inventory digest, or write the cache. A
-projection succeeds atomically or the prior client selection, grouping, and
-view remain installed with an explicit diagnostic.
+The client picker is transactional. Search filters by client name, arrows
+navigate matches, Space toggles the highlighted match, and `*` inverts all
+current matches. Enter commits one non-empty draft and reprojects once; Esc or
+an outside click discards it. The picker has no per-client hotkeys.
 
-The selection filters usage rows, charts, agents, and Sessions. Data Health
-remains generation-wide: hiding a client from the report must not hide the fact
-that one of its inputs was degraded or failed. Overview health counts, scanned
-input bytes, and exported health therefore describe the fixed
-universe, not the temporary selection.
+### Generation and acquisition
 
-After a committed selection, an active detail view is reconciled by semantic
-identity. It remains open with refreshed rows when its locked identity still
-exists; otherwise it closes with an explicit status. This reconciliation uses
-the installed generation and does not broaden the scanner boundary.
+One local generation contains the input manifest, data-health result, session
+snapshot, client-aware canonical accumulator, and all exposed Group By usage
+projections. It is published and installed atomically. Local usage projections,
+Sessions, and the other local report tabs therefore cannot mix generations.
 
-Only these events may request an input scan:
+Only these events may scan inputs:
 
-1. a stale or missing startup generation;
+1. startup with a stale or missing generation;
 2. automatic refresh;
-3. explicit manual refresh.
+3. explicit local refresh.
 
-Clients and Group By controls are unavailable until a generation has been
-installed. They remain usable while a newer generation refreshes in the
-background because the previous generation is still coherent.
+Acquisition stays in the background. Before the first generation exists, the
+local TUI is either loading or has an explicit cold failure; it cannot claim a
+successful empty report. A warm refresh leaves the installed generation
+visible. If that refresh fails, the same generation remains installed and the
+failure is exposed as a degraded diagnostic.
 
-TUI cache schema 44 retains the client-aware canonical accumulator and four
-eager public Group By projections in one atomic bundle. The normal
-full-universe view continues to read an eager projection. The canonical state
-is deserialized lazily only after the user selects a proper subset, then reused
-for later local projections. The cache records `clientUniverse`; it never
-records the temporary selection. Startup validates the canonical state's
-required structural envelope and SHA-256 content digest before accepting the
-bundle, while its aggregate contents remain lazily deserialized.
+The remote Subscription Usage tab has its own lifecycle and is not classified
+from the local generation.
+
+### Projection
+
+Clients and Group By are projections of the installed generation. They never
+scan inputs, write the generation cache, persist picker state, or reset the
+refresh clock. Projection controls are unavailable until a generation exists
+and remain usable during a warm background refresh.
+
+A usage projection is installed atomically with its `data_clients`, grouping,
+and usage data. Sessions filters the fixed generation snapshot through that
+same committed client scope. Failure restores the complete prior usage
+projection and reports an explicit diagnostic. Detail selections are
+reconciled by semantic identity after a projection; a detail that no longer
+exists closes explicitly instead of becoming an empty detail page.
+
+Data Health and scanned input bytes describe the immutable generation-wide
+client universe. Usage rows, charts, agents, and Sessions follow the selected
+client projection. A view filter therefore cannot hide an input failure or
+change the amount of input data acquired for the generation.
+
+### Presentation
+
+Every render frame classifies each top-level view through one presentation
+authority:
+
+```text
+Loading | Failed | Empty(subject) | Ready
+```
+
+`Loading` and `Failed` require the absence of an installed local generation.
+Once a generation exists, each top-level view is `Empty` or `Ready` according
+to the structural collection that view renders, never according to token or
+cost totals. The supported empty subjects are usage, agent breakdown, and
+sessions. Detail views do not invent separate empty states.
+
+Pages own their panel title and layout, then consume the classified state;
+they do not inspect data again to decide whether to show an empty page.
+Overview keeps Snapshot visible while its chart is empty. Sessions keeps a
+warm-refresh degraded diagnostic visible alongside its empty body.
+
+All empty views use one information template:
+
+```text
+No <subject> in the current view
+Scope: <selection> · Current report range
+[s] Change clients · [r] Rescan
+```
+
+For one selected client, `<selection>` is always its display name. A complete
+multi-client universe is `All clients`; every proper multi-client subset is
+`<N> selected clients`. Narrow layouts remove the range suffix before
+truncating the scope, and all truncation uses terminal display width rather
+than bytes or Unicode scalar count. The footer uses the same scope summary and
+degrades to the same recovery actions.
+
+### Actions
+
+The same presentation result produces one `ActionSet` for the frame. Footer
+help, contextual keyboard dispatch, wheel handling, and sortable-row hit areas
+consume that set instead of independently guessing whether an action applies.
+Header tab navigation and Ready-only page interactions such as contribution
+graph cells remain owned by their renderers; `ActionSet` is a capability set,
+not a command bus.
+
+An empty view advertises only recovery and navigation actions. Valid global
+operations remain accepted without being promoted as recovery; in particular,
+export still writes the complete current report when the Agents breakdown or
+another displayed collection is empty. Row sorting, details, copying a row,
+and row hit areas are absent when there is no row to operate on.
+
+### Data and cache shape
+
+`UsageData.graph` is a total value. A valid empty graph is
+`UsageGraphData { weeks: [] }`; `Option<UsageGraphData>` is not part of the
+domain. The current cache schema stores the graph object in every projection.
+A missing or `null` graph is an invalid current-schema generation and becomes
+an ordinary cache miss.
+
+The TUI accepts only the current schema 44 generation bundle. It has no
+compatibility decoder, migration branch, or synthesized defaults for older or
+partial bundle shapes.
 
 ## Consequences
 
-- `tokscale tui --client claude,codex` scans only Claude and Codex. Its picker
-  lists only those two clients and initially checks both. Running TUI without a
-  configured scope scans and lists the complete catalog.
-- Rechecking a client that was disabled during the current process is an
-  in-memory or pinned-cache projection, not a rescan. Seeing a client outside
-  the startup universe requires restarting with a wider scope.
-- Quitting discards picker state. The next process again starts with every
-  client in its resolved universe selected.
-- Only schema 44 TUI bundles are accepted; every other schema is an explicit
-  miss and rebuilds once.
-- Cache files grow because they retain projectable canonical aggregate state,
-  but no raw `UnifiedMessage` corpus is retained. Fine-grained state enters
-  steady-state memory lazily only when subset projection is requested.
-- Acquisition has no content-area blocking reload state. Scanner failure and
-  projection failure remain explicit states; neither is converted into
-  invented empty data.
-- Local Clients and Group By projection does not reset the acquisition refresh
-  clock; presentation changes cannot postpone automatic refresh.
+- Acquisition, generation installation, projection, presentation, and action
+  availability each have one authority and one direction of dependency.
+- A selected client with no usage receives the same honest, scoped template
+  across local report pages without claiming a scan failure or a global lack
+  of data.
+- Adding a top-level page requires declaring its structural readiness and
+  empty subject once; it must not create another lifecycle or shortcut table.
+- Cache or refresh failures remain explicit, while valid empty projections are
+  ordinary installed data rather than disguised errors.
