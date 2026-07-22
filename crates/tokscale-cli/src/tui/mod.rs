@@ -6,6 +6,7 @@ pub mod data;
 mod event;
 mod export;
 mod interaction;
+mod model_family;
 mod session_data;
 pub mod settings;
 mod themes;

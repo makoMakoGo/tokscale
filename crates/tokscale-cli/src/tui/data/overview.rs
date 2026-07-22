@@ -2,40 +2,8 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use tokscale_core::inferred_provider_from_model;
-
 use super::{TokenBreakdown, UsageData};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum OverviewFamily {
-    Gpt,
-    Claude,
-    Gemini,
-    Glm,
-    Deepseek,
-    Qwen,
-    Kimi,
-    Minimax,
-    Mimo,
-    Unknown,
-}
-
-impl OverviewFamily {
-    pub(crate) fn from_model_id(model_id: &str) -> Self {
-        match inferred_provider_from_model(model_id) {
-            Some("openai") => Self::Gpt,
-            Some("anthropic") => Self::Claude,
-            Some("google") => Self::Gemini,
-            Some("zai") => Self::Glm,
-            Some("deepseek") => Self::Deepseek,
-            Some("qwen") => Self::Qwen,
-            Some("kimi") => Self::Kimi,
-            Some("minimax") => Self::Minimax,
-            Some("xiaomi") => Self::Mimo,
-            _ => Self::Unknown,
-        }
-    }
-}
+use crate::tui::model_family::ModelFamily;
 
 /// Cache-token share rounded to the one decimal place shown by Overview.
 ///
@@ -83,7 +51,7 @@ pub(crate) struct RankedUsage {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RankedFamilyUsage {
-    pub(crate) family: OverviewFamily,
+    pub(crate) family: ModelFamily,
     pub(crate) tokens: u64,
     pub(crate) cost: f64,
 }
@@ -115,7 +83,7 @@ impl OverviewSummary {
         };
         let mut models = BTreeMap::<String, Aggregate>::new();
         let mut clients = BTreeMap::<String, Aggregate>::new();
-        let mut families = BTreeMap::<OverviewFamily, Aggregate>::new();
+        let mut families = BTreeMap::<ModelFamily, Aggregate>::new();
 
         for day in &data.daily {
             let daily_tokens = day.tokens.total();
@@ -144,7 +112,7 @@ impl OverviewSummary {
                         .or_default()
                         .add(model_tokens, model.cost);
                     families
-                        .entry(OverviewFamily::from_model_id(&model.model_id))
+                        .entry(ModelFamily::from_model_id(&model.model_id))
                         .or_default()
                         .add(model_tokens, model.cost);
                 }
@@ -200,7 +168,7 @@ fn favorite_named(entries: BTreeMap<String, Aggregate>) -> Option<RankedUsage> {
         })
 }
 
-fn favorite_family(entries: BTreeMap<OverviewFamily, Aggregate>) -> Option<RankedFamilyUsage> {
+fn favorite_family(entries: BTreeMap<ModelFamily, Aggregate>) -> Option<RankedFamilyUsage> {
     entries
         .into_iter()
         .max_by(|(left_family, left), (right_family, right)| {
@@ -264,7 +232,6 @@ mod tests {
                         provider: String::new(),
                         model_id: model_id.to_string(),
                         display_name: model_id.to_string(),
-                        color_key: model_id.to_string(),
                         workspace_key: None,
                         workspace_label: None,
                         tokens: model_tokens,
@@ -337,7 +304,7 @@ mod tests {
         assert_eq!(client.tokens, 200);
 
         let family = summary.favorite_family.unwrap();
-        assert_eq!(family.family, OverviewFamily::Gpt);
+        assert_eq!(family.family, ModelFamily::Gpt);
         assert_eq!(family.tokens, 325);
         assert_eq!(family.cost, 5.0);
     }
@@ -358,33 +325,5 @@ mod tests {
             assert!(!CacheRate::from_tokens(boundary - 6, 10_000).reaches(threshold));
         }
         assert_eq!(CacheRate::from_tokens(1, 0), CacheRate::default());
-    }
-
-    #[test]
-    fn family_detection_covers_the_overview_portraits() {
-        for (model_id, family) in [
-            ("gpt-5.5", OverviewFamily::Gpt),
-            ("codex-mini-latest", OverviewFamily::Gpt),
-            ("o3", OverviewFamily::Gpt),
-            ("claude-opus-4-7", OverviewFamily::Claude),
-            ("gemini-2.5-pro", OverviewFamily::Gemini),
-            ("glm-4.6", OverviewFamily::Glm),
-            ("deepseek-v3.2", OverviewFamily::Deepseek),
-            ("qwen3-coder-plus", OverviewFamily::Qwen),
-            ("qwq-32b", OverviewFamily::Qwen),
-            ("qvq-max", OverviewFamily::Qwen),
-            ("kimi-k2", OverviewFamily::Kimi),
-            ("k3-thinking", OverviewFamily::Kimi),
-            ("minimax-m3", OverviewFamily::Minimax),
-            ("mimo-v2.5-pro", OverviewFamily::Mimo),
-            ("llama-4-scout", OverviewFamily::Unknown),
-            ("mistral-large-3", OverviewFamily::Unknown),
-        ] {
-            assert_eq!(
-                OverviewFamily::from_model_id(model_id),
-                family,
-                "{model_id}"
-            );
-        }
     }
 }

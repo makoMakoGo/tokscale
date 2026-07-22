@@ -5,7 +5,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::tui::app::{App, ClickAction};
-use crate::tui::colors::{get_client_color, get_provider_shade};
+use crate::tui::colors::get_client_color;
 use crate::tui::data::{ContributionDay, DailyClientInfo, DailyUsage};
 
 use super::radar::{render_radar, RadarAxis};
@@ -519,12 +519,7 @@ fn render_day_stats_lines(
         let name_budget = (area.width as usize)
             .saturating_sub(value.chars().count() + 12)
             .max(4);
-        // Canonical ids aggregate usage across providers, so there is no
-        // single provider color to look up; color by the model family
-        // inferred from the id itself, falling back to neutral gray.
-        let model_color = tokscale_core::inferred_provider_from_model(&model.canonical_id)
-            .map(|provider| get_provider_shade(provider, 0))
-            .unwrap_or_else(|| app.model_color(&model.canonical_id));
+        let model_color = app.model_color(&model.canonical_id);
         rows.push(StatRow::KeyVal(
             Line::from(vec![
                 Span::styled("Top model: ", Style::default().fg(app.theme.muted)),
@@ -708,6 +703,7 @@ mod tests {
     use crate::tui::data::{
         DailyClientInfo, DailyModelInfo, DailyUsage, GraphData, HourlyUsage, TokenBreakdown,
     };
+    use crate::tui::themes::{TerminalColorMode, Theme, ThemeName};
     use chrono::NaiveDate;
     use ratatui::{backend::TestBackend, Terminal};
     use std::collections::BTreeSet;
@@ -758,15 +754,14 @@ mod tests {
     fn model_info(
         provider: &str,
         display_name: &str,
-        color_key: &str,
+        model_id: &str,
         tokens: u64,
         cost: f64,
     ) -> DailyModelInfo {
         DailyModelInfo {
             provider: provider.to_string(),
-            model_id: color_key.to_string(),
+            model_id: model_id.to_string(),
             display_name: display_name.to_string(),
-            color_key: color_key.to_string(),
             workspace_key: None,
             workspace_label: None,
             tokens: token_breakdown(tokens),
@@ -1576,6 +1571,8 @@ mod tests {
     fn top_model_uses_inferred_family_color() {
         let date = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
         let mut app = make_app(120);
+        app.theme =
+            Theme::from_name_with_color_mode(ThemeName::Blue, TerminalColorMode::Compatible);
         app.data.daily = vec![day_usage(
             date,
             5_000,
@@ -1609,9 +1606,12 @@ mod tests {
             .find(|(_, row)| row.contains("Top model:"))
             .expect("top model row rendered");
         let name_x = top_row.find("gpt-5.4").expect("model name rendered") as u16;
+        let raw_brand_color = crate::tui::colors::model_color("gpt-5.4");
+        let compatible_brand_color = app.theme.color(raw_brand_color);
+        assert_ne!(compatible_brand_color, raw_brand_color);
         assert_eq!(
             buf.cell((name_x, top_y)).unwrap().fg,
-            get_provider_shade("openai", 0)
+            compatible_brand_color
         );
     }
 

@@ -69,7 +69,7 @@ The parse pipeline must hold at most one owned copy of any message.
   and the session projection; a full `Vec<UnifiedMessage>` is not part of this
   path. APIs whose explicit public contract returns all messages remain
   unchanged.
-- Schema 43 stores one immutable TUI generation containing its manifest,
+- Schema 44 stores one immutable TUI generation containing its manifest,
   session projection, client-aware canonical aggregate, and every exposed
   Group By usage projection in one atomic JSON bundle. The writer serializes
   borrowed views through a buffered temporary file and publishes the complete
@@ -199,7 +199,7 @@ that final output.
 - A corrupt generic shard produces one visible warning and a same-run input
   reparse instead of silently suppressing usage. Normal exact hits still read
   no input bytes and do not eagerly materialize adapter-wide cache bodies.
-- The TUI accepts only schema 43 generation bundles. Any other schema or a
+- The TUI accepts only schema 44 generation bundles. Any other schema or a
   bundle missing its inventory signature, canonical client-aware aggregate, or
   canonical digest is an explicit miss and rebuilds once. An accepted bundle
   supports Clients and Group By projection without a background scan.

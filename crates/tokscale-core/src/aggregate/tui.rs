@@ -64,11 +64,6 @@ fn daily_client_model_display_name(
     }
 }
 
-fn model_color_key(model: &str) -> String {
-    // All GroupBy variants reduce to the bare model name (ADR 0026).
-    model.to_string()
-}
-
 fn hourly_model_display_name(group_by: &GroupBy, model: &str) -> String {
     grouped_model_display_label(group_by, None, model)
 }
@@ -154,7 +149,6 @@ fn merge_daily_clients(
                     provider: model_info.provider.clone(),
                     model_id: model_info.model_id.clone(),
                     display_name: model_info.display_name.clone(),
-                    color_key: model_info.color_key.clone(),
                     workspace_key: model_info.workspace_key.clone(),
                     workspace_label: model_info.workspace_label.clone(),
                     tokens: UsageTokenBreakdown::default(),
@@ -738,7 +732,6 @@ fn materialize_daily_model(model: DailyModelBucket, group_by: &GroupBy) -> Daily
         provider,
         model_id: model.model.to_string(),
         display_name,
-        color_key: model_color_key(&model.model),
         workspace_key: model.workspace_key.map(|key| key.to_string()),
         workspace_label: model.workspace_label.map(|label| label.to_string()),
         tokens: model.tokens,
@@ -855,7 +848,6 @@ fn materialize_hourly_model(model: HourlyModelBucket, group_by: &GroupBy) -> Hou
         provider: model.provider.to_string(),
         model_id: model.model.to_string(),
         display_name: hourly_model_display_name(group_by, &model.model),
-        color_key: model_color_key(&model.model),
         tokens: model.tokens,
         cost: model.cost,
     }
@@ -1972,7 +1964,6 @@ mod tests {
             assert_eq!(models.len(), 1);
             let info = models.values().next().unwrap();
             assert_eq!(info.model_id, "claude-sonnet-4.5");
-            assert_eq!(info.color_key, "claude-sonnet-4.5");
             assert_eq!(info.display_name, "claude-sonnet-4.5");
             if group_by == GroupBy::WorkspaceModel {
                 assert_eq!(info.workspace_key.as_deref(), Some("/repo-a"));
@@ -2770,7 +2761,6 @@ mod tests {
                     assert_eq!(left_model.provider, right_model.provider);
                     assert_eq!(left_model.model_id, right_model.model_id);
                     assert_eq!(left_model.display_name, right_model.display_name);
-                    assert_eq!(left_model.color_key, right_model.color_key);
                     assert_eq!(left_model.workspace_key, right_model.workspace_key);
                     assert_eq!(left_model.workspace_label, right_model.workspace_label);
                     assert_tokens_eq(&left_model.tokens, &right_model.tokens);
@@ -2796,7 +2786,6 @@ mod tests {
                 assert_eq!(left_model.provider, right_model.provider);
                 assert_eq!(left_model.model_id, right_model.model_id);
                 assert_eq!(left_model.display_name, right_model.display_name);
-                assert_eq!(left_model.color_key, right_model.color_key);
                 assert_tokens_eq(&left_model.tokens, &right_model.tokens);
                 assert_eq!(left_model.cost.to_bits(), right_model.cost.to_bits());
             }

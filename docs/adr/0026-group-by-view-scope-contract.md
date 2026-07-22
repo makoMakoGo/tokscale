@@ -10,7 +10,7 @@ in core but are not exposed) reshapes `UsageData` when the user switches
 grouping. The authoritative numbers — totals, per-day and per-hour
 aggregates, the contribution graph, and streaks — do not depend on the
 grouping, but the model identity carried by the view types did: the
-canonical model identity was smuggled through `DailyModelInfo.color_key`,
+canonical model identity was smuggled through a color key,
 `display_name` grew a `"workspace / model"` prefix under
 `GroupBy::WorkspaceModel`, and the workspace dimension had no structured
 field on the daily/hourly model entries. Consumers that needed the canonical
@@ -61,16 +61,26 @@ footer model count) groups by the bare canonical model ID read from
 `model_id`, regardless of the active grouping. A WorkspaceModel projection
 and a Model projection of the same data must produce identical rankings.
 
-**Identity triad.** Model-carrying view entries keep three separate fields
+**Model presentation identity.** Model-carrying view entries keep two fields
 with disjoint duties:
 
 - `model_id` — the bare canonical model ID. The authoritative semantic
-  identity; the only field ranking and grouping consumers may key on.
+  identity; the only field ranking, grouping, and model-color consumers may
+  key on.
 - `display_name` — a pure label for rendering. It never carries the
   workspace dimension. (Session groupings still prefix the session id; that
   dimension is out of scope for this contract.)
-- `color_key` — a pure color key for the color path (`model_color_for`). It
-  is not an identity authority and must not be read as one.
+
+`color_key` is removed. It duplicated model identity while allowing the color
+path to drift from the canonical model contract.
+
+**Model color is family-first and fixed.** The canonical `model_id` is the
+only input to model color resolution. Its family classification selects one
+fixed brand color; an unclassified model uses the explicit neutral color.
+Provider and route attribution, usage cost, rank, active `GroupBy`, client,
+and workspace must not affect a model's color. Provider metadata remains valid
+for attribution, pricing, and provider display, but is not a visual-model
+identity.
 
 **Storage keys are not identity.** `GroupedModelKey::map_key` (the `v1|…`
 length-prefixed encoding) exists to make internal buckets collision-free.
@@ -100,12 +110,13 @@ export) emit the grouping (`groupBy`) and the dimension fields
 
 ## Consequences
 
-- `DailyModelInfo` and `HourlyModelInfo` carry `model_id`; the TUI disk
-  cache schema is bumped so pre-identity cache files miss on the schema
-  version check instead of deserializing into a degraded shape.
-- The `color_key → display_name → map_key` fallback chains in the TUI
-  consumers are deleted; ranking code reads `model_id` directly, and the
-  color path keeps reading `color_key`.
+- `DailyModelInfo` and `HourlyModelInfo` carry `model_id` plus
+  `display_name`; `color_key` is removed. The TUI disk-cache schema is bumped
+  and old entries are rebuilt directly rather than deserialized through a
+  compatibility shape.
+- The `color_key → display_name → map_key` fallback chains and provider/model
+  shade selection are deleted. Every model-color caller resolves the fixed
+  family brand color from `model_id` alone.
 - Under `GroupBy::WorkspaceModel`, the daily-detail Model column now shows
   the bare model name; presenting the workspace dimension in that table is a
   separate, deliberate UI change that consumes the structured fields.

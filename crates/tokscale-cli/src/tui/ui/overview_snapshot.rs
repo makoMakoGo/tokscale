@@ -9,7 +9,8 @@ use super::widgets::{
     format_cost, format_tokens, format_tokens_with_commas, get_client_display_name,
 };
 use crate::tui::app::App;
-use crate::tui::data::{OverviewFamily, OverviewSummary};
+use crate::tui::data::OverviewSummary;
+use crate::tui::model_family::ModelFamily;
 
 const THREE_COLUMN_MIN_WIDTH: u16 = 110;
 const TWO_COLUMN_MIN_WIDTH: u16 = 80;
@@ -206,7 +207,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
             ));
         }
         None => {
-            portrait = portraits::lines(app, OverviewFamily::Unknown);
+            portrait = portraits::lines(app, ModelFamily::Unknown);
             slogan = Some(Line::from(Span::styled(
                 "no data yet",
                 Style::default().fg(app.theme.muted),
@@ -747,6 +748,16 @@ mod tests {
         let mut app = App::new_with_cached_data(config, None).unwrap();
         app.terminal_width = width;
         app
+    }
+
+    #[test]
+    fn favorite_model_uses_its_own_family_brand_color() {
+        let app = make_app(120);
+
+        assert_eq!(
+            app.model_color("claude-opus-4.6"),
+            portraits::family_color(&app, ModelFamily::Claude)
+        );
     }
 
     fn buffer_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {

@@ -29,7 +29,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 43;
+const CACHE_SCHEMA_VERSION: u32 = 44;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -194,7 +194,7 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn schema_43_bundle_round_trips_sessions_and_metadata() {
+    fn schema_44_bundle_round_trips_sessions_and_metadata() {
         let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
         let accumulator = TuiAcc::new();
         let expected_signature = signature();
@@ -237,7 +237,7 @@ mod bundle_tests {
         assert!(raw["projections"]["model"].get("health").is_none());
 
         let CacheResult::Fresh(loaded) = load_cache(&clients, &GroupBy::Model, &scope) else {
-            panic!("expected a fresh schema-43 bundle");
+            panic!("expected a fresh schema-44 bundle");
         };
         assert_eq!(loaded.sessions, sessions);
         assert_eq!(loaded.client_space, client_space);
@@ -246,7 +246,7 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn schema_43_nonempty_bundle_round_trips_all_four_public_groupings() {
+    fn schema_44_nonempty_bundle_round_trips_all_four_public_groupings() {
         let (temp, _guard, _clients, scope, _sessions, _client_space) = fixture();
         let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
         let accumulator = nonempty_accumulator(temp.path());
@@ -321,6 +321,10 @@ mod bundle_tests {
         let cached_day = &raw["projections"]["model"]["daily"][0];
         assert!(cached_day.get("clientBreakdown").is_some());
         assert!(cached_day.get("sourceBreakdown").is_none());
+        assert!(
+            !raw.to_string().contains("\"colorKey\""),
+            "schema 44 must derive model colors from modelId"
+        );
 
         for group_by in [
             GroupBy::Model,
@@ -331,7 +335,7 @@ mod bundle_tests {
             let expected = accumulator.project(&group_by);
             let loaded = match load_cache(&clients, &group_by, &scope) {
                 CacheResult::Fresh(loaded) | CacheResult::Stale(loaded) => loaded,
-                CacheResult::Miss => panic!("schema-43 bundle must load for {group_by}"),
+                CacheResult::Miss => panic!("schema-44 bundle must load for {group_by}"),
             };
             assert_projection_eq(&loaded.data, &expected);
             assert_eq!(loaded.data.health, health);
@@ -361,7 +365,7 @@ mod bundle_tests {
     #[serial]
     fn legacy_schema_versions_are_explicit_misses() {
         let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
-        for schema_version in [38, 39, 40, 41, 42] {
+        for schema_version in [38, 39, 40, 41, 42, 43] {
             save_tui_bundle_cache(
                 &TuiAcc::new(),
                 &sessions,
@@ -622,7 +626,7 @@ impl CacheReportScope {
     }
 }
 
-/// Default usage projection selected when the TUI starts. Schema 43 stores all
+/// Default usage projection selected when the TUI starts. Schema 44 stores all
 /// four public projections plus canonical client-aware state, so Group By and
 /// Clients are presentation state rather than cache keys.
 pub const TUI_DEFAULT_GROUP_BY: GroupBy = GroupBy::Model;
@@ -699,7 +703,6 @@ struct CachedDailyModelInfo {
     #[serde(default)]
     model_id: String,
     display_name: String,
-    color_key: String,
     #[serde(default)]
     workspace_key: Option<String>,
     #[serde(default)]
@@ -735,7 +738,6 @@ struct CachedHourlyModelInfo {
     #[serde(default)]
     model_id: String,
     display_name: String,
-    color_key: String,
     tokens: CachedTokenBreakdown,
     cost: f64,
 }
@@ -875,7 +877,6 @@ struct CachedDailyModelInfoRef<'a> {
     provider: &'a str,
     model_id: &'a str,
     display_name: &'a str,
-    color_key: &'a str,
     workspace_key: Option<&'a str>,
     workspace_label: Option<&'a str>,
     tokens: CachedTokenBreakdownRef,
@@ -889,7 +890,6 @@ impl<'a> From<&'a DailyModelInfo> for CachedDailyModelInfoRef<'a> {
             provider: &model.provider,
             model_id: &model.model_id,
             display_name: &model.display_name,
-            color_key: &model.color_key,
             workspace_key: model.workspace_key.as_deref(),
             workspace_label: model.workspace_label.as_deref(),
             tokens: (&model.tokens).into(),
@@ -999,7 +999,6 @@ struct CachedHourlyModelInfoRef<'a> {
     provider: &'a str,
     model_id: &'a str,
     display_name: &'a str,
-    color_key: &'a str,
     tokens: CachedTokenBreakdownRef,
     cost: f64,
 }
@@ -1010,7 +1009,6 @@ impl<'a> From<&'a HourlyModelInfo> for CachedHourlyModelInfoRef<'a> {
             provider: &model.provider,
             model_id: &model.model_id,
             display_name: &model.display_name,
-            color_key: &model.color_key,
             tokens: (&model.tokens).into(),
             cost: model.cost,
         }
@@ -1187,7 +1185,6 @@ fn daily_model_info_from_cached(value: CachedDailyModelInfo) -> DailyModelInfo {
         provider: value.provider,
         model_id: value.model_id,
         display_name: value.display_name,
-        color_key: value.color_key,
         workspace_key: value.workspace_key,
         workspace_label: value.workspace_label,
         tokens: value.tokens.into(),
@@ -1218,7 +1215,6 @@ fn hourly_model_info_from_cached(value: CachedHourlyModelInfo) -> HourlyModelInf
         provider: value.provider,
         model_id: value.model_id,
         display_name: value.display_name,
-        color_key: value.color_key,
         tokens: value.tokens.into(),
         cost: value.cost,
     }
@@ -1474,7 +1470,7 @@ pub struct LoadedTuiCache {
     pub input_inventory_signature: InputInventorySignature,
 }
 
-/// Result of loading the schema-43 TUI bundle.
+/// Result of loading the schema-44 TUI bundle.
 pub enum CacheResult {
     Fresh(LoadedTuiCache),
     Stale(LoadedTuiCache),
@@ -1842,7 +1838,7 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
     type Value = ParsedTuiBundle;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-43 TUI cache bundle")
+        formatter.write_str("a schema-44 TUI cache bundle")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -1972,7 +1968,7 @@ impl<'de> Visitor<'de> for ProjectionBundleVisitor<'_> {
     type Value = CachedUsageData;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-43 TUI cache bundle")
+        formatter.write_str("a schema-44 TUI cache bundle")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -2029,7 +2025,7 @@ impl<'de> Visitor<'de> for CanonicalBundleVisitor {
     type Value = TuiAcc;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-43 TUI cache bundle with canonical projection state")
+        formatter.write_str("a schema-44 TUI cache bundle with canonical projection state")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -2155,7 +2151,7 @@ pub fn load_cache(
     }
 }
 
-/// Atomically persist one complete schema-43 TUI bundle.
+/// Atomically persist one complete schema-44 TUI bundle.
 ///
 /// Projection serialization borrows the canonical accumulator and materializes
 /// one grouping at a time, so the four projections never coexist in memory.

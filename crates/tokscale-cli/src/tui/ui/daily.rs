@@ -357,8 +357,6 @@ struct TopDailyClient {
 struct TopDailyModel {
     key: String,
     label: String,
-    provider: String,
-    color_key: String,
     tokens: u64,
     cost: f64,
 }
@@ -414,8 +412,6 @@ fn top_daily_model(day: &DailyUsage) -> Option<TopDailyModel> {
                 .or_insert_with(|| TopDailyModel {
                     key: model.model_id.clone(),
                     label: model.model_id.clone(),
-                    provider: model.provider.clone(),
-                    color_key: model.color_key.clone(),
                     tokens,
                     cost: model.cost,
                 });
@@ -597,7 +593,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
                 DailyColumn::TopModel => {
                     if let Some(model) = top_model.as_ref() {
-                        let model_color = app.model_color_for(&model.provider, &model.color_key);
+                        let model_color = app.model_color(&model.key);
                         Cell::from(truncate_model_display_name_to(
                             &model.label,
                             table_layout.width_for(DailyColumn::TopModel),
@@ -818,7 +814,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             let idx = i + start;
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
-            let model_color = app.model_color_for(&row.provider, &row.color_key);
+            let model_color = app.model_color(&row.model_id);
 
             let cell_for_column = |column: DailyDetailColumn| -> Cell {
                 match column {
@@ -946,15 +942,14 @@ mod tests {
     fn daily_model(
         display_name: &str,
         provider: &str,
-        color_key: &str,
+        model_id: &str,
         tokens: u64,
         cost: f64,
     ) -> DailyModelInfo {
         DailyModelInfo {
             provider: provider.to_string(),
-            model_id: color_key.to_string(),
+            model_id: model_id.to_string(),
             display_name: display_name.to_string(),
-            color_key: color_key.to_string(),
             workspace_key: None,
             workspace_label: None,
             tokens: token_breakdown(tokens),
@@ -1218,7 +1213,6 @@ mod tests {
             provider: provider.to_string(),
             model_id: model_id.to_string(),
             display_name: model_id.to_string(),
-            color_key: model_id.to_string(),
             workspace_key: Some(format!("/work/{workspace}")),
             workspace_label: Some(workspace.to_string()),
             tokens: token_breakdown(tokens),

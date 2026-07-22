@@ -9,7 +9,6 @@ use crate::tui::app::{App, ChartGranularity};
 
 #[derive(Debug, Clone, Default)]
 struct ModelAggregate {
-    provider: String,
     tokens: u64,
     cost: f64,
 }
@@ -83,9 +82,6 @@ fn collect_overview_data(app: &App) -> OverviewData {
         for client in day.client_breakdown.values() {
             for model in client.models.values() {
                 let entry = overview.models.entry(model.model_id.clone()).or_default();
-                if entry.provider.is_empty() && !model.provider.is_empty() {
-                    entry.provider = model.provider.clone();
-                }
                 entry.tokens = entry
                     .tokens
                     .checked_add(model.tokens.total())
@@ -117,9 +113,6 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
                 for client in day.client_breakdown.values() {
                     for model in client.models.values() {
                         let entry = models.entry(model.model_id.clone()).or_default();
-                        if entry.provider.is_empty() && !model.provider.is_empty() {
-                            entry.provider = model.provider.clone();
-                        }
                         entry.tokens = entry
                             .tokens
                             .checked_add(model.tokens.total())
@@ -132,7 +125,7 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
                     models: models
                         .into_iter()
                         .map(|(model, aggregate)| ModelSegment {
-                            color: app.model_color_for(&aggregate.provider, &model),
+                            color: app.model_color(&model),
                             model_id: model,
                             tokens: aggregate.tokens,
                         })
@@ -153,9 +146,6 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
                 let mut models = BTreeMap::<String, ModelAggregate>::new();
                 for model in hour.models.values() {
                     let entry = models.entry(model.model_id.clone()).or_default();
-                    if entry.provider.is_empty() && !model.provider.is_empty() {
-                        entry.provider = model.provider.clone();
-                    }
                     entry.tokens = entry
                         .tokens
                         .checked_add(model.tokens.total())
@@ -167,7 +157,7 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
                     models: models
                         .into_iter()
                         .map(|(model, aggregate)| ModelSegment {
-                            color: app.model_color_for(&aggregate.provider, &model),
+                            color: app.model_color(&model),
                             model_id: model,
                             tokens: aggregate.tokens,
                         })
@@ -206,13 +196,13 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
         area.width as usize,
     );
     let mut spans = Vec::new();
-    for (index, (model, aggregate)) in models.into_iter().take(visible_count).enumerate() {
+    for (index, (model, _)) in models.into_iter().take(visible_count).enumerate() {
         if index > 0 {
             spans.push(Span::raw("  "));
         }
         spans.push(Span::styled(
             "■",
-            Style::default().fg(app.model_color_for(&aggregate.provider, model)),
+            Style::default().fg(app.model_color(model)),
         ));
         spans.push(Span::raw(format!(
             " {}",
@@ -320,7 +310,6 @@ mod tests {
                     provider: "provider".to_string(),
                     model_id: name.to_string(),
                     display_name: name.to_string(),
-                    color_key: name.to_string(),
                     workspace_key: None,
                     workspace_label: None,
                     tokens: TokenBreakdown {

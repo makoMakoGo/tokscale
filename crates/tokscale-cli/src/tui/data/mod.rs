@@ -14,7 +14,7 @@ use tokscale_core::{
 };
 
 mod overview;
-pub(crate) use overview::{CacheRate, OverviewFamily, OverviewSummary};
+pub(crate) use overview::{CacheRate, OverviewSummary};
 
 // The TUI view types live in core (`tokscale_core::usage_views`) so the
 // aggregation engine can produce them directly (#37). Re-export them under the
@@ -688,7 +688,6 @@ after"#,
                 provider: "anthropic".to_string(),
                 model_id: "claude-sonnet-4".to_string(),
                 display_name: "claude-sonnet-4".to_string(),
-                color_key: "claude-sonnet-4".to_string(),
                 workspace_key: None,
                 workspace_label: None,
                 tokens: tokens.clone(),

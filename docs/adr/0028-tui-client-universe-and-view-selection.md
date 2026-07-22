@@ -67,7 +67,7 @@ Clients and Group By controls are unavailable until a generation has been
 installed. They remain usable while a newer generation refreshes in the
 background because the previous generation is still coherent.
 
-TUI cache schema 43 retains the client-aware canonical accumulator and four
+TUI cache schema 44 retains the client-aware canonical accumulator and four
 eager public Group By projections in one atomic bundle. The normal
 full-universe view continues to read an eager projection. The canonical state
 is deserialized lazily only after the user selects a proper subset, then reused
@@ -86,7 +86,7 @@ bundle, while its aggregate contents remain lazily deserialized.
   the startup universe requires restarting with a wider scope.
 - Quitting discards picker state. The next process again starts with every
   client in its resolved universe selected.
-- Only schema 43 TUI bundles are accepted; every other schema is an explicit
+- Only schema 44 TUI bundles are accepted; every other schema is an explicit
   miss and rebuilds once.
 - Cache files grow because they retain projectable canonical aggregate state,
   but no raw `UnifiedMessage` corpus is retained. Fine-grained state enters

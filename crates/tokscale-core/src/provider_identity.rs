@@ -512,7 +512,7 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("google");
     }
 
-    if lower.contains("grok") {
+    if lower.contains("grok") || matches_model_family(model_part, "composer") {
         return Some("xai");
     }
 
@@ -868,6 +868,7 @@ mod tests {
             inferred_provider_from_model("grok-code-fast-1"),
             Some("xai")
         );
+        assert_eq!(inferred_provider_from_model("composer-2.5"), Some("xai"));
         assert_eq!(
             inferred_provider_from_model("deepseek-v3"),
             Some("deepseek")

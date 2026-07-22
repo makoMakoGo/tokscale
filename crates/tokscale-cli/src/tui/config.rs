@@ -11,18 +11,7 @@ static CONFIG: OnceCell<TokscaleConfig> = OnceCell::new();
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TokscaleConfig {
     #[serde(default)]
-    pub colors: ColorsConfig,
-    #[serde(default)]
     pub display_names: DisplayNamesConfig,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ColorsConfig {
-    #[serde(default)]
-    pub providers: HashMap<String, String>,
-    #[serde(default)]
-    pub clients: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -77,17 +66,6 @@ impl TokscaleConfig {
         CONFIG.get_or_init(Self::default)
     }
 
-    pub fn get_provider_color_hex(&self, provider_key: &str) -> Option<&str> {
-        self.colors
-            .providers
-            .get(provider_key)
-            .map(|hex| hex.as_str())
-    }
-
-    pub fn get_client_color_hex(&self, client_key: &str) -> Option<&str> {
-        self.colors.clients.get(client_key).map(|hex| hex.as_str())
-    }
-
     pub fn get_provider_display_name(&self, provider: &str) -> Option<&str> {
         self.display_names
             .providers
@@ -121,7 +99,6 @@ mod tests {
         let directory = tempfile::TempDir::new().unwrap();
         let config =
             TokscaleConfig::load_from_path(&directory.path().join("missing.toml")).unwrap();
-        assert!(config.colors.providers.is_empty());
         assert!(config.display_names.clients.is_empty());
     }
 
@@ -129,7 +106,7 @@ mod tests {
     fn malformed_or_unreadable_config_is_explicit() {
         let directory = tempfile::TempDir::new().unwrap();
         let malformed = directory.path().join("malformed.toml");
-        fs::write(&malformed, "[colors.providers\n").unwrap();
+        fs::write(&malformed, "[display_names.providers\n").unwrap();
         let parse_error = TokscaleConfig::load_from_path(&malformed).unwrap_err();
         let parse_diagnostic = format!("{parse_error:#}");
         assert!(parse_diagnostic.contains("parse TOML config"));
@@ -141,18 +118,6 @@ mod tests {
         assert!(read_diagnostic.contains("failed to read"));
         assert!(read_diagnostic.contains(&directory.path().display().to_string()));
         assert!(read_error.source().is_some());
-    }
-
-    #[test]
-    fn retired_sources_key_is_rejected_instead_of_aliased() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = directory.path().join("legacy.toml");
-        fs::write(&path, "[colors.sources]\nclaude = '#fff'\n").unwrap();
-
-        let error = TokscaleConfig::load_from_path(&path)
-            .expect_err("retired Sources terminology must not remain a config alias");
-
-        assert!(format!("{error:#}").contains("unknown field `sources`"));
     }
 
     #[test]

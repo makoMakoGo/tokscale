@@ -660,7 +660,6 @@ mod tests {
             provider: provider.to_string(),
             model_id: model_id.to_string(),
             display_name: model_id.to_string(),
-            color_key: model_id.to_string(),
             tokens: TokenBreakdown {
                 input: tokens,
                 ..TokenBreakdown::default()

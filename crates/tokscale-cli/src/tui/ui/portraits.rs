@@ -5,54 +5,47 @@ use ratatui::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::app::App;
-use crate::tui::data::OverviewFamily;
+use crate::tui::colors;
+use crate::tui::model_family::ModelFamily;
 
-pub(super) fn display_name(family: OverviewFamily) -> &'static str {
+pub(super) fn display_name(family: ModelFamily) -> &'static str {
     match family {
-        OverviewFamily::Gpt => "gpt",
-        OverviewFamily::Claude => "claude",
-        OverviewFamily::Gemini => "gemini",
-        OverviewFamily::Glm => "glm",
-        OverviewFamily::Deepseek => "deepseek",
-        OverviewFamily::Qwen => "qwen",
-        OverviewFamily::Kimi => "kimi",
-        OverviewFamily::Minimax => "minimax",
-        OverviewFamily::Mimo => "mimo",
-        OverviewFamily::Unknown => "???",
+        ModelFamily::Gpt => "gpt",
+        ModelFamily::Claude => "claude",
+        ModelFamily::Gemini => "gemini",
+        ModelFamily::Xai => "xai",
+        ModelFamily::Glm => "glm",
+        ModelFamily::Deepseek => "deepseek",
+        ModelFamily::Qwen => "qwen",
+        ModelFamily::Kimi => "kimi",
+        ModelFamily::Minimax => "minimax",
+        ModelFamily::Mimo => "mimo",
+        ModelFamily::Mistral => "mistral",
+        ModelFamily::Unknown => "???",
     }
 }
 
-pub(super) fn slogan(family: OverviewFamily) -> &'static str {
+pub(super) fn slogan(family: ModelFamily) -> &'static str {
     match family {
-        OverviewFamily::Gpt => "最后还得找我~",
-        OverviewFamily::Claude => "You are absolutely right!",
-        OverviewFamily::Gemini => "你真是太棒了",
-        OverviewFamily::Mimo => "我流口水",
-        OverviewFamily::Minimax => "我不爱刷榜",
-        OverviewFamily::Qwen => "我这次是真学会了",
-        OverviewFamily::Kimi => "我不是区",
-        OverviewFamily::Glm => "蒸馏之神,不解释",
-        OverviewFamily::Deepseek => "杂鱼 杂鱼",
-        OverviewFamily::Unknown => "……",
+        ModelFamily::Gpt => "最后还得找我~",
+        ModelFamily::Claude => "You are absolutely right!",
+        ModelFamily::Gemini => "你真是太棒了",
+        ModelFamily::Xai => "最大限度求真",
+        ModelFamily::Mimo => "我流口水",
+        ModelFamily::Minimax => "我不爱刷榜",
+        ModelFamily::Qwen => "我这次是真学会了",
+        ModelFamily::Kimi => "我不是区",
+        ModelFamily::Glm => "蒸馏之神,不解释",
+        ModelFamily::Deepseek => "杂鱼 杂鱼",
+        ModelFamily::Mistral => "风往哪吹？",
+        ModelFamily::Unknown => "……",
     }
 }
 
 /// Fixed brand color per family (logo primary colors), run through the
 /// theme's color-mode mapping so legacy terminals degrade gracefully.
-pub(super) fn family_color(app: &App, family: OverviewFamily) -> Color {
-    let color = match family {
-        OverviewFamily::Gpt => Color::Rgb(16, 163, 127),
-        OverviewFamily::Claude => Color::Rgb(217, 119, 87),
-        OverviewFamily::Gemini => Color::Rgb(142, 124, 240),
-        OverviewFamily::Glm => Color::Rgb(232, 232, 232),
-        OverviewFamily::Deepseek => Color::Rgb(77, 107, 254),
-        OverviewFamily::Qwen => Color::Rgb(97, 92, 237),
-        OverviewFamily::Kimi => Color::Rgb(192, 192, 192),
-        OverviewFamily::Minimax => Color::Rgb(228, 58, 58),
-        OverviewFamily::Mimo => Color::Rgb(255, 105, 0),
-        OverviewFamily::Unknown => Color::Gray,
-    };
-    app.theme.color(color)
+pub(super) fn family_color(app: &App, family: ModelFamily) -> Color {
+    app.theme.color(colors::family_color(family))
 }
 
 /// Overview card artwork uses one fixed three-row visual contract.
@@ -60,40 +53,44 @@ pub(super) const PORTRAIT_HEIGHT: usize = 3;
 type Portrait = [&'static str; PORTRAIT_HEIGHT];
 
 const GPT: Portrait = ["     ╲", "  (¬‿¬)╮", "   ⁄|~|⁄"];
-const CLAUDE: Portrait = ["  ╭────╮ ✧", "  (｡•ᴗ•｡)", "   \\∪∪/"];
+const CLAUDE: Portrait = ["   ╭─ ✦ ─╮", "  (˶ᵔ ᵕ ᵔ˶)", "    /| |\\"];
 const GEMINI: Portrait = ["  ✦    ✦", "  (◕‿◕)✦", "   /||\\"];
+const XAI: Portrait = ["    𝕏", "  (¬‿¬)✕", "   /|\\"];
 const GLM: Portrait = ["   ___", "  (⌐■_■)▤", "   /|  |\\"];
 const DEEPSEEK: Portrait = ["  ～～～", " (｡•́︿•̀｡)", "   ～|～"];
 const QWEN: Portrait = ["   ☁", "  (｡•̀ᴗ•́｡)☁", "   /|\\"];
 const KIMI: Portrait = ["   ☾", "  (｡･ω･｡)☾", "   /|\\"];
 const MINIMAX: Portrait = ["   /\\  /\\", "  (｡•̀ᴗ•́)◆", "   /|  |\\"];
 const MIMO: Portrait = ["   ___", "  (｡•ω•｡)¤", "   /|  |\\"];
+const MISTRAL: Portrait = ["  ≋≋≋", " (•̀ᴗ•́)≋", "   /|\\"];
 const UNKNOWN: Portrait = ["  [■_■]", "  (•_•)", "   /|\\"];
 const ROW_PADDING: &str = "                ";
 
-pub(super) fn portrait(family: OverviewFamily) -> [&'static str; PORTRAIT_HEIGHT] {
+pub(super) fn portrait(family: ModelFamily) -> [&'static str; PORTRAIT_HEIGHT] {
     match family {
-        OverviewFamily::Gpt => GPT,
-        OverviewFamily::Claude => CLAUDE,
-        OverviewFamily::Gemini => GEMINI,
-        OverviewFamily::Glm => GLM,
-        OverviewFamily::Deepseek => DEEPSEEK,
-        OverviewFamily::Qwen => QWEN,
-        OverviewFamily::Kimi => KIMI,
-        OverviewFamily::Minimax => MINIMAX,
-        OverviewFamily::Mimo => MIMO,
-        OverviewFamily::Unknown => UNKNOWN,
+        ModelFamily::Gpt => GPT,
+        ModelFamily::Claude => CLAUDE,
+        ModelFamily::Gemini => GEMINI,
+        ModelFamily::Xai => XAI,
+        ModelFamily::Glm => GLM,
+        ModelFamily::Deepseek => DEEPSEEK,
+        ModelFamily::Qwen => QWEN,
+        ModelFamily::Kimi => KIMI,
+        ModelFamily::Minimax => MINIMAX,
+        ModelFamily::Mimo => MIMO,
+        ModelFamily::Mistral => MISTRAL,
+        ModelFamily::Unknown => UNKNOWN,
     }
 }
 
 /// Every line is padded on the right to the family block's width so the
 /// artwork's authored left-edge alignment survives per-line centering
 /// (left-padding each line independently was the misalignment bug).
-pub(super) fn lines(app: &App, family: OverviewFamily) -> [Line<'static>; PORTRAIT_HEIGHT] {
+pub(super) fn lines(app: &App, family: ModelFamily) -> [Line<'static>; PORTRAIT_HEIGHT] {
     styled_lines(family, family_color(app, family))
 }
 
-fn styled_lines(family: OverviewFamily, color: Color) -> [Line<'static>; PORTRAIT_HEIGHT] {
+fn styled_lines(family: ModelFamily, color: Color) -> [Line<'static>; PORTRAIT_HEIGHT] {
     let art = portrait(family);
     let block_width = art
         .iter()
@@ -116,16 +113,18 @@ mod tests {
     #[test]
     fn portrait_lines_have_fixed_height_and_equal_display_width() {
         for family in [
-            OverviewFamily::Gpt,
-            OverviewFamily::Claude,
-            OverviewFamily::Gemini,
-            OverviewFamily::Glm,
-            OverviewFamily::Deepseek,
-            OverviewFamily::Qwen,
-            OverviewFamily::Kimi,
-            OverviewFamily::Minimax,
-            OverviewFamily::Mimo,
-            OverviewFamily::Unknown,
+            ModelFamily::Gpt,
+            ModelFamily::Claude,
+            ModelFamily::Gemini,
+            ModelFamily::Xai,
+            ModelFamily::Glm,
+            ModelFamily::Deepseek,
+            ModelFamily::Qwen,
+            ModelFamily::Kimi,
+            ModelFamily::Minimax,
+            ModelFamily::Mimo,
+            ModelFamily::Mistral,
+            ModelFamily::Unknown,
         ] {
             let art = portrait(family);
             let width = art
@@ -145,7 +144,7 @@ mod tests {
         }
 
         assert!(
-            portrait(OverviewFamily::Qwen)
+            portrait(ModelFamily::Qwen)
                 .iter()
                 .any(|row| row.chars().count() != UnicodeWidthStr::width(*row)),
             "fixture must retain a combining-mark row that exercises display width"

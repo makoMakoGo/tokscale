@@ -16,7 +16,6 @@ use tokscale_core::{
 use ratatui::style::Color;
 
 use super::cache::ProjectionStore;
-use super::colors::{get_provider_shade, provider_color_key};
 use super::data::{
     build_period_usage, AgentUsage, DailyClientInfo, DailyUsage, DataLoader, HourlyUsage,
     ModelUsage, OverviewSummary, PeriodKind, PeriodUsage, TokenBreakdown, UsageData,
@@ -262,7 +261,7 @@ pub struct DetailRow {
     pub client: String,
     pub provider: String,
     pub model: String,
-    pub color_key: String,
+    pub model_id: String,
     /// Workspace dimension for the Workspace column; populated only from
     /// `DailyModelInfo` workspace fields (i.e. under `GroupBy::WorkspaceModel`).
     pub workspace: Option<String>,
@@ -305,7 +304,7 @@ struct DetailRowAccumulator {
     client_totals: HashMap<String, ClientContributionOrder>,
     provider: String,
     model: String,
-    color_key: String,
+    model_id: String,
     workspace: Option<String>,
     tokens: TokenBreakdown,
     cost: f64,
@@ -354,12 +353,11 @@ fn build_detail_rows(client_breakdown: &BTreeMap<String, DailyClientInfo>) -> Ve
                         client_totals: HashMap::new(),
                         provider: String::new(),
                         model: if model_info.display_name.is_empty() {
-                            model_key.clone()
+                            model_info.model_id.clone()
                         } else {
                             model_info.display_name.clone()
                         },
-                        // Merged detail buckets share a model-derived color key.
-                        color_key: model_info.color_key.clone(),
+                        model_id: model_info.model_id.clone(),
                         workspace: model_info
                             .workspace_label
                             .clone()
@@ -394,7 +392,7 @@ fn build_detail_rows(client_breakdown: &BTreeMap<String, DailyClientInfo>) -> Ve
             client: ordered_clients_by_token_contribution(&row.client_totals),
             provider: row.provider,
             model: row.model,
-            color_key: row.color_key,
+            model_id: row.model_id,
             workspace: row.workspace,
             tokens: row.tokens,
             cost: row.cost,
@@ -523,13 +521,6 @@ pub struct App {
     pub dialog_group_changed: Rc<RefCell<bool>>,
 
     pub hourly_view_mode: HourlyViewMode,
-
-    pub model_shade_map: HashMap<String, Color>,
-
-    /// Canonical model -> resolved provider key. Color lookups resolve the
-    /// provider through this map so one canonical model gets the same shade
-    /// under every `GroupBy` projection (ADR 0026).
-    pub model_provider_map: HashMap<String, String>,
 
     pub subscription_usage: Vec<crate::commands::usage::UsageOutput>,
     pub subscription_usage_errors: Vec<crate::commands::usage::UsageProviderError>,
@@ -685,8 +676,6 @@ impl App {
             dialog_client_changed,
             dialog_group_changed,
             hourly_view_mode: HourlyViewMode::default(),
-            model_shade_map: HashMap::new(),
-            model_provider_map: HashMap::new(),
             subscription_usage: if usage_tab_enabled {
                 #[cfg(not(test))]
                 {
@@ -705,7 +694,6 @@ impl App {
             usage_initial_fetch_started: false,
             usage_rx: None,
         };
-        app.build_model_shade_map();
         app.try_auto_select_stats_today();
         app.maybe_fetch_subscription_usage_on_usage_entry();
         Ok(app)
@@ -921,7 +909,6 @@ impl App {
         if mark_refresh {
             self.last_refresh = Instant::now();
         }
-        self.build_model_shade_map();
         if had_graph_selection {
             self.selected_graph_cell =
                 selected_graph_date.and_then(|date| self.graph_cell_for_date(date));
@@ -1001,35 +988,8 @@ impl App {
         };
     }
 
-    pub fn build_model_shade_map(&mut self) {
-        let built = super::colors::build_model_shade_map(&self.data.models);
-        self.model_shade_map = built.shades;
-        self.model_provider_map = built.providers;
-    }
-
-    /// Resolves the provider for color lookups to the canonical per-model
-    /// provider, falling back to the caller-supplied provider's first segment
-    /// for models outside the current data set.
-    fn resolve_color_provider<'a>(&'a self, provider: &'a str, model: &str) -> &'a str {
-        self.model_provider_map
-            .get(model)
-            .map(String::as_str)
-            .unwrap_or_else(|| provider_color_key(provider))
-    }
-
-    pub fn model_color_for(&self, provider: &str, model: &str) -> Color {
-        let provider = self.resolve_color_provider(provider, model);
-        let lookup_key = super::colors::model_shade_key(provider, model);
-        let color = self
-            .model_shade_map
-            .get(&lookup_key)
-            .copied()
-            .unwrap_or_else(|| get_provider_shade(provider, 0));
-        self.theme.color(color)
-    }
-
-    pub fn model_color(&self, model: &str) -> Color {
-        self.model_color_for("", model)
+    pub fn model_color(&self, model_id: &str) -> Color {
+        self.theme.color(super::colors::model_color(model_id))
     }
 
     pub fn set_error(&mut self, error: Option<String>) {
@@ -2714,7 +2674,6 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::super::colors::get_provider_shade;
     use super::*;
     use crate::tui::data::{DailyClientInfo, DailyModelInfo, ModelUsage, TokenBreakdown};
     use chrono::NaiveDate;
@@ -3285,7 +3244,6 @@ mod tests {
                         provider: provider.to_string(),
                         model_id: model.to_string(),
                         display_name: model.to_string(),
-                        color_key: model.to_string(),
                         workspace_key: None,
                         workspace_label: None,
                         tokens,
@@ -3313,6 +3271,40 @@ mod tests {
             message_count: 1,
             turn_count: 1,
         }
+    }
+
+    #[test]
+    fn detail_rows_keep_canonical_model_identity_separate_from_storage_keys() {
+        let canonical_model_id = "claude-opus-4.6";
+        let storage_key = "v1|4:kiro|14:amazon-bedrock|17:claude-opus-4.6";
+        let model = DailyModelInfo {
+            provider: "amazon-bedrock".to_string(),
+            model_id: canonical_model_id.to_string(),
+            display_name: canonical_model_id.to_string(),
+            workspace_key: None,
+            workspace_label: None,
+            tokens: TokenBreakdown {
+                input: 1,
+                ..TokenBreakdown::default()
+            },
+            cost: 0.0,
+            messages: 1,
+        };
+        let client_breakdown = BTreeMap::from([(
+            "kiro".to_string(),
+            DailyClientInfo {
+                tokens: model.tokens.clone(),
+                cost: 0.0,
+                models: BTreeMap::from([(storage_key.to_string(), model)]),
+            },
+        )]);
+
+        let rows = build_detail_rows(&client_breakdown);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model_id, canonical_model_id);
+        assert_eq!(rows[0].model, canonical_model_id);
+        assert_ne!(rows[0].model_id, storage_key);
     }
 
     fn usage_data_with_graph_for_today(
@@ -5795,314 +5787,5 @@ mod tests {
         app.current_tab = Tab::Daily;
         app.handle_key_event(key(KeyCode::Char('v')));
         assert_eq!(app.hourly_view_mode, HourlyViewMode::Table);
-    }
-
-    // ── build_model_shade_map ───────────────────────────────────────
-
-    fn model_usage(name: &str, cost: f64, workspace: Option<&str>) -> ModelUsage {
-        ModelUsage {
-            model: name.to_string(),
-            provider: "anthropic".to_string(),
-            client: "claude".to_string(),
-            workspace_key: workspace.map(String::from),
-            workspace_label: workspace.map(String::from),
-            tokens: TokenBreakdown::default(),
-            cost,
-            performance: Default::default(),
-            session_count: 1,
-        }
-    }
-
-    fn shade_key(provider: &str, model: &str) -> String {
-        super::super::colors::model_shade_key(provider, model)
-    }
-
-    #[test]
-    fn test_shade_map_assigns_rank_0_to_highest_cost() {
-        let mut app = make_app();
-        app.data.models = vec![
-            model_usage("claude-haiku-4-5", 10.0, None),
-            model_usage("claude-opus-4-5", 100.0, None),
-            model_usage("claude-sonnet-4-5", 50.0, None),
-        ];
-        app.build_model_shade_map();
-
-        let opus = app
-            .model_shade_map
-            .get(&shade_key("anthropic", "claude-opus-4-5"))
-            .copied()
-            .unwrap();
-        let sonnet = app
-            .model_shade_map
-            .get(&shade_key("anthropic", "claude-sonnet-4-5"))
-            .copied()
-            .unwrap();
-        let haiku = app
-            .model_shade_map
-            .get(&shade_key("anthropic", "claude-haiku-4-5"))
-            .copied()
-            .unwrap();
-
-        // Rank 0 is the base Anthropic coral; ranks below lighten toward white.
-        assert_eq!(opus, get_provider_shade("anthropic", 0));
-        assert_eq!(sonnet, get_provider_shade("anthropic", 1));
-        assert_eq!(haiku, get_provider_shade("anthropic", 2));
-    }
-
-    #[test]
-    fn test_shade_map_dedupes_same_model_across_workspaces() {
-        // Same model appearing N times in different workspaces (as happens
-        // under GroupBy::WorkspaceModel) must not inflate the rank count.
-        let mut app = make_app();
-        app.data.models = vec![
-            model_usage("claude-sonnet-4-5", 20.0, Some("ws-a")),
-            model_usage("claude-sonnet-4-5", 20.0, Some("ws-b")),
-            model_usage("claude-sonnet-4-5", 20.0, Some("ws-c")),
-            model_usage("claude-haiku-4-5", 5.0, None),
-        ];
-        app.build_model_shade_map();
-
-        // Only two distinct model names should be in the map; sonnet takes
-        // rank 0 (aggregate cost 60 > haiku cost 5).
-        assert_eq!(app.model_shade_map.len(), 2);
-        assert_eq!(
-            app.model_shade_map
-                .get(&shade_key("anthropic", "claude-sonnet-4-5"))
-                .copied(),
-            Some(get_provider_shade("anthropic", 0))
-        );
-        assert_eq!(
-            app.model_shade_map
-                .get(&shade_key("anthropic", "claude-haiku-4-5"))
-                .copied(),
-            Some(get_provider_shade("anthropic", 1))
-        );
-    }
-
-    #[test]
-    fn test_shade_map_is_deterministic_on_cost_ties() {
-        // All-zero costs (fresh data) must produce a stable shade assignment
-        // across refreshes so the chart doesn't flicker.
-        let ranks = |app: &App| {
-            let a = app
-                .model_shade_map
-                .get(&shade_key("anthropic", "claude-alpha"))
-                .copied();
-            let b = app
-                .model_shade_map
-                .get(&shade_key("anthropic", "claude-beta"))
-                .copied();
-            let c = app
-                .model_shade_map
-                .get(&shade_key("anthropic", "claude-gamma"))
-                .copied();
-            (a, b, c)
-        };
-
-        let mut app1 = make_app();
-        app1.data.models = vec![
-            model_usage("claude-gamma", 0.0, None),
-            model_usage("claude-alpha", 0.0, None),
-            model_usage("claude-beta", 0.0, None),
-        ];
-        app1.build_model_shade_map();
-
-        let mut app2 = make_app();
-        app2.data.models = vec![
-            model_usage("claude-beta", 0.0, None),
-            model_usage("claude-gamma", 0.0, None),
-            model_usage("claude-alpha", 0.0, None),
-        ];
-        app2.build_model_shade_map();
-
-        assert_eq!(ranks(&app1), ranks(&app2));
-        // alpha sorts first by name so it gets rank 0 on ties.
-        assert_eq!(
-            app1.model_shade_map
-                .get(&shade_key("anthropic", "claude-alpha"))
-                .copied(),
-            Some(get_provider_shade("anthropic", 0))
-        );
-    }
-
-    #[test]
-    fn test_shade_map_handles_nan_cost() {
-        // NaN costs must not propagate into total_cmp ordering surprises or
-        // crash the builder.
-        let mut app = make_app();
-        app.data.models = vec![
-            model_usage("claude-nan", f64::NAN, None),
-            model_usage("claude-normal", 1.0, None),
-        ];
-        app.build_model_shade_map();
-
-        assert_eq!(app.model_shade_map.len(), 2);
-        // Normal model outranks NaN (which is coerced to 0).
-        assert_eq!(
-            app.model_shade_map
-                .get(&shade_key("anthropic", "claude-normal"))
-                .copied(),
-            Some(get_provider_shade("anthropic", 0))
-        );
-    }
-
-    #[test]
-    fn test_shade_map_separates_providers() {
-        let mut app = make_app();
-        app.data.models = vec![
-            ModelUsage {
-                model: "claude-opus-4-5".to_string(),
-                provider: "anthropic".to_string(),
-                client: "claude".to_string(),
-                workspace_key: None,
-                workspace_label: None,
-                tokens: TokenBreakdown::default(),
-                cost: 10.0,
-                performance: Default::default(),
-                session_count: 1,
-            },
-            ModelUsage {
-                model: "gpt-5".to_string(),
-                provider: "openai".to_string(),
-                client: "codex".to_string(),
-                workspace_key: None,
-                workspace_label: None,
-                tokens: TokenBreakdown::default(),
-                cost: 1.0,
-                performance: Default::default(),
-                session_count: 1,
-            },
-        ];
-        app.build_model_shade_map();
-
-        // Each provider ranks independently — both get rank-0 shades.
-        assert_eq!(
-            app.model_shade_map
-                .get(&shade_key("anthropic", "claude-opus-4-5"))
-                .copied(),
-            Some(get_provider_shade("anthropic", 0))
-        );
-        assert_eq!(
-            app.model_shade_map
-                .get(&shade_key("openai", "gpt-5"))
-                .copied(),
-            Some(get_provider_shade("openai", 0))
-        );
-    }
-
-    #[test]
-    fn test_shade_map_rebuilds_on_update_data() {
-        let mut app = make_app();
-        app.data.models = vec![model_usage("claude-opus-4-5", 10.0, None)];
-        app.build_model_shade_map();
-        assert!(app
-            .model_shade_map
-            .contains_key(&shade_key("anthropic", "claude-opus-4-5")));
-
-        let fresh = UsageData {
-            models: vec![model_usage("claude-sonnet-4-5", 5.0, None)],
-            ..UsageData::default()
-        };
-        app.update_data(fresh);
-
-        assert!(!app
-            .model_shade_map
-            .contains_key(&shade_key("anthropic", "claude-opus-4-5")));
-        assert!(app
-            .model_shade_map
-            .contains_key(&shade_key("anthropic", "claude-sonnet-4-5")));
-    }
-
-    #[test]
-    fn test_same_canonical_model_resolves_one_color_across_providers() {
-        // A canonical model seen at several providers resolves to one
-        // deterministic provider, so every grouping projection renders it
-        // with the same shade (ADR 0026).
-        let mut app = make_app();
-        app.data.models = vec![
-            ModelUsage {
-                model: "sonnet-shared".to_string(),
-                provider: "anthropic".to_string(),
-                client: "claude".to_string(),
-                workspace_key: None,
-                workspace_label: None,
-                tokens: TokenBreakdown::default(),
-                cost: 10.0,
-                performance: Default::default(),
-                session_count: 1,
-            },
-            ModelUsage {
-                model: "sonnet-shared".to_string(),
-                provider: "openai".to_string(),
-                client: "codex".to_string(),
-                workspace_key: None,
-                workspace_label: None,
-                tokens: TokenBreakdown::default(),
-                cost: 5.0,
-                performance: Default::default(),
-                session_count: 1,
-            },
-        ];
-        app.build_model_shade_map();
-
-        let canonical = app.theme.color(get_provider_shade("anthropic", 0));
-        assert_eq!(app.model_color_for("anthropic", "sonnet-shared"), canonical);
-        assert_eq!(app.model_color_for("openai", "sonnet-shared"), canonical);
-        assert_eq!(app.model_color("sonnet-shared"), canonical);
-    }
-
-    #[test]
-    fn test_model_color_is_identical_for_merged_and_split_projections() {
-        // GroupBy::Model merges providers into one entry; the other groupings
-        // split the same messages into per-bucket entries. Both projections
-        // must yield the same color for a canonical model.
-        let merged_entry = ModelUsage {
-            model: "sonnet-shared".to_string(),
-            provider: "anthropic, openai".to_string(),
-            client: "claude, codex".to_string(),
-            workspace_key: None,
-            workspace_label: None,
-            tokens: TokenBreakdown::default(),
-            cost: 15.0,
-            performance: Default::default(),
-            session_count: 2,
-        };
-        let mut merged = make_app();
-        merged.data.models = vec![merged_entry];
-        merged.build_model_shade_map();
-
-        let mut split = make_app();
-        split.data.models = vec![
-            ModelUsage {
-                model: "sonnet-shared".to_string(),
-                provider: "anthropic".to_string(),
-                client: "claude".to_string(),
-                workspace_key: None,
-                workspace_label: None,
-                tokens: TokenBreakdown::default(),
-                cost: 10.0,
-                performance: Default::default(),
-                session_count: 1,
-            },
-            ModelUsage {
-                model: "sonnet-shared".to_string(),
-                provider: "openai".to_string(),
-                client: "codex".to_string(),
-                workspace_key: None,
-                workspace_label: None,
-                tokens: TokenBreakdown::default(),
-                cost: 5.0,
-                performance: Default::default(),
-                session_count: 1,
-            },
-        ];
-        split.build_model_shade_map();
-
-        assert_eq!(merged.model_shade_map, split.model_shade_map);
-        assert_eq!(merged.model_provider_map, split.model_provider_map);
-        assert_eq!(
-            merged.model_color("sonnet-shared"),
-            split.model_color("sonnet-shared")
-        );
     }
 }
