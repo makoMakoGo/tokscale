@@ -161,7 +161,7 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary)
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// The Fun Things column: favorite model family's slogan, portrait and
+/// The Fun column: favorite model family's slogan, portrait and
 /// stats, then the favorite model, client (with its own slogan) and day.
 fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary) {
     let total = data.tokens.total();
@@ -285,7 +285,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
 
     let mut lines = Vec::new();
     if height >= full_height {
-        lines.push(section_title(app, "Fun Things"));
+        lines.push(section_title(app, "Fun"));
         lines.push(Line::default());
         if let Some(label) = favorite_label {
             lines.push(label);
@@ -310,7 +310,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
             lines.extend(client_block);
         }
     } else if height >= COMPACT_FUN_THINGS_HEIGHT {
-        lines.push(section_title(app, "Fun Things"));
+        lines.push(section_title(app, "Fun"));
         lines.extend(portrait);
         if let Some(slogan) = slogan {
             lines.push(slogan);
@@ -348,23 +348,23 @@ fn center_line(line: Line<'static>, width: usize) -> Line<'static> {
 fn client_slogan(client_id: &str) -> &'static str {
     let key = client_id.to_ascii_lowercase();
     if key == "pi" || key.contains("claude") {
-        "夯"
+        "最一流的品味"
     } else if key.contains("kimi")
         || key.contains("codex")
         || key.contains("omp")
         || key.contains("droid")
     {
-        "顶级"
+        "顶级玩家"
     } else if key.contains("antigravity")
         || key.contains("copilot")
         || key.contains("kiro")
         || key.contains("gemini")
     {
-        "拉完了"
+        "你拉完了"
     } else if key.contains("warp") {
-        "人上人"
+        "口味人上人"
     } else {
-        "NPC"
+        "无知的NPC"
     }
 }
 
@@ -874,7 +874,7 @@ mod tests {
 
         let lines = buffer_lines(&terminal);
         let screen = lines.join("\n");
-        assert!(screen.contains("Fun Things"), "{screen}");
+        assert!(screen.contains("Fun"), "{screen}");
         assert!(screen.contains("Core"), "{screen}");
         assert!(
             !screen.contains("Achievements"),
@@ -906,7 +906,7 @@ mod tests {
         let screen = lines.join("\n");
         assert!(screen.contains("Core"), "{screen}");
         assert!(screen.contains("Data Size"), "{screen}");
-        assert!(!screen.contains("Fun Things"), "{screen}");
+        assert!(!screen.contains("Fun"), "{screen}");
         let core_row = lines
             .iter()
             .find(|line| line.contains("Data Size"))
@@ -1099,7 +1099,7 @@ mod tests {
                 .unwrap();
 
             let screen = buffer_lines(&terminal).join("\n");
-            for title in ["Fun Things", "Core", "Roast", "Achievements"] {
+            for title in ["Fun", "Core", "Roast", "Achievements"] {
                 assert!(screen.contains(title), "missing {title}: {screen}");
             }
             assert!(screen.contains("[■_■]"), "fallback portrait: {screen}");
