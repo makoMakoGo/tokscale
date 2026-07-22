@@ -27,6 +27,11 @@ DEFAULT_RELEASE_BRANCH = "personal/local-clients"
 RELEASE_TRIGGER_PATH = "packages/cli/package.json"
 RELEASE_TOOLING_COMMAND = "bash scripts/test-release-tooling.sh"
 LOCAL_BUN_SETUP_ACTION = "./.github/actions/setup-bun"
+RECOVERY_NPM_BASE_VERSION_EXPRESSION = (
+    "${{ needs.prepare-release.outputs.recovery == 'true' "
+    "&& needs.prepare-release.outputs.version "
+    "|| needs.prepare-release.outputs.base_version }}"
+)
 RELEASE_VALIDATION_PATHS = {
     "scripts/**",
     "package.json",
@@ -467,6 +472,14 @@ def main() -> None:
         errors.append("publish workflow must consume committed versions, not bump them")
     if publish_text.count("bash scripts/check-release-commit.sh") < 2:
         errors.append("release commit must be validated before and after native builds")
+    authorize_publish_text = "\n".join(job_block(publish_lines, "authorize-publish"))
+    recovery_base_version_line = (
+        f"RELEASE_BASE_VERSION: {RECOVERY_NPM_BASE_VERSION_EXPRESSION}"
+    )
+    if recovery_base_version_line not in authorize_publish_text:
+        errors.append(
+            "authorize-publish must pass the recovery target version to the npm state check"
+        )
     if "cancel-in-progress: false" not in publish_text:
         errors.append("publish workflow must serialize releases without cancelling in progress")
 

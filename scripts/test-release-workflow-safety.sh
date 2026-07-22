@@ -138,6 +138,10 @@ jobs:
   authorize-publish:
     steps:
       - run: bash scripts/check-release-commit.sh
+      - name: Check npm release state
+        env:
+          RELEASE_BASE_VERSION: ${{ needs.prepare-release.outputs.recovery == 'true' && needs.prepare-release.outputs.version || needs.prepare-release.outputs.base_version }}
+        run: bash scripts/check-npm-release-state.sh
   publish-cli:
     steps:
       - uses: actions/checkout@v5
@@ -391,6 +395,21 @@ PY
   grep -q "publish push branches must be" "${output}"
 }
 
+test_rejects_recovery_npm_base_version_drift() {
+  local work="${TMP_DIR}/recovery-npm-base-version-drift"
+  write_good_workflows "${work}"
+  replace_text \
+    "${work}/.github/workflows/publish-cli.yml" \
+    'RELEASE_BASE_VERSION: ${{ needs.prepare-release.outputs.recovery == '\''true'\'' && needs.prepare-release.outputs.version || needs.prepare-release.outputs.base_version }}' \
+    'RELEASE_BASE_VERSION: ${{ needs.prepare-release.outputs.base_version }}'
+
+  assert_safety_rejected \
+    "${work}" \
+    "${TMP_DIR}/recovery-npm-base-version-drift-output.txt" \
+    "authorize-publish must pass the recovery target version to the npm state check" \
+    "Expected workflow safety check to reject recovery npm base-version drift"
+}
+
 test_rejects_version_commits_in_publish_workflow() {
   local work="${TMP_DIR}/version-commit"
   write_good_workflows "${work}"
@@ -606,6 +625,7 @@ test_rejects_release_env_drift
 test_rejects_missing_required_release_env
 test_rejects_platform_publish_matrix_drift
 test_rejects_missing_default_branch_push_trigger
+test_rejects_recovery_npm_base_version_drift
 test_rejects_version_commits_in_publish_workflow
 test_rejects_branch_pushes_in_publish_workflow
 test_rejects_release_tooling_command_drift

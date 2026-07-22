@@ -186,7 +186,7 @@ jobs:
       - name: Check npm release state
         env:
           NEW_VERSION: ${{ needs.prepare-release.outputs.version }}
-          RELEASE_BASE_VERSION: ${{ needs.prepare-release.outputs.base_version }}
+          RELEASE_BASE_VERSION: ${{ needs.prepare-release.outputs.recovery == 'true' && needs.prepare-release.outputs.version || needs.prepare-release.outputs.base_version }}
           RELEASE_RECOVERY: ${{ needs.prepare-release.outputs.recovery }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: bash scripts/check-npm-release-state.sh
