@@ -8,9 +8,11 @@ use super::sessions::format_bytes;
 use super::widgets::{
     format_cost, format_tokens, format_tokens_with_commas, get_client_display_name,
 };
+use crate::tui::actions::ActionSet;
 use crate::tui::app::App;
 use crate::tui::data::OverviewSummary;
 use crate::tui::model_family::ModelFamily;
+use crate::tui::presentation::EmptySubject;
 
 const THREE_COLUMN_MIN_WIDTH: u16 = 110;
 const TWO_COLUMN_MIN_WIDTH: u16 = 80;
@@ -23,8 +25,14 @@ const FULL_FUN_THINGS_HEIGHT: usize = portraits::PORTRAIT_HEIGHT + 7;
 // Section title, portrait, slogan and family stats without blank rows.
 const COMPACT_FUN_THINGS_HEIGHT: usize = portraits::PORTRAIT_HEIGHT + 3;
 
-pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
-    let snapshot_area = super::overview::render(frame, app, area);
+pub(crate) fn render(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    empty: Option<EmptySubject>,
+    actions: &ActionSet,
+) {
+    let snapshot_area = super::overview::render(frame, app, area, empty, actions);
     if snapshot_area.is_empty() {
         return;
     }
@@ -820,6 +828,13 @@ mod tests {
             .collect()
     }
 
+    fn render_snapshot(frame: &mut Frame, app: &mut App, area: Rect) {
+        let state = crate::tui::view_state::ViewState::default();
+        let presentation = crate::tui::presentation::Presentation::for_view(app, &state);
+        let actions = ActionSet::for_view(app, &state, presentation);
+        render(frame, app, area, None, &actions);
+    }
+
     fn line_width(line: &Line<'_>) -> usize {
         line.spans
             .iter()
@@ -1013,7 +1028,7 @@ mod tests {
                 let area = frame.area();
                 let stale = vec![Line::from("X".repeat(width as usize)); height as usize];
                 frame.render_widget(Paragraph::new(stale), area);
-                render(frame, &mut app, area);
+                render_snapshot(frame, &mut app, area);
             })
             .unwrap();
 
@@ -1033,7 +1048,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
         terminal
-            .draw(|frame| render(frame, &mut app, frame.area()))
+            .draw(|frame| render_snapshot(frame, &mut app, frame.area()))
             .unwrap();
 
         let lines = buffer_lines(&terminal);
@@ -1062,7 +1077,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
         terminal
-            .draw(|frame| render(frame, &mut app, frame.area()))
+            .draw(|frame| render_snapshot(frame, &mut app, frame.area()))
             .unwrap();
 
         let lines = buffer_lines(&terminal);
@@ -1092,7 +1107,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
         terminal
-            .draw(|frame| render(frame, &mut app, frame.area()))
+            .draw(|frame| render_snapshot(frame, &mut app, frame.area()))
             .unwrap();
 
         let lines = buffer_lines(&terminal);
@@ -1156,7 +1171,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
         terminal
-            .draw(|frame| render(frame, &mut app, frame.area()))
+            .draw(|frame| render_snapshot(frame, &mut app, frame.area()))
             .unwrap();
 
         let lines = buffer_lines(&terminal);
@@ -1186,7 +1201,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
         terminal
-            .draw(|frame| render(frame, &mut app, frame.area()))
+            .draw(|frame| render_snapshot(frame, &mut app, frame.area()))
             .unwrap();
 
         let screen = buffer_lines(&terminal).join("\n");
@@ -1277,7 +1292,7 @@ mod tests {
             let mut app = make_app(width);
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
-                .draw(|frame| render(frame, &mut app, frame.area()))
+                .draw(|frame| render_snapshot(frame, &mut app, frame.area()))
                 .unwrap();
         }
     }
@@ -1288,7 +1303,7 @@ mod tests {
             let mut app = make_app(width);
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
-                .draw(|frame| render(frame, &mut app, frame.area()))
+                .draw(|frame| render_snapshot(frame, &mut app, frame.area()))
                 .unwrap();
 
             let screen = buffer_lines(&terminal).join("\n");

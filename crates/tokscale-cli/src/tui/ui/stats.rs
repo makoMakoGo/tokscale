@@ -4,10 +4,13 @@ use chrono::{Datelike, Timelike};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::tui::actions::ActionSet;
 use crate::tui::app::{App, ClickAction};
 use crate::tui::colors::get_client_color;
 use crate::tui::data::{ContributionDay, DailyClientInfo, DailyUsage};
+use crate::tui::presentation::EmptySubject;
 
+use super::empty_state;
 use super::radar::{render_radar, RadarAxis};
 use super::widgets::{
     format_cost, format_tokens, get_client_display_name, truncate_model_display_name_to,
@@ -29,8 +32,18 @@ const MONTH_LABELS: &[&str] = &[
 ];
 const DAY_LABELS: &[&str] = &["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+pub fn render(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    empty: Option<EmptySubject>,
+    actions: &ActionSet,
+) {
     if area.is_empty() {
+        return;
+    }
+    if let Some(subject) = empty {
+        render_empty_graph(frame, app, area, subject, actions);
         return;
     }
 
@@ -51,6 +64,32 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     render_day_insights(frame, app, chunks[1]);
 }
 
+fn graph_block(app: &App) -> Block<'_> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border))
+        .title(Span::styled(
+            " Contribution Graph (52 weeks) ",
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(app.theme.background))
+}
+
+fn render_empty_graph(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    subject: EmptySubject,
+    actions: &ActionSet,
+) {
+    let block = graph_block(app);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    empty_state::render(frame, app, inner, subject, actions);
+}
+
 fn split_graph_height(area_height: u16) -> Option<u16> {
     if area_height < GRAPH_MIN_H + DAY_INSIGHTS_MIN_H {
         return None;
@@ -64,16 +103,7 @@ fn split_graph_height(area_height: u16) -> Option<u16> {
 }
 
 fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
-        .title(Span::styled(
-            " Contribution Graph (52 weeks) ",
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .style(Style::default().bg(app.theme.background));
+    let block = graph_block(app);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.is_empty() {
@@ -87,15 +117,7 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let Some(graph) = app.data.graph.clone() else {
-        frame.render_widget(
-            Paragraph::new("No contribution data available")
-                .style(Style::default().fg(app.theme.muted))
-                .alignment(Alignment::Center),
-            content,
-        );
-        return;
-    };
+    let graph = app.data.graph.clone();
 
     let selected_cell = app.selected_graph_cell;
     let selected_date = selected_cell.and_then(|(week_idx, day_idx)| {
@@ -361,8 +383,8 @@ fn selected_graph_day(app: &App) -> Option<&ContributionDay> {
     app.selected_graph_cell.and_then(|(week_idx, day_idx)| {
         app.data
             .graph
-            .as_ref()
-            .and_then(|graph| graph.weeks.get(week_idx))
+            .weeks
+            .get(week_idx)
             .and_then(|week| week.get(day_idx))
             .and_then(Option::as_ref)
     })
@@ -815,7 +837,7 @@ mod tests {
     fn select_day(app: &mut App, date: NaiveDate, tokens: u64, cost: f64) {
         let sunday = date - chrono::Duration::days(date.weekday().num_days_from_sunday() as i64);
         let selected_day = date.weekday().num_days_from_sunday() as usize;
-        app.data.graph = Some(GraphData {
+        app.data.graph = GraphData {
             weeks: vec![(0..7usize)
                 .map(|day_idx| {
                     Some(ContributionDay {
@@ -826,7 +848,7 @@ mod tests {
                     })
                 })
                 .collect()],
-        });
+        };
         app.selected_graph_cell = Some((0, selected_day));
     }
 
@@ -834,8 +856,9 @@ mod tests {
         app.handle_resize(width, height);
         app.clear_click_areas();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let actions = actions_for(app);
         let frame = terminal
-            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
+            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height), None, &actions))
             .unwrap();
         (0..height)
             .map(|y| {
@@ -845,6 +868,12 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn actions_for(app: &App) -> ActionSet {
+        let state = crate::tui::view_state::ViewState::default();
+        let presentation = crate::tui::presentation::Presentation::for_view(app, &state);
+        ActionSet::for_view(app, &state, presentation)
     }
 
     fn four_model_day(date: NaiveDate) -> DailyUsage {
@@ -889,12 +918,12 @@ mod tests {
         assert_eq!(split_graph_height(60), Some(GRAPH_PANEL_H));
 
         let mut short_app = make_app(100);
-        short_app.data.graph = Some(sample_week_graph());
+        short_app.data.graph = sample_week_graph();
         let short = render_text(&mut short_app, 100, 15);
         assert!(!short.contains("Day Insights"));
 
         let mut split_app = make_app(100);
-        split_app.data.graph = Some(sample_week_graph());
+        split_app.data.graph = sample_week_graph();
         let split = render_text(&mut split_app, 100, 16);
         assert!(split.contains("Day Insights"));
         assert_eq!(split_app.click_areas.len(), 7);
@@ -907,7 +936,7 @@ mod tests {
     #[test]
     fn graph_registers_click_areas_only_for_real_days() {
         let mut app = make_app(30);
-        app.data.graph = Some(GraphData {
+        app.data.graph = GraphData {
             weeks: vec![vec![
                 None,
                 Some(ContributionDay {
@@ -918,7 +947,7 @@ mod tests {
                 }),
                 None,
             ]],
-        });
+        };
         let mut terminal = Terminal::new(TestBackend::new(30, GRAPH_PANEL_H)).unwrap();
 
         terminal
@@ -935,7 +964,7 @@ mod tests {
     #[test]
     fn selected_real_day_highlights_cell_and_both_axes() {
         let mut app = make_app(120);
-        app.data.graph = Some(sample_week_graph());
+        app.data.graph = sample_week_graph();
         app.selected_graph_cell = Some((0, 4));
         let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
 
@@ -986,7 +1015,7 @@ mod tests {
         assert_eq!(selected_cell.0, graph.weeks.len() - 1);
 
         let mut app = make_app(80);
-        app.data.graph = Some(graph);
+        app.data.graph = graph;
         app.selected_graph_cell = Some(selected_cell);
         let mut terminal = Terminal::new(TestBackend::new(80, GRAPH_PANEL_H)).unwrap();
 
@@ -1009,7 +1038,7 @@ mod tests {
     #[test]
     fn graph_without_selection_has_no_crosshair_and_mouse_only_hint() {
         let mut app = make_app(120);
-        app.data.graph = Some(sample_week_graph());
+        app.data.graph = sample_week_graph();
         let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
 
         let frame = terminal
@@ -1038,7 +1067,7 @@ mod tests {
     #[test]
     fn none_cells_render_as_dot_placeholders() {
         let mut app = make_app(120);
-        app.data.graph = Some(GraphData {
+        app.data.graph = GraphData {
             weeks: vec![vec![
                 None,
                 Some(ContributionDay {
@@ -1053,7 +1082,7 @@ mod tests {
                 None,
                 None,
             ]],
-        });
+        };
         let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
 
         let frame = terminal
@@ -1076,7 +1105,7 @@ mod tests {
         let mut app = make_app(120);
         let sunday = NaiveDate::from_ymd_opt(2026, 7, 12).unwrap();
         let intensities = [0.0, 0.1, 0.3, 0.6, 0.9, 0.0, 0.0];
-        app.data.graph = Some(GraphData {
+        app.data.graph = GraphData {
             weeks: vec![(0..7usize)
                 .map(|day_idx| {
                     Some(ContributionDay {
@@ -1087,7 +1116,7 @@ mod tests {
                     })
                 })
                 .collect()],
-        });
+        };
         let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
 
         let frame = terminal
@@ -1111,7 +1140,7 @@ mod tests {
         // One in-range day per week, each week starting a new month, so label
         // candidates land one week column (2 cells) apart and would collide
         // without suppression.
-        app.data.graph = Some(GraphData {
+        app.data.graph = GraphData {
             weeks: (0..52usize)
                 .map(|week_idx| {
                     (0..7usize)
@@ -1135,7 +1164,7 @@ mod tests {
                         .collect()
                 })
                 .collect(),
-        });
+        };
         let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
 
         let frame = terminal
@@ -1177,7 +1206,7 @@ mod tests {
     #[test]
     fn metrics_and_legend_share_the_inset_offset() {
         let mut app = make_app(120);
-        app.data.graph = Some(sample_week_graph());
+        app.data.graph = sample_week_graph();
         let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
 
         let frame = terminal
@@ -1209,7 +1238,7 @@ mod tests {
     #[test]
     fn legend_hint_drops_when_it_would_overlap_the_legend() {
         let mut app = make_app(50);
-        app.data.graph = Some(sample_week_graph());
+        app.data.graph = sample_week_graph();
         let mut terminal = Terminal::new(TestBackend::new(50, GRAPH_PANEL_H)).unwrap();
 
         let frame = terminal
@@ -1227,7 +1256,7 @@ mod tests {
     #[test]
     fn narrow_width_renders_without_overflowing_the_border() {
         let mut app = make_app(70);
-        app.data.graph = Some(sample_week_graph());
+        app.data.graph = sample_week_graph();
         let mut terminal = Terminal::new(TestBackend::new(70, GRAPH_PANEL_H)).unwrap();
 
         let frame = terminal
@@ -1530,9 +1559,10 @@ mod tests {
             hourly_entry(date, 11, 10), // 0.1 -> grade 1
         ];
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let actions = actions_for(&app);
 
         let frame = terminal
-            .draw(|frame| render(frame, &mut app, Rect::new(0, 0, 120, 30)))
+            .draw(|frame| render(frame, &mut app, Rect::new(0, 0, 120, 30), None, &actions))
             .unwrap();
         let buffer = frame.buffer;
         let rows: Vec<String> = (0..30u16)
@@ -1592,8 +1622,9 @@ mod tests {
         select_day(&mut app, date, 5_000, 0.0);
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let actions = actions_for(&app);
         let frame = terminal
-            .draw(|f| render(f, &mut app, Rect::new(0, 0, 120, 40)))
+            .draw(|f| render(f, &mut app, Rect::new(0, 0, 120, 40), None, &actions))
             .unwrap();
         let buf = frame.buffer;
         let (top_y, top_row) = (0..40u16)

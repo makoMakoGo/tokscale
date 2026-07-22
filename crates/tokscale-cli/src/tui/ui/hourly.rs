@@ -1,9 +1,8 @@
 use chrono::{Local, NaiveDate, NaiveDateTime, Timelike};
 use ratatui::prelude::*;
-use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
-};
+use ratatui::widgets::{Block, Borders, Cell, Row, Scrollbar, ScrollbarOrientation, Table};
 
+use super::empty_state;
 use super::hourly_profile;
 use super::table_layout::{
     display_width, distributed_table_area, responsive_table_layout, width_for_column,
@@ -13,7 +12,9 @@ use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
     get_client_display_name, total_tokens_cell, truncate_display_width, viewport_scrollbar_state,
 };
+use crate::tui::actions::ActionSet;
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
+use crate::tui::presentation::EmptySubject;
 
 const HOUR_WIDTH: u16 = 7;
 const CLIENT_MIN_WIDTH: u16 = 8;
@@ -54,10 +55,16 @@ impl HourlyTableLayout {
     }
 }
 
-pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+pub fn render(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    empty: Option<EmptySubject>,
+    actions: &ActionSet,
+) {
     match app.hourly_view_mode {
-        HourlyViewMode::Table => render_table(frame, app, area),
-        HourlyViewMode::Profile => hourly_profile::render(frame, app, area),
+        HourlyViewMode::Table => render_table(frame, app, area, empty, actions),
+        HourlyViewMode::Profile => hourly_profile::render(frame, app, area, empty, actions),
     }
 }
 
@@ -204,7 +211,13 @@ fn format_date_separator(date: NaiveDate) -> String {
     date.format("%m/%d").to_string()
 }
 
-fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
+fn render_table(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    empty: Option<EmptySubject>,
+    actions: &ActionSet,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
@@ -221,15 +234,12 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
-
-    let hourly = app.get_sorted_hourly();
-    if hourly.is_empty() {
-        let empty_msg = Paragraph::new("No hourly usage data found. Press 'r' to refresh.")
-            .style(Style::default().fg(app.theme.muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(empty_msg, inner);
+    app.set_max_visible_items(visible_height);
+    if empty_state::render_if(frame, app, inner, empty, actions) {
         return;
     }
+
+    let hourly = app.get_sorted_hourly();
 
     let has_turn_data = hourly.iter().any(|h| h.turn_count > 0);
     let client_content_width = hourly
@@ -491,8 +501,11 @@ mod tests {
     fn render_lines(app: &mut App, width: u16, height: u16) -> Vec<String> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
+        let state = crate::tui::view_state::ViewState::default();
+        let presentation = crate::tui::presentation::Presentation::for_view(app, &state);
+        let actions = ActionSet::for_view(app, &state, presentation);
         terminal
-            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
+            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height), None, &actions))
             .unwrap();
         terminal
             .backend()

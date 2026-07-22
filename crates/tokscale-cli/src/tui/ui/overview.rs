@@ -5,7 +5,10 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use super::bar_chart::{render_stacked_bar_chart, ModelSegment, StackedBarData};
+use super::empty_state;
+use crate::tui::actions::ActionSet;
 use crate::tui::app::{App, ChartGranularity};
+use crate::tui::presentation::EmptySubject;
 
 #[derive(Debug, Clone, Default)]
 struct ModelAggregate {
@@ -18,7 +21,13 @@ struct OverviewData {
     models: BTreeMap<String, ModelAggregate>,
 }
 
-pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) -> Rect {
+pub(crate) fn render(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    empty: Option<EmptySubject>,
+    actions: &ActionSet,
+) -> Rect {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Block::default().style(Style::default().bg(app.theme.background)),
@@ -61,6 +70,19 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) -> Rect {
         .style(Style::default().bg(app.theme.background));
     let inner = block.inner(chunks[0]);
     frame.render_widget(block, chunks[0]);
+
+    if empty_state::render_if(
+        frame,
+        app,
+        inner.inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        }),
+        empty,
+        actions,
+    ) {
+        return chunks[1];
+    }
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
@@ -437,9 +459,20 @@ mod tests {
         let height = 30;
         let mut app = make_app(width);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let state = crate::tui::view_state::ViewState::default();
+        let presentation = crate::tui::presentation::Presentation::for_view(&app, &state);
+        let actions = crate::tui::actions::ActionSet::for_view(&app, &state, presentation);
 
         terminal
-            .draw(|frame| crate::tui::ui::overview_snapshot::render(frame, &mut app, frame.area()))
+            .draw(|frame| {
+                crate::tui::ui::overview_snapshot::render(
+                    frame,
+                    &mut app,
+                    frame.area(),
+                    None,
+                    &actions,
+                )
+            })
             .unwrap();
 
         let lines = buffer_lines(&terminal);

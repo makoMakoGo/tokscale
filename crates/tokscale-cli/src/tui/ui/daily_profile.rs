@@ -2,10 +2,13 @@ use chrono::Datelike;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
+use super::empty_state;
 use super::usage_profile;
 use super::widgets::{format_tokens, viewport_scrollbar_state};
+use crate::tui::actions::ActionSet;
 use crate::tui::app::App;
 use crate::tui::data::DailyUsage;
+use crate::tui::presentation::EmptySubject;
 use crate::tui::view_state::ViewState;
 
 const WEEKDAYS: [&str; 7] = [
@@ -61,7 +64,14 @@ fn peak_weekday(weekdays: &[WeekdayUsage; 7]) -> Option<WeekdayUsage> {
         .map(|(_, weekday)| *weekday)
 }
 
-pub fn render(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rect) {
+pub fn render(
+    frame: &mut Frame,
+    app: &App,
+    state: &mut ViewState,
+    area: Rect,
+    empty: Option<EmptySubject>,
+    actions: &ActionSet,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
@@ -82,15 +92,8 @@ pub fn render(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rect) {
         state.set_daily_profile_text_viewport(0, 0);
         return;
     }
-
-    if app.data.daily.is_empty() {
+    if empty_state::render_if(frame, app, content, empty, actions) {
         state.set_daily_profile_text_viewport(content.height as usize, 0);
-        frame.render_widget(
-            Paragraph::new("No daily usage data available")
-                .style(Style::default().fg(app.theme.muted))
-                .alignment(Alignment::Center),
-            content,
-        );
         return;
     }
 
@@ -216,8 +219,19 @@ mod tests {
 
     fn render_screen(app: &App, state: &mut ViewState, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let presentation = crate::tui::presentation::Presentation::for_view(app, state);
+        let actions = ActionSet::for_view(app, state, presentation);
         terminal
-            .draw(|frame| render(frame, app, state, Rect::new(0, 0, width, height)))
+            .draw(|frame| {
+                render(
+                    frame,
+                    app,
+                    state,
+                    Rect::new(0, 0, width, height),
+                    None,
+                    &actions,
+                )
+            })
             .unwrap();
         terminal
             .backend()
@@ -240,8 +254,19 @@ mod tests {
         height: u16,
     ) -> ratatui::buffer::Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let presentation = crate::tui::presentation::Presentation::for_view(app, state);
+        let actions = ActionSet::for_view(app, state, presentation);
         terminal
-            .draw(|frame| render(frame, app, state, Rect::new(0, 0, width, height)))
+            .draw(|frame| {
+                render(
+                    frame,
+                    app,
+                    state,
+                    Rect::new(0, 0, width, height),
+                    None,
+                    &actions,
+                )
+            })
             .unwrap()
             .buffer
             .clone()

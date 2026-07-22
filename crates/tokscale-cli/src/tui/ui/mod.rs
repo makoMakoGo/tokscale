@@ -4,6 +4,7 @@ mod bar_chart;
 mod daily;
 mod daily_profile;
 pub mod dialog;
+mod empty_state;
 mod footer;
 mod header;
 mod hourly;
@@ -28,7 +29,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
+use crate::tui::actions::ActionSet;
 use crate::tui::app::{App, Tab};
+use crate::tui::presentation::Presentation;
 use crate::tui::view_state::ViewState;
 
 pub(crate) fn render_with_state(frame: &mut Frame, app: &mut App, state: &mut ViewState) {
@@ -51,45 +54,52 @@ pub(crate) fn render_with_state(frame: &mut Frame, app: &mut App, state: &mut Vi
 
     header::render(frame, app, chunks[0]);
 
-    // Only local-report tabs project the installed generation. Subscription
-    // Usage has an independent remote-fetch lifecycle and stays usable while
-    // local acquisition is cold-loading or has failed.
-    let local_generation_tab = app.current_tab.depends_on_local_generation();
-    if local_generation_tab && app.is_cold_loading() {
-        // Cold start: the first scan is still running and no cached
-        // generation is installed, so there is nothing meaningful to show
-        // yet — render the loading state instead of empty/zero tab states.
-        render_loading(frame, app, chunks[1]);
-    } else if local_generation_tab && app.is_cold_failed() {
-        render_cold_failed(frame, app, chunks[1]);
-    } else {
-        render_current_tab(frame, app, state, chunks[1]);
+    let presentation = Presentation::for_view(app, state);
+    let actions = ActionSet::for_view(app, state, presentation);
+    match presentation {
+        Presentation::Loading => render_loading(frame, app, chunks[1]),
+        Presentation::Failed => render_cold_failed(frame, app, chunks[1]),
+        Presentation::Empty(_) | Presentation::Ready => {
+            render_current_tab(frame, app, state, chunks[1], presentation, &actions)
+        }
     }
 
-    view_footer::render(frame, app, state, chunks[2]);
+    view_footer::render(frame, app, state, chunks[2], presentation, &actions);
 
     if app.dialog_stack.is_active() {
         app.dialog_stack.render(frame, area);
     }
 }
 
-fn render_current_tab(frame: &mut Frame, app: &mut App, state: &mut ViewState, area: Rect) {
+fn render_current_tab(
+    frame: &mut Frame,
+    app: &mut App,
+    state: &mut ViewState,
+    area: Rect,
+    presentation: Presentation,
+    actions: &ActionSet,
+) {
+    let empty = presentation.empty_subject();
     match app.current_tab {
-        Tab::Overview => overview_snapshot::render(frame, app, area),
-        Tab::Models => models::render(frame, app, area),
-        Tab::Agents => agents::render(frame, app, area),
-        Tab::Daily => render_daily(frame, app, state, area),
-        Tab::Hourly => hourly::render(frame, app, area),
-        Tab::Monthly => period::render_monthly(frame, app, area),
-        Tab::Weekly => period::render_weekly(frame, app, area),
-        Tab::Stats => stats::render(frame, app, area),
+        Tab::Overview => overview_snapshot::render(frame, app, area, empty, actions),
+        Tab::Models => models::render(frame, app, area, empty, actions),
+        Tab::Agents => agents::render(frame, app, area, empty, actions),
+        Tab::Daily => render_daily(frame, app, state, area, empty, actions),
+        Tab::Hourly => hourly::render(frame, app, area, empty, actions),
+        Tab::Monthly => period::render_monthly(frame, app, area, empty, actions),
+        Tab::Weekly => period::render_weekly(frame, app, area, empty, actions),
+        Tab::Stats => stats::render(frame, app, area, empty, actions),
         Tab::Usage => usage::render(frame, app, area),
-        Tab::Sessions => sessions::render(frame, app, state, area),
+        Tab::Sessions => sessions::render(frame, app, state, area, empty, actions),
     }
 }
 
 fn render_cold_failed(frame: &mut Frame, app: &App, area: Rect) {
-    let diagnostic = app.data.error.as_deref().unwrap_or("unknown error");
+    let diagnostic = app
+        .data
+        .error
+        .as_deref()
+        .expect("cold report failure must carry its diagnostic");
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
@@ -168,11 +178,18 @@ fn wrapped_line_count(text: &str, width: usize) -> usize {
         .max(1)
 }
 
-fn render_daily(frame: &mut Frame, app: &mut App, state: &mut ViewState, area: Rect) {
+fn render_daily(
+    frame: &mut Frame,
+    app: &mut App,
+    state: &mut ViewState,
+    area: Rect,
+    empty: Option<crate::tui::presentation::EmptySubject>,
+    actions: &ActionSet,
+) {
     if app.is_daily_detail_active() || !state.daily_profile_active() {
-        daily::render(frame, app, area);
+        daily::render(frame, app, area, empty, actions);
     } else {
-        daily_profile::render(frame, app, state, area);
+        daily_profile::render(frame, app, state, area, empty, actions);
     }
 }
 
@@ -190,10 +207,14 @@ fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::tui::app::{ProjectionBackend, TuiConfig};
+    use crate::tui::data::UsageData;
     use crate::tui::view_state::ViewState;
     use ratatui::{backend::TestBackend, Terminal};
+    use tokscale_core::{ClientId, GroupBy, TuiAcc};
 
     fn make_app() -> App {
         let config = TuiConfig {
@@ -225,12 +246,37 @@ mod tests {
     }
 
     fn render_screen(app: &mut App, width: u16, height: u16) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let mut state = ViewState::default();
+        render_screen_with_state(app, &mut state, width, height)
+    }
+
+    fn render_screen_with_state(
+        app: &mut App,
+        state: &mut ViewState,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| render_with_state(frame, app, &mut state))
+            .draw(|frame| render_with_state(frame, app, state))
             .unwrap();
         buffer_lines(&terminal)
+    }
+
+    fn install_generation(
+        app: &mut App,
+        clients: &[ClientId],
+        data: UsageData,
+        client_space: BTreeMap<String, u64>,
+    ) {
+        *app.selected_clients.borrow_mut() = clients.iter().copied().collect();
+        app.install_tui_snapshot(
+            data,
+            Vec::new(),
+            client_space,
+            ProjectionBackend::Memory(TuiAcc::default()),
+            GroupBy::Model,
+        );
     }
 
     #[test]
@@ -254,8 +300,9 @@ mod tests {
         );
         assert!(screen.contains('~'), "fish pond should render: {screen}");
         assert!(screen.contains('°'), "fish pond should render: {screen}");
-        assert!(!screen.contains("No session data available"));
+        assert!(!screen.contains("No usage in the current view"));
         assert!(!screen.contains("Total Tokens"));
+        assert!(!screen.contains("Scope:"), "{screen}");
     }
 
     #[test]
@@ -299,8 +346,8 @@ mod tests {
         assert!(screen.contains("Could not load local reports"), "{screen}");
         assert!(screen.contains("[r] Retry"), "{screen}");
         assert!(screen.contains("[q] Quit"), "{screen}");
-        // the misleading empty/zero tab states stay behind the Oops page
-        assert!(!screen.contains("No session data available"), "{screen}");
+        // successful empty/zero tab states stay behind the Oops page
+        assert!(!screen.contains("No usage in the current view"), "{screen}");
         assert!(!screen.contains("Total Tokens"), "{screen}");
         // long diagnostics wrap across rows instead of clipping at the edge
         let head_row = lines
@@ -313,6 +360,8 @@ mod tests {
         );
         // the failure is carried by the Oops page alone, never the footer
         assert!(!footer.contains("injected cold failure"), "{footer}");
+        assert!(!footer.contains("Scope:"), "{footer}");
+        assert!(!footer.contains("0 tokens"), "{footer}");
     }
 
     #[test]
@@ -396,5 +445,154 @@ mod tests {
             screen.contains("Refreshing cached data in background..."),
             "{screen}"
         );
+    }
+
+    #[test]
+    fn empty_usage_tabs_share_scope_and_only_executable_shortcuts() {
+        let clients = [
+            ClientId::Junie,
+            ClientId::Codex,
+            ClientId::Claude,
+            ClientId::Gemini,
+            ClientId::Kiro,
+        ];
+
+        for tab in [
+            Tab::Models,
+            Tab::Monthly,
+            Tab::Weekly,
+            Tab::Daily,
+            Tab::Hourly,
+            Tab::Stats,
+        ] {
+            let mut app = make_app();
+            install_generation(&mut app, &clients, UsageData::default(), BTreeMap::new());
+            app.current_tab = tab;
+
+            let screen = render_screen(&mut app, 120, 32).join("\n");
+
+            assert!(
+                screen.contains("No usage in the current view"),
+                "{tab:?}: {screen}"
+            );
+            assert!(
+                screen.contains("Scope: 5 selected clients · Current report range"),
+                "{tab:?}: {screen}"
+            );
+            assert!(screen.contains("[s:clients]"), "{tab:?}: {screen}");
+            assert!(screen.contains("[r:rescan]"), "{tab:?}: {screen}");
+            assert!(!screen.contains("[d/t/c:sort]"), "{tab:?}: {screen}");
+            assert!(!screen.contains("[enter:"), "{tab:?}: {screen}");
+            assert!(!screen.contains("[g:"), "{tab:?}: {screen}");
+            assert!(!screen.contains("Press 'r'"), "{tab:?}: {screen}");
+            assert!(
+                !screen.contains("Select a day in the contribution graph"),
+                "{tab:?}: {screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_client_empty_scope_uses_only_its_display_name() {
+        let mut app = make_app();
+        install_generation(
+            &mut app,
+            &[ClientId::Junie],
+            UsageData::default(),
+            BTreeMap::new(),
+        );
+        app.current_tab = Tab::Monthly;
+
+        let screen = render_screen(&mut app, 100, 28).join("\n");
+
+        assert!(
+            screen.contains("Scope: Junie · Current report range"),
+            "{screen}"
+        );
+        assert!(!screen.contains("selected clients"), "{screen}");
+    }
+
+    #[test]
+    fn empty_overview_keeps_snapshot_acquisition_facts() {
+        let mut app = make_app();
+        install_generation(
+            &mut app,
+            &[ClientId::Junie],
+            UsageData::default(),
+            BTreeMap::new(),
+        );
+        app.current_tab = Tab::Overview;
+
+        let screen = render_screen(&mut app, 120, 38).join("\n");
+
+        assert!(screen.contains("No usage in the current view"), "{screen}");
+        assert!(screen.contains("Snapshot"), "{screen}");
+        assert!(screen.contains("Inputs Healthy"), "{screen}");
+        assert!(screen.contains("Data Size"), "{screen}");
+    }
+
+    #[test]
+    fn agents_use_the_shared_breakdown_subject_without_client_guessing() {
+        let mut app = make_app();
+        install_generation(
+            &mut app,
+            &[ClientId::Codex],
+            UsageData::default(),
+            BTreeMap::new(),
+        );
+        app.current_tab = Tab::Agents;
+
+        let screen = render_screen(&mut app, 110, 30).join("\n");
+
+        assert!(
+            screen.contains("No agent breakdown in the current view"),
+            "{screen}"
+        );
+        assert!(!screen.contains("usually does not record"), "{screen}");
+        assert!(!screen.contains("Only some clients"), "{screen}");
+    }
+
+    #[test]
+    fn sessions_keep_a_zero_session_client_row_without_fake_details_action() {
+        let mut app = make_app();
+        install_generation(
+            &mut app,
+            &[ClientId::Junie],
+            UsageData::default(),
+            BTreeMap::from([(ClientId::Junie.as_str().to_string(), 0)]),
+        );
+        app.current_tab = Tab::Sessions;
+
+        let screen = render_screen(&mut app, 120, 30).join("\n");
+
+        assert!(screen.contains("Junie"), "{screen}");
+        assert!(
+            !screen.contains("No sessions in the current view"),
+            "{screen}"
+        );
+        assert!(!screen.contains("enter:sessions"), "{screen}");
+        assert!(screen.contains("1 clients · 0 sessions"), "{screen}");
+    }
+
+    #[test]
+    fn degraded_empty_sessions_preserve_the_failure_diagnostic() {
+        let mut app = make_app();
+        install_generation(
+            &mut app,
+            &[ClientId::Junie],
+            UsageData::default(),
+            BTreeMap::new(),
+        );
+        app.mark_snapshot_refresh_failed("database locked".to_string());
+        app.current_tab = Tab::Sessions;
+
+        let screen = render_screen(&mut app, 120, 30).join("\n");
+
+        assert!(
+            screen.contains("No sessions in the current view"),
+            "{screen}"
+        );
+        assert!(screen.contains("Degraded"), "{screen}");
+        assert!(screen.contains("database locked"), "{screen}");
     }
 }

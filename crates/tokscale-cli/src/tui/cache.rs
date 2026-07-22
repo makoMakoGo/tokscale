@@ -235,6 +235,10 @@ mod bundle_tests {
         assert_eq!(raw["health"]["inputDataBytes"], 4096);
         assert_eq!(raw["canonicalDigest"].as_str().unwrap().len(), 64);
         assert!(raw["projections"]["model"].get("health").is_none());
+        assert_eq!(
+            raw["projections"]["model"]["graph"],
+            serde_json::json!({ "weeks": [] })
+        );
 
         let CacheResult::Fresh(loaded) = load_cache(&clients, &GroupBy::Model, &scope) else {
             panic!("expected a fresh schema-44 bundle");
@@ -242,6 +246,44 @@ mod bundle_tests {
         assert_eq!(loaded.sessions, sessions);
         assert_eq!(loaded.client_space, client_space);
         assert_eq!(loaded.data.health, health);
+    }
+
+    #[test]
+    #[serial]
+    fn missing_or_null_projection_graph_is_an_explicit_miss() {
+        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
+        let path = cache_file().unwrap();
+
+        for graph in [None, Some(serde_json::Value::Null)] {
+            save_tui_bundle_cache(
+                &TuiAcc::new(),
+                &sessions,
+                &client_space,
+                &Default::default(),
+                &clients,
+                &scope,
+                signature(),
+            )
+            .unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+            match graph.clone() {
+                Some(graph) => value["projections"]["model"]["graph"] = graph,
+                None => {
+                    value["projections"]["model"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("graph");
+                }
+            }
+            tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+                .unwrap();
+
+            assert!(matches!(
+                load_cache(&clients, &GroupBy::Model, &scope),
+                CacheResult::Miss
+            ));
+        }
     }
 
     #[test]
@@ -284,10 +326,7 @@ mod bundle_tests {
         assert!(model_projection.models.len() >= 3);
         assert!(!model_projection.daily.is_empty());
         assert!(model_projection.hourly.len() >= 3);
-        assert!(model_projection
-            .graph
-            .as_ref()
-            .is_some_and(|graph| !graph.weeks.is_empty()));
+        assert!(!model_projection.graph.weeks.is_empty());
         let workspace_projection = accumulator.project(&GroupBy::WorkspaceModel);
         let workspace_keys = workspace_projection
             .models
@@ -650,7 +689,7 @@ struct CachedUsageData {
     agents: Vec<CachedAgentUsage>,
     daily: Vec<CachedDailyUsage>,
     hourly: Vec<CachedHourlyUsage>,
-    graph: Option<CachedGraphData>,
+    graph: CachedGraphData,
     total_tokens: u64,
     total_cost: f64,
     current_streak: u32,
@@ -1328,15 +1367,13 @@ impl TryFrom<CachedUsageData> for UsageData {
         let daily: Result<Vec<DailyUsage>, _> = u.daily.into_iter().map(|d| d.try_into()).collect();
         let hourly: Result<Vec<HourlyUsage>, _> =
             u.hourly.into_iter().map(|h| h.try_into()).collect();
-        let graph: Option<Result<GraphData, _>> = u.graph.map(|g| g.try_into());
-
         Ok(Self {
             health: Default::default(),
             models: u.models.into_iter().map(|m| m.into()).collect(),
             agents: normalize_cached_agents(u.agents)?,
             daily: daily?,
             hourly: hourly?,
-            graph: graph.transpose()?,
+            graph: u.graph.try_into()?,
             total_tokens: u.total_tokens,
             total_cost: u.total_cost,
             error: None,
@@ -1589,7 +1626,7 @@ struct CachedProjectionUsageDataRef<'a> {
     agents: CachedAgentsRef<'a>,
     daily: CachedDailyEntriesRef<'a>,
     hourly: CachedHourlyEntriesRef<'a>,
-    graph: Option<CachedGraphDataRef<'a>>,
+    graph: CachedGraphDataRef<'a>,
     total_tokens: u64,
     total_cost: f64,
     current_streak: u32,
@@ -1603,7 +1640,7 @@ impl<'a> From<&'a UsageData> for CachedProjectionUsageDataRef<'a> {
             agents: CachedAgentsRef(&data.agents),
             daily: CachedDailyEntriesRef(&data.daily),
             hourly: CachedHourlyEntriesRef(&data.hourly),
-            graph: data.graph.as_ref().map(CachedGraphDataRef::from),
+            graph: CachedGraphDataRef::from(&data.graph),
             total_tokens: data.total_tokens,
             total_cost: data.total_cost,
             current_streak: data.current_streak,

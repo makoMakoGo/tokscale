@@ -225,6 +225,7 @@ impl ViewState {
                     .iter()
                     .any(|summary| summary.client == selected)
                     || !app.is_client_selected(selected)
+                    || app.session_snapshot.session_count_for_client(selected) == 0
             })
         {
             self.selected_session_client = None;

@@ -1264,7 +1264,7 @@ impl TuiAcc {
             agents,
             daily,
             hourly,
-            graph: Some(graph),
+            graph,
             total_tokens,
             total_cost: sane_cost(total_cost),
             error: None,
@@ -2693,28 +2693,22 @@ mod tests {
         }
     }
 
-    fn assert_graph_eq(left: &Option<UsageGraphData>, right: &Option<UsageGraphData>) {
-        match (left, right) {
-            (Some(left), Some(right)) => {
-                assert_eq!(left.weeks.len(), right.weeks.len());
-                for (left_week, right_week) in left.weeks.iter().zip(&right.weeks) {
-                    assert_eq!(left_week.len(), right_week.len());
-                    for (left_day, right_day) in left_week.iter().zip(right_week) {
-                        match (left_day, right_day) {
-                            (Some(left), Some(right)) => {
-                                assert_eq!(left.date, right.date);
-                                assert_eq!(left.tokens, right.tokens);
-                                assert_eq!(left.cost.to_bits(), right.cost.to_bits());
-                                assert_eq!(left.intensity.to_bits(), right.intensity.to_bits());
-                            }
-                            (None, None) => {}
-                            _ => panic!("graph day presence mismatch"),
-                        }
+    fn assert_graph_eq(left: &UsageGraphData, right: &UsageGraphData) {
+        assert_eq!(left.weeks.len(), right.weeks.len());
+        for (left_week, right_week) in left.weeks.iter().zip(&right.weeks) {
+            assert_eq!(left_week.len(), right_week.len());
+            for (left_day, right_day) in left_week.iter().zip(right_week) {
+                match (left_day, right_day) {
+                    (Some(left), Some(right)) => {
+                        assert_eq!(left.date, right.date);
+                        assert_eq!(left.tokens, right.tokens);
+                        assert_eq!(left.cost.to_bits(), right.cost.to_bits());
+                        assert_eq!(left.intensity.to_bits(), right.intensity.to_bits());
                     }
+                    (None, None) => {}
+                    _ => panic!("graph day presence mismatch"),
                 }
             }
-            (None, None) => {}
-            _ => panic!("graph presence mismatch"),
         }
     }
 

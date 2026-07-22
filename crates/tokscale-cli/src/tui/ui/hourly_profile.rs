@@ -1,12 +1,21 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
+use super::empty_state;
 use super::usage_profile;
 use super::widgets::viewport_scrollbar_state;
+use crate::tui::actions::ActionSet;
 use crate::tui::app::App;
 use crate::tui::data::{aggregate_by_period, find_peak_hour};
+use crate::tui::presentation::EmptySubject;
 
-pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+pub fn render(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    empty: Option<EmptySubject>,
+    actions: &ActionSet,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
@@ -23,15 +32,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         horizontal: 1,
         vertical: 0,
     });
-
-    if app.data.hourly.is_empty() {
+    if empty_state::render_if(frame, app, content, empty, actions) {
         app.set_hourly_profile_text_viewport(content.height as usize, 0);
-        frame.render_widget(
-            Paragraph::new("No hourly usage data found. Press 'r' to refresh.")
-                .style(Style::default().fg(app.theme.muted))
-                .alignment(Alignment::Center),
-            content,
-        );
         return;
     }
 
@@ -176,8 +178,11 @@ mod tests {
 
     fn render_buffer(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let state = crate::tui::view_state::ViewState::default();
+        let presentation = crate::tui::presentation::Presentation::for_view(app, &state);
+        let actions = ActionSet::for_view(app, &state, presentation);
         terminal
-            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
+            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height), None, &actions))
             .unwrap()
             .buffer
             .clone()

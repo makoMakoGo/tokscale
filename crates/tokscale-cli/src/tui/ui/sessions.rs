@@ -4,6 +4,7 @@ use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
 };
 
+use super::empty_state;
 use super::table_layout::{
     display_width, distributed_table_area, responsive_table_layout, ResponsiveColumn,
     ResponsiveTableLayout, DISTRIBUTED_TABLE_FLEX, TABLE_COLUMN_SPACING,
@@ -12,7 +13,9 @@ use super::widgets::{
     format_cost, format_tokens, get_client_display_name, truncate_display_width,
     viewport_scrollbar_state,
 };
+use crate::tui::actions::ActionSet;
 use crate::tui::app::App;
+use crate::tui::presentation::EmptySubject;
 use crate::tui::session_data::SessionProjectionStatus;
 use crate::tui::view_state::ViewState;
 
@@ -126,12 +129,23 @@ fn client_column_label(column: ClientColumn) -> &'static str {
     }
 }
 
-pub(crate) fn render(frame: &mut Frame, app: &App, state: &mut ViewState, area: Rect) {
+pub(crate) fn render(
+    frame: &mut Frame,
+    app: &App,
+    state: &mut ViewState,
+    area: Rect,
+    empty: Option<EmptySubject>,
+    actions: &ActionSet,
+) {
     let projection_status = &app.session_projection_status;
     if state.session_detail_active() {
+        debug_assert!(
+            empty.is_none(),
+            "session detail cannot be an empty root view"
+        );
         render_session_details(frame, app, state, area, projection_status);
     } else {
-        render_clients(frame, app, state, area, projection_status);
+        render_clients(frame, app, state, area, projection_status, empty, actions);
     }
 }
 
@@ -149,6 +163,8 @@ fn render_clients(
     state: &mut ViewState,
     area: Rect,
     projection_status: &SessionProjectionStatus,
+    empty: Option<EmptySubject>,
+    actions: &ActionSet,
 ) {
     let rows = state.client_rows(app);
     let block = panel_block(
@@ -171,16 +187,14 @@ fn render_clients(
         return;
     }
 
-    if rows.is_empty() {
+    if empty_state::render_if(frame, app, content_area, empty, actions) {
         state.set_client_viewport(content_area.height as usize, 0);
-        frame.render_widget(
-            Paragraph::new("No session data available")
-                .style(Style::default().fg(app.theme.muted))
-                .alignment(Alignment::Center),
-            content_area,
-        );
         return;
     }
+    debug_assert!(
+        !rows.is_empty(),
+        "ready Sessions root must contain a client row"
+    );
 
     let visible = content_area.height.saturating_sub(1).max(1) as usize;
     state.set_client_viewport(visible, rows.len());
@@ -281,7 +295,9 @@ fn render_session_details(
     area: Rect,
     projection_status: &SessionProjectionStatus,
 ) {
-    let client = state.selected_session_client().unwrap_or_default();
+    let client = state
+        .selected_session_client()
+        .expect("session detail requires a selected client");
     let display_client = get_client_display_name(client);
     let title = Line::from(Span::styled(
         format!(" Sessions / {display_client} "),
@@ -302,16 +318,10 @@ fn render_session_details(
         return;
     }
 
-    if rows.is_empty() {
-        state.set_detail_viewport(content_area.height as usize, 0);
-        frame.render_widget(
-            Paragraph::new("No sessions found for this client")
-                .style(Style::default().fg(app.theme.muted))
-                .alignment(Alignment::Center),
-            content_area,
-        );
-        return;
-    }
+    debug_assert!(
+        !rows.is_empty(),
+        "session detail requires at least one session"
+    );
 
     let visible = content_area.height.saturating_sub(1).max(1) as usize;
     state.set_detail_viewport(visible, rows.len());
@@ -447,12 +457,7 @@ fn panel_body_areas(
     inner: Rect,
     projection_status: &SessionProjectionStatus,
 ) -> (Rect, Option<Rect>) {
-    if inner.height < 2
-        || !matches!(
-            projection_status,
-            SessionProjectionStatus::Degraded { .. } | SessionProjectionStatus::Unavailable { .. }
-        )
-    {
+    if inner.height < 2 || !matches!(projection_status, SessionProjectionStatus::Degraded { .. }) {
         return (inner, None);
     }
 
@@ -493,11 +498,9 @@ fn projection_status_line(
             " · last refresh failed; showing previous snapshot",
             diagnostic,
         ),
-        SessionProjectionStatus::Unavailable { diagnostic } => (
-            "Unavailable",
-            " · refresh failed before the first snapshot",
-            diagnostic,
-        ),
+        SessionProjectionStatus::Unavailable { .. } => {
+            unreachable!("cold session failure is rendered by the acquisition failure page")
+        }
         SessionProjectionStatus::Pending | SessionProjectionStatus::Ready => return None,
     };
 
