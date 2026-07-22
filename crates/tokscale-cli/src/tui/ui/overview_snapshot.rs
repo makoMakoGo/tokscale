@@ -523,7 +523,7 @@ fn render_right(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary
         data.model_count,
         data.client_count,
     );
-    let mut lines = achievements::lines(app, &items);
+    let mut lines = achievements::lines(&app.theme, &items);
     lines.truncate(rows[3].height as usize);
     frame.render_widget(Paragraph::new(lines), rows[3]);
 }

@@ -4,8 +4,8 @@
 use ratatui::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
-use crate::tui::app::App;
 use crate::tui::data::CacheRate;
+use crate::tui::themes::Theme;
 
 struct TierSet {
     roast: &'static str,
@@ -68,7 +68,7 @@ const TITLE_WIDTH: usize = 10;
 pub(super) struct Achievement {
     title: &'static str,
     ladder: [&'static str; 5],
-    /// Tier index 0..=4, or -1 when below the first tier (roast title).
+    /// Tier index 0..=4, or -1 when below the first tier.
     current: i8,
 }
 
@@ -115,32 +115,28 @@ pub(super) fn build(
     ]
 }
 
-pub(super) fn lines(app: &App, achievements: &[Achievement]) -> Vec<Line<'static>> {
+pub(super) fn lines(theme: &Theme, achievements: &[Achievement]) -> Vec<Line<'static>> {
     let mut lines = Vec::with_capacity(achievements.len() + 2);
     lines.push(Line::from(Span::styled(
         "Achievements",
         Style::default()
-            .fg(app.theme.foreground)
+            .fg(theme.foreground)
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::default());
     lines.extend(
         achievements
             .iter()
-            .map(|achievement| ladder_line(app, achievement)),
+            .map(|achievement| ladder_line(theme, achievement)),
     );
     lines
 }
 
-fn ladder_line(app: &App, achievement: &Achievement) -> Line<'static> {
-    let roasting = achievement.current < 0;
-    let title_style = if roasting {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default()
-            .fg(app.theme.foreground)
-            .add_modifier(Modifier::BOLD)
-    };
+fn ladder_line(theme: &Theme, achievement: &Achievement) -> Line<'static> {
+    let locked = achievement.current < 0;
+    let title_style = Style::default()
+        .fg(theme.foreground)
+        .add_modifier(Modifier::BOLD);
     let title_pad = TITLE_WIDTH.saturating_sub(text_width(achievement.title));
 
     let mut spans = vec![
@@ -153,18 +149,18 @@ fn ladder_line(app: &App, achievement: &Achievement) -> Line<'static> {
             spans.push(Span::styled(
                 format!("[{display}]"),
                 Style::default()
-                    .fg(app.theme.accent)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ));
-        } else if !roasting && tier < achievement.current {
+        } else if !locked && tier < achievement.current {
             spans.push(Span::styled(
                 display.to_string(),
-                Style::default().fg(app.theme.accent),
+                Style::default().fg(theme.accent),
             ));
         } else {
             spans.push(Span::styled(
                 display.to_string(),
-                Style::default().fg(app.theme.muted),
+                Style::default().fg(theme.muted),
             ));
         }
         spans.push(Span::raw(" "));
@@ -180,6 +176,11 @@ fn text_width(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::themes::{TerminalColorMode, ThemeName};
+
+    fn theme() -> Theme {
+        Theme::from_name_with_color_mode(ThemeName::Blue, TerminalColorMode::FullColor)
+    }
 
     #[test]
     fn rank_picks_the_highest_reached_tier_or_roast() {
@@ -212,5 +213,60 @@ mod tests {
         assert_eq!(rounded_to_fifty[2].current, 0);
         assert_eq!(still_below_fifty[2].title, "败家子");
         assert_eq!(still_below_fifty[2].current, -1);
+    }
+
+    #[test]
+    fn every_below_threshold_achievement_keeps_its_roast_title() {
+        let achievements = build(0, 0, CacheRate::default(), 0, 0);
+
+        assert_eq!(
+            achievements
+                .iter()
+                .map(|achievement| (achievement.title, achievement.current))
+                .collect::<Vec<_>>(),
+            vec![
+                ("三天打鱼", -1),
+                ("养生局", -1),
+                ("败家子", -1),
+                ("从一而终", -1),
+                ("光杆司令", -1),
+            ]
+        );
+    }
+
+    #[test]
+    fn colors_encode_ladder_progress_without_highlighting_locked_titles() {
+        let theme = theme();
+        let locked = rank(&STREAK, 0);
+        let unlocked = rank(&STREAK, 15);
+        let locked_line = ladder_line(&theme, &locked);
+        let unlocked_line = ladder_line(&theme, &unlocked);
+
+        assert_eq!(locked_line.spans[0].style, unlocked_line.spans[0].style);
+        assert_eq!(locked_line.spans[0].style.fg, Some(theme.foreground));
+        assert!(locked_line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+
+        for tier_span in locked_line.spans.iter().skip(2).step_by(2) {
+            assert_eq!(tier_span.style.fg, Some(theme.muted));
+            assert!(!tier_span.style.add_modifier.contains(Modifier::BOLD));
+        }
+
+        assert_eq!(unlocked_line.spans[2].style.fg, Some(theme.accent));
+        assert!(!unlocked_line.spans[2]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(unlocked_line.spans[4].content.as_ref(), "[15]");
+        assert_eq!(unlocked_line.spans[4].style.fg, Some(theme.accent));
+        assert!(unlocked_line.spans[4]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        for tier_span in unlocked_line.spans.iter().skip(6).step_by(2) {
+            assert_eq!(tier_span.style.fg, Some(theme.muted));
+        }
     }
 }
