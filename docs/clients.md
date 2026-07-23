@@ -4,15 +4,15 @@ The canonical identity list is `crates/tokscale-core/client-catalog.json`. It is
 used to generate Rust client identity data. This page summarizes scan inputs
 and semantic boundaries for users.
 
-Run this command from a built checkout to inspect what Tokscale sees on the
-current machine:
+Use the Models report to scan one Client and inspect its Data Health:
 
 ```bash
-bun run cli -- clients
-bun run cli -- clients --json
+bun run cli -- models --client codex --json --no-spinner
 ```
 
-When using an installed binary, use `tokscale clients` instead.
+The retired `clients` diagnostic command is not a second discovery authority.
+The table below and each Client adapter own the documented locations; actual
+Input failures are reported in Models JSON or the TUI Data Health view.
 
 ## Client table
 
@@ -130,19 +130,12 @@ AGY CLI databases directly; there is no sync command. Historical
 `~/.config/tokscale/antigravity-cache/` artifacts are ignored and may be
 deleted.
 
-`warp` has two separate surfaces. Local reports read `warp.sqlite` when it is
-available. Those local rows are per-conversation/per-model aggregates, not
-turns; they are timestamped with the conversation `last_modified_at` value
-when present, then the latest query timestamp, then file mtime. Warp's naive
-SQLite timestamps are interpreted as UTC. The
-`tokscale warp ...` commands still manage subscription aggregate usage cache
-and credentials:
-
-```bash
-tokscale warp login
-tokscale warp sync --json
-tokscale usage
-```
+`warp` has one maintained surface: local reports read `warp.sqlite` when it is
+available. Those rows are per-conversation/per-model aggregates, not turns;
+they are timestamped with the conversation `last_modified_at` value when
+present, then the latest query timestamp, then file mtime. Warp's naive SQLite
+timestamps are interpreted as UTC. Tokscale does not own Warp credentials,
+remote quota caches, login, logout, or sync commands.
 
 ## Retention notes
 

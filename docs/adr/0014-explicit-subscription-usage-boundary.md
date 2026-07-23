@@ -43,12 +43,14 @@ General provider API keys are intentionally ignored for these quota lookups. Exa
 
 Credential ownership and persistence follow ADR 0023. The broader Usage
 subsystem boundary, including removal of Cursor and Trae, follows ADR 0024.
+ADR 0033 removes Warp remote subscription access while retaining Warp as a
+local Client.
 
 ## Configuration Policy
 
 Canonical TUI provider IDs are:
 
-`claude`, `codex`, `zai`, `amp`, `copilot`, `grok`, `kimi`, `minimax-token-plan-cn`, `minimax-token-plan-global`, `warp`.
+`claude`, `codex`, `zai`, `amp`, `copilot`, `grok`, `kimi`, `minimax-token-plan-cn`, `minimax-token-plan-global`.
 
 Unknown provider IDs are ignored while parsing settings. Explicitly selected providers without credentials produce provider errors instead of silently collapsing into "no data".
 

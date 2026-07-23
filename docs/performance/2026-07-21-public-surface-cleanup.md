@@ -1,5 +1,9 @@
 # Public-surface cleanup performance check
 
+This is a historical measurement record. Its `time-metrics` and `graph` probe
+names describe commands that existed during the run and were later removed by
+ADR 0033; the maintained measurement script now probes Models.
+
 This report compares the B-surface cleanup candidate with the installed binary
 built from the same `personal/local-clients` HEAD.
 

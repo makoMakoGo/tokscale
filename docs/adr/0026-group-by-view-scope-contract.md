@@ -9,9 +9,8 @@ identity carried through them.
 ## Context
 
 The TUI `GroupBy` selector (`GroupBy::Model`, `ClientModel`,
-`ClientProviderModel`, `WorkspaceModel`; `Session` and `ClientSession` exist
-in core but are not exposed) reshapes `UsageData` when the user switches
-grouping. The authoritative numbers — totals, per-day and per-hour
+`ClientProviderModel`, and `WorkspaceModel`) reshapes `UsageData` when the user
+switches grouping. The authoritative numbers — totals, per-day and per-hour
 aggregates, the contribution graph, and streaks — do not depend on the
 grouping, but the model identity carried by the view types did: the
 canonical model identity was smuggled through a color key,
@@ -70,9 +69,8 @@ with disjoint duties:
 - `model_id` — the bare canonical model ID. The authoritative semantic
   identity; the only field ranking, grouping, and model-color consumers may
   key on.
-- `display_name` — a pure label for rendering. It never carries the
-  workspace dimension. (Session groupings still prefix the session id; that
-  dimension is out of scope for this contract.)
+- `display_name` — a pure label for rendering. It never carries the workspace
+  dimension.
 
 `color_key` is removed. It duplicated model identity while allowing the color
 path to drift from the canonical model contract.

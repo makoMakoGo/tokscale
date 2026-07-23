@@ -55,7 +55,7 @@ fields, cache metadata, configuration, and maintained internal APIs. Retired
 names are never mapped to current names: strict configuration surfaces reject
 them, report serializers do not emit them, and old cache schemas are explicit
 misses. The Overview fact label is `Inputs Healthy`. Additional scan-path
-provenance in `clients --json` is `origin`.
+provenance is an internal Input fact rather than a second public identity.
 
 ## Persisted client ID migrations
 

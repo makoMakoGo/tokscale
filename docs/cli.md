@@ -1,12 +1,28 @@
 # CLI usage
 
-Tokscale separates its interactive interface from report commands. Command
-meaning is determined entirely by argv; piping or redirecting output never
-selects a different feature.
+Tokscale treats the TUI as the canonical local-report product. The CLI exposes
+one headless projection of that product, `models`, plus commands whose jobs are
+not TUI report tabs. Command meaning is determined entirely by argv; piping or
+redirecting output never selects another feature.
 
 Run commands from a built checkout with `bun run cli --`, or use `tokscale`
-with an installed fork package. Pass `--no-spinner` to report commands in
-automation.
+with an installed fork package. Pass `--no-spinner` in automation.
+
+## Command surface
+
+| Command | Meaning |
+| --- | --- |
+| `tokscale` | Exact shortcut for `tokscale tui`. |
+| `tokscale tui` | Launch the complete interactive interface. |
+| `tokscale models` | Print the TUI Models projection as a table or JSON. |
+| `tokscale usage` | Query remote subscription quota; independent of local reports. |
+| `tokscale pricing ...` | Query pricing catalogs or custom overrides. |
+| `tokscale wrapped` | Generate the year-in-review image from local usage. |
+| `tokscale cache ...` | Explicitly maintain Tokscale's local caches. |
+
+There are no root `monthly`, `weekly`, `daily`, `hourly`, `stats`, `agents`,
+`sessions`, `time-metrics`, `graph`, `clients`, `doctor`, or `warp` commands.
+Unknown commands fail as invalid CLI usage; they are not compatibility aliases.
 
 ## Interactive TUI
 
@@ -14,52 +30,77 @@ automation.
 tokscale
 tokscale tui
 tokscale tui --tab models
+tokscale tui --tab monthly
+tokscale tui --tab sessions
 tokscale tui --client opencode,claude --week
 tokscale tui --theme blue --refresh 30
 tokscale tui --no-refresh
 ```
 
-Bare `tokscale` is exactly the default TUI shortcut. Any TUI option requires
-the explicit `tui` subcommand. The TUI requires interactive stdin and stdout;
-for example, `tokscale | jq` fails and points to `tokscale models --json`
-instead of changing into a report command.
+`--tab` launches the same complete TUI and sets its initial focus. It does not
+run a hidden one-tab application. Every real TUI tab is accepted:
+`overview`, `models`, `monthly`, `weekly`, `daily`, `hourly`, `stats`,
+`agents`, `usage`, and `sessions`.
 
-Available `--tab` values are `overview`, `models`, `monthly`, `weekly`,
-`daily`, `hourly`, `stats`, `agents`, `usage`, and `sessions`. Requesting the
-Usage tab while `usageTabEnabled` is false is an error; Tokscale does not
-silently open Overview.
+Requesting a tab disabled by settings is an error rather than a silent jump to
+Overview. The TUI requires interactive stdin and stdout; for example,
+`tokscale | jq` fails and points to `tokscale models --json`.
+
+Monthly, Weekly, Daily, Hourly, Stats, Agents, and Sessions are intentionally
+TUI-only. Their richer interactions and cross-tab state are not duplicated in
+parallel CLI report implementations.
 
 CLI options override settings for the current TUI process and do not rewrite
 `settings.json`. The TUI captures normal mouse input; use the terminal's
 modified selection gesture, usually `Shift+drag`, to select terminal text.
 
-## Local reports
+## Models report
 
 ```bash
-# Human-readable tables
 tokscale models --no-spinner
-tokscale monthly --no-spinner
-tokscale hourly --no-spinner
-tokscale time-metrics --no-spinner
-
-# Structured output
 tokscale models --json
-tokscale monthly --json
-tokscale hourly --json
-tokscale time-metrics --json
+tokscale models --group-by client,model --no-spinner
+tokscale models --group-by client,provider,model --json
+tokscale models --group-by workspace,model --json
 ```
 
-These commands always produce reports, even when stdout is a terminal. Table
-output is the default; the removed `--light` mode is not an alias. To open a
-specific TUI view, use `tokscale tui --tab models` or the corresponding tab.
+`tokscale models` and `tokscale models --group-by model` are identical. Both
+consume the same `UsageData.models` projection as the TUI Models tab, including
+its token normalization, pricing, performance metrics, model identity, Client
+and Provider attribution, and ordering semantics. The table exposes:
 
-All local JSON reports currently use the same top-level envelope. This
-documents the present wire shape; individual health census fields are report
-projections, not an ADR-frozen TUI or JSON layout:
+```text
+Workspace?  Model  Client  Provider  Input  Output  Cache×  Cache R  Cache W
+Total  Cost  Cost/1M  ms/1K
+```
+
+`Workspace` appears only for `workspace,model`. `Output` is the TUI's displayed
+output total, which includes reasoning tokens when the source format reports
+reasoning as a component of output. JSON also preserves `output`,
+`reasoning`, and `displayedOutput` separately.
+
+The four supported grouping strategies exactly match the TUI Group By picker:
+
+| Strategy | Effect |
+| --- | --- |
+| `model` | One row per model across Clients and Providers. |
+| `client,model` | One row per Client and model pair. |
+| `client,provider,model` | One row per Client, Provider, and model. |
+| `workspace,model` | One row per workspace and model. |
+
+Session-based grouping values are invalid. Sessions are their own TUI tab, not
+a hidden Models grouping. Hyphenated compatibility spellings are also rejected;
+the comma-separated values above are the complete public set.
+
+All local Models JSON uses this top-level envelope:
 
 ```json
 {
-  "data": {},
+  "data": {
+    "groupBy": "model",
+    "models": [],
+    "totals": {}
+  },
   "health": {
     "complete": true,
     "cleanInputs": 0,
@@ -77,13 +118,14 @@ projections, not an ADR-frozen TUI or JSON layout:
 ```
 
 Stdout contains only the table or JSON document. Progress, `--benchmark`
-timing, health summaries, warnings, and errors go to stderr. A degraded report
-still exits `0` when its payload was produced; inspect `health` when automation
-must react to rejected records or unavailable inputs.
+timing, Data Health summaries, warnings, and errors go to stderr. A degraded
+report still exits `0` when its payload was produced; inspect `health` when
+automation must react to rejected records or unavailable Inputs.
 
 ## Client and date scope
 
-Local commands that read usage share the same client scope:
+`Client` is the only public product-identity term. `--client` is repeatable or
+comma-separated:
 
 ```bash
 tokscale models --client opencode
@@ -93,23 +135,17 @@ tokscale models --home /tmp/test-home --no-spinner
 tokscale tui --client codex --home /tmp/test-home
 ```
 
-Repeated client ids are deduplicated. Client scope resolves once: an explicit
-`--client` list wins, otherwise `defaultClients` applies, and without either
-Tokscale uses every accepted local client. Unknown clients are errors. `--home`
-must be an existing directory and is authoritative; discovery does not fall
-back to the process home or client-specific environment roots.
+Repeated Client ids are deduplicated. An explicit `--client` list wins,
+otherwise `defaultClients` applies, and without either Tokscale uses every
+accepted local Client. Unknown Clients are errors. `--home` must be an existing
+directory and is authoritative; discovery does not fall back to the process
+home or Client-specific environment roots.
 
-Report commands scan the resolved scope for that invocation. The TUI fixes it
-as the process-wide client universe: its Clients picker initially checks every
-member and can apply only a session-local, non-persisted subset. Search filters
-the list, arrows navigate matches, Space toggles one match, and `*` inverts all
-current matches. Enter applies one non-empty draft; Esc or a click outside the
-picker cancels it. Picker and Group By changes reproject the installed
-generation without scanning, writing the cache, or resetting automatic
-refresh. Manual and automatic refresh scan the original universe. Local report
-rows, charts, agents, and Sessions follow the committed subset. Data Health and
-scanned input bytes continue to describe the complete universe, while the
-remote Subscription Usage tab has an independent lifecycle.
+The TUI resolves its Client universe once. Its Clients picker applies a
+session-local projection of the installed generation without rescanning,
+writing the aggregate cache, or resetting refresh. Manual and automatic
+refresh scan the original universe. Data Health continues to describe that
+complete universe.
 
 Date boundaries are inclusive and use the local timezone:
 
@@ -126,62 +162,23 @@ tokscale models --since 2026-01-01 --until 2026-01-31
 Choose one preset or a custom range. Combining presets, combining `--year`
 with `--since`/`--until`, or specifying `since > until` is invalid usage.
 
-## Model grouping
-
-Only `models` owns `--group-by`:
-
-| Strategy | Effect |
-| --- | --- |
-| `model` | One row per model across clients and providers. |
-| `client,model` | One row per client and model pair. |
-| `client,provider,model` | One row per client, provider, and model. |
-| `workspace,model` | One row per workspace and model. |
-| `session,model` | One row per session id and model. |
-| `client,session,model` | One row per client, session id, and model. |
+## Subscription Usage
 
 ```bash
-tokscale models --json --group-by model
-tokscale models --json --group-by client,provider,model
+tokscale usage
+tokscale usage --json
 ```
 
-## Graph and client inspection
+Subscription Usage is account-level remote quota and plan state, not locally
+parsed token history. The CLI command is explicit consent to query configured
+providers under ADR 0014. `--json` exists for scripts and status integrations;
+it serializes the same provider/account/plan domain model as the TUI Usage tab.
 
-`graph` always produces JSON:
-
-```bash
-tokscale graph --no-spinner
-tokscale graph --no-spinner --output graph.json
-```
-
-Without `--output`, the JSON document is stdout. With an output file, stdout
-contains only the final path and operational details use stderr.
-
-Graph usage does not depend on pricing availability. Pricing data is loaded
-once per process; on-disk pricing caches are valid for one hour, so `graph` does
-not contact Pricing Sources on every invocation. Missing or expired caches may
-trigger a refresh. If that refresh fails, Tokscale uses an older cache when one
-exists; without any usable pricing, it still emits every token and leaves
-unpriceable cost at `0.0`.
-
-The JSON field `data.meta.pricingStatus` makes that outcome explicit:
-
-| Status | Meaning |
-| --- | --- |
-| `available` | Pricing initialized without diagnostics. |
-| `availableWithWarnings` | Pricing initialized, but one or more non-fatal diagnostics were recorded. |
-| `cachedFallback` | Refresh failed and an older on-disk cache supplied pricing. |
-| `unavailable` | Refresh failed and no cached pricing was available; usage is still complete. |
-
-When diagnostics exist, `data.meta.pricingDiagnostics` contains them and the
-same messages are written to stderr.
-
-Inspect client input locations and counts with:
-
-```bash
-tokscale clients
-tokscale clients --json
-tokscale clients --client codex --home /tmp/test-home
-```
+Tokscale consumes provider-owned credentials. It does not provide login,
+logout, account switching, credential copying, or provider-specific sync
+namespaces. In particular, the removed remote `tokscale warp ...` integration
+has no replacement. Warp remains a normal local Client whose `warp.sqlite`
+usage is scanned by Models and the TUI.
 
 ## Wrapped ranking
 
@@ -191,11 +188,10 @@ tokscale wrapped --ranking agents
 tokscale wrapped --ranking clients
 ```
 
-Without `--ranking`, Wrapped automatically uses OpenCode agent rankings when
-agent data exists and otherwise uses client rankings. An explicit
-`--ranking agents` never changes into a client ranking: when no agent data is
-available, the image keeps the requested panel and renders an explicit empty
-state. `--ranking agents` requires OpenCode in an explicit `--client` scope.
+Without `--ranking`, Wrapped uses OpenCode agent rankings when agent data exists
+and otherwise uses Client rankings. An explicit `--ranking agents` keeps the
+requested panel and renders an empty state when no agent data is available.
+It requires OpenCode in an explicit `--client` scope.
 
 ## Cache maintenance
 
@@ -205,12 +201,11 @@ tokscale cache warm --client codex
 tokscale cache prune
 ```
 
-`cache warm` explicitly builds the TUI aggregate cache for its client scope.
-Report commands never modify that aggregate cache. Scan-input message shards
-remain an internal derived cache and are written automatically while parsing.
+`cache warm` explicitly builds the TUI aggregate cache for its Client scope.
+Models never writes that aggregate cache. Scan-input message shards remain an
+internal derived cache and are written while parsing.
 
-`cache prune` traverses scan-input message shards, removes orphaned inputs and
-superseded parser revisions, and prints scanned, removed, and retained counts.
+`cache prune` removes orphaned Inputs and superseded parser revisions.
 Unreadable or unclassifiable shards make the explicit maintenance command fail
 instead of reporting partial success.
 
@@ -225,44 +220,8 @@ tokscale pricing overrides --json
 ```
 
 `--pricing-source` selects a pricing catalog and is distinct from a model's
-provider. Standalone lookup is a catalog query; it does not replay arbitrary
-cleanup from a local input parser.
-
-## Integration and usage commands
-
-Tokscale does not provide `cursor`, `trae`, or `codex` account-management
-command namespaces. Cursor and Trae are not supported local clients.
-`tokscale usage` reads the currently authenticated Codex account from
-provider-owned auth state without copying, switching, refreshing, or modifying
-its credentials.
-
-```bash
-# Local integration with an explicit sync workflow
-tokscale warp status --json
-tokscale warp sync --json
-
-# Subscription quota, separate from local reports
-tokscale usage
-tokscale usage --json
-```
-
-Antigravity is an ordinary local report client, not a command namespace:
-
-```bash
-tokscale clients --client antigravity
-tokscale models --client antigravity --no-spinner
-```
-
-Tokscale reads current AGY CLI SQLite/WAL data directly. The retired
-Antigravity IDE/2.0 private-RPC bridge and `tokscale antigravity ...` commands
-are not supported; see ADR 0025.
-
-Flags belong to the leaf command that executes them. They cannot be placed on
-the root or before the owning subcommand.
-
-Provider-owned non-interactive sessions require no Tokscale wrapper. For
-example, Codex writes ordinary `codex exec` rollouts under its own session
-directory, and Tokscale discovers them through the `codex` adapter.
+Provider. Standalone lookup is a catalog query; it does not replay local Input
+normalization.
 
 ## Exit codes
 
@@ -273,4 +232,5 @@ directory, and Tokscale discovers them through the `codex` adapter.
 | `2` | Invalid CLI arguments, option combinations, or runtime environment. |
 | `130` | User interruption where supplied by the terminal or child process. |
 
-This fork does not expose hosted login, submission, or leaderboard commands.
+Flags belong to the leaf command that executes them. They cannot be placed on
+the root or before the owning subcommand.

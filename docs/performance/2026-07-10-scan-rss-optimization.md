@@ -13,8 +13,10 @@ keeps the prior rows so later improvements cannot quietly replace the baseline.
 - Real-corpus probe: one unmeasured warm-up followed by three measured runs.
 - Timing: CLI `processingTimeMs` plus `/usr/bin/time` wall/user/sys and maximum
   RSS.
-- Command: `tokscale time-metrics --json --no-spinner -c <clients>`; this path
-  does not load pricing, so network and pricing-cache latency are excluded.
+- Historical command at measurement time:
+  `tokscale time-metrics --json --no-spinner -c <clients>`. ADR 0033 later
+  removed that parallel report; the maintained probe now uses
+  `tokscale models --group-by model --json --no-spinner -c <clients>`.
 - Reported values in the cumulative table are medians. Raw samples remain below.
 - The input corpus is live local data. Each stage records cache/input facts,
   and comparisons must call out material corpus drift.
@@ -23,12 +25,11 @@ The fixed probe is automated by:
 
 ```bash
 scripts/measure-scan-performance.sh \
-  "$PWD/target/release/tokscale" <label> <comma-separated-clients> 3 \
-  [time-metrics|graph]
+  "$PWD/target/release/tokscale" <label> <comma-separated-clients> 3
 ```
 
-The optional report selector defaults to `time-metrics`; `graph` applies the
-same envelope timing and RSS contract to graph generation.
+The script measures the canonical Models projection and reads processing time
+from its common JSON envelope.
 
 The secondary aggregation probe runs the existing 100,000-message
 `aggregation` benchmark executable with the `tui_client_model --quick` filter.

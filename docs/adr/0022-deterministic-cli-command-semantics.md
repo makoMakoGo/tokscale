@@ -2,6 +2,10 @@
 
 Status: Accepted
 
+ADR 0033 supersedes this ADR's local report-command list and public Graph
+command. Its deterministic argv, option ownership, output, and failure
+contracts remain accepted.
+
 ## Context
 
 The v4 CLI mixed interactive navigation and report generation in the same
@@ -24,10 +28,11 @@ The bare `tokscale` command is an exact shorthand for an unconfigured
 `tokscale tui`. The root owns only help, version, and subcommand selection. Any
 TUI option requires the explicit `tui` subcommand.
 
-`models`, `monthly`, `hourly`, and `time-metrics` are report commands. They
-always emit a human-readable table by default and a JSON document with
-`--json`; their function never changes with TTY state. Opening a report tab is
-spelled `tokscale tui --tab <tab>`.
+`models` is the canonical headless local report. It always emits a
+human-readable table by default and a JSON document with `--json`; its function
+never changes with TTY state. Opening any report tab is spelled `tokscale tui
+--tab <tab>`. Monthly, Weekly, Daily, Hourly, Stats, Agents, and Sessions are
+TUI-only under ADR 0033.
 
 TTY detection may control terminal presentation such as color and progress,
 but it may not select a different command. A TUI requires interactive stdin
@@ -87,10 +92,6 @@ is a typed user interruption and returns `130`, but only after terminal modes
 and the alternate screen have been restored.
 
 ### Explicit maintenance and leaf commands
-
-`graph` always produces JSON. Without `--output` it writes the document to
-stdout; with `--output` it writes the file and prints only the final path to
-stdout.
 
 Pricing is `pricing lookup <model>` or `pricing overrides`; the lookup's
 catalog selector is named `--pricing-source`. Cache maintenance is `cache warm` or

@@ -110,16 +110,10 @@ legacy shards; there is no automatic migration.
 The TUI aggregate cache is separate from scan-input message shards. Reports never
 write it; use `tokscale cache warm` when you intentionally want to prebuild it.
 
-Integration roots are mixed state, not all disposable caches:
-
-- `warp-cache/` contains both synced Warp aggregate usage and
-  `credentials.json`. Deleting the directory can log you out; use
-  `tokscale warp logout --purge-cache` when you intentionally want to remove
-  credentials and cached usage together.
-
-The retired `antigravity-cache/` integration root is not a current input.
-Tokscale does not delete it automatically; it may be removed manually after
-upgrading. Current AGY CLI usage remains provider-owned under
+Retired `warp-cache/` and `antigravity-cache/` integration roots are not
+current Inputs. Tokscale ignores them and does not delete them automatically.
+Current local Warp usage remains provider-owned in `warp.sqlite`; current AGY
+CLI usage remains provider-owned under
 `$GEMINI_CLI_HOME/antigravity-cli/conversations/`.
 
 ## Subscription providers
@@ -136,7 +130,6 @@ grok
 kimi
 minimax-token-plan-cn
 minimax-token-plan-global
-warp
 ```
 
 General-purpose provider API keys such as `ZAI_API_KEY`, `GLM_API_KEY`,
