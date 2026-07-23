@@ -187,90 +187,6 @@ fn test_client_flags_parses_canonical_form() {
 }
 
 #[test]
-fn wrapped_ranking_is_one_typed_selection() {
-    let cli = Cli::try_parse_from(["tokscale", "wrapped"]).expect("parse ok");
-    let Some(Commands::Wrapped(args)) = cli.command else {
-        panic!("expected wrapped command");
-    };
-    assert_eq!(args.ranking, None);
-
-    let cli = Cli::try_parse_from(["tokscale", "wrapped", "--ranking", "agents"])
-        .expect("agents ranking parses");
-    let Some(Commands::Wrapped(args)) = cli.command else {
-        panic!("expected wrapped command");
-    };
-    assert_eq!(args.ranking, Some(WrappedRankingArg::Agents));
-
-    let cli = Cli::try_parse_from(["tokscale", "wrapped", "--ranking", "clients"])
-        .expect("clients ranking parses");
-    let Some(Commands::Wrapped(args)) = cli.command else {
-        panic!("expected wrapped command");
-    };
-    assert_eq!(args.ranking, Some(WrappedRankingArg::Clients));
-
-    for removed in ["--agents", "--clients"] {
-        assert!(Cli::try_parse_from(["tokscale", "wrapped", removed]).is_err());
-    }
-}
-
-#[test]
-fn wrapped_ranking_resolves_without_boolean_precedence() {
-    let resolve = |args: &[&str]| {
-        let cli = Cli::try_parse_from(args).expect("wrapped arguments parse");
-        ExecutionPlan::resolve(
-            cli,
-            TerminalState {
-                stdin: false,
-                stdout: false,
-            },
-        )
-    };
-
-    let ExecutionPlan::Wrapped(plan) =
-        resolve(&["tokscale", "wrapped"]).expect("default ranking resolves")
-    else {
-        panic!("expected wrapped plan");
-    };
-    assert_eq!(plan.ranking, WrappedRanking::Auto);
-
-    let ExecutionPlan::Wrapped(plan) = resolve(&[
-        "tokscale",
-        "wrapped",
-        "--ranking",
-        "agents",
-        "--client",
-        "opencode",
-    ])
-    .expect("agents ranking resolves") else {
-        panic!("expected wrapped plan");
-    };
-    assert_eq!(plan.ranking, WrappedRanking::Agents);
-
-    let error = resolve(&[
-        "tokscale",
-        "wrapped",
-        "--ranking",
-        "agents",
-        "--client",
-        "claude",
-    ])
-    .expect_err("agents ranking without OpenCode must fail during resolve");
-    assert_eq!(error.exit_code(), 2);
-    assert!(error.to_string().contains("requires `opencode`"));
-
-    let error = resolve(&[
-        "tokscale",
-        "wrapped",
-        "--ranking",
-        "clients",
-        "--disable-pinned",
-    ])
-    .expect_err("client ranking cannot accept an ignored agent option");
-    assert_eq!(error.exit_code(), 2);
-    assert!(error.to_string().contains("does not apply"));
-}
-
-#[test]
 fn test_legacy_client_flags_are_removed() {
     assert!(Cli::try_parse_from(["tokscale", "--claude"]).is_err());
     assert!(Cli::try_parse_from(["tokscale", "--opencode"]).is_err());
@@ -886,6 +802,8 @@ fn removed_report_and_cache_flags_are_rejected() {
     for flag in ["--light", "--write-cache", "--no-write-cache"] {
         assert!(Cli::try_parse_from(["tokscale", "models", flag]).is_err());
     }
+    assert!(Cli::try_parse_from(["tokscale", "wrapped", "--ranking", "agents"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "wrapped", "--disable-pinned"]).is_err());
 }
 
 #[test]

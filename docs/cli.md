@@ -180,18 +180,14 @@ namespaces. In particular, the removed remote `tokscale warp ...` integration
 has no replacement. Warp remains a normal local Client whose `warp.sqlite`
 usage is scanned by Models and the TUI.
 
-## Wrapped ranking
+## Wrapped
 
 ```bash
 tokscale wrapped
-tokscale wrapped --ranking agents
-tokscale wrapped --ranking clients
 ```
 
-Without `--ranking`, Wrapped uses OpenCode agent rankings when agent data exists
-and otherwise uses Client rankings. An explicit `--ranking agents` keeps the
-requested panel and renders an empty state when no agent data is available.
-It requires OpenCode in an explicit `--client` scope.
+Wrapped always renders the top Client rankings for the selected local input
+scope.
 
 ## Cache maintenance
 

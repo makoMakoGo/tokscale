@@ -59,6 +59,10 @@ wrapped
 cache
 ```
 
+`tokscale wrapped` is one annual Top Clients report. Client is its only ranking
+identity; it has no Agent ranking mode, pinned Agent, Agent-specific palette,
+or OpenCode-only validation branch.
+
 Remove the public `monthly`, `hourly`, `time-metrics`, `graph`, and `clients`
 commands and their parallel core report DTOs, accumulators, and entry points.
 Do not introduce `doctor clients` as a rename: Client Input failures belong to

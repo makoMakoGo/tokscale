@@ -124,8 +124,6 @@ fn run_wrapped_command(plan: WrappedPlan) -> Result<()> {
         home_dir: plan.input.home,
         clients: plan.input.clients,
         short: plan.short,
-        ranking: plan.ranking,
-        pin_sisyphus: !plan.disable_pinned,
     };
 
     let output_path = commands::wrapped::run(wrapped_options)?;

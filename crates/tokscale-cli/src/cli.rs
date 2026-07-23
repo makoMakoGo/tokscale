@@ -383,38 +383,8 @@ pub(crate) struct WrappedArgs {
     pub(crate) input: InputScopeArgs,
     #[arg(long, help = "Display total tokens in abbreviated format")]
     pub(crate) short: bool,
-    #[arg(
-        long,
-        value_enum,
-        help = "Choose the ranking panel instead of automatic selection"
-    )]
-    pub(crate) ranking: Option<WrappedRankingArg>,
-    #[arg(long, help = "Disable pinning of Sisyphus agents in rankings")]
-    pub(crate) disable_pinned: bool,
     #[arg(long, help = "Disable progress animation")]
     pub(crate) no_spinner: bool,
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum WrappedRankingArg {
-    Agents,
-    Clients,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum WrappedRanking {
-    Auto,
-    Agents,
-    Clients,
-}
-
-impl From<WrappedRankingArg> for WrappedRanking {
-    fn from(value: WrappedRankingArg) -> Self {
-        match value {
-            WrappedRankingArg::Agents => Self::Agents,
-            WrappedRankingArg::Clients => Self::Clients,
-        }
-    }
 }
 
 #[derive(Args, Clone, Debug, Default)]
@@ -605,8 +575,6 @@ pub(crate) struct WrappedPlan {
     pub(crate) year: Option<String>,
     pub(crate) input: ResolvedInputScope,
     pub(crate) short: bool,
-    pub(crate) ranking: WrappedRanking,
-    pub(crate) disable_pinned: bool,
     pub(crate) no_spinner: bool,
 }
 
@@ -642,36 +610,12 @@ impl ExecutionPlan {
 
 fn resolve_wrapped(args: WrappedArgs) -> Result<WrappedPlan, CliFailure> {
     let input = resolve_input(args.input)?;
-    let ranking = args
-        .ranking
-        .map(WrappedRanking::from)
-        .unwrap_or(WrappedRanking::Auto);
-
-    if ranking == WrappedRanking::Agents
-        && input.clients.as_ref().is_some_and(|clients| {
-            !clients
-                .iter()
-                .any(|client| client == ClientId::OpenCode.as_str())
-        })
-    {
-        return Err(CliFailure::invalid_message(
-            "--ranking agents requires `opencode` in the --client scope".to_string(),
-        ));
-    }
-
-    if ranking == WrappedRanking::Clients && args.disable_pinned {
-        return Err(CliFailure::invalid_message(
-            "--disable-pinned does not apply to --ranking clients".to_string(),
-        ));
-    }
 
     Ok(WrappedPlan {
         output: args.output,
         year: args.year,
         input,
         short: args.short,
-        ranking,
-        disable_pinned: args.disable_pinned,
         no_spinner: args.no_spinner,
     })
 }
