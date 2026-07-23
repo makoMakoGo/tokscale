@@ -22,8 +22,14 @@ struct LocalMessagesForTest {
     health: super::DataHealth,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct TestClientCounts([i32; ClientId::COUNT]);
+
+impl Default for TestClientCounts {
+    fn default() -> Self {
+        Self(std::array::from_fn(|_| 0))
+    }
+}
 
 impl TestClientCounts {
     fn from_messages(messages: &[UnifiedMessage]) -> Self {
