@@ -18,7 +18,7 @@ mod opencode;
 
 mod omp;
 mod pi;
-mod vscode_tasks;
+mod roocode;
 mod warp;
 mod zed;
 
@@ -541,7 +541,6 @@ fn default_parser_id(client: ClientId) -> ParserId {
         ClientId::Kimi => ParserId::Kimi,
         ClientId::Qwen => ParserId::Qwen,
         ClientId::RooCode => ParserId::RooCode,
-        ClientId::KiloCode => ParserId::KiloCode,
         ClientId::Mux => ParserId::Mux,
         ClientId::Kilo => ParserId::Kilo,
         ClientId::Hermes => ParserId::Hermes,
@@ -652,7 +651,7 @@ impl ParsedUnit {
     }
 }
 
-static LOCAL_INPUT_ADAPTERS: [&dyn LocalInputAdapter; 29] = [
+static LOCAL_INPUT_ADAPTERS: [&dyn LocalInputAdapter; 28] = [
     &zed::ZED_ADAPTER,
     &pi::PI_ADAPTER,
     &omp::OMP_ADAPTER,
@@ -670,8 +669,7 @@ static LOCAL_INPUT_ADAPTERS: [&dyn LocalInputAdapter; 29] = [
     &codebuff::CODEBUFF_ADAPTER,
     &codebuddy::CODEBUDDY_ADAPTER,
     &openclaw::OPENCLAW_ADAPTER,
-    &vscode_tasks::ROOCODE_ADAPTER,
-    &vscode_tasks::KILOCODE_ADAPTER,
+    &roocode::ROOCODE_ADAPTER,
     &cline::CLINE_ADAPTER,
     &antigravity::ANTIGRAVITY_ADAPTER,
     &kilo::KILO_ADAPTER,
@@ -1539,5 +1537,14 @@ mod tests {
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].client(), ClientId::Antigravity);
         assert!(selected_adapters(&["antigravity-cli".to_string()]).is_err());
+    }
+
+    #[test]
+    fn kilo_uses_one_current_runtime_adapter() {
+        let adapters = selected_adapters(&["kilo".to_string()]).unwrap();
+
+        assert_eq!(adapters.len(), 1);
+        assert_eq!(adapters[0].client(), ClientId::Kilo);
+        assert!(selected_adapters(&["kilocode".to_string()]).is_err());
     }
 }

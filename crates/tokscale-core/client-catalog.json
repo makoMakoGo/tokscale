@@ -97,14 +97,6 @@
     "color": "#10B981"
   },
   {
-    "variant": "KiloCode",
-    "id": "kilocode",
-    "displayName": "KiloCode",
-    "shortName": "KiloCode",
-    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-kilocode.png",
-    "color": "#F59E0B"
-  },
-  {
     "variant": "Mux",
     "id": "mux",
     "displayName": "Mux",
@@ -115,9 +107,9 @@
   {
     "variant": "Kilo",
     "id": "kilo",
-    "displayName": "Kilo CLI",
-    "shortName": "Kilo CLI",
-    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-kilocode.png",
+    "displayName": "Kilo",
+    "shortName": "Kilo",
+    "logo": "https://raw.githubusercontent.com/makoMakoGo/tokscale/personal/local-clients/.github/assets/client-kilo.png",
     "color": "#F59E0B"
   },
   {

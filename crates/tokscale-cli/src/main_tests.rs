@@ -42,7 +42,7 @@ fn test_parse_client_id_arg_rejects_unknown_ids() {
 
 #[test]
 fn removed_clients_are_not_valid_client_ids() {
-    for client in ["cursor", "trae"] {
+    for client in ["cursor", "trae", "kilocode"] {
         let error = parse_client_id_arg(client).unwrap_err();
         assert!(error.contains(client), "unexpected error: {error}");
     }
@@ -132,6 +132,18 @@ fn test_build_client_filter_defaults_reject_unknown_ids() {
     assert!(
         err.to_string().contains("not-a-client"),
         "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn retired_kilocode_default_is_rejected() {
+    let flags = ClientFlags::default();
+    let defaults = vec!["kilocode".to_string()];
+    let error = build_client_filter_with_defaults(flags, &defaults).unwrap_err();
+
+    assert!(
+        error.to_string().contains("kilocode"),
+        "unexpected error: {error}"
     );
 }
 

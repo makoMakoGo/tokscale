@@ -197,14 +197,6 @@ pub const LOCAL_CLIENTS: &[LocalClientEntry] = &[
         },
     },
     LocalClientEntry {
-        client: ClientId::KiloCode,
-        def: LocalClientDef {
-            root: PathRoot::Home,
-            relative_path: ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
-            pattern: "ui_messages.json",
-        },
-    },
-    LocalClientEntry {
         client: ClientId::Mux,
         def: LocalClientDef {
             root: PathRoot::Home,

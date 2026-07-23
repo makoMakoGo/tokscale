@@ -19,10 +19,10 @@ compile_error!("input-message cache requires stable Unix or Windows file identit
 // Input-message cache shards split serialization layout from parser/input
 // semantics. Bump this only when the shard bincode layout changes; parser-only
 // fixes should bump the relevant InputUnit parser revision instead.
-const CACHE_FORMAT_VERSION: u32 = 8;
+const CACHE_FORMAT_VERSION: u32 = 9;
 #[cfg(test)]
-const PREVIOUS_CACHE_FORMAT_VERSION: u32 = 7;
-const LEGACY_MAGIC_FORMAT_VERSIONS: [u32; 6] = [2, 3, 4, 5, 6, 7];
+const PREVIOUS_CACHE_FORMAT_VERSION: u32 = 8;
+const LEGACY_MAGIC_FORMAT_VERSIONS: [u32; 7] = [2, 3, 4, 5, 6, 7, 8];
 const SHARD_MAGIC: [u8; 8] = *b"TOKSHRD\0";
 const SHARD_KEY_FORMAT_VERSION: u32 = 1;
 const SHARDS_DIRNAME: &str = "shards";
@@ -278,7 +278,6 @@ pub(crate) enum ParserId {
     Kimi,
     Qwen,
     RooCode,
-    KiloCode,
     Mux,
     Kilo,
     Hermes,
@@ -332,7 +331,6 @@ impl ParserId {
             Self::Kimi => "kimi",
             Self::Qwen => "qwen",
             Self::RooCode => "roo-code",
-            Self::KiloCode => "kilo-code",
             Self::Mux => "mux",
             Self::Kilo => "kilo",
             Self::Hermes => "hermes",
@@ -1750,7 +1748,7 @@ enum LegacyV1ParserId {
     Kimi,
     Qwen,
     RooCode,
-    KiloCode,
+    RetiredVscodeTask,
     Mux,
     Kilo,
     Hermes,

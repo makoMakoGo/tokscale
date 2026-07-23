@@ -20,7 +20,6 @@ pub mod hermes;
 pub mod intern;
 pub mod junie;
 pub mod kilo;
-pub mod kilocode;
 pub mod kimi;
 pub mod kiro;
 pub mod mux;

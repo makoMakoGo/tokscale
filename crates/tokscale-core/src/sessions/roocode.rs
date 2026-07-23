@@ -13,10 +13,6 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub fn parse_roocode_file(path: &Path) -> SessionParseResult<ScannedInput> {
-    parse_roo_kilo_file(path, "roocode")
-}
-
-pub(crate) fn parse_roo_kilo_file(path: &Path, client: &str) -> SessionParseResult<ScannedInput> {
     let data = std::fs::read(path)
         .map_err(|error| SessionParseError::at_path(path, "read Roo Code UI messages", error))?;
 
@@ -109,7 +105,7 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, client: &str) -> SessionParseResu
             &model_id,
         );
         messages.push(UnifiedMessage::new_with_agent(
-            client,
+            "roocode",
             model_id.clone(),
             provider,
             session_id.clone(),
