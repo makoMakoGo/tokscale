@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-use crate::TokenBreakdown;
+use crate::{model_aliases, TokenBreakdown};
 
 pub use litellm::ModelPricing;
 
@@ -261,12 +261,13 @@ impl PricingService {
         model_id: &str,
         forced_pricing_source: Option<&str>,
     ) -> Option<LookupResult> {
+        let canonical_model_id = model_aliases::canonicalize_model_id(model_id);
         match forced_pricing_source {
             Some(pricing_source) if pricing_source.eq_ignore_ascii_case("custom") => {
-                return self.lookup_custom(model_id);
+                return self.lookup_custom(&canonical_model_id);
             }
             None => {
-                if let Some(result) = self.lookup_custom(model_id) {
+                if let Some(result) = self.lookup_custom(&canonical_model_id) {
                     return Some(result);
                 }
             }
@@ -274,7 +275,7 @@ impl PricingService {
         }
 
         self.lookup
-            .lookup_with_pricing_source(model_id, forced_pricing_source)
+            .lookup_with_pricing_source(&canonical_model_id, forced_pricing_source)
     }
 
     pub fn lookup_with_pricing_source_and_provider(
@@ -283,12 +284,13 @@ impl PricingService {
         forced_pricing_source: Option<&str>,
         provider_id: Option<&str>,
     ) -> Option<LookupResult> {
+        let canonical_model_id = model_aliases::canonicalize_model_id(model_id);
         match forced_pricing_source {
             Some(pricing_source) if pricing_source.eq_ignore_ascii_case("custom") => {
-                return self.lookup_custom(model_id);
+                return self.lookup_custom(&canonical_model_id);
             }
             None => {
-                if let Some(result) = self.lookup_custom(model_id) {
+                if let Some(result) = self.lookup_custom(&canonical_model_id) {
                     return Some(result);
                 }
             }
@@ -296,7 +298,7 @@ impl PricingService {
         }
 
         self.lookup.lookup_with_pricing_source_and_provider(
-            model_id,
+            &canonical_model_id,
             forced_pricing_source,
             provider_id,
         )
@@ -327,7 +329,8 @@ impl PricingService {
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> f64 {
-        if let Some(result) = self.custom.lookup_with_key(model_id) {
+        let canonical_model_id = model_aliases::canonicalize_model_id(model_id);
+        if let Some(result) = self.custom.lookup_with_key(&canonical_model_id) {
             return compute_cost(
                 result.pricing,
                 usage.input,
@@ -339,7 +342,7 @@ impl PricingService {
         }
 
         self.lookup
-            .calculate_cost_with_provider(model_id, provider_id, usage)
+            .calculate_cost_with_provider(&canonical_model_id, provider_id, usage)
     }
 
     fn lookup_custom(&self, model_id: &str) -> Option<LookupResult> {
@@ -429,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn models_dev_fills_provider_aware_fallback_prices() {
+    fn models_dev_resolves_provider_scoped_exact_price() {
         let service = custom_service_with_models_dev(
             HashMap::new(),
             HashMap::new(),
@@ -447,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn models_dev_cache_prices_are_used_for_cost_fallback() {
+    fn models_dev_exact_price_is_used_for_cost() {
         let service = custom_service_with_models_dev(
             HashMap::new(),
             HashMap::new(),
@@ -470,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_pricing_sources_beat_models_dev_fallback() {
+    fn provider_scoped_rows_precede_unscoped_rows_across_catalogs() {
         let mut litellm = HashMap::new();
         litellm.insert(
             "gpt-fixture-model".into(),
@@ -492,8 +495,11 @@ mod tests {
         let litellm_result = service
             .lookup_with_pricing_source_and_provider("gpt-fixture-model", None, Some("openai"))
             .unwrap();
-        assert_eq!(litellm_result.pricing_source, "LiteLLM");
-        assert_eq!(litellm_result.pricing.input_cost_per_token, Some(0.000002));
+        assert_eq!(litellm_result.pricing_source, "Models.dev");
+        assert_eq!(
+            litellm_result.pricing.input_cost_per_token,
+            Some(0.00000125)
+        );
 
         let openrouter_result = service
             .lookup_with_pricing_source_and_provider(
@@ -544,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_override_beats_models_dev_fallback() {
+    fn custom_exact_price_precedes_models_dev() {
         let mut custom = HashMap::new();
         custom.insert(
             "gpt-fixture-model".into(),
@@ -703,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_prefixed_model_id_uses_catalog_full_key() {
+    fn standalone_lookup_canonicalizes_provider_qualified_input() {
         let mut openrouter = HashMap::new();
         openrouter.insert(
             "openai/gpt-5.3-codex".into(),
@@ -722,11 +728,16 @@ mod tests {
     }
 
     #[test]
-    fn test_catalog_lookup_does_not_match_via_suffix_stripping() {
-        let service = PricingService::new(HashMap::new(), HashMap::new());
-        assert!(service
-            .lookup_with_pricing_source("gpt-5.3-codex-high", None)
-            .is_none());
+    fn standalone_lookup_uses_the_shared_canonical_model_id() {
+        let mut litellm = HashMap::new();
+        litellm.insert("gpt-5.3-codex".into(), model_pricing(0.000002, 0.000016));
+        let service = PricingService::new(litellm, HashMap::new());
+
+        let result = service
+            .lookup_with_pricing_source("openai/GPT-5.3-Codex (high)", None)
+            .unwrap();
+
+        assert_eq!(result.matched_key, "gpt-5.3-codex");
     }
 
     #[test]
@@ -828,6 +839,23 @@ mod tests {
     }
 
     #[test]
+    fn custom_override_is_exact_and_case_insensitive_after_canonicalization() {
+        let mut custom = HashMap::new();
+        custom.insert("gpt-5.5".into(), model_pricing(0.000002, 0.000008));
+        let mut litellm = HashMap::new();
+        litellm.insert("gpt-5.5".into(), model_pricing(0.00001, 0.00003));
+
+        let service = custom_service(custom, litellm, HashMap::new());
+        let result = service
+            .lookup_with_pricing_source("openai/GPT-5.5 (high)", None)
+            .unwrap();
+
+        assert_eq!(result.pricing_source, "Custom");
+        assert_eq!(result.matched_key, "gpt-5.5");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.000002));
+    }
+
+    #[test]
     fn custom_override_wins_over_openrouter() {
         let mut custom = HashMap::new();
         custom.insert("grok-code".into(), model_pricing(0.000002, 0.000008));
@@ -890,12 +918,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_override_raw_match_wins() {
+    fn custom_override_matches_the_shared_canonical_model_id() {
         let mut custom = HashMap::new();
-        custom.insert(
-            "accounts/fireworks/routers/kimi-k2p6-turbo".into(),
-            model_pricing(0.000002, 0.000008),
-        );
+        custom.insert("kimi-k2p6-turbo".into(), model_pricing(0.000002, 0.000008));
         let mut litellm = HashMap::new();
         litellm.insert("kimi-k2.6".into(), model_pricing(0.00000095, 0.000004));
 
@@ -905,28 +930,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.pricing_source, "Custom");
-        assert_eq!(
-            result.matched_key,
-            "accounts/fireworks/routers/kimi-k2p6-turbo"
-        );
+        assert_eq!(result.matched_key, "kimi-k2p6-turbo");
         assert_eq!(result.pricing.input_cost_per_token, Some(0.000002));
     }
 
     #[test]
-    fn custom_override_does_not_normalize_gateway_path() {
+    fn custom_override_key_must_be_the_final_canonical_model_id() {
         let mut custom = HashMap::new();
         custom.insert("kimi-k2p6".into(), model_pricing(0.00000095, 0.000004));
-        let mut litellm = HashMap::new();
-        litellm.insert("gpt-4-turbo".into(), model_pricing(0.00001, 0.00003));
+        custom.insert("kimi-k2.6".into(), model_pricing(0.000002, 0.000008));
 
-        let service = custom_service(custom, litellm, HashMap::new());
-        assert!(service
+        let service = custom_service(custom, HashMap::new(), HashMap::new());
+        let result = service
             .lookup_with_pricing_source("accounts/fireworks/models/kimi-k2p6", None)
-            .is_none());
+            .unwrap();
+
+        assert_eq!(result.matched_key, "kimi-k2.6");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.000002));
     }
 
     #[test]
-    fn custom_override_raw_beats_normalized() {
+    fn custom_override_selects_the_final_canonical_key() {
         let mut custom = HashMap::new();
         custom.insert("kimi-k2p6-turbo".into(), model_pricing(0.000001, 0.000004));
         custom.insert(
@@ -939,15 +963,12 @@ mod tests {
             .lookup_with_pricing_source("accounts/fireworks/models/kimi-k2p6-turbo", None)
             .unwrap();
 
-        assert_eq!(
-            result.matched_key,
-            "accounts/fireworks/models/kimi-k2p6-turbo"
-        );
-        assert_eq!(result.pricing.input_cost_per_token, Some(0.000002));
+        assert_eq!(result.matched_key, "kimi-k2p6-turbo");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.000001));
     }
 
     #[test]
-    fn custom_override_skips_fuzzy_chain() {
+    fn custom_non_exact_model_id_is_an_ordinary_miss() {
         let mut custom = HashMap::new();
         custom.insert("kimi-k2p6-turbo".into(), model_pricing(0.000002, 0.000008));
 
@@ -973,15 +994,9 @@ mod tests {
     #[test]
     fn custom_calculate_cost_uses_override() {
         let mut custom = HashMap::new();
-        custom.insert(
-            "accounts/fireworks/routers/kimi-k2p6-turbo".into(),
-            model_pricing(0.000002, 0.000008),
-        );
+        custom.insert("kimi-k2p6-turbo".into(), model_pricing(0.000002, 0.000008));
         let mut litellm = HashMap::new();
-        litellm.insert(
-            "accounts/fireworks/routers/kimi-k2p6-turbo".into(),
-            model_pricing(0.00001, 0.00003),
-        );
+        litellm.insert("kimi-k2p6-turbo".into(), model_pricing(0.00001, 0.00003));
 
         let service = custom_service(custom, litellm, HashMap::new());
         let cost = service.calculate_cost(

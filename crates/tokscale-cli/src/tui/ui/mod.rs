@@ -228,7 +228,12 @@ mod tests {
             year: None,
             initial_tab: None,
         };
-        App::new_with_cached_data(config, None).unwrap()
+        App::new_with_cached_data_and_settings(
+            config,
+            None,
+            crate::tui::settings::Settings::default(),
+        )
+        .unwrap()
     }
 
     fn buffer_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {

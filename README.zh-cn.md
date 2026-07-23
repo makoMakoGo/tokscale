@@ -84,12 +84,9 @@ tokscale models --since 2026-01-01 --until 2026-01-31
 tokscale models --group-by client,provider,model --json
 
 # TUI 内的期间报表与 Sessions
+tokscale tui --tab usage
 tokscale tui --tab monthly
 tokscale tui --tab sessions
-
-# 独立的远程订阅额度
-tokscale usage
-tokscale usage --json
 
 # 查询价格目录
 tokscale pricing lookup claude-sonnet-4-5 --no-spinner

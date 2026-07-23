@@ -34,7 +34,7 @@ struct CustomModelPricing {
     #[serde(rename = "pricingSource")]
     _pricing_source: Option<String>,
     #[serde(flatten)]
-    extra_fields: HashMap<String, Value>,
+    _metadata: HashMap<String, Value>,
     input_cost_per_million_tokens: Option<f64>,
     input_cost_per_million_tokens_above_128k_tokens: Option<f64>,
     input_cost_per_million_tokens_above_200k_tokens: Option<f64>,
@@ -69,10 +69,6 @@ struct CustomModelPricing {
 
 impl CustomModelPricing {
     fn into_model_pricing(self) -> Result<ModelPricing, String> {
-        if self.extra_fields.contains_key("source") {
-            return Err("retired `source` field is not supported; use `pricingSource`".into());
-        }
-
         let input_cost_per_token = base_price(
             self.input_cost_per_million_tokens,
             self.input_cost_per_token,
@@ -180,18 +176,22 @@ impl CustomModelPricing {
 }
 
 impl CustomPricing {
-    pub fn default_path() -> PathBuf {
-        crate::paths::get_config_dir().join(CUSTOM_PRICING_FILENAME)
+    pub fn default_path() -> Result<PathBuf, crate::paths::ConfigDirUnavailable> {
+        crate::paths::try_get_config_dir().map(|directory| directory.join(CUSTOM_PRICING_FILENAME))
     }
 
     pub fn load_from_default_path() -> Self {
-        Self::load_from_path(&Self::default_path())
+        Self::default_path()
+            .map(|path| Self::load_from_path(&path))
+            .unwrap_or_default()
     }
 
     pub(crate) fn load_from_default_path_with_diagnostics(
         diagnostics: &mut PricingDiagnostics,
     ) -> Self {
-        Self::load_from_path_with_diagnostics(&Self::default_path(), diagnostics)
+        Self::default_path()
+            .map(|path| Self::load_from_path_with_diagnostics(&path, diagnostics))
+            .unwrap_or_default()
     }
 
     pub fn load_from_path(path: &Path) -> Self {
@@ -815,34 +815,6 @@ mod tests {
         assert_eq!(
             loaded.lookup("annotated").unwrap().input_cost_per_token,
             Some(0.000002)
-        );
-    }
-
-    #[test]
-    fn retired_source_field_is_rejected_instead_of_aliased() {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("custom-pricing.json");
-        fs::write(
-            &path,
-            r#"{
-                "models": {
-                    "retired-field": {
-                        "input_cost_per_million_tokens": 2.00,
-                        "output_cost_per_million_tokens": 8.00,
-                        "source": "https://example.com/pricing"
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-        let mut diagnostics = Vec::new();
-
-        let loaded = CustomPricing::load_from_path_with_diagnostics(&path, &mut diagnostics);
-
-        assert!(loaded.lookup("retired-field").is_none());
-        assert_eq!(diagnostics.len(), 1);
-        assert!(
-            diagnostics[0].contains("retired `source` field is not supported; use `pricingSource`")
         );
     }
 

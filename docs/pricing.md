@@ -123,6 +123,5 @@ query over the exact canonical model component, not a parser repair path.
 
 ## Subscription usage is separate
 
-Subscription quota commands call provider-specific quota endpoints and show what
-the provider reports. Those numbers are not mixed into normal local token
-reports.
+The TUI Usage tab calls provider-specific quota endpoints and shows what the
+provider reports. Those numbers are not mixed into normal local token reports.

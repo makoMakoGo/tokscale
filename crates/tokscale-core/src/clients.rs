@@ -1,7 +1,6 @@
 pub use crate::client_catalog::{ClientId, ClientIdentity, CLIENT_IDENTITIES};
 pub use crate::local_clients::{
-    cline_session_data_dir_with_env_strategy, warp_sqlite_roots_with_env_strategy, LocalClientDef,
-    PathRoot, LOCAL_CLIENTS,
+    cline_session_data_dir, warp_sqlite_roots, LocalClientDef, PathRoot, LOCAL_CLIENTS,
 };
 
 #[cfg(test)]
@@ -32,14 +31,6 @@ mod tests {
     fn synthetic_is_not_a_client_identity() {
         assert_eq!(ClientId::from_str("synthetic"), None);
         assert_eq!(ClientId::from_str("synthetic.new"), None);
-        assert_eq!(ClientId::from_str("antigravity-cli"), None);
-    }
-
-    #[test]
-    fn removed_clients_are_not_client_identities() {
-        for client in ["cursor", "trae", "kilocode"] {
-            assert_eq!(ClientId::from_str(client), None);
-        }
     }
 
     #[test]

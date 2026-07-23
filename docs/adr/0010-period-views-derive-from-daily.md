@@ -6,7 +6,7 @@ Status: Accepted
 
 Local reports combine authoritative model/token facts with several derived
 views: time buckets, workspace and agent attribution, Group By projections,
-estimated cost, and graph metadata. If those layers independently reinterpret
+estimated cost, and the contribution graph. If those layers independently reinterpret
 identity or refold the same messages, reports can disagree and the single-copy
 pipeline loses its benefit.
 
@@ -137,8 +137,9 @@ secondary projection and never controls eligibility.
 - Parsers ignore app/vendor `cost`, credits, spend, and billing-total fields.
 - Finalization clears any parser/cache cost and derives cost only from
   canonical model identity, provider scope, and token buckets.
-- Custom pricing has highest priority and matches the final canonical model id
-  exactly, case-insensitively.
+- In automatic lookup, custom pricing has highest priority and matches the
+  final canonical model id exactly, case-insensitively. A forced Pricing Source
+  limits lookup to that source, including when the selected source is custom.
 - Public Pricing Sources have the deterministic order LiteLLM, OpenRouter, then
   models.dev. A forced `--pricing-source` limits lookup to that catalog. An
   explicit `0.0` row is valid; a row without price fields is not pricing data.

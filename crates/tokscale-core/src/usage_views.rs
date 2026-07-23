@@ -62,7 +62,11 @@ impl UsageTokenBreakdown {
 
 #[derive(Debug, Clone)]
 pub struct UsageModelEntry {
-    pub model: String,
+    /// Bare canonical semantic identity used for grouping, ranking, pricing,
+    /// detail selection, and model color.
+    pub model_id: String,
+    /// Presentation-only model label.
+    pub display_name: String,
     pub provider: String,
     /// Canonical display of every Client contributing to this model bucket.
     ///
@@ -109,7 +113,7 @@ pub struct DailyModelInfo {
     /// provider was seen first and is **not** authoritative. Only treat it as
     /// exact when `group_by == GroupBy::ClientProviderModel`.
     pub provider: String,
-    /// Bare canonical model ID: the authoritative model identity (ADR 0026).
+    /// Bare canonical model ID: the authoritative model identity (ADR 0010).
     pub model_id: String,
     /// Pure display label; never carries another grouping dimension.
     pub display_name: String,
@@ -169,7 +173,7 @@ pub struct DailyUsage {
 #[derive(Debug, Clone)]
 pub struct HourlyModelInfo {
     pub provider: String,
-    /// Bare canonical model ID: the authoritative model identity (ADR 0026).
+    /// Bare canonical model ID: the authoritative model identity (ADR 0010).
     pub model_id: String,
     pub display_name: String,
     pub tokens: UsageTokenBreakdown,

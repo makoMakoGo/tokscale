@@ -14,9 +14,9 @@ rather than an authentication authority.
 
 ### Product and identity model
 
-Subscription Usage consists of `tokscale usage`, the optional TUI Usage tab,
+Subscription Usage is owned by the optional TUI Usage tab. It consists of
 provider-specific quota adapters, a normalized short-lived cache, and one
-provider/account/plan/metric model shared by CLI and TUI.
+provider/account/plan/metric model consumed by that tab.
 
 Local reports and Subscription Usage have independent acquisition lifecycles.
 Subscription data never enters local token totals, Group By, Sessions, or local
@@ -30,7 +30,7 @@ Each normalized output contains:
 - zero or more metrics with a label, used and remaining percentages, optional
   remaining label, and optional reset time.
 
-Both renderers use that identity directly. Provider and account failures are
+The renderer uses that identity directly. Provider and account failures are
 isolated, so healthy outputs remain visible alongside explicit errors.
 
 The complete `usageProviders` id set is:
@@ -39,10 +39,9 @@ The complete `usageProviders` id set is:
 claude
 codex
 zai
-amp
-copilot
 grok
-kimi
+kimi-coding-plan-key
+kimi-coding-plan-credential
 minimax-token-plan-cn
 minimax-token-plan-global
 ```
@@ -65,11 +64,6 @@ The TUI lifecycle is:
 - `R` controls local-report automatic refresh only; and
 - Subscription Usage is never polled in the background.
 
-`tokscale usage` is explicit remote-request consent. It detects providers with
-usable subscription credentials, fetches them concurrently, renders every
-healthy output, and reports every provider failure. A partial failure makes the
-command fail after available output is rendered.
-
 An explicitly configured TUI provider without usable credentials produces a
 provider error rather than ordinary empty data.
 
@@ -81,31 +75,41 @@ credential authority is limited to reading the fields required for an explicit
 quota request. It does not own login, logout, account switching, OAuth refresh,
 or credential persistence.
 
-Codex quota lookup reads the active provider-owned authentication artifact in
-this order:
+Codex quota lookup reads exactly `~/.codex/auth.json`. Only the access token
+and account id required by the request are consumed.
 
-1. `$CODEX_HOME/auth.json` when `CODEX_HOME` is set;
-2. `~/.config/codex/auth.json`;
-3. `~/.codex/auth.json`;
-4. the provider's macOS Keychain entry.
-
-Only the access token and account id required by the request are consumed.
+Grok Build quota lookup reads exactly `~/.grok/auth.json`. The file must contain
+exactly one usable `https://auth.x.ai::*` account entry; absence and ambiguity
+are explicit provider errors. Tokscale reads only the access key and the
+provider-owned principal, user-facing name, and email fields required to issue
+the quota request and identify its result. It queries the Grok Build
+subscription backend directly and never invokes the Grok executable. The
+provider-owned principal is the account id.
 
 Purpose-specific subscription credentials are:
 
 - Z.ai/Zhipu GLM Coding Plan:
   `TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY`;
-- Kimi Code:
-  `TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY` or provider-owned Kimi Code OAuth;
+- Kimi Coding Plan (key):
+  `TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY`;
+- Kimi Coding Plan (credential):
+  exactly `~/.kimi-code/credentials/kimi-code.json`;
 - MiniMax CN Token Plan:
   `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY`; and
 - MiniMax Global Token Plan:
   `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY`.
 
-General provider API keys are not subscription-plan credentials. Claude, Amp,
-Copilot, Grok, Kimi, and Codex adapters read only their provider-owned current
-authentication artifacts. Missing, ambiguous, expired, or rejected
-authentication is an explicit provider error repaired with provider tooling.
+General provider API keys are not subscription-plan credentials. Claude, Grok,
+Kimi Coding Plan (credential), and Codex adapters read only their
+provider-owned current authentication artifacts. The Kimi key and credential
+providers are independent and never substitute for one another. Missing,
+ambiguous, expired, or rejected authentication is an explicit provider error
+repaired with provider tooling.
+
+MiniMax Token Plan CN and MiniMax Token Plan Global are separate subscription
+surfaces with the display identities `MiniMax Token Plan CN` and
+`MiniMax Token Plan Global`. Their region is not an account identity. Unless
+the provider returns a real account id, both outputs carry no `UsageAccount`.
 
 ### Normalized cache
 
@@ -118,18 +122,24 @@ closed envelope:
 - normalized `UsageOutput` data.
 
 The envelope and nested normalized types reject unknown fields. Wrong schema or
-version, malformed data, and cache I/O failures are explicit cache errors.
-Entries older than 300 seconds are ordinary misses.
+version, malformed data, and cache I/O failures are explicit Usage-tab cache
+errors. Entries older than 300 seconds are ordinary misses.
 
-Cache-display mode never converts a miss into a remote request. A fetch that
-returns normalized output atomically replaces the installed snapshot and
-cache. An empty or failed fetch keeps the installed snapshot and exposes its
-errors. Cache state contains no access token, refresh token, cookie, API key,
-raw authentication response, or raw provider response.
+Cache-display mode never converts a miss into a remote request. A fetch with
+one or more healthy outputs atomically replaces the complete installed
+in-memory snapshot, even when other providers failed; those failures remain
+visible beside the new snapshot. An empty or wholly failed fetch keeps the
+installed snapshot and disk cache while exposing the new errors.
+
+The in-memory installation and disk publication are separate atomic
+boundaries. Disk publication uses a temporary file and rename. A disk write
+failure retains the newly installed in-memory snapshot and adds an explicit
+cache diagnostic. Cache state contains no access token, refresh token, cookie,
+API key, raw authentication response, or raw provider response.
 
 ## Consequences
 
-Local refresh cannot unexpectedly contact a remote account. CLI and TUI share
-one provider/account/plan identity, partial failures remain visible, and cached
-quota output carries no authentication material. Every authentication mutation
-stays under provider authority.
+Local refresh cannot unexpectedly contact a remote account. The provider
+adapters and TUI renderer share one provider/account/plan identity, partial
+failures remain visible, and cached quota output carries no authentication
+material. Every authentication mutation stays under provider authority.

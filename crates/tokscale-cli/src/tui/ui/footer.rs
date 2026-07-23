@@ -695,10 +695,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::commands::usage::{UsageMetric, UsageOutput, UsageProviderId};
     use crate::tui::app::{ProjectionBackend, TuiConfig};
     use crate::tui::data::{DailyUsage, ModelUsage, TokenBreakdown, UsageData};
     use crate::tui::settings::Settings;
+    use crate::tui::subscription_usage::{UsageMetric, UsageOutput, UsageProviderId};
     use chrono::NaiveDate;
 
     fn make_app_on(tab: Tab) -> App {
@@ -745,7 +745,8 @@ mod tests {
             turn_count: 0,
         });
         app.data.models.push(ModelUsage {
-            model: "test-model".to_string(),
+            model_id: "test-model".to_string(),
+            display_name: "Test Model".to_string(),
             provider: "test-provider".to_string(),
             client: "codex".to_string(),
             workspace_key: None,

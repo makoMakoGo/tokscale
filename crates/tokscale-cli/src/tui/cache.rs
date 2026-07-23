@@ -28,7 +28,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 45;
+const CACHE_SCHEMA_VERSION: u32 = 47;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -45,7 +45,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct CacheReportScope {
     pub resolved_home_dir: String,
-    pub use_env_roots: bool,
     pub since: Option<String>,
     pub until: Option<String>,
     pub year: Option<String>,
@@ -97,7 +96,7 @@ mod bundle_tests {
         let temp = TempDir::new().unwrap();
         let guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path().as_os_str());
         let clients = HashSet::from([ClientId::Claude]);
-        let scope = CacheReportScope::new("/test/home".into(), false, None, None, None);
+        let scope = CacheReportScope::new("/test/home".into(), None, None, None);
         let sessions = vec![TuiSessionEntry {
             client: "claude".into(),
             session_id: "session-1".into(),
@@ -230,7 +229,7 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn schema_45_bundle_round_trips_sessions_and_metadata() {
+    fn schema_47_bundle_round_trips_sessions_and_metadata() {
         let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
         let accumulator = TuiAcc::new();
         let expected_signature = signature();
@@ -276,7 +275,7 @@ mod bundle_tests {
         assert_eq!(raw["common"]["graph"], serde_json::json!({ "weeks": [] }));
 
         let CacheResult::Fresh(loaded) = load_cache(&clients, &GroupBy::Model, &scope) else {
-            panic!("expected a fresh schema-45 bundle");
+            panic!("expected a fresh schema-47 bundle");
         };
         assert_eq!(loaded.sessions, sessions);
         assert_eq!(loaded.client_space, client_space);
@@ -285,7 +284,7 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn schema_45_keeps_same_named_agents_separate_across_clients() {
+    fn schema_47_keeps_same_named_agents_separate_across_clients() {
         let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
         let accumulator = same_named_cross_client_agent_accumulator();
         let clients = HashSet::from([ClientId::OpenCode, ClientId::RooCode]);
@@ -306,7 +305,7 @@ mod bundle_tests {
         .unwrap();
 
         let CacheResult::Fresh(loaded) = load_cache(&clients, &GroupBy::Model, &scope) else {
-            panic!("expected a fresh schema-45 bundle");
+            panic!("expected a fresh schema-47 bundle");
         };
         assert_eq!(loaded.data.agents.len(), 2);
         let identities = loaded
@@ -366,7 +365,7 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn schema_45_nonempty_bundle_round_trips_all_four_public_groupings() {
+    fn schema_47_nonempty_bundle_round_trips_all_four_public_groupings() {
         let (temp, _guard, _clients, scope, _sessions, _client_space) = fixture();
         let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
         let accumulator = nonempty_accumulator(temp.path());
@@ -450,7 +449,7 @@ mod bundle_tests {
         assert!(raw["projections"]["model"].get("graph").is_none());
         assert!(
             !raw.to_string().contains("\"colorKey\""),
-            "schema 45 must derive model colors from modelId"
+            "schema 47 must derive model colors from modelId"
         );
 
         for group_by in [
@@ -462,7 +461,7 @@ mod bundle_tests {
             let expected = accumulator.project(&group_by);
             let loaded = match load_cache(&clients, &group_by, &scope) {
                 CacheResult::Fresh(loaded) | CacheResult::Stale(loaded) => loaded,
-                CacheResult::Miss => panic!("schema-45 bundle must load for {group_by}"),
+                CacheResult::Miss => panic!("schema-47 bundle must load for {group_by}"),
             };
             assert_projection_eq(&loaded.data, &expected);
             assert_eq!(loaded.data.health, health);
@@ -489,7 +488,7 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn schema_45_rejects_common_and_grouped_shape_mismatches() {
+    fn schema_47_rejects_common_and_grouped_shape_mismatches() {
         type Mutation = fn(&mut serde_json::Value);
 
         fn mismatch_daily_date(value: &mut serde_json::Value) {
@@ -541,14 +540,14 @@ mod bundle_tests {
                     load_cache(&clients, &GroupBy::Model, &scope),
                     CacheResult::Miss
                 ),
-                "{boundary} mismatch must invalidate the schema-45 bundle"
+                "{boundary} mismatch must invalidate the schema-47 bundle"
             );
         }
     }
 
     #[test]
     #[serial]
-    fn schema_45_rejects_corrupt_inactive_projections_during_default_load() {
+    fn schema_47_rejects_corrupt_inactive_projections_during_default_load() {
         type Mutation = fn(&mut serde_json::Value);
 
         fn mismatch_client_model_date(value: &mut serde_json::Value) {
@@ -613,14 +612,14 @@ mod bundle_tests {
                     load_cache(&clients, &GroupBy::Model, &scope),
                     CacheResult::Miss
                 ),
-                "{boundary} corruption must invalidate the schema-45 bundle at startup"
+                "{boundary} corruption must invalidate the schema-47 bundle at startup"
             );
         }
     }
 
     #[test]
     #[serial]
-    fn schema_45_rejects_model_clients_outside_universe_in_active_and_inactive_projections() {
+    fn schema_47_rejects_model_clients_outside_universe_in_active_and_inactive_projections() {
         let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
         let accumulator = same_named_cross_client_agent_accumulator();
         let clients = HashSet::from([ClientId::OpenCode, ClientId::RooCode]);
@@ -657,14 +656,14 @@ mod bundle_tests {
                     load_cache(&clients, &GroupBy::Model, &scope),
                     CacheResult::Miss
                 ),
-                "{boundary} model Client corruption must invalidate the schema-45 bundle"
+                "{boundary} model Client corruption must invalidate the schema-47 bundle"
             );
         }
     }
 
     #[test]
     #[serial]
-    fn schema_45_rejects_missing_required_projection_fields() {
+    fn schema_47_rejects_missing_required_projection_fields() {
         type Mutation = fn(&mut serde_json::Value);
 
         fn remove_model_performance(value: &mut serde_json::Value) {
@@ -672,6 +671,13 @@ mod bundle_tests {
                 .as_object_mut()
                 .unwrap()
                 .remove("performance");
+        }
+
+        fn remove_model_display_name(value: &mut serde_json::Value) {
+            value["projections"]["model"]["models"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("displayName");
         }
 
         fn remove_agent_instance_count(value: &mut serde_json::Value) {
@@ -712,6 +718,7 @@ mod bundle_tests {
 
         for (field, mutate) in [
             ("model performance", remove_model_performance as Mutation),
+            ("model display name", remove_model_display_name as Mutation),
             (
                 "Agent instance count",
                 remove_agent_instance_count as Mutation,
@@ -744,14 +751,14 @@ mod bundle_tests {
                     load_cache(&clients, &GroupBy::Model, &scope),
                     CacheResult::Miss
                 ),
-                "missing {field} must invalidate the schema-45 bundle"
+                "missing {field} must invalidate the schema-47 bundle"
             );
         }
     }
 
     #[test]
     #[serial]
-    fn schema_45_rejects_duplicate_client_agent_identity() {
+    fn schema_47_rejects_duplicate_client_agent_identity() {
         let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
         let accumulator = same_named_cross_client_agent_accumulator();
         let clients = HashSet::from([ClientId::OpenCode, ClientId::RooCode]);
@@ -789,7 +796,7 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn schema_45_rejects_agent_outside_client_universe() {
+    fn schema_47_rejects_agent_outside_client_universe() {
         let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
         let accumulator = same_named_cross_client_agent_accumulator();
         let clients = HashSet::from([ClientId::OpenCode, ClientId::RooCode]);
@@ -823,32 +830,30 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn legacy_schema_versions_are_explicit_misses() {
+    fn unsupported_schema_version_is_an_explicit_miss() {
         let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
-        for schema_version in [38, 39, 40, 41, 42, 43, 44] {
-            save_tui_bundle_cache(
-                &TuiAcc::new(),
-                &sessions,
-                &client_space,
-                &Default::default(),
-                &clients,
-                &scope,
-                signature(),
-            )
+        save_tui_bundle_cache(
+            &TuiAcc::new(),
+            &sessions,
+            &client_space,
+            &Default::default(),
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+        let path = cache_file().unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        value["schemaVersion"] = serde_json::Value::from(0);
+        refresh_canonical_digest(&mut value);
+        tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
             .unwrap();
-            let path = cache_file().unwrap();
-            let mut value: serde_json::Value =
-                serde_json::from_reader(File::open(&path).unwrap()).unwrap();
-            value["schemaVersion"] = serde_json::Value::from(schema_version);
-            refresh_canonical_digest(&mut value);
-            tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
-                .unwrap();
 
-            assert!(matches!(
-                load_cache(&clients, &GroupBy::Model, &scope),
-                CacheResult::Miss
-            ));
-        }
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Miss
+        ));
     }
 
     #[test]
@@ -910,7 +915,7 @@ mod bundle_tests {
                 load_cache(&clients, &GroupBy::Model, &scope),
                 CacheResult::Miss
             ),
-            "missing canonical Client totals must invalidate the schema-45 bundle"
+            "missing canonical Client totals must invalidate the schema-47 bundle"
         );
 
         save_tui_bundle_cache(
@@ -1073,14 +1078,12 @@ mod bundle_tests {
 impl CacheReportScope {
     fn new(
         resolved_home_dir: String,
-        use_env_roots: bool,
         since: Option<String>,
         until: Option<String>,
         year: Option<String>,
     ) -> Self {
         Self {
             resolved_home_dir,
-            use_env_roots,
             since,
             until,
             year,
@@ -1093,28 +1096,19 @@ impl CacheReportScope {
         until: Option<String>,
         year: Option<String>,
     ) -> anyhow::Result<Self> {
-        let (resolved_home_dir, use_env_roots) = match home_dir {
-            Some(home_dir) => (home_dir, false),
-            None => (
-                dirs::home_dir()
-                    .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
-                    .to_string_lossy()
-                    .into_owned(),
-                true,
-            ),
+        let resolved_home_dir = match home_dir {
+            Some(home_dir) => home_dir,
+            None => dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+                .to_string_lossy()
+                .into_owned(),
         };
 
-        Ok(Self::new(
-            resolved_home_dir,
-            use_env_roots,
-            since,
-            until,
-            year,
-        ))
+        Ok(Self::new(resolved_home_dir, since, until, year))
     }
 }
 
-/// Default usage projection selected when the TUI starts. Schema 45 stores one
+/// Default usage projection selected when the TUI starts. Schema 47 stores one
 /// Common part, all four Grouped parts, and canonical client-aware state, so
 /// Group By and Clients are presentation state rather than cache keys.
 pub const TUI_DEFAULT_GROUP_BY: GroupBy = GroupBy::Model;
@@ -1166,7 +1160,8 @@ struct CachedTokenBreakdown {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CachedModelUsage {
-    model: String,
+    model_id: String,
+    display_name: String,
     provider: String,
     client: String,
     #[serde(default)]
@@ -1311,7 +1306,8 @@ impl Serialize for CachedModelsRef<'_> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CachedModelUsageRef<'a> {
-    model: &'a str,
+    model_id: &'a str,
+    display_name: &'a str,
     provider: &'a str,
     client: &'a str,
     workspace_key: Option<&'a str>,
@@ -1325,7 +1321,8 @@ struct CachedModelUsageRef<'a> {
 impl<'a> From<&'a ModelUsage> for CachedModelUsageRef<'a> {
     fn from(model: &'a ModelUsage) -> Self {
         Self {
-            model: &model.model,
+            model_id: &model.model_id,
+            display_name: &model.display_name,
             provider: &model.provider,
             client: &model.client,
             workspace_key: model.workspace_key.as_deref(),
@@ -1721,7 +1718,8 @@ impl From<CachedTokenBreakdown> for TokenBreakdown {
 impl From<CachedModelUsage> for ModelUsage {
     fn from(m: CachedModelUsage) -> Self {
         Self {
-            model: m.model,
+            model_id: m.model_id,
+            display_name: m.display_name,
             provider: m.provider,
             client: m.client,
             workspace_key: m.workspace_key,
@@ -2057,7 +2055,7 @@ fn usage_data_from_cached(
     )?)
 }
 
-/// Since schema 38, `modelId` is the authoritative model identity (ADR 0026).
+/// `modelId` is the authoritative model identity (ADR 0010).
 /// Reject an explicitly empty id so unrelated entries cannot merge under the
 /// empty key downstream.
 fn cached_models_missing_identity(data: &UsageData) -> bool {
@@ -2161,7 +2159,7 @@ pub struct LoadedTuiCache {
     pub input_inventory_signature: InputInventorySignature,
 }
 
-/// Result of loading the schema-45 TUI bundle.
+/// Result of loading the schema-47 TUI bundle.
 pub enum CacheResult {
     Fresh(LoadedTuiCache),
     Stale(LoadedTuiCache),
@@ -2691,7 +2689,7 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
     type Value = ParsedTuiBundle;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-45 TUI cache bundle")
+        formatter.write_str("a schema-47 TUI cache bundle")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -2854,7 +2852,7 @@ impl<'de> Visitor<'de> for ProjectionBundleVisitor<'_> {
     type Value = CachedProjectionParts;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-45 TUI cache bundle")
+        formatter.write_str("a schema-47 TUI cache bundle")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -2916,7 +2914,7 @@ impl<'de> Visitor<'de> for CanonicalBundleVisitor {
     type Value = TuiAcc;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-45 TUI cache bundle with canonical projection state")
+        formatter.write_str("a schema-47 TUI cache bundle with canonical projection state")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -3011,7 +3009,7 @@ fn load_bundle_from_file(
 }
 
 /// Load one complete TUI snapshot while materializing only the requested usage
-/// projection plus Sessions. Unsupported/legacy/corrupt files are explicit
+/// projection plus Sessions. Unsupported or corrupt files are explicit
 /// misses; the caller remains responsible for reporting a refresh failure.
 pub fn load_cache(
     client_universe: &HashSet<ClientId>,
@@ -3045,7 +3043,7 @@ pub fn load_cache(
     }
 }
 
-/// Atomically persist one complete schema-45 TUI bundle.
+/// Atomically persist one complete schema-47 TUI bundle.
 ///
 /// Projection serialization borrows the canonical accumulator and materializes
 /// one grouping at a time, so the four projections never coexist in memory.

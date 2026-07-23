@@ -31,9 +31,9 @@ fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
 
 /// The Model column always shows the bare canonical model; under
 /// `GroupBy::WorkspaceModel` the workspace dimension lives in its own column
-/// instead of a "workspace / model" prefix (ADR 0026).
+/// instead of a "workspace / model" prefix (ADR 0010).
 fn model_display_name(model: &crate::tui::data::ModelUsage) -> &str {
-    &model.model
+    &model.display_name
 }
 
 fn model_content_width(models: &[&crate::tui::data::ModelUsage]) -> u16 {
@@ -243,7 +243,7 @@ pub fn render(
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
 
-            let model_color = app.model_color(&model.model);
+            let model_color = app.model_color(&model.model_id);
             let display_name = model_display_name(model);
             let cell_for_column = |column: ModelsColumn| -> Cell {
                 match column {
@@ -564,7 +564,8 @@ mod tests {
     #[test]
     fn workspace_model_widths_split_workspace_from_bare_model() {
         let model = crate::tui::data::ModelUsage {
-            model: "gpt-5".to_string(),
+            model_id: "gpt-5".to_string(),
+            display_name: "gpt-5".to_string(),
             provider: "openai".to_string(),
             client: "opencode".to_string(),
             workspace_key: Some("/work/project".to_string()),
@@ -593,7 +594,8 @@ mod tests {
     #[test]
     fn workspace_column_falls_back_to_key_when_label_missing() {
         let model = crate::tui::data::ModelUsage {
-            model: "gpt-5".to_string(),
+            model_id: "gpt-5".to_string(),
+            display_name: "gpt-5".to_string(),
             provider: "openai".to_string(),
             client: "opencode".to_string(),
             workspace_key: Some("/work/project".to_string()),
@@ -688,7 +690,8 @@ mod tests {
         cost: f64,
     ) -> crate::tui::data::ModelUsage {
         crate::tui::data::ModelUsage {
-            model: model.to_string(),
+            model_id: model.to_string(),
+            display_name: model.to_string(),
             provider: "openai".to_string(),
             client: "opencode".to_string(),
             workspace_key: Some(format!("/work/{workspace}")),

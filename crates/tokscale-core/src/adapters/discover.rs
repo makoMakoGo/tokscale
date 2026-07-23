@@ -13,7 +13,7 @@ pub(crate) fn discover_default_scanned_units(
     let def = client
         .local_def()
         .expect("adapter client must have local scan policy");
-    let default_root = def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots);
+    let default_root = def.resolve_path(ctx.home_dir);
 
     let mut paths = scan_roots(client, [default_root], def.pattern)?;
     paths.extend(scan_roots(
@@ -36,35 +36,6 @@ pub(crate) fn extra_roots_for_client(
                 .iter()
                 .filter(|path| !path.as_os_str().is_empty())
                 .cloned(),
-        );
-    }
-
-    if ctx.use_env_roots {
-        let enabled = HashSet::from([client]);
-        let extra_dirs = match std::env::var("TOKSCALE_EXTRA_DIRS") {
-            Ok(value) => value,
-            Err(std::env::VarError::NotPresent) => String::new(),
-            Err(source) => {
-                return Err(InputDiscoveryError::configuration(
-                    client,
-                    "TOKSCALE_EXTRA_DIRS",
-                    "read environment variable",
-                    source,
-                ));
-            }
-        };
-        roots.extend(
-            scanner::parse_extra_dirs(&extra_dirs, &enabled)
-                .map_err(|source| {
-                    InputDiscoveryError::configuration(
-                        client,
-                        "TOKSCALE_EXTRA_DIRS",
-                        "parse environment variable",
-                        source,
-                    )
-                })?
-                .into_iter()
-                .map(|(_, path)| PathBuf::from(path)),
         );
     }
 

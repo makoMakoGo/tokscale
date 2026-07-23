@@ -1,8 +1,7 @@
 use crate::claude_diagnostics;
 use crate::commands::render::{dim_borders, format_currency, LightSpinner, TABLE_PRESET};
 use crate::commands::shared::{
-    emit_client_diagnostics, get_date_range_label, resolve_effective_home_dir, use_env_roots,
-    ReportEnvelope,
+    emit_client_diagnostics, get_date_range_label, resolve_effective_home_dir, ReportEnvelope,
 };
 use crate::tui::{
     self, format_cache_hit_rate, format_cost_per_million, format_ms_per_1k,
@@ -92,7 +91,6 @@ pub(crate) fn run_models_report(
     let data = rt
         .block_on(tokscale_core::get_usage_data(ReportOptions {
             home_dir: home_dir.clone(),
-            use_env_roots: use_env_roots(&home_dir),
             clients: clients.clone(),
             since,
             until,
@@ -192,7 +190,7 @@ fn render_models_table(
             ));
         }
         row.extend([
-            Cell::new(truncate_model_display_name(&model.model)),
+            Cell::new(truncate_model_display_name(&model.display_name)),
             Cell::new(get_client_display_name(&model.client)),
             Cell::new(get_provider_display_name(&model.provider)),
             numeric_cell(format_usage_tokens_with_commas(model.tokens.input)),

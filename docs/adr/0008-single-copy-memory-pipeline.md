@@ -189,10 +189,10 @@ reported explicitly; already completed removals are not rolled back.
 
 ### Atomic TUI generation storage
 
-One local fold produces the manifest, health data, client-space accounting,
-sessions, client-aware canonical accumulator, one group-agnostic Common
-projection, and four full-universe Grouped projections. The current schema 45
-TUI cache stores them in one atomic JSON bundle.
+One local fold produces health data, client-space accounting, sessions,
+client-aware canonical accumulator, one group-agnostic Common projection, and
+four full-universe Grouped projections. The current schema 47 TUI cache stores
+them in one atomic JSON bundle.
 
 Common stores Agents, daily and hourly totals with Client membership, the
 contribution graph, report totals, and streaks exactly once. Each Grouped

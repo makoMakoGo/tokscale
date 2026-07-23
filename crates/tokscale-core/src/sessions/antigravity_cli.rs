@@ -8,7 +8,7 @@
 //! Tokscale intentionally supports this provider-owned database directly and
 //! does not bridge Antigravity IDE or Antigravity 2.0 through a running language
 //! server, transient CSRF credentials, private RPCs, or a Tokscale-owned shadow
-//! cache. See ADR 0025.
+//! cache. See ADR 0007.
 //!
 //! The field numbers below were reverse-engineered upstream from real
 //! Antigravity CLI conversation databases and ported here as a narrow decoder.

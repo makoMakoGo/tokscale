@@ -730,7 +730,8 @@ fn materialize_tui_model(mut bucket: TuiModelBucket) -> UsageModelEntry {
     };
     bucket.performance.finalize(bucket.tokens.total() as i64);
     UsageModelEntry {
-        model: bucket.model.to_string(),
+        model_id: bucket.model.to_string(),
+        display_name: bucket.model.to_string(),
         provider,
         client,
         workspace_key: bucket.workspace_key.map(|key| key.to_string()),
@@ -1355,7 +1356,7 @@ impl TuiAcc {
         keyed_models.sort_by(|(a_key, a), (b_key, b)| {
             b.cost
                 .total_cmp(&a.cost)
-                .then_with(|| a.model.cmp(&b.model))
+                .then_with(|| a.model_id.cmp(&b.model_id))
                 .then_with(|| a.provider.cmp(&b.provider))
                 .then_with(|| a.client.cmp(&b.client))
                 .then_with(|| a.workspace_label.cmp(&b.workspace_label))
@@ -1503,7 +1504,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.models.len(), 1);
-        assert_eq!(usage.models[0].model, "mimo-v2.5-pro");
+        assert_eq!(usage.models[0].model_id, "mimo-v2.5-pro");
+        assert_eq!(usage.models[0].display_name, "mimo-v2.5-pro");
         assert_eq!(usage.models[0].provider, "xiaomi");
         assert_eq!(usage.models[0].cost, 3.0);
     }
@@ -1569,7 +1571,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.models.len(), 1);
-        assert_eq!(usage.models[0].model, "gpt-5.5");
+        assert_eq!(usage.models[0].model_id, "gpt-5.5");
+        assert_eq!(usage.models[0].display_name, "gpt-5.5");
         assert_eq!(usage.models[0].provider, "openai");
 
         let daily_models = &usage.daily[0].client_breakdown["opencode"].models;
@@ -1799,7 +1802,8 @@ mod tests {
         assert_eq!(usage.models.len(), 1);
         assert_eq!(usage.models[0].workspace_key.as_deref(), Some("/repo-a"));
         assert_eq!(usage.models[0].workspace_label.as_deref(), Some("repo-a"));
-        assert_eq!(usage.models[0].model, "claude-sonnet-4.5");
+        assert_eq!(usage.models[0].model_id, "claude-sonnet-4.5");
+        assert_eq!(usage.models[0].display_name, "claude-sonnet-4.5");
         assert_eq!(usage.models[0].client, "claude, qwen");
         assert_eq!(usage.models[0].session_count, 2);
         assert_eq!(usage.models[0].cost, 4.0);
@@ -1922,7 +1926,7 @@ mod tests {
         assert_ne!(daily_keys[0], daily_keys[1]);
 
         // The workspace dimension travels in structured fields; display_name
-        // and model_id stay the bare canonical model (ADR 0026).
+        // and model_id stay the bare canonical model (ADR 0010).
         let daily_identities: Vec<_> = claude
             .models
             .values()
@@ -2096,12 +2100,12 @@ mod tests {
         assert_eq!(usage.models.len(), 2);
         assert!(usage.models.iter().any(|model| {
             model.workspace_key.as_deref() == Some("a:b")
-                && model.model == "c"
+                && model.model_id == "c"
                 && (model.cost - 1.0).abs() < f64::EPSILON
         }));
         assert!(usage.models.iter().any(|model| {
             model.workspace_key.as_deref() == Some("a")
-                && model.model == "b:c"
+                && model.model_id == "b:c"
                 && (model.cost - 2.0).abs() < f64::EPSILON
         }));
 
@@ -2401,7 +2405,7 @@ mod tests {
     }
 
     #[test]
-    fn top_level_models_preserve_structured_buckets_with_colliding_legacy_text() {
+    fn top_level_models_preserve_structured_buckets_with_colliding_display_text() {
         let timestamp = 1_735_689_600_000;
         let cases = [
             (
@@ -2773,7 +2777,8 @@ mod tests {
 
         assert_eq!(left.models.len(), right.models.len());
         for (left, right) in left.models.iter().zip(&right.models) {
-            assert_eq!(left.model, right.model);
+            assert_eq!(left.model_id, right.model_id);
+            assert_eq!(left.display_name, right.display_name);
             assert_eq!(left.provider, right.provider);
             assert_eq!(left.client, right.client);
             assert_eq!(left.workspace_key, right.workspace_key);
@@ -3071,7 +3076,7 @@ mod tests {
         let gpt = model
             .models
             .iter()
-            .find(|entry| entry.model == "gpt-5.5")
+            .find(|entry| entry.model_id == "gpt-5.5")
             .expect("merged gpt-5.5 entry");
         assert_eq!(gpt.provider, "azure, openai");
         assert_eq!(gpt.client, "qwen, claude, codex");
@@ -3086,7 +3091,7 @@ mod tests {
         let sonnet = model
             .models
             .iter()
-            .find(|entry| entry.model == "claude-sonnet-4.5")
+            .find(|entry| entry.model_id == "claude-sonnet-4.5")
             .expect("claude-sonnet-4.5 entry");
         assert_eq!(sonnet.session_count, 1);
         assert_eq!(
@@ -3119,7 +3124,7 @@ mod tests {
         let claude_gpt = client_model
             .models
             .iter()
-            .find(|entry| entry.model == "gpt-5.5" && entry.client == "claude")
+            .find(|entry| entry.model_id == "gpt-5.5" && entry.client == "claude")
             .expect("claude gpt-5.5 entry");
         assert_eq!(claude_gpt.provider, "azure, openai");
         assert_eq!(claude_gpt.tokens.total(), 520);

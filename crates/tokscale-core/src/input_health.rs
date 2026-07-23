@@ -4,7 +4,7 @@
 //! contract here is isolation without silence: a bad record is rejected and
 //! counted, a broken input is skipped and reported, and neither may erase
 //! data that other records or inputs produced. Only tokscale's own pipeline
-//! invariants remain hard errors. See ADR 0020.
+//! invariants remain hard errors. See ADR 0001.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -522,32 +522,13 @@ mod tests {
         assert_eq!(value["failedInputs"], 0);
         assert_eq!(value["inputDataBytes"], 0);
         assert_eq!(value["issues"], serde_json::json!([]));
-        for retired in [
-            "cleanSources",
-            "degradedSources",
-            "partialSources",
-            "failedSources",
-            "sourceDataBytes",
-            "sources",
-        ] {
-            assert!(value.get(retired).is_none());
-        }
     }
 
     #[test]
-    fn retired_health_fields_are_rejected_instead_of_ignored() {
-        for retired in [
-            r#"{"cleanSources":1}"#,
-            r#"{"degradedSources":1}"#,
-            r#"{"partialSources":1}"#,
-            r#"{"failedSources":1}"#,
-            r#"{"sourceDataBytes":1}"#,
-            r#"{"sources":[]}"#,
-        ] {
-            let error = serde_json::from_str::<HealthReport>(retired)
-                .expect_err("retired health fields must not deserialize");
-            assert!(error.to_string().contains("unknown field"));
-        }
+    fn health_report_rejects_unknown_fields() {
+        let error = serde_json::from_str::<HealthReport>(r#"{"unexpectedField":1}"#)
+            .expect_err("unknown health fields must not deserialize");
+        assert!(error.to_string().contains("unknown field"));
     }
 
     #[test]

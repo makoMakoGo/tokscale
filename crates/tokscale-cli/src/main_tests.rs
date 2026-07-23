@@ -41,14 +41,6 @@ fn test_parse_client_id_arg_rejects_unknown_ids() {
 }
 
 #[test]
-fn removed_clients_are_not_valid_client_ids() {
-    for client in ["cursor", "trae", "kilocode"] {
-        let error = parse_client_id_arg(client).unwrap_err();
-        assert!(error.contains(client), "unexpected error: {error}");
-    }
-}
-
-#[test]
 fn test_build_client_filter_no_flags_no_defaults_returns_none() {
     let flags = ClientFlags::default();
     let defaults: Vec<String> = vec![];
@@ -96,20 +88,6 @@ fn test_build_client_filter_with_defaults_when_no_flags() {
 }
 
 #[test]
-fn test_build_client_filter_canonicalizes_persisted_antigravity_cli_default() {
-    let flags = ClientFlags::default();
-    let defaults = vec![
-        "antigravity-cli".to_string(),
-        "antigravity".to_string(),
-        "codex".to_string(),
-    ];
-    assert_eq!(
-        build_client_filter_with_defaults(flags, &defaults).unwrap(),
-        Some(vec!["antigravity".to_string(), "codex".to_string()])
-    );
-}
-
-#[test]
 fn test_build_client_filter_cli_overrides_defaults_completely() {
     // User passes --client → defaults must be ignored entirely
     // (no merge). This is the predictable semantics: "I asked for X,
@@ -132,18 +110,6 @@ fn test_build_client_filter_defaults_reject_unknown_ids() {
     assert!(
         err.to_string().contains("not-a-client"),
         "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn retired_kilocode_default_is_rejected() {
-    let flags = ClientFlags::default();
-    let defaults = vec!["kilocode".to_string()];
-    let error = build_client_filter_with_defaults(flags, &defaults).unwrap_err();
-
-    assert!(
-        error.to_string().contains("kilocode"),
-        "unexpected error: {error}"
     );
 }
 
@@ -187,12 +153,6 @@ fn test_client_flags_parses_canonical_form() {
 }
 
 #[test]
-fn test_legacy_client_flags_are_removed() {
-    assert!(Cli::try_parse_from(["tokscale", "--claude"]).is_err());
-    assert!(Cli::try_parse_from(["tokscale", "--opencode"]).is_err());
-}
-
-#[test]
 fn test_client_flag_accepts_uppercase() {
     let cli = Cli::try_parse_from(["tokscale", "models", "--client", "OPENCODE"])
         .expect("uppercase parses");
@@ -216,12 +176,6 @@ fn test_client_flag_accepts_uppercase() {
 fn test_client_flag_rejects_unknown_and_empty_values() {
     assert!(Cli::try_parse_from(["tokscale", "models", "--client", "unknown"]).is_err());
     assert!(Cli::try_parse_from(["tokscale", "models", "--client", ""]).is_err());
-
-    let error = Cli::try_parse_from(["tokscale", "models", "--client", "crush"])
-        .expect_err("excluded clients must not remain valid CLI values")
-        .to_string();
-    assert!(error.contains("invalid client id `crush`"), "{error}");
-    assert!(!error.contains("does not support local parsing"), "{error}");
 }
 
 #[test]
@@ -259,19 +213,6 @@ fn test_pricing_source_rejects_unknown_values() {
         "gpt-4o",
         "--pricing-source",
         "unknown",
-    ])
-    .is_err());
-}
-
-#[test]
-fn retired_pricing_source_flag_is_not_an_alias() {
-    assert!(Cli::try_parse_from([
-        "tokscale",
-        "pricing",
-        "lookup",
-        "gpt-4o",
-        "--source",
-        "openrouter",
     ])
     .is_err());
 }
@@ -543,7 +484,6 @@ fn test_light_spinner_scanner_state_cycle_wrap() {
 fn root_rejects_business_options() {
     for args in [
         vec!["tokscale", "--json"],
-        vec!["tokscale", "--light"],
         vec!["tokscale", "--client", "codex"],
         vec!["tokscale", "--week"],
         vec!["tokscale", "--json", "models"],
@@ -553,87 +493,13 @@ fn root_rejects_business_options() {
 }
 
 #[test]
-fn legacy_v4_invocations_get_one_migration_hint_without_becoming_aliases() {
-    let strings = |values: &[&str]| {
-        values
-            .iter()
-            .map(|value| (*value).to_string())
-            .collect::<Vec<_>>()
-    };
-
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["--json", "models"])).as_deref(),
-        Some("use `tokscale models --json`")
-    );
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["--light"])).as_deref(),
-        Some("use `tokscale models`")
-    );
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["models", "--light"])).as_deref(),
-        Some("use `tokscale models`")
-    );
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["--client", "codex"])).as_deref(),
-        Some("use `tokscale tui --client codex`")
-    );
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["--client=codex"])).as_deref(),
-        Some("use `tokscale tui --client=codex`")
-    );
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["tui", "--json"])).as_deref(),
-        Some("use `tokscale models --json`")
-    );
-    assert_eq!(legacy_invocation_hint(&strings(&["graph", "--json"])), None);
-    assert_eq!(legacy_invocation_hint(&strings(&["--json", "graph"])), None);
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["graph", "--json", "--output", "graph.json"])),
-        None
-    );
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["--client=codex", "models"])).as_deref(),
-        Some("use `tokscale models --client=codex`")
-    );
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["pricing", "list-overrides"])).as_deref(),
-        Some("use `tokscale pricing overrides`")
-    );
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["pricing", "list-overrides", "--json"])).as_deref(),
-        Some("use `tokscale pricing overrides --json`")
-    );
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["pricing", "gpt-5", "--json"])).as_deref(),
-        Some("use `tokscale pricing lookup gpt-5 --json`")
-    );
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["--json", "pricing", "gpt-5"])),
-        None,
-        "migration hints must never suggest another invalid invocation"
-    );
-    for unrelated in [
-        &["wrapped", "--json"][..],
-        &["monthly", "--benchmark"],
-        &["pricing", "--json"],
-        &["graph", "--group-by", "model"],
-    ] {
-        assert_eq!(
-            legacy_invocation_hint(&strings(unrelated)),
-            None,
-            "migration hints must not change an explicit command's product"
-        );
-    }
-}
-
-#[test]
 fn misplaced_and_equals_form_options_remain_parse_errors() {
     for args in [
         vec!["tokscale", "tui", "--json"],
         vec!["tokscale", "--client=codex"],
-        vec!["tokscale", "graph", "--json"],
+        vec!["tokscale", "not-a-command", "--json"],
     ] {
-        let error = Cli::try_parse_from(args).expect_err("legacy invocation must be rejected");
+        let error = Cli::try_parse_from(args).expect_err("invalid invocation must be rejected");
         assert_eq!(error.exit_code(), 2);
     }
 }
@@ -744,10 +610,6 @@ fn tui_tab_accepts_every_tui_tab_name() {
         };
         assert_eq!(args.tab, Some(expected));
     }
-
-    let error = Cli::try_parse_from(["tokscale", "tui", "--tab", "issues"])
-        .expect_err("the removed Issues tab name must not remain as an alias");
-    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
 }
 
 #[test]
@@ -798,15 +660,6 @@ fn resolve_rejects_reversed_custom_date_range() {
 }
 
 #[test]
-fn removed_report_and_cache_flags_are_rejected() {
-    for flag in ["--light", "--write-cache", "--no-write-cache"] {
-        assert!(Cli::try_parse_from(["tokscale", "models", flag]).is_err());
-    }
-    assert!(Cli::try_parse_from(["tokscale", "wrapped", "--ranking", "agents"]).is_err());
-    assert!(Cli::try_parse_from(["tokscale", "wrapped", "--disable-pinned"]).is_err());
-}
-
-#[test]
 fn clap_accepts_input_cache_prune_command() {
     let cli = Cli::try_parse_from(["tokscale", "cache", "prune"]).expect("cache prune parses");
     assert!(matches!(
@@ -830,24 +683,6 @@ fn clap_accepts_explicit_cache_warm_scope() {
 }
 
 #[test]
-fn cli_rejects_removed_account_management_namespaces() {
-    assert!(Cli::try_parse_from(["tokscale", "cursor", "sync"]).is_err());
-    assert!(Cli::try_parse_from(["tokscale", "cursor", "logout", "--all"]).is_err());
-    assert!(Cli::try_parse_from(["tokscale", "codex", "accounts"]).is_err());
-    assert!(Cli::try_parse_from(["tokscale", "codex", "switch", "work"]).is_err());
-    assert!(Cli::try_parse_from(["tokscale", "trae", "status"]).is_err());
-    assert!(Cli::try_parse_from(["tokscale", "warp", "status"]).is_err());
-    assert!(Cli::try_parse_from(["tokscale", "warp", "sync"]).is_err());
-}
-
-#[test]
-fn clap_accepts_usage_without_light_flag() {
-    assert!(Cli::try_parse_from(["tokscale", "usage"]).is_ok());
-    assert!(Cli::try_parse_from(["tokscale", "usage", "--json"]).is_ok());
-    assert!(Cli::try_parse_from(["tokscale", "usage", "--light"]).is_err());
-}
-
-#[test]
 fn client_id_parses_warp() {
     assert_eq!(ClientId::from_str("warp"), Some(ClientId::Warp));
     assert_eq!(ClientId::Warp.as_str(), "warp");
@@ -860,35 +695,10 @@ fn client_id_parses_grok() {
 }
 
 #[test]
-fn antigravity_is_a_local_client_without_an_integration_command_namespace() {
-    assert!(Cli::try_parse_from(["tokscale", "models", "--client", "antigravity"]).is_ok());
-    assert!(Cli::try_parse_from(["tokscale", "models", "--client", "antigravity-cli"]).is_err());
-    assert!(Cli::try_parse_from(["tokscale", "antigravity", "status"]).is_err());
-}
-
-#[test]
-fn antigravity_local_input_uses_home_when_env_roots_are_disabled() {
+fn antigravity_local_input_uses_standard_home_path() {
     let def = ClientId::Antigravity.local_def().unwrap();
     assert_eq!(
-        def.resolve_path_with_env_strategy("/tmp/home", false),
+        def.resolve_path("/tmp/home"),
         PathBuf::from("/tmp/home/.gemini/antigravity-cli/conversations")
     );
-}
-
-#[test]
-#[serial_test::serial]
-fn antigravity_local_input_falls_back_for_blank_env() {
-    let previous = std::env::var("GEMINI_CLI_HOME").ok();
-    unsafe { std::env::set_var("GEMINI_CLI_HOME", "   ") };
-
-    let def = ClientId::Antigravity.local_def().unwrap();
-    assert_eq!(
-        def.resolve_path_with_env_strategy("/tmp/home", true),
-        PathBuf::from("/tmp/home/.gemini/antigravity-cli/conversations")
-    );
-
-    match previous {
-        Some(value) => unsafe { std::env::set_var("GEMINI_CLI_HOME", value) },
-        None => unsafe { std::env::remove_var("GEMINI_CLI_HOME") },
-    }
 }

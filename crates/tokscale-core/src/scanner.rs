@@ -9,26 +9,22 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::clients::ClientId;
-use crate::paths::configured_path_env;
 use serde::{Deserialize, Serialize};
 
 /// User-controlled scanner settings loaded from a config file.
 ///
-/// This is the persistent, declarative counterpart to environment variables
-/// like `TOKSCALE_EXTRA_DIRS` — it lives on the `scanner` key inside
-/// `~/.config/tokscale/settings.json` and is consumed by input adapters.
+/// These settings live on the `scanner` key inside
+/// `~/.config/tokscale/settings.json` and are consumed by input adapters.
 ///
-/// `#[serde(default)]` at both the struct and field level guarantees that
-/// older settings.json files (which have no `scanner` key at all, or an
-/// empty `{}`) deserialize cleanly without errors.
+/// `#[serde(default)]` makes the scanner object and each optional setting
+/// independently omissible.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ScannerSettings {
     /// Absolute paths to additional OpenCode SQLite databases to scan.
     ///
-    /// Use this when the opencode binary was launched with `OPENCODE_DB`
-    /// pointing at a location outside the default `~/.local/share/opencode`
-    /// data directory, so tokscale's auto-discovery can't find it.
+    /// Use this for a database outside the fixed
+    /// `~/.local/share/opencode` directory.
     ///
     /// The OpenCode adapter merges these paths with auto-discovered databases
     /// and removes duplicates by canonical path. Configured paths are
@@ -85,26 +81,9 @@ pub enum ScannerSettingsError {
     EmptyPath { setting: String },
 }
 
-pub fn copilot_exporter_path_with_env_strategy(use_env_roots: bool) -> Option<PathBuf> {
-    if !use_env_roots {
-        return None;
-    }
-
-    configured_path_env("COPILOT_OTEL_FILE_EXPORTER_PATH")
-}
-
-/// Resolve the OpenCode data directory without requiring a UTF-8 environment path.
-pub fn opencode_data_dir_with_env_strategy(home_dir: &str, use_env_roots: bool) -> PathBuf {
-    let data_home = if use_env_roots {
-        std::env::var_os("XDG_DATA_HOME")
-            .filter(|root| !root.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(home_dir).join(".local/share"))
-    } else {
-        PathBuf::from(home_dir).join(".local/share")
-    };
-
-    data_home.join("opencode")
+/// Resolve OpenCode's fixed data directory beneath the selected home.
+pub fn opencode_data_dir(home_dir: &str) -> PathBuf {
+    PathBuf::from(home_dir).join(".local/share/opencode")
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -146,9 +125,9 @@ pub fn scan_directory(
 
     let entries = WalkDir::new(root)
         .into_iter()
-        // Gemini's retired SHA-256 project directories can contain large chat
-        // histories. Prune unsupported project directories before WalkDir
-        // enumerates their contents instead of discovering and filtering files.
+        // Gemini project directories outside the current named-project layout
+        // can contain large chat histories. Prune them before WalkDir enumerates
+        // their contents instead of discovering and filtering individual files.
         .filter_entry(|entry| {
             pattern != "gemini-session"
                 || entry.depth() != 1
@@ -214,7 +193,7 @@ pub fn scan_directory(
                         return false;
                     }
 
-                    // Exclude legacy backups like usage.backup-<ts>.csv
+                    // Backup files such as usage.backup-<ts>.csv are not inputs.
                     if file_name.starts_with("usage.backup") {
                         return false;
                     }
@@ -251,6 +230,8 @@ pub fn scan_directory(
                         || path.extension().is_none()
                 }
                 "sessions.json" => file_name == "sessions.json",
+                "sessions.db" => file_name == "sessions.db",
+                "kilo.db" => file_name == "kilo.db",
                 "wire.jsonl" => file_name == "wire.jsonl",
                 "updates.jsonl" => file_name == "updates.jsonl",
                 "events.jsonl" => file_name == "events.jsonl",
@@ -272,61 +253,6 @@ pub fn scan_directory(
     // not case-normalized (known Windows/macOS caveat for mixed-case paths).
     paths.sort_unstable();
     Ok(paths)
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("invalid TOKSCALE_EXTRA_DIRS entry `{entry}`: {reason}")]
-pub struct ExtraDirsParseError {
-    entry: String,
-    reason: &'static str,
-}
-
-/// Parse a `TOKSCALE_EXTRA_DIRS`-formatted string into (ClientId, path) pairs.
-///
-/// Format: comma-separated `client:path` pairs.
-/// Example: `"claude:/path/to/mac/sessions,openclaw:/other/path"`
-///
-/// Only returns entries whose client is present in `enabled`.
-/// This is a pure function — the caller is responsible for reading the
-/// environment variable and passing its value here.
-pub fn parse_extra_dirs(
-    value: &str,
-    enabled: &HashSet<ClientId>,
-) -> Result<Vec<(ClientId, String)>, ExtraDirsParseError> {
-    if value.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut parsed = Vec::new();
-    for raw_entry in value.split(',') {
-        let entry = raw_entry.trim();
-        let (client_str, path) = entry.split_once(':').ok_or_else(|| ExtraDirsParseError {
-            entry: entry.to_string(),
-            reason: "expected `client:path`",
-        })?;
-        let client_id =
-            ClientId::from_str(client_str.trim()).ok_or_else(|| ExtraDirsParseError {
-                entry: entry.to_string(),
-                reason: "unknown client",
-            })?;
-        if !supports_extra_dir_scanning(client_id) {
-            return Err(ExtraDirsParseError {
-                entry: entry.to_string(),
-                reason: "client does not support extra directory scanning",
-            });
-        }
-        let path = path.trim();
-        if path.is_empty() {
-            return Err(ExtraDirsParseError {
-                entry: entry.to_string(),
-                reason: "path is blank",
-            });
-        }
-        if enabled.contains(&client_id) {
-            parsed.push((client_id, path.to_string()));
-        }
-    }
-    Ok(parsed)
 }
 
 pub fn extra_scan_paths_for(
@@ -525,15 +451,10 @@ fn is_opencode_db_filename(name: &str) -> bool {
 }
 
 fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
-    // OpenCode custom databases use only `scanner.opencodeDbPaths`. Kilo and
-    // Goose currently load fixed SQLite database locations. Roo Code requires
-    // local + remote and server task roots. Hermes/Zed profile databases are
-    // named consistently enough for `scan_directory` to find them from
+    // OpenCode custom databases use only `scanner.opencodeDbPaths`. Other
+    // supported clients expose stable filenames or directory layouts beneath
     // user-provided roots.
-    !matches!(
-        client_id,
-        ClientId::OpenCode | ClientId::Kilo | ClientId::Goose
-    )
+    client_id != ClientId::OpenCode
 }
 
 /// Merge user-configured OpenCode db paths from [`ScannerSettings`] into the
@@ -572,17 +493,8 @@ pub(crate) fn merge_user_opencode_db_paths(discovered: &mut Vec<PathBuf>, extra_
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
-    use std::ffi::OsString;
     use std::fs::{self, File};
     use tempfile::TempDir;
-
-    fn restore_env_os(var: &str, previous: Option<OsString>) {
-        match previous {
-            Some(value) => unsafe { std::env::set_var(var, value) },
-            None => unsafe { std::env::remove_var(var) },
-        }
-    }
 
     struct FakeOpenCodeEntry {
         path: PathBuf,
@@ -610,50 +522,12 @@ mod tests {
         )
     }
 
-    #[cfg(unix)]
     #[test]
-    #[serial]
-    fn opencode_data_dir_preserves_non_utf8_xdg_data_home() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let previous = std::env::var_os("XDG_DATA_HOME");
-        let xdg_data_home = OsString::from_vec(b"/tmp/tokscale-xdg-\xff".to_vec());
-        unsafe { std::env::set_var("XDG_DATA_HOME", &xdg_data_home) };
-
+    fn opencode_data_dir_is_fixed_beneath_home() {
         assert_eq!(
-            opencode_data_dir_with_env_strategy("/home/alice", true),
-            PathBuf::from(xdg_data_home).join("opencode")
-        );
-
-        restore_env_os("XDG_DATA_HOME", previous);
-    }
-
-    #[test]
-    #[serial]
-    fn opencode_data_dir_treats_empty_xdg_data_home_as_unset() {
-        let previous = std::env::var_os("XDG_DATA_HOME");
-        unsafe { std::env::set_var("XDG_DATA_HOME", "") };
-
-        assert_eq!(
-            opencode_data_dir_with_env_strategy("/home/alice", true),
+            opencode_data_dir("/home/alice"),
             PathBuf::from("/home/alice/.local/share/opencode")
         );
-
-        restore_env_os("XDG_DATA_HOME", previous);
-    }
-
-    #[test]
-    #[serial]
-    fn opencode_data_dir_ignores_xdg_data_home_when_env_roots_are_disabled() {
-        let previous = std::env::var_os("XDG_DATA_HOME");
-        unsafe { std::env::set_var("XDG_DATA_HOME", "/conflicting/xdg") };
-
-        assert_eq!(
-            opencode_data_dir_with_env_strategy("/home/alice", false),
-            PathBuf::from("/home/alice/.local/share/opencode")
-        );
-
-        restore_env_os("XDG_DATA_HOME", previous);
     }
 
     #[test]
@@ -1063,10 +937,9 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_user_opencode_db_paths_picks_up_path_outside_xdg() {
-        // Simulate `OPENCODE_DB=/arbitrary/abs/path/custom.db` upstream:
-        // the file is a real opencode db but lives outside
-        // `~/.local/share/opencode`, so auto-discovery never sees it.
+    fn test_merge_user_opencode_db_paths_picks_up_path_outside_default() {
+        // The file is a real OpenCode database outside the fixed default
+        // directory, so only the configured path can discover it.
         let dir = TempDir::new().unwrap();
         let outside = dir.path().join("somewhere-else");
         fs::create_dir_all(&outside).unwrap();
@@ -1181,81 +1054,29 @@ mod tests {
     }
 
     #[test]
-    fn scanner_settings_reject_unsupported_extra_scan_client() {
+    fn scanner_settings_accept_sqlite_client_extra_scan_roots() {
         let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
-            "extraScanPaths": { "goose": ["/tmp/goose"] }
+            "extraScanPaths": {
+                "goose": ["/tmp/goose-one", "/tmp/goose-two"],
+                "kilo": ["/tmp/kilo-one", "/tmp/kilo-two"]
+            }
         }))
         .unwrap();
 
-        assert!(matches!(
-            settings.validate(),
-            Err(ScannerSettingsError::UnsupportedClient { client }) if client == "goose"
-        ));
-    }
-
-    #[test]
-    fn test_parse_extra_dirs_basic() {
-        let enabled: HashSet<ClientId> = [ClientId::Claude, ClientId::OpenClaw]
-            .iter()
-            .copied()
-            .collect();
-        let dirs =
-            parse_extra_dirs("claude:/tmp/mac-sessions,openclaw:/tmp/oc-extra", &enabled).unwrap();
-        assert_eq!(dirs.len(), 2);
-        assert_eq!(dirs[0].0, ClientId::Claude);
-        assert_eq!(dirs[0].1, "/tmp/mac-sessions");
-        assert_eq!(dirs[1].0, ClientId::OpenClaw);
-        assert_eq!(dirs[1].1, "/tmp/oc-extra");
-    }
-
-    #[test]
-    fn test_parse_extra_dirs_filters_disabled_clients() {
-        let enabled: HashSet<ClientId> = [ClientId::Claude].iter().copied().collect();
-        let dirs = parse_extra_dirs(
-            "claude:/tmp/mac-sessions,gemini:/tmp/gemini-extra",
-            &enabled,
-        )
-        .unwrap();
-        assert_eq!(dirs.len(), 1);
-        assert_eq!(dirs[0].0, ClientId::Claude);
-    }
-
-    #[test]
-    fn test_parse_extra_dirs_rejects_unsupported_clients() {
-        let enabled: HashSet<ClientId> =
-            [ClientId::Claude, ClientId::Kilo].iter().copied().collect();
-        let error =
-            parse_extra_dirs("claude:/tmp/mac-sessions,kilo:/tmp/kilo", &enabled).unwrap_err();
-        assert!(error.to_string().contains("does not support"));
-    }
-
-    #[test]
-    fn test_parse_extra_dirs_empty_string() {
-        let enabled: HashSet<ClientId> = ClientId::iter().collect();
-        let dirs = parse_extra_dirs("", &enabled).unwrap();
-        assert!(dirs.is_empty());
-    }
-
-    #[test]
-    fn test_parse_extra_dirs_invalid_client() {
-        let enabled: HashSet<ClientId> = ClientId::iter().collect();
-        let error = parse_extra_dirs("nonexistent:/tmp/foo", &enabled).unwrap_err();
-        assert!(error.to_string().contains("unknown client"));
-    }
-
-    #[test]
-    fn retired_kilocode_id_is_rejected_by_scanner_configuration() {
-        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
-            "extraScanPaths": { "kilocode": ["/tmp/kilo"] }
-        }))
-        .unwrap();
-        assert!(matches!(
-            settings.validate(),
-            Err(ScannerSettingsError::UnknownClient { client }) if client == "kilocode"
-        ));
-
-        let enabled: HashSet<ClientId> = ClientId::iter().collect();
-        let error = parse_extra_dirs("kilocode:/tmp/kilo", &enabled).unwrap_err();
-        assert!(error.to_string().contains("unknown client"));
+        settings.validate().unwrap();
+        assert_eq!(
+            settings.extra_scan_paths["goose"],
+            vec![
+                PathBuf::from("/tmp/goose-one"),
+                PathBuf::from("/tmp/goose-two")
+            ]
+        );
+        assert_eq!(
+            settings.extra_scan_paths["kilo"],
+            vec![
+                PathBuf::from("/tmp/kilo-one"),
+                PathBuf::from("/tmp/kilo-two")
+            ]
+        );
     }
 }

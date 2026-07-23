@@ -22,12 +22,10 @@ pub fn read_keychain(service: &str) -> Result<String> {
     Ok(String::from_utf8(out.stdout)?.trim_end().to_string())
 }
 
-pub fn read_first_env(keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        let value = std::env::var(key).ok()?;
-        let trimmed = value.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    })
+pub fn read_env(key: &str) -> Option<String> {
+    let value = std::env::var(key).ok()?;
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 pub fn format_reset_time(resets_at: &str) -> String {
@@ -60,8 +58,4 @@ pub fn format_reset_time(resets_at: &str) -> String {
 pub fn render_ascii_bar(remaining_percent: f64, width: usize) -> String {
     let filled = (remaining_percent.clamp(0.0, 100.0) / 100.0 * width as f64).round() as usize;
     format!("[{}{}]", "=".repeat(filled), "-".repeat(width - filled))
-}
-
-pub fn atomic_write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-    tokscale_core::fs_atomic::write_atomic(path, data)
 }

@@ -2,7 +2,7 @@
 //!
 //! Parses aggregated session rows from Hermes Agent's SQLite state database:
 //! - `~/.hermes/state.db`
-//! - `$HERMES_HOME/state.db`
+//! - `~/.hermes/state.db`
 //!
 //! App-reported estimated and actual costs are ignored. Tokscale reports cost
 //! only from token usage and its own pricing table.

@@ -16,15 +16,10 @@ fn prime_pricing_cache(base: &Path) {
         .as_secs();
     let payload = format!(r#"{{"timestamp":{},"data":{{}}}}"#, now);
 
-    for dir in [
-        base.join("Library/Caches/tokscale"),
-        base.join(".cache/tokscale"),
-        base.join(".config/tokscale/cache"),
-    ] {
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("pricing-litellm.json"), &payload).unwrap();
-        fs::write(dir.join("pricing-openrouter.json"), &payload).unwrap();
-    }
+    let dir = base.join(".config/tokscale/cache");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("pricing-litellm.json"), &payload).unwrap();
+    fs::write(dir.join("pricing-openrouter.json"), &payload).unwrap();
 }
 
 fn prime_override_pricing_cache(config_dir: &Path) {
@@ -457,55 +452,33 @@ fn cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.env("HOME", tmp)
         .env("XDG_CONFIG_HOME", tmp.join(".config"))
-        .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
         .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
-        // Clear scan-path overrides inherited from the dev's shell, otherwise a
-        // developer who exports e.g. TOKSCALE_EXTRA_DIRS=~/.codex/sessions (for
-        // codefuse mirror tracking) makes the scanner read real session data
-        // and breaks fixture-count assertions. Hermetic on CI either way.
-        .env_remove("TOKSCALE_EXTRA_DIRS")
-        .env_remove("CODEX_HOME")
-        .env_remove("COPILOT_OTEL_FILE_EXPORTER_PATH")
-        .env_remove("GOOSE_PATH_ROOT")
-        .env_remove("CODEBUFF_DATA_DIR")
-        .env_remove("GEMINI_CLI_HOME")
-        .env_remove("HERMES_HOME")
         .env_remove("TOKSCALE_CONFIG_DIR");
     cmd
 }
 
-fn cmd_with_conflicting_env(tmp: &Path) -> Command {
+fn cmd_with_process_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.env("HOME", tmp)
         .env("XDG_CONFIG_HOME", tmp.join(".config"))
-        .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"));
     cmd
 }
 
 fn offline_cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokscale");
-    // Pin every XDG_* var so the cache resolvers stay inside the sandbox.
+    // Pin Tokscale's config/cache roots so test artifacts stay inside the sandbox.
     // Without XDG_CONFIG_HOME the post-#470 cache root can leak to the
     // host's $XDG_CONFIG_HOME (set globally on some CI runners) and
     // either find pricing data outside the fixture or write to the
     // host filesystem. Mirrors what cmd_with_home does.
     cmd.env("HOME", tmp)
         .env("XDG_CONFIG_HOME", tmp.join(".config"))
-        .env("XDG_DATA_HOME", tmp.join(".local/share"))
         .env("XDG_CACHE_HOME", tmp.join(".cache"))
         .env("HTTP_PROXY", "http://127.0.0.1:9")
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env("ALL_PROXY", "http://127.0.0.1:9")
-        // Clear scan-path overrides (mirrors cmd_with_home)
-        .env_remove("TOKSCALE_EXTRA_DIRS")
-        .env_remove("CODEX_HOME")
-        .env_remove("COPILOT_OTEL_FILE_EXPORTER_PATH")
-        .env_remove("GOOSE_PATH_ROOT")
-        .env_remove("CODEBUFF_DATA_DIR")
-        .env_remove("GEMINI_CLI_HOME")
-        .env_remove("HERMES_HOME")
         .env_remove("TOKSCALE_CONFIG_DIR");
     cmd
 }
@@ -529,28 +502,15 @@ fn model_token_sum(document: &serde_json::Value, field: &str) -> u64 {
 
 fn write_pricing_cache(base: &Path, timestamp: u64) {
     let litellm = format!(
-        r#"{{"timestamp":{},"data":{{"gpt-4o":{{"input_cost_per_token":0.0000025,"output_cost_per_token":0.00001}},"claude-sonnet-4-20250514":{{"input_cost_per_token":0.000003,"output_cost_per_token":0.000015}}}}}}"#,
+        r#"{{"timestamp":{},"data":{{"gpt-4o":{{"input_cost_per_token":0.0000025,"output_cost_per_token":0.00001}},"claude-sonnet-4":{{"input_cost_per_token":0.000003,"output_cost_per_token":0.000015}}}}}}"#,
         timestamp
     );
     let openrouter = format!(r#"{{"timestamp":{},"data":{{}}}}"#, timestamp);
 
-    // Seed all three locations so the test exercises the same fallback
-    // chain the binary uses post-#470: canonical
-    // <config_dir>/cache/, then legacy dirs::cache_dir()/tokscale, then
-    // ~/.cache/tokscale. Without the canonical path seeded, CI runners
-    // where dirs::cache_dir() resolves outside the sandboxed HOME (e.g.
-    // some Linux runners with XDG_CACHE_HOME set globally) miss the
-    // pricing cache entirely and the report falls back to embedded
-    // input-record costs.
-    for dir in [
-        base.join(".config/tokscale/cache"),
-        base.join("Library/Caches/tokscale"),
-        base.join(".cache/tokscale"),
-    ] {
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("pricing-litellm.json"), &litellm).unwrap();
-        fs::write(dir.join("pricing-openrouter.json"), &openrouter).unwrap();
-    }
+    let dir = base.join(".config/tokscale/cache");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("pricing-litellm.json"), &litellm).unwrap();
+    fs::write(dir.join("pricing-openrouter.json"), &openrouter).unwrap();
 }
 
 fn create_pricing_fixture_dir() -> TempDir {
@@ -587,23 +547,18 @@ fn write_fireworks_pricing_cache(base: &Path) {
         }
     });
 
-    for dir in [
-        base.join(".config/tokscale/cache"),
-        base.join("Library/Caches/tokscale"),
-        base.join(".cache/tokscale"),
-    ] {
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("pricing-litellm.json"),
-            serde_json::to_vec(&litellm).unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            dir.join("pricing-openrouter.json"),
-            serde_json::to_vec(&openrouter).unwrap(),
-        )
-        .unwrap();
-    }
+    let dir = base.join(".config/tokscale/cache");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("pricing-litellm.json"),
+        serde_json::to_vec(&litellm).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("pricing-openrouter.json"),
+        serde_json::to_vec(&openrouter).unwrap(),
+    )
+    .unwrap();
 }
 
 fn write_settings_json(base: &Path, body: &str) {
@@ -713,38 +668,6 @@ fn test_cache_prune_surfaces_unknown_shard_magic() {
 }
 
 #[test]
-fn test_removed_integration_namespaces_are_not_registered() {
-    for command in ["codex", "cursor", "trae", "warp"] {
-        cargo_bin_cmd!("tokscale")
-            .args([command, "--help"])
-            .assert()
-            .code(2);
-    }
-}
-
-#[test]
-fn removed_duplicate_report_commands_are_not_registered() {
-    for command in [
-        "monthly",
-        "hourly",
-        "time-metrics",
-        "graph",
-        "clients",
-        "doctor",
-        "daily",
-        "weekly",
-        "stats",
-        "agents",
-        "sessions",
-    ] {
-        cargo_bin_cmd!("tokscale")
-            .args([command, "--help"])
-            .assert()
-            .code(2);
-    }
-}
-
-#[test]
 fn test_tui_command_help() {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.arg("tui")
@@ -781,38 +704,6 @@ fn test_help_exposes_only_leaf_owned_options() {
         .stdout(predicate::str::contains("--tab"))
         .stdout(predicate::str::contains("--theme"))
         .stdout(predicate::str::contains("--json").not());
-}
-
-#[test]
-fn test_headless_command_is_not_registered() {
-    cargo_bin_cmd!("tokscale")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("headless").not());
-
-    cargo_bin_cmd!("tokscale")
-        .arg("headless")
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "unrecognized subcommand 'headless'",
-        ));
-}
-
-#[test]
-fn test_hosted_commands_are_not_registered() {
-    for command in [
-        "login",
-        "logout",
-        "whoami",
-        "qr",
-        "submit",
-        "delete-submitted-data",
-    ] {
-        let mut cmd = cargo_bin_cmd!("tokscale");
-        cmd.arg(command).arg("--help").assert().failure();
-    }
 }
 
 #[test]
@@ -949,54 +840,6 @@ fn test_tui_refresh_modes_are_mutually_exclusive() {
 }
 
 #[test]
-fn test_opencode_json_only_storage_is_not_reported() {
-    let tmp = TempDir::new().unwrap();
-    prime_pricing_cache(tmp.path());
-    let legacy_dir = tmp
-        .path()
-        .join(".local/share/opencode/storage/message/session-1");
-    fs::create_dir_all(&legacy_dir).unwrap();
-    fs::write(
-        legacy_dir.join("msg_legacy.json"),
-        r#"{"id":"legacy-only","sessionID":"session-1","role":"assistant","modelID":"legacy-json-model","providerID":"openai","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-    )
-    .unwrap();
-
-    cmd_with_home(tmp.path())
-        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("legacy-json-model").not());
-}
-
-#[test]
-fn test_opencode_obsolete_sqlite_schema_reports_aggregate_health_only() {
-    let tmp = TempDir::new().unwrap();
-    prime_pricing_cache(tmp.path());
-    let data_dir = tmp.path().join(".local/share/opencode");
-    fs::create_dir_all(&data_dir).unwrap();
-    let conn = Connection::open(data_dir.join("opencode.db")).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE message (
-            id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            data TEXT NOT NULL
-        );",
-    )
-    .unwrap();
-    drop(conn);
-
-    cmd_with_home(tmp.path())
-        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"failedInputs\": 1"))
-        .stdout(predicate::str::contains("\"issue\": \"input-unavailable\""))
-        .stdout(predicate::str::contains("does not match the current session schema").not())
-        .stderr(predicate::str::contains("1 failed input(s)"));
-}
-
-#[test]
 fn test_opencode_invalid_sqlite_payload_is_rejected_without_losing_good_rows() {
     let tmp = TempDir::new().unwrap();
     prime_pricing_cache(tmp.path());
@@ -1059,11 +902,11 @@ fn test_models_with_year_filter() {
 }
 
 #[test]
-fn test_models_home_override_ignores_conflicting_xdg_env() {
+fn test_models_home_override_uses_the_explicit_home() {
     let real_home = create_temp_fixture_dir();
     let conflicting_home = create_conflicting_opencode_fixture_dir();
 
-    let output = cmd_with_conflicting_env(conflicting_home.path())
+    let output = cmd_with_process_home(conflicting_home.path())
         .args([
             "models",
             "--json",
@@ -1089,12 +932,11 @@ fn test_models_home_override_ignores_conflicting_xdg_env() {
 }
 
 #[test]
-fn test_models_home_override_ignores_conflicting_codex_home_env() {
+fn test_codex_models_home_override_uses_the_explicit_home() {
     let real_home = create_codex_fixture_dir();
     let conflicting_home = create_conflicting_codex_fixture_dir();
 
-    let output = cmd_with_conflicting_env(conflicting_home.path())
-        .env("CODEX_HOME", conflicting_home.path().join(".codex"))
+    let output = cmd_with_process_home(conflicting_home.path())
         .args([
             "models",
             "--json",
@@ -1207,21 +1049,6 @@ fn test_models_with_client_filter_multiple() {
 }
 
 #[test]
-fn test_reports_reject_removed_client_ids() {
-    let tmp = create_empty_fixture_dir();
-    for client in ["cursor", "trae"] {
-        let output = cmd_with_home(tmp.path())
-            .args(["models", "--client", client, "--no-spinner"])
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(2));
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("invalid value"), "stderr: {stderr}");
-        assert!(stderr.contains(client), "stderr: {stderr}");
-    }
-}
-
-#[test]
 fn test_models_with_repeated_client_filter() {
     let tmp = create_temp_fixture_dir();
     cmd_with_home(tmp.path())
@@ -1293,7 +1120,9 @@ fn test_models_json_output() {
     assert!(!models.is_empty(), "Should have models from fixture data");
     let first = &models[0];
     assert!(first.get("client").is_some());
-    assert!(first.get("model").is_some());
+    assert!(first.get("modelId").is_some());
+    assert!(first.get("displayName").is_some());
+    assert!(first.get("model").is_none());
     assert!(first.get("provider").is_some());
     let tokens = first["tokens"].as_object().expect("tokens object");
     for field in [
@@ -1570,7 +1399,7 @@ fn test_models_group_by_model() {
 
     let models: Vec<&str> = model_rows(&json)
         .iter()
-        .map(|e| e["model"].as_str().unwrap())
+        .map(|e| e["modelId"].as_str().unwrap())
         .collect();
     let unique_models: std::collections::HashSet<&&str> = models.iter().collect();
     assert_eq!(
@@ -1598,7 +1427,11 @@ fn test_models_group_by_client_provider_model() {
     for entry in model_rows(&json) {
         assert!(entry.get("client").is_some(), "Entry must have client");
         assert!(entry.get("provider").is_some(), "Entry must have provider");
-        assert!(entry.get("model").is_some(), "Entry must have model");
+        assert!(entry.get("modelId").is_some(), "Entry must have modelId");
+        assert!(
+            entry.get("displayName").is_some(),
+            "Entry must have displayName"
+        );
     }
 }
 
@@ -1720,7 +1553,8 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_qwen() {
         entries[0]["workspaceLabel"].as_str().unwrap(),
         "demo-workspace"
     );
-    assert_eq!(entries[0]["model"].as_str().unwrap(), "qwen3.5-plus");
+    assert_eq!(entries[0]["modelId"].as_str().unwrap(), "qwen3.5-plus");
+    assert_eq!(entries[0]["displayName"].as_str().unwrap(), "qwen3.5-plus");
 }
 
 #[test]
@@ -1745,7 +1579,8 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_codex() {
         entries[0]["workspaceLabel"].as_str().unwrap(),
         "codex-workspace"
     );
-    assert_eq!(entries[0]["model"].as_str().unwrap(), "gpt-5.4");
+    assert_eq!(entries[0]["modelId"].as_str().unwrap(), "gpt-5.4");
+    assert_eq!(entries[0]["displayName"].as_str().unwrap(), "gpt-5.4");
 }
 
 #[test]
@@ -1776,7 +1611,8 @@ fn test_models_group_by_workspace_model_merges_claude_project_path_with_codex_pi
         entries[0]["workspaceLabel"].as_str().unwrap(),
         "shared-workspace"
     );
-    assert_eq!(entries[0]["model"].as_str().unwrap(), "gpt-5.4");
+    assert_eq!(entries[0]["modelId"].as_str().unwrap(), "gpt-5.4");
+    assert_eq!(entries[0]["displayName"].as_str().unwrap(), "gpt-5.4");
     assert_eq!(entries[0]["tokens"]["input"].as_u64().unwrap(), 60);
     assert_eq!(entries[0]["tokens"]["output"].as_u64().unwrap(), 30);
     assert_eq!(entries[0]["sessionCount"].as_u64().unwrap(), 3);
@@ -1845,7 +1681,11 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_opencode()
         entries[0]["workspaceLabel"].as_str().unwrap(),
         "opencode-workspace"
     );
-    assert_eq!(entries[0]["model"].as_str().unwrap(), "claude-sonnet-4");
+    assert_eq!(entries[0]["modelId"].as_str().unwrap(), "claude-sonnet-4");
+    assert_eq!(
+        entries[0]["displayName"].as_str().unwrap(),
+        "claude-sonnet-4"
+    );
 }
 
 // ── Pricing command tests ──────────────────────────────────────────────────
@@ -1925,24 +1765,7 @@ fn test_pricing_command_invalid_pricing_source() {
 }
 
 #[test]
-fn test_pricing_v4_spellings_are_rejected_with_exact_replacements() {
-    cargo_bin_cmd!("tokscale")
-        .args(["pricing", "list-overrides"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("use `tokscale pricing overrides`"));
-
-    cargo_bin_cmd!("tokscale")
-        .args(["pricing", "gpt-5", "--json"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "use `tokscale pricing lookup gpt-5 --json`",
-        ));
-}
-
-#[test]
-fn test_pricing_command_does_not_fuzzy_match_provider_scoped_fireworks_model() {
+fn test_pricing_command_canonicalizes_input_before_exact_lookup() {
     let tmp = TempDir::new().expect("failed to create temp dir");
     write_fireworks_pricing_cache(tmp.path());
 
@@ -1956,15 +1779,15 @@ fn test_pricing_command_does_not_fuzzy_match_provider_scoped_fireworks_model() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("Model not found: accounts/fireworks/models/deepseek-v4-pro"),
-        "expected a not-found message, got: {stderr}"
+        stdout.contains("deepseek/deepseek-v4-pro"),
+        "expected the canonical exact catalog row, got: {stdout}"
     );
     assert!(
-        !stderr.contains("deepseek-r1-0528-distill-qwen3-8b"),
-        "provider-scoped pricing lookup must not report the wrong Fireworks match: {stderr}"
+        !stdout.contains("deepseek-r1-0528-distill-qwen3-8b"),
+        "an exact lookup must not report an unrelated catalog row: {stdout}"
     );
 }
 
@@ -1986,25 +1809,6 @@ fn test_models_command_reports_malformed_settings() {
         .stderr(predicate::str::contains(
             settings_json_path(tmp.path()).display().to_string(),
         ));
-}
-
-#[test]
-fn excluded_crush_default_client_fails_before_report_output() {
-    let tmp = create_empty_fixture_dir();
-    write_settings_json(tmp.path(), r#"{"defaultClients":["crush"]}"#);
-
-    cmd_with_home(tmp.path())
-        .env("RUST_BACKTRACE", "1")
-        .args(["models", "--no-spinner"])
-        .assert()
-        .code(2)
-        .stdout(predicate::str::is_empty())
-        .stderr(
-            predicate::str::contains("invalid client id(s) in settings.json defaultClients: crush")
-                .and(predicate::str::contains("does not support local parsing").not())
-                .and(predicate::str::contains("panicked at").not())
-                .and(predicate::str::contains("stack backtrace").not()),
-        );
 }
 
 #[test]
@@ -2043,22 +1847,6 @@ fn non_utf8_settings_is_invalid_execution_environment() {
         .code(2)
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("failed to parse settings JSON"));
-}
-
-#[test]
-fn malformed_scanner_environment_is_invalid_execution_environment() {
-    let tmp = create_empty_fixture_dir();
-
-    cmd_with_home(tmp.path())
-        .env("TOKSCALE_EXTRA_DIRS", "broken")
-        .args(["models", "--client", "amp", "--no-spinner"])
-        .assert()
-        .code(2)
-        .stdout(predicate::str::is_empty())
-        .stderr(
-            predicate::str::contains("TOKSCALE_EXTRA_DIRS")
-                .and(predicate::str::contains("expected `client:path`")),
-        );
 }
 
 #[test]
@@ -2174,24 +1962,6 @@ fn test_models_no_spinner_flag() {
 // ── Root command ownership tests ───────────────────────────────────────────
 
 #[test]
-fn test_root_rejects_json_report_options() {
-    cargo_bin_cmd!("tokscale")
-        .args(["--json", "models"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("use `tokscale models --json`"));
-}
-
-#[test]
-fn test_root_rejects_removed_light_option() {
-    cargo_bin_cmd!("tokscale")
-        .arg("--light")
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("use `tokscale models`"));
-}
-
-#[test]
 fn table_report_surfaces_malformed_display_config_without_panicking() {
     let tmp = create_temp_fixture_dir();
     let config_path = tmp.path().join(".tokscale");
@@ -2207,52 +1977,6 @@ fn table_report_surfaces_malformed_display_config_without_panicking() {
                 .and(predicate::str::contains(config_path.display().to_string()))
                 .and(predicate::str::contains("panicked").not()),
         );
-}
-
-#[test]
-fn removed_write_cache_flag_fails_before_report_output() {
-    let tmp = create_temp_fixture_dir();
-    let scoped_home = tmp.path().join("scoped-home");
-    fs::create_dir_all(&scoped_home).unwrap();
-
-    cmd_with_home(tmp.path())
-        .args([
-            "models",
-            "--home",
-            scoped_home.to_str().unwrap(),
-            "--write-cache",
-            "--client",
-            "opencode",
-            "--no-spinner",
-        ])
-        .assert()
-        .failure()
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("--write-cache"));
-}
-
-#[test]
-fn removed_light_setting_has_no_report_cache_side_effect() {
-    let tmp = create_temp_fixture_dir();
-    let scoped_home = tmp.path().join("scoped-home");
-    fs::create_dir_all(&scoped_home).unwrap();
-    write_settings_json(tmp.path(), r#"{"light":{"writeCache":true}}"#);
-
-    cmd_with_home(tmp.path())
-        .args([
-            "models",
-            "--home",
-            scoped_home.to_str().unwrap(),
-            "--client",
-            "opencode",
-            "--no-spinner",
-        ])
-        .assert()
-        .success();
-    assert!(!tmp
-        .path()
-        .join(".cache/tokscale/tui-data-cache.json")
-        .exists());
 }
 
 #[test]
@@ -2272,24 +1996,4 @@ fn cache_warm_writes_to_canonical_path() {
         config_dir.join("cache/tui-data-cache.json").exists(),
         "cache warm should populate the canonical cache path"
     );
-}
-
-#[test]
-fn test_root_rejects_date_filter() {
-    cargo_bin_cmd!("tokscale")
-        .args(["--year", "2025"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("use `tokscale tui --year 2025`"));
-}
-
-#[test]
-fn test_root_rejects_group_by() {
-    cargo_bin_cmd!("tokscale")
-        .args(["--group-by", "model"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "use `tokscale models --group-by model`",
-        ));
 }

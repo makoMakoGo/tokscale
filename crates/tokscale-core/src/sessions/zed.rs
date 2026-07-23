@@ -1,9 +1,9 @@
 //! Zed Agent session parser
 //!
 //! Parses hosted Zed Agent thread rows from Zed's SQLite database:
-//! - Linux/FreeBSD: `$XDG_DATA_HOME/zed/threads/threads.db`
+//! - Linux/FreeBSD: `~/.local/share/zed/threads/threads.db`
 //! - macOS: `~/Library/Application Support/Zed/threads/threads.db`
-//! - Windows: `%LOCALAPPDATA%\Zed\threads\threads.db`
+//! - Windows: `~\AppData\Local\Zed\threads\threads.db`
 //!
 //! Only Zed-hosted model rows (`provider == "zed.dev"`) are counted. External
 //! ACP agents are billed and logged by their own providers/CLIs, and counting

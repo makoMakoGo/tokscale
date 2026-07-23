@@ -55,35 +55,26 @@ CLI flags override matching config values for a single invocation.
 
 OpenCode is intentionally not an `extraScanPaths` client. Put each additional
 current-format database file in `scanner.opencodeDbPaths`; OpenCode entries in
-`scanner.extraScanPaths` or `TOKSCALE_EXTRA_DIRS` are ignored. Automatic
-discovery treats only `NotFound` as absent; other discovery I/O failures are
-reported explicitly.
+`scanner.extraScanPaths` are rejected. Automatic discovery treats only
+`NotFound` as absent; other discovery I/O failures are reported explicitly.
 
 ## Environment variables
 
 | Variable | Meaning |
 | --- | --- |
 | `TOKSCALE_CONFIG_DIR` | Overrides the general config/cache root used by Tokscale. Surrounding whitespace is trimmed; empty and whitespace-only values are treated as unset. |
-| `TOKSCALE_EXTRA_DIRS` | One-off extra scan roots as `client:/abs/path,client:/abs/path`. |
 | `TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY` | Z.ai/Zhipu GLM Coding Plan quota key. |
-| `TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY` | Kimi Code Console quota key. |
+| `TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY` | Kimi Coding Plan quota key. |
 | `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY` | MiniMax CN Token Plan subscription key. |
 | `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY` | MiniMax Global Token Plan subscription key. |
 
-Client-specific homes are also respected where the client supports them, such as
-`CODEX_HOME`, `GEMINI_CLI_HOME`, `KIMI_CODE_HOME`, `HERMES_HOME`,
-`CODEBUFF_DATA_DIR`, `GOOSE_PATH_ROOT`, and `GROK_HOME`. These client home
-overrides trim leading/trailing whitespace and fall back to the default client
-path when set to a blank value.
+Automatic input discovery uses only the fixed client paths documented in
+[`clients.md`](clients.md). `scanner.extraScanPaths` is the sole configuration
+for additional recursive input roots; OpenCode uses
+`scanner.opencodeDbPaths` instead.
 
-Path-like environment variables use these policies:
-
-- Client scan roots and `TOKSCALE_CONFIG_DIR` trim surrounding whitespace and
-  treat blank values as unset. A blank client home therefore uses that client's
-  default root, while a blank `TOKSCALE_CONFIG_DIR` uses the platform config
-  root.
-- `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are interpreted by the platform path
-  resolver or by the scanner logic that reads them.
+`TOKSCALE_CONFIG_DIR` changes Tokscale's own settings and cache location. It
+does not change any client input location.
 
 ## Cache layout
 
@@ -109,7 +100,7 @@ Traversal and classification complete before deletion; an unknown, future,
 truncated, malformed, undecodable, or oversized shard aborts pruning without
 deleting anything.
 
-The current schema 45 TUI generation bundle is separate from scan-input message
+The current schema 47 TUI generation bundle is separate from scan-input message
 shards. It contains one canonical accumulator, one Common projection, four
 Grouped projections, Sessions, Data Health, and generation metadata. Models
 never writes it; use `tokscale cache warm` when you intentionally want to
@@ -123,22 +114,31 @@ Canonical `usageProviders` ids:
 claude
 codex
 zai
-amp
-copilot
 grok
-kimi
+kimi-coding-plan-key
+kimi-coding-plan-credential
 minimax-token-plan-cn
 minimax-token-plan-global
 ```
 
-General-purpose provider API keys such as `ZAI_API_KEY`, `GLM_API_KEY`,
-`KIMI_API_KEY`, `MINIMAX_API_KEY`, and `MINIMAX_API_TOKEN` are not used for
-subscription quota lookups.
-
 Codex subscription usage reads the currently authenticated account from
-provider-owned Codex auth state (`$CODEX_HOME/auth.json`, the standard Codex
-config locations, or the official macOS keychain item). Tokscale does not copy,
-refresh, switch, or modify those credentials.
+exactly `~/.codex/auth.json`. Tokscale reads only the access token and account
+id required for the quota request.
+
+Grok Build subscription usage reads exactly `~/.grok/auth.json`, requires one
+usable `https://auth.x.ai::*` account entry, and queries the provider quota
+backend directly. Tokscale does not invoke the Grok executable.
+
+Kimi Coding Plan is exposed as two independent providers.
+`kimi-coding-plan-key` reads only
+`TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY` and displays
+`Kimi Coding Plan (key)`. `kimi-coding-plan-credential` reads only
+`~/.kimi-code/credentials/kimi-code.json` and displays
+`Kimi Coding Plan (credential)`. Its credential path is fixed.
+
+MiniMax CN and Global are distinct subscription products. Their TUI provider
+labels are `MiniMax Token Plan CN` and `MiniMax Token Plan Global`; neither
+region is an account identity.
 
 The normalized Subscription Usage cache uses schema
 `tokscale.subscription-usage`, version `1`, and a five-minute freshness window.

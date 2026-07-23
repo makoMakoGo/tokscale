@@ -98,7 +98,6 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
             ),
             PricingSubcommand::Overrides { json } => run_pricing_list_overrides(json),
         },
-        ExecutionPlan::Usage { json } => commands::usage::run(json),
         ExecutionPlan::Wrapped(plan) => run_wrapped_command(plan),
         ExecutionPlan::CachePrune => run_input_cache_prune(),
         ExecutionPlan::CacheWarm(input) => run_warm_tui_cache(input.home, input.clients),

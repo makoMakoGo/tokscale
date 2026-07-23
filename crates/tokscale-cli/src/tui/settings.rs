@@ -386,20 +386,6 @@ mod tests {
     }
 
     #[test]
-    fn load_for_home_override_does_not_read_legacy_macos_path() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let legacy_path = temp
-            .path()
-            .join("Library/Application Support/tokscale/settings.json");
-        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-        fs::write(&legacy_path, r#"{"colorPalette":"halloween"}"#).unwrap();
-
-        let loaded = Settings::load_for_home_override(Some(temp.path())).unwrap();
-
-        assert_eq!(loaded.color_palette, Settings::default().color_palette);
-    }
-
-    #[test]
     fn load_for_home_override_reports_malformed_json_with_path_and_source() {
         let temp = tempfile::TempDir::new().unwrap();
         let path = Settings::explicit_home_config_path(temp.path());

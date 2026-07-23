@@ -332,12 +332,14 @@ async fn fetch_all_models_with_sink(
 
     if !result.is_empty() {
         if let Err(e) = cache::save_cache(CACHE_FILENAME, &result) {
+            let cache_path = cache::get_cache_path(CACHE_FILENAME)
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|error| error.to_string());
             emit_diagnostic(
                 diagnostics,
                 format!(
                     "[tokscale] Warning: Failed to cache OpenRouter pricing at {}: {}",
-                    cache::get_cache_path(CACHE_FILENAME).display(),
-                    e
+                    cache_path, e
                 ),
             );
         }

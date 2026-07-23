@@ -26,8 +26,7 @@ pub use aggregate::{
     TuiSessionTokens, ViewSet, UNKNOWN_WORKSPACE_LABEL,
 };
 pub use clients::{
-    cline_session_data_dir_with_env_strategy, warp_sqlite_roots_with_env_strategy, ClientId,
-    ClientIdentity, LocalClientDef, PathRoot,
+    cline_session_data_dir, warp_sqlite_roots, ClientId, ClientIdentity, LocalClientDef, PathRoot,
 };
 pub use input_health::{
     DataHealth, InputFailure, InputHealth, InputStatus, RecordRejectionReason, RejectionEntry,
@@ -296,7 +295,6 @@ pub struct LocalReportWithPricingDiagnostics<T> {
 #[derive(Debug, Clone, Default)]
 pub struct LocalParseOptions {
     pub home_dir: Option<String>,
-    pub use_env_roots: bool,
     pub clients: Option<Vec<String>>,
     pub since: Option<String>,
     pub until: Option<String>,
@@ -337,6 +335,8 @@ pub struct PreparedLocalInputs {
     groups: Vec<adapters::PreparedAdapterInputs>,
     signature: InputInventorySignature,
     health: DataHealth,
+    #[cfg(test)]
+    input_cache_dir: std::path::PathBuf,
 }
 
 impl PreparedLocalInputs {
@@ -442,7 +442,6 @@ fn confirmed_input_data_bytes(
 #[derive(Debug, Clone, Default)]
 pub struct ReportOptions {
     pub home_dir: Option<String>,
-    pub use_env_roots: bool,
     pub clients: Option<Vec<String>>,
     pub since: Option<String>,
     pub until: Option<String>,
@@ -471,31 +470,23 @@ fn parse_all_messages_with_pricing(
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
 ) -> Result<Vec<UnifiedMessage>, LocalReportError> {
-    parse_all_messages_with_pricing_with_env_strategy(
+    parse_all_messages_with_pricing_with_settings(
         home_dir,
         clients,
         pricing,
-        true,
         &scanner::ScannerSettings::default(),
     )
 }
 
 #[cfg(test)]
-fn parse_all_messages_with_pricing_with_env_strategy(
+fn parse_all_messages_with_pricing_with_settings(
     home_dir: &str,
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
-    use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
 ) -> Result<Vec<UnifiedMessage>, LocalReportError> {
-    parse_all_messages_with_health_with_env_strategy(
-        home_dir,
-        clients,
-        pricing,
-        use_env_roots,
-        scanner_settings,
-    )
-    .map(|(messages, _)| messages)
+    parse_all_messages_with_health_with_settings(home_dir, clients, pricing, scanner_settings)
+        .map(|(messages, _)| messages)
 }
 
 #[cfg(test)]
@@ -504,26 +495,23 @@ fn parse_all_messages_with_health(
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
 ) -> Result<(Vec<UnifiedMessage>, DataHealth), LocalReportError> {
-    parse_all_messages_with_health_with_env_strategy(
+    parse_all_messages_with_health_with_settings(
         home_dir,
         clients,
         pricing,
-        true,
         &scanner::ScannerSettings::default(),
     )
 }
 
 #[cfg(test)]
-fn parse_all_messages_with_health_with_env_strategy(
+fn parse_all_messages_with_health_with_settings(
     home_dir: &str,
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
-    use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
 ) -> Result<(Vec<UnifiedMessage>, DataHealth), LocalReportError> {
     let prepared = prepare_local_inputs(LocalParseOptions {
         home_dir: Some(home_dir.to_string()),
-        use_env_roots,
         clients: Some(clients.to_vec()),
         scanner_settings: scanner_settings.clone(),
         ..LocalParseOptions::default()
@@ -539,17 +527,27 @@ struct FoldOutcome {
     health: DataHealth,
 }
 
+#[cfg(test)]
+fn input_cache_dir_for_test_home(home_dir: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(home_dir).join(".tokscale-test-cache/input")
+}
+
 fn fold_prepared_local_inputs_with_pricing(
     prepared: PreparedLocalInputs,
     pricing: Option<&pricing::PricingService>,
     sink: &mut dyn adapters::MessageSink,
 ) -> Result<FoldOutcome, LocalReportError> {
+    #[cfg(test)]
+    let input_cache_dir = prepared.input_cache_dir.clone();
     let PreparedLocalInputs {
         clients,
         groups,
         mut health,
         ..
     } = prepared;
+    #[cfg(test)]
+    let mut input_cache = message_cache::InputMessageCache::with_cache_dir(&input_cache_dir);
+    #[cfg(not(test))]
     let mut input_cache = message_cache::InputMessageCache::load()
         .map_err(adapters::InputPipelineError::from)
         .map_err(LocalReportError::operational)?;
@@ -648,7 +646,6 @@ pub fn prepare_local_inputs(
         adapters::selected_adapters(&clients).map_err(LocalReportError::invalid_request_message)?;
     let scan_ctx = adapters::AdapterScanContext {
         home_dir: &home_dir,
-        use_env_roots: options.use_env_roots,
         scanner_settings: &options.scanner_settings,
     };
     let mut health = DataHealth::default();
@@ -658,15 +655,9 @@ pub fn prepare_local_inputs(
             #[cfg(test)]
             PREPARE_DISCOVERY_COUNT.with(|count| count.set(count.get() + 1));
             // Third-party input and snapshot failures stay inside their
-            // input's failure domain. Configuration failures belong to the
-            // outer pipeline and must abort preparation.
+            // input's failure domain.
             let units = match adapter.discover_checked(&scan_ctx) {
                 Ok(units) => units,
-                Err(error)
-                    if error.kind == adapters::error::InputDiscoveryErrorKind::Configuration =>
-                {
-                    return Err(LocalReportError::invalid_environment(error));
-                }
                 Err(error) => {
                     health.record(InputHealth {
                         client: error.client,
@@ -719,6 +710,8 @@ pub fn prepare_local_inputs(
         groups,
         signature,
         health,
+        #[cfg(test)]
+        input_cache_dir: input_cache_dir_for_test_home(&home_dir),
     })
 }
 
@@ -873,7 +866,6 @@ struct ResolvedAggregationRequest<'a> {
     clients: &'a [String],
     group_by: GroupBy,
     date_range: DateRange,
-    use_env_roots: bool,
     scanner_settings: &'a scanner::ScannerSettings,
     views: ViewSet,
     pricing: Option<&'a pricing::PricingService>,
@@ -884,7 +876,6 @@ fn load_aggregated_views_resolved(
 ) -> Result<AggregatedViews, LocalReportError> {
     let prepared = prepare_local_inputs(LocalParseOptions {
         home_dir: Some(request.home_dir.to_string()),
-        use_env_roots: request.use_env_roots,
         clients: Some(request.clients.to_vec()),
         since: request.date_range.since.clone(),
         until: request.date_range.until.clone(),
@@ -947,7 +938,6 @@ fn load_aggregated_views_for_resolved_report(
         clients,
         group_by: options.group_by.clone(),
         date_range: DateRange::from_options(options),
-        use_env_roots: options.use_env_roots,
         scanner_settings: &options.scanner_settings,
         views,
         pricing,
@@ -998,9 +988,11 @@ fn apply_token_pricing(message: &mut UnifiedMessage, pricing: Option<&pricing::P
         return;
     };
 
-    let provider_hint = pricing_provider_hint(&message.model_id, &message.provider_id);
-    let calculated_cost =
-        pricing.calculate_cost_with_provider(&message.model_id, provider_hint, &message.tokens);
+    let calculated_cost = pricing.calculate_cost_with_provider(
+        &message.model_id,
+        Some(message.provider_id.as_ref()),
+        &message.tokens,
+    );
 
     if calculated_cost > 0.0 {
         message.cost = calculated_cost;
@@ -1051,23 +1043,6 @@ pub(crate) fn finalize_token_priced_messages(
         apply_token_pricing(message, pricing);
         true
     });
-}
-
-fn pricing_provider_hint<'a>(model_id: &str, provider_id: &'a str) -> Option<&'a str> {
-    let trimmed = provider_id.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if provider_identity::is_owl_usage_provider(trimmed) {
-        return provider_identity::inferred_provider_from_model(model_id);
-    }
-
-    if trimmed.eq_ignore_ascii_case("openai-pro") || trimmed.eq_ignore_ascii_case("openai_pro") {
-        return Some("openai");
-    }
-
-    Some(trimmed)
 }
 
 fn select_local_parse_pricing<F>(

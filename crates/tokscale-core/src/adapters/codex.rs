@@ -37,9 +37,9 @@ impl LocalInputAdapter for CodexAdapter {
         let def = ClientId::Codex
             .local_def()
             .expect("Codex adapter must have local scan policy");
-        let codex_home = codex_home(ctx.home_dir, ctx.use_env_roots);
+        let codex_home = codex_home(ctx.home_dir);
         let mut roots = vec![
-            def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
+            def.resolve_path(ctx.home_dir),
             codex_home.join("archived_sessions"),
         ];
         roots.extend(adapter_discover::extra_roots_for_client(
@@ -250,15 +250,8 @@ struct CodexResolvedMessages {
     health_override: Option<crate::adapters::UnitScanHealth>,
 }
 
-fn codex_home(home_dir: &str, use_env_roots: bool) -> PathBuf {
-    if use_env_roots {
-        match std::env::var_os("CODEX_HOME") {
-            Some(path) if !path.is_empty() => PathBuf::from(path),
-            Some(_) | None => PathBuf::from(home_dir).join(".codex"),
-        }
-    } else {
-        PathBuf::from(home_dir).join(".codex")
-    }
+fn codex_home(home_dir: &str) -> PathBuf {
+    PathBuf::from(home_dir).join(".codex")
 }
 
 fn parse_full_log_input(
@@ -771,21 +764,16 @@ mod tests {
     ) -> AdapterScanContext<'a> {
         AdapterScanContext {
             home_dir: home_dir.to_str().unwrap(),
-            use_env_roots: false,
             scanner_settings: settings,
         }
     }
 
-    #[cfg(unix)]
     #[test]
-    #[serial_test::serial]
-    fn codex_home_preserves_non_utf8_environment_path() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let path = PathBuf::from(OsString::from_vec(b"/tmp/codex-\xff".to_vec()));
-        let _guard = EnvVarGuard::set("CODEX_HOME", &path);
-
-        assert_eq!(codex_home("/unused-home", true), path);
+    fn codex_home_uses_standard_home_path() {
+        assert_eq!(
+            codex_home("/home/alice"),
+            PathBuf::from("/home/alice/.codex")
+        );
     }
 
     fn codex_unit(path: &Path) -> InputUnit {
@@ -976,24 +964,6 @@ mod tests {
         assert!(units
             .iter()
             .all(|unit| matches!(unit.meta, InputUnitMeta::Codex)));
-    }
-
-    #[test]
-    fn codex_adapter_ignores_removed_shadow_capture_root() {
-        let home = tempfile::TempDir::new().unwrap();
-        let shadow_path = home
-            .path()
-            .join(".config/tokscale/headless/codex/captured.jsonl");
-        write_file(&shadow_path, FIRST_CODEX_ENTRY);
-
-        let units = CODEX_ADAPTER
-            .discover_checked(&scan_context(
-                home.path(),
-                &crate::scanner::ScannerSettings::default(),
-            ))
-            .expect("removed shadow root must not affect discovery");
-
-        assert!(units.is_empty());
     }
 
     #[test]

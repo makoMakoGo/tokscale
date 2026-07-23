@@ -21,8 +21,7 @@ compile_error!("input-message cache requires stable Unix or Windows file identit
 // fixes should bump the relevant InputUnit parser revision instead.
 const CACHE_FORMAT_VERSION: u32 = 9;
 #[cfg(test)]
-const PREVIOUS_CACHE_FORMAT_VERSION: u32 = 8;
-const LEGACY_MAGIC_FORMAT_VERSIONS: [u32; 7] = [2, 3, 4, 5, 6, 7, 8];
+const UNSUPPORTED_CACHE_FORMAT_VERSION: u32 = CACHE_FORMAT_VERSION - 1;
 const SHARD_MAGIC: [u8; 8] = *b"TOKSHRD\0";
 const SHARD_KEY_FORMAT_VERSION: u32 = 1;
 const SHARDS_DIRNAME: &str = "shards";
@@ -1728,130 +1727,6 @@ struct PrunableShard {
     canonical_path: bool,
 }
 
-// Frozen v1 header layout used only by explicit prune classification. Ordinary
-// cache reads never deserialize this legacy format.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-enum LegacyV1ParserId {
-    OpenCode,
-    OpenCodeSqlite,
-    OpenCodeJson,
-    Claude,
-    Codex,
-    Cursor,
-    Gemini,
-    Amp,
-    Droid,
-    OpenClaw,
-    Pi,
-    Omp,
-    Kimi,
-    Qwen,
-    RooCode,
-    RetiredVscodeTask,
-    Mux,
-    Kilo,
-    Hermes,
-    Copilot,
-    Goose,
-    Codebuff,
-    Antigravity,
-    AntigravityCacheJsonl,
-    AntigravityCliSqlite,
-    Zed,
-    Kiro,
-    KiroFile,
-    KiroSqlite,
-    KiroGlobalStorage,
-    Junie,
-    Trae,
-    Cline,
-    CommandCode,
-    Grok,
-    Zcode,
-    Warp,
-    CodeBuddy,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-struct LegacyV1ParserVersion {
-    parser_id: LegacyV1ParserId,
-    revision: ParserRevision,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct LegacyV1FileSampleHash {
-    offset: u64,
-    len: u64,
-    hash: u64,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct LegacyV1RelatedFileFingerprint {
-    suffix: String,
-    size: u64,
-    modified_ns: u64,
-    sample_hashes: Vec<LegacyV1FileSampleHash>,
-    content_hash: [u8; 32],
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct RetiredV1InputFingerprint {
-    size: u64,
-    modified_ns: u64,
-    sample_hashes: Vec<LegacyV1FileSampleHash>,
-    content_hash: [u8; 32],
-    related_files: Vec<LegacyV1RelatedFileFingerprint>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct LegacyV1CodexTotals {
-    input: i64,
-    output: i64,
-    cached: i64,
-    reasoning: i64,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct LegacyV1CodexParseState {
-    current_model: Option<String>,
-    current_turn_start_ms: Option<i64>,
-    previous_totals: Option<LegacyV1CodexTotals>,
-    session_is_exec: bool,
-    session_id_from_meta: Option<String>,
-    session_forked_from_id: Option<String>,
-    forked_child_session_id: Option<String>,
-    forked_child_replay_session_id: Option<String>,
-    session_provider: Option<String>,
-    session_agent: Option<String>,
-    session_agent_instance: Option<String>,
-    session_workspace_key: Option<String>,
-    session_workspace_label: Option<String>,
-    forked_child_waiting_for_turn_context: bool,
-    forked_child_inherited_baseline: Option<LegacyV1CodexTotals>,
-    forked_child_inherited_reported_total: Option<i64>,
-    pending_turn_start: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct LegacyV1CodexIncrementalCache {
-    state: LegacyV1CodexParseState,
-    consumed_offset: u64,
-    ends_with_newline: bool,
-    prefix_hash: [u8; 32],
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct LegacyV1CachedShardHeader {
-    format_version: u32,
-    parser_version: LegacyV1ParserVersion,
-    path: CachedPath,
-    fingerprint: RetiredV1InputFingerprint,
-    fallback_timestamp_indices: Vec<usize>,
-    codex_incremental: Option<LegacyV1CodexIncrementalCache>,
-    message_count: usize,
-}
-
 /// Explicitly garbage-collect input-message cache shards.
 ///
 /// Ordinary report and TUI loads intentionally do not call this function. The
@@ -1998,7 +1873,7 @@ pub(crate) fn shard_path_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn mark_current_key_shard_as_previous_format_for_test(
+pub(crate) fn mark_current_key_shard_as_unsupported_format_for_test(
     cache_dir: &Path,
     input_path: &Path,
     parser_version: ParserVersion,
@@ -2010,7 +1885,7 @@ pub(crate) fn mark_current_key_shard_as_previous_format_for_test(
         .expect("test cache shard must exist");
     file.seek(SeekFrom::Start(SHARD_MAGIC.len() as u64))
         .expect("test shard format field must be seekable");
-    file.write_all(&PREVIOUS_CACHE_FORMAT_VERSION.to_le_bytes())
+    file.write_all(&UNSUPPORTED_CACHE_FORMAT_VERSION.to_le_bytes())
         .expect("test shard format field must be writable");
     file.flush().expect("test shard format rewrite must flush");
     shard_path
@@ -2348,7 +2223,10 @@ fn read_shard_header_for_prune(
         InputCachePruneError::io("read input cache shard header", path, source)
     })?;
     if magic != SHARD_MAGIC {
-        return classify_legacy_v1_shard(path, file, file_len, magic);
+        return Err(InputCachePruneError::UnknownMagic {
+            path: path.to_path_buf(),
+            actual: magic,
+        });
     }
 
     let mut version_bytes = [0_u8; 4];
@@ -2356,9 +2234,6 @@ fn read_shard_header_for_prune(
         InputCachePruneError::io("read input cache shard format version", path, source)
     })?;
     let format_version = u32::from_le_bytes(version_bytes);
-    if LEGACY_MAGIC_FORMAT_VERSIONS.contains(&format_version) {
-        return Ok(None);
-    }
     if format_version != CACHE_FORMAT_VERSION {
         return Err(InputCachePruneError::UnsupportedFormat {
             path: path.to_path_buf(),
@@ -2410,48 +2285,6 @@ fn read_shard_header_for_prune(
             format_version,
             source,
         })
-}
-
-fn classify_legacy_v1_shard(
-    path: &Path,
-    mut file: File,
-    file_len: u64,
-    prefix: [u8; 8],
-) -> Result<Option<CachedShardHeader>, InputCachePruneError> {
-    let header_len = u64::from_le_bytes(prefix);
-    let header_end = 8_u64.checked_add(header_len);
-    if header_len == 0
-        || header_len > MAX_SHARD_HEADER_BYTES
-        || header_end.is_none_or(|end| end > file_len)
-    {
-        return Err(InputCachePruneError::UnknownMagic {
-            path: path.to_path_buf(),
-            actual: prefix,
-        });
-    }
-
-    let mut header_bytes = vec![0_u8; header_len as usize];
-    file.read_exact(&mut header_bytes).map_err(|source| {
-        InputCachePruneError::io("read legacy v1 input cache shard header", path, source)
-    })?;
-    let header: LegacyV1CachedShardHeader = bincode::options()
-        .with_limit(MAX_SHARD_HEADER_BYTES)
-        .deserialize(&header_bytes)
-        .map_err(|_| InputCachePruneError::UnknownMagic {
-            path: path.to_path_buf(),
-            actual: prefix,
-        })?;
-    if header.format_version != 1
-        || header.parser_version.revision == 0
-        || header.path.to_path_buf().as_os_str().is_empty()
-    {
-        return Err(InputCachePruneError::UnknownMagic {
-            path: path.to_path_buf(),
-            actual: prefix,
-        });
-    }
-
-    Ok(None)
 }
 
 fn modified_ns(path: &Path, metadata: &fs::Metadata) -> Result<u64, InputSnapshotError> {
@@ -2566,31 +2399,6 @@ mod tests {
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
-    #[allow(dead_code)]
-    #[derive(Serialize)]
-    enum LegacyV2ParserId {
-        OpenCode,
-        OpenCodeSqlite,
-        OpenCodeJson,
-        Claude,
-        Codex,
-        Cursor,
-        Gemini,
-        Amp,
-    }
-
-    #[derive(Serialize)]
-    struct LegacyV2ParserVersion {
-        parser_id: LegacyV2ParserId,
-        revision: ParserRevision,
-    }
-
-    #[derive(Serialize)]
-    struct RetiredV2CachedInputKey {
-        path: CachedPath,
-        parser_version: LegacyV2ParserVersion,
-    }
-
     fn restore_env_var(key: &str, value: Option<impl AsRef<std::ffi::OsStr>>) {
         unsafe {
             match value {
@@ -2602,9 +2410,8 @@ mod tests {
 
     /// Pin every env var the cache resolvers consult so the test stays
     /// inside `temp_home`. CI runners can leak `XDG_CONFIG_HOME` /
-    /// `XDG_CACHE_HOME` from the host, in which case `paths::get_cache_dir`
-    /// resolves outside the sandbox and the legacy fallback never gets
-    /// exercised. Returns the previous values so the caller can restore.
+    /// `XDG_CACHE_HOME` from the host, which would resolve outside the
+    /// sandbox. Returns the saved values so the caller can restore them.
     fn sandbox_cache_env(
         temp_home: &std::path::Path,
     ) -> (
@@ -2642,27 +2449,6 @@ mod tests {
 
     fn test_parser_version(revision: ParserRevision) -> ParserVersion {
         ParserVersion::new(ParserId::Amp, revision)
-    }
-
-    fn legacy_v2_amp_shard_path(
-        cache_dir: &Path,
-        path: &Path,
-        revision: ParserRevision,
-    ) -> PathBuf {
-        let key = RetiredV2CachedInputKey {
-            path: CachedPath::from_path(path),
-            parser_version: LegacyV2ParserVersion {
-                parser_id: LegacyV2ParserId::Amp,
-                revision,
-            },
-        };
-        let serialized = bincode::options().serialize(&key).unwrap();
-        let digest: [u8; 32] = Sha256::digest(serialized).into();
-        let hex = hex_sha256(&digest);
-        cache_dir
-            .join(SHARDS_DIRNAME)
-            .join(&hex[..2])
-            .join(format!("{hex}.bin"))
     }
 
     fn test_cache_read_failure(reason: CacheReadFailureReason) -> CacheReadFailure {
@@ -2727,7 +2513,7 @@ mod tests {
                 actual: *b"notmagic",
             },
             CacheReadFailureReason::FormatMismatch {
-                actual: PREVIOUS_CACHE_FORMAT_VERSION,
+                actual: UNSUPPORTED_CACHE_FORMAT_VERSION,
                 current: CACHE_FORMAT_VERSION,
             },
             CacheReadFailureReason::FormatMismatch {
@@ -2813,39 +2599,6 @@ mod tests {
         file.write_all(content).unwrap();
         file.flush().unwrap();
         file
-    }
-
-    fn write_legacy_v1_shard(shard_path: &Path, input_path: &Path) {
-        let header = LegacyV1CachedShardHeader {
-            format_version: 1,
-            parser_version: LegacyV1ParserVersion {
-                parser_id: LegacyV1ParserId::Amp,
-                revision: 1,
-            },
-            path: CachedPath::from_path(input_path),
-            fingerprint: RetiredV1InputFingerprint {
-                size: 6,
-                modified_ns: 1,
-                sample_hashes: vec![LegacyV1FileSampleHash {
-                    offset: 0,
-                    len: 6,
-                    hash: 7,
-                }],
-                content_hash: [8; 32],
-                related_files: Vec::new(),
-            },
-            fallback_timestamp_indices: Vec::new(),
-            codex_incremental: None,
-            message_count: 1,
-        };
-        let header_bytes = bincode::options().serialize(&header).unwrap();
-        ensure_cache_dir(shard_path.parent().unwrap()).unwrap();
-        let mut file = File::create(shard_path).unwrap();
-        file.write_all(&(header_bytes.len() as u64).to_le_bytes())
-            .unwrap();
-        file.write_all(&header_bytes).unwrap();
-        file.write_all(b"legacy-body-not-decoded").unwrap();
-        file.flush().unwrap();
     }
 
     #[test]
@@ -3656,22 +3409,6 @@ mod tests {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
 
-        let previous_shard = cache_dir()
-            .unwrap()
-            .join(SHARDS_DIRNAME)
-            .join("ee")
-            .join("previous.bin");
-        ensure_cache_dir(previous_shard.parent().unwrap()).unwrap();
-        std::fs::write(
-            &previous_shard,
-            [
-                SHARD_MAGIC.as_slice(),
-                PREVIOUS_CACHE_FORMAT_VERSION.to_le_bytes().as_slice(),
-            ]
-            .concat(),
-        )
-        .unwrap();
-
         let invalid_shard = cache_dir()
             .unwrap()
             .join(SHARDS_DIRNAME)
@@ -3701,11 +3438,7 @@ mod tests {
         assert!(std::error::Error::source(&error).is_some());
         assert!(
             invalid_shard.exists(),
-            "current-format corruption must not be mistaken for a removable legacy shard"
-        );
-        assert!(
-            previous_shard.exists(),
-            "malformed-current failure must happen before deleting retired shards"
+            "current-format corruption must be preserved"
         );
 
         restore_cache_env(prev_env);
@@ -3718,17 +3451,7 @@ mod tests {
         let prev_env = sandbox_cache_env(temp_home.path());
         let shard_dir = cache_dir().unwrap().join(SHARDS_DIRNAME).join("ff");
         ensure_cache_dir(&shard_dir).unwrap();
-        let previous_shard = shard_dir.join("previous.bin");
         let future_shard = shard_dir.join("future.bin");
-        std::fs::write(
-            &previous_shard,
-            [
-                SHARD_MAGIC.as_slice(),
-                PREVIOUS_CACHE_FORMAT_VERSION.to_le_bytes().as_slice(),
-            ]
-            .concat(),
-        )
-        .unwrap();
         std::fs::write(
             &future_shard,
             [
@@ -3749,53 +3472,43 @@ mod tests {
             } if actual == CACHE_FORMAT_VERSION + 1 && current == CACHE_FORMAT_VERSION
         ));
         assert!(future_shard.exists());
-        assert!(
-            previous_shard.exists(),
-            "future-format failure must prevent deletion of a retired shard"
-        );
 
         restore_cache_env(prev_env);
     }
 
     #[test]
-    #[serial_test::serial]
-    fn test_explicit_prune_removes_every_recognized_retired_envelope() {
-        let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
+    fn prune_classifier_accepts_current_envelope_and_rejects_unsupported_version() {
+        let cache_home = TempDir::new().unwrap();
         let input = write_temp_file(b"primary");
-        let shards_dir = cache_dir().unwrap().join(SHARDS_DIRNAME);
-        let v1_shard = shards_dir.join("01").join("legacy-v1.bin");
-        write_legacy_v1_shard(&v1_shard, input.path());
-        let retired_magic_shards = (2..CACHE_FORMAT_VERSION)
-            .map(|version| {
-                (
-                    shards_dir
-                        .join(format!("{version:02}"))
-                        .join(format!("legacy-v{version}.bin")),
-                    version,
-                )
-            })
-            .collect::<Vec<_>>();
-        for (path, version) in &retired_magic_shards {
-            ensure_cache_dir(path.parent().unwrap()).unwrap();
-            let mut file = File::create(path).unwrap();
-            file.write_all(&SHARD_MAGIC).unwrap();
-            file.write_all(&version.to_le_bytes()).unwrap();
-            file.flush().unwrap();
-        }
+        let parser_version = test_parser_version(1);
+        let mut cache = InputMessageCache::with_cache_dir(cache_home.path());
+        cache.insert(CachedInputEntry::new_with_version(
+            input.path(),
+            parser_version,
+            InputFingerprint::from_path(input.path()).unwrap(),
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty().unwrap();
+        let current_shard = shard_path_for_test(cache_home.path(), input.path(), parser_version);
+        assert!(read_shard_header_for_prune(&current_shard)
+            .unwrap()
+            .is_some());
 
-        assert_eq!(
-            prune_input_message_cache().unwrap(),
-            InputCachePruneStats {
-                scanned: CACHE_FORMAT_VERSION as usize - 1,
-                removed: CACHE_FORMAT_VERSION as usize - 1,
-                retained: 0,
-            }
-        );
-        assert!(!v1_shard.exists());
-        assert!(retired_magic_shards.iter().all(|(path, _)| !path.exists()));
-
-        restore_cache_env(prev_env);
+        let unsupported_version = CACHE_FORMAT_VERSION - 1;
+        let unsupported_shard = cache_home.path().join("unsupported.bin");
+        let mut file = File::create(&unsupported_shard).unwrap();
+        file.write_all(&SHARD_MAGIC).unwrap();
+        file.write_all(&unsupported_version.to_le_bytes()).unwrap();
+        file.flush().unwrap();
+        assert!(matches!(
+            read_shard_header_for_prune(&unsupported_shard),
+            Err(InputCachePruneError::UnsupportedFormat {
+                actual,
+                current,
+                ..
+            }) if actual == unsupported_version && current == CACHE_FORMAT_VERSION
+        ));
     }
 
     #[test]
@@ -3844,25 +3557,6 @@ mod tests {
             shard.exists(),
             "ordinary report loads must not perform input-cache garbage collection"
         );
-
-        restore_cache_env(prev_env);
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_load_has_no_monolithic_cache_side_effects() {
-        let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
-
-        let cache_file = cache_dir().unwrap().join("input-message-cache.bin");
-        let lock_file = cache_dir().unwrap().join("input-message-cache.lock");
-        ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
-        std::fs::write(&cache_file, b"old-monolith").unwrap();
-        std::fs::write(&lock_file, b"old-lock").unwrap();
-
-        let _loaded = InputMessageCache::load().unwrap();
-        assert_eq!(std::fs::read(cache_file).unwrap(), b"old-monolith");
-        assert_eq!(std::fs::read(lock_file).unwrap(), b"old-lock");
 
         restore_cache_env(prev_env);
     }
@@ -3992,7 +3686,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_same_key_previous_envelope_is_preserved_until_successful_current_replacement() {
+    fn test_same_key_unsupported_envelope_is_preserved_until_successful_current_replacement() {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
 
@@ -4008,7 +3702,7 @@ mod tests {
                 "client",
                 "gpt-5",
                 "provider",
-                "previous-session",
+                "cached-session",
                 1,
                 TokenBreakdown::default(),
                 0.0,
@@ -4023,17 +3717,17 @@ mod tests {
             .unwrap();
         file.seek(SeekFrom::Start(SHARD_MAGIC.len() as u64))
             .unwrap();
-        file.write_all(&PREVIOUS_CACHE_FORMAT_VERSION.to_le_bytes())
+        file.write_all(&UNSUPPORTED_CACHE_FORMAT_VERSION.to_le_bytes())
             .unwrap();
         file.flush().unwrap();
-        let previous_bytes = std::fs::read(&shard).unwrap();
+        let original_bytes = std::fs::read(&shard).unwrap();
 
         let mut loaded = InputMessageCache::load().unwrap();
         assert!(loaded.get_meta(input.path(), parser_version).is_err());
         assert_eq!(
             std::fs::read(&shard).unwrap(),
-            previous_bytes,
-            "a failed ordinary rebuild must retain the exact previous-format shard"
+            original_bytes,
+            "a failed ordinary rebuild must retain the unsupported shard"
         );
 
         let replacement = vec![UnifiedMessage::new(
@@ -4069,64 +3763,6 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(messages[0].session_id.as_ref(), "current-session");
-
-        restore_cache_env(prev_env);
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_real_v2_enum_key_is_untouched_by_scan_and_removed_only_by_prune() {
-        let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
-        let input = write_temp_file(b"input\n");
-        let parser_version = test_parser_version(1);
-        let _initialized = InputMessageCache::load().unwrap();
-        let current_shard = shard_path(input.path(), parser_version).unwrap();
-        let v2_shard = legacy_v2_amp_shard_path(cache_dir().unwrap().as_path(), input.path(), 1);
-        assert_ne!(v2_shard, current_shard);
-        ensure_cache_dir(v2_shard.parent().unwrap()).unwrap();
-        std::fs::write(
-            &v2_shard,
-            [SHARD_MAGIC.as_slice(), 2_u32.to_le_bytes().as_slice()].concat(),
-        )
-        .unwrap();
-
-        let fingerprint = InputFingerprint::from_path(input.path()).unwrap();
-        let mut cache = InputMessageCache::load().unwrap();
-        assert!(cache
-            .get_meta(input.path(), parser_version)
-            .unwrap()
-            .is_none());
-        assert!(cache
-            .write_messages(
-                CacheWritePlan::new(input.path(), parser_version, fingerprint, None),
-                &[UnifiedMessage::new(
-                    "client",
-                    "gpt-5",
-                    "provider",
-                    "v4-session",
-                    1,
-                    TokenBreakdown::default(),
-                    0.0,
-                )],
-            )
-            .is_ok());
-        assert!(current_shard.exists());
-        assert!(
-            v2_shard.exists(),
-            "ordinary current-key lookup and write must not delete an unencountered v2 shard"
-        );
-
-        assert_eq!(
-            prune_input_message_cache().unwrap(),
-            InputCachePruneStats {
-                scanned: 2,
-                removed: 1,
-                retained: 1,
-            }
-        );
-        assert!(!v2_shard.exists());
-        assert!(current_shard.exists());
 
         restore_cache_env(prev_env);
     }

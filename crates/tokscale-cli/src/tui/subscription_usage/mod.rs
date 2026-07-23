@@ -1,18 +1,17 @@
-mod amp;
 mod claude;
-pub mod codex;
-mod copilot;
+mod codex;
 mod grok;
-pub mod helpers;
+pub(crate) mod helpers;
 mod kimi;
 mod minimax_tokenplan;
 mod zai;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Context, Result};
 
 // ── Shared types ──
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsageMetric {
     pub label: String,
     pub used_percent: f64,
@@ -21,7 +20,8 @@ pub struct UsageMetric {
     pub resets_at: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsageOutput {
     pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -31,7 +31,8 @@ pub struct UsageOutput {
     pub metrics: Vec<UsageMetric>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsageAccount {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,7 +41,7 @@ pub struct UsageAccount {
     pub is_active: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageProviderError {
     pub provider: String,
     pub message: String,
@@ -55,7 +56,7 @@ impl UsageProviderError {
     }
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct UsageFetchBatch {
     pub outputs: Vec<UsageOutput>,
     pub errors: Vec<UsageProviderError>,
@@ -66,29 +67,24 @@ pub enum UsageProviderId {
     Claude,
     Codex,
     Zai,
-    Amp,
-    Copilot,
     Grok,
-    Kimi,
+    KimiCodingPlanKey,
+    KimiCodingPlanCredential,
     MiniMaxTokenPlanCn,
     MiniMaxTokenPlanGlobal,
 }
 
 impl UsageProviderId {
     pub fn from_setting(raw: &str) -> Option<Self> {
-        let normalized = raw.trim().to_lowercase().replace(['_', ' ', '.'], "-");
-        match normalized.as_str() {
+        match raw {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
-            "zai" | "z-ai" | "glm" => Some(Self::Zai),
-            "amp" => Some(Self::Amp),
-            "copilot" => Some(Self::Copilot),
-            "grok" | "grok-build" => Some(Self::Grok),
-            "kimi" | "kimi-code" => Some(Self::Kimi),
-            "minimax-token-plan-cn" | "minimax-cn-token-plan" => Some(Self::MiniMaxTokenPlanCn),
-            "minimax-token-plan-global" | "minimax-global-token-plan" => {
-                Some(Self::MiniMaxTokenPlanGlobal)
-            }
+            "zai" => Some(Self::Zai),
+            "grok" => Some(Self::Grok),
+            "kimi-coding-plan-key" => Some(Self::KimiCodingPlanKey),
+            "kimi-coding-plan-credential" => Some(Self::KimiCodingPlanCredential),
+            "minimax-token-plan-cn" => Some(Self::MiniMaxTokenPlanCn),
+            "minimax-token-plan-global" => Some(Self::MiniMaxTokenPlanGlobal),
             _ => None,
         }
     }
@@ -179,49 +175,80 @@ impl UsageOutput {
 
 // ── Cache ──
 
-fn cache_path() -> Option<std::path::PathBuf> {
-    let dir = crate::paths::get_cache_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
-        return None;
-    }
-    Some(dir.join("subscription-usage-cache.json"))
+const CACHE_SCHEMA: &str = "tokscale.subscription-usage";
+const CACHE_VERSION: u32 = 1;
+const CACHE_MAX_AGE_SECS: u64 = 300;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UsageCacheEnvelope {
+    schema: String,
+    version: u32,
+    timestamp: u64,
+    data: Vec<UsageOutput>,
 }
 
-pub fn save_cache(data: &[UsageOutput]) {
-    let Some(path) = cache_path() else { return };
-    let timestamp = std::time::SystemTime::now()
+fn cache_path() -> Result<std::path::PathBuf> {
+    Ok(crate::paths::try_get_cache_dir()?.join("subscription-usage-cache.json"))
+}
+
+fn current_unix_timestamp() -> Result<u64> {
+    Ok(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let json = serde_json::json!({
-        "timestamp": timestamp,
-        "data": data,
-    });
-    let _ = std::fs::write(&path, serde_json::to_string(&json).unwrap_or_default());
+        .context("system clock is before the Unix epoch")?
+        .as_secs())
 }
 
-pub fn clear_cache() {
-    if let Some(path) = cache_path() {
-        let _ = std::fs::remove_file(&path);
-    }
+pub fn save_cache(data: &[UsageOutput]) -> Result<()> {
+    save_cache_at(&cache_path()?, data, current_unix_timestamp()?)
+}
+
+fn save_cache_at(path: &std::path::Path, data: &[UsageOutput], timestamp: u64) -> Result<()> {
+    let envelope = UsageCacheEnvelope {
+        schema: CACHE_SCHEMA.to_string(),
+        version: CACHE_VERSION,
+        timestamp,
+        data: data.to_vec(),
+    };
+    let bytes = serde_json::to_vec(&envelope).context("failed to serialize subscription cache")?;
+    tokscale_core::fs_atomic::write_atomic(path, &bytes)
+        .with_context(|| format!("failed to persist subscription cache `{}`", path.display()))
 }
 
 #[cfg_attr(test, allow(dead_code))]
-pub fn load_cache() -> Option<Vec<UsageOutput>> {
-    let path = cache_path()?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let doc: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let timestamp = doc.get("timestamp")?.as_u64()?;
-    let age = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .saturating_sub(timestamp);
-    // Cache expires after 5 minutes
-    if age > 300 {
-        return None;
+pub fn load_cache() -> Result<Option<Vec<UsageOutput>>> {
+    load_cache_at(&cache_path()?, current_unix_timestamp()?)
+}
+
+fn load_cache_at(path: &std::path::Path, now: u64) -> Result<Option<Vec<UsageOutput>>> {
+    let content = match std::fs::read(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read subscription cache `{}`", path.display()))
+        }
+    };
+    let envelope: UsageCacheEnvelope = serde_json::from_slice(&content)
+        .with_context(|| format!("malformed subscription cache `{}`", path.display()))?;
+    if envelope.schema != CACHE_SCHEMA {
+        anyhow::bail!(
+            "subscription cache `{}` has unsupported schema `{}`",
+            path.display(),
+            envelope.schema
+        );
     }
-    serde_json::from_value(doc.get("data")?.clone()).ok()
+    if envelope.version != CACHE_VERSION {
+        anyhow::bail!(
+            "subscription cache `{}` has unsupported version {}",
+            path.display(),
+            envelope.version
+        );
+    }
+    if now.saturating_sub(envelope.timestamp) > CACHE_MAX_AGE_SECS {
+        return Ok(None);
+    }
+    Ok(Some(envelope.data))
 }
 
 // ── Public API ──
@@ -272,20 +299,6 @@ fn all_providers() -> Vec<UsageProvider> {
             fetch: Fetch::Single(zai::fetch),
         },
         UsageProvider {
-            id: UsageProviderId::Amp,
-            label: "Amp",
-            is_available: amp::has_credentials,
-            unavailable_message: "enabled in usageProviders but no Amp credentials were found",
-            fetch: Fetch::Single(amp::fetch),
-        },
-        UsageProvider {
-            id: UsageProviderId::Copilot,
-            label: "Copilot",
-            is_available: copilot::has_credentials,
-            unavailable_message: "enabled in usageProviders but no GitHub Copilot credentials were found",
-            fetch: Fetch::Single(copilot::fetch),
-        },
-        UsageProvider {
             id: UsageProviderId::Grok,
             label: "Grok",
             is_available: grok::has_credentials,
@@ -293,11 +306,18 @@ fn all_providers() -> Vec<UsageProvider> {
             fetch: Fetch::Single(grok::fetch),
         },
         UsageProvider {
-            id: UsageProviderId::Kimi,
-            label: "Kimi Code",
-            is_available: kimi::has_credentials,
-            unavailable_message: "enabled in usageProviders but TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY is not set and no Kimi Code OAuth credentials were found",
-            fetch: Fetch::Single(kimi::fetch),
+            id: UsageProviderId::KimiCodingPlanKey,
+            label: "Kimi Coding Plan (key)",
+            is_available: kimi::has_key_credentials,
+            unavailable_message: "enabled in usageProviders but TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY is not set",
+            fetch: Fetch::Single(kimi::fetch_key),
+        },
+        UsageProvider {
+            id: UsageProviderId::KimiCodingPlanCredential,
+            label: "Kimi Coding Plan (credential)",
+            is_available: kimi::has_credential_credentials,
+            unavailable_message: "enabled in usageProviders but ~/.kimi-code/credentials/kimi-code.json is unavailable",
+            fetch: Fetch::Single(kimi::fetch_credential),
         },
         UsageProvider {
             id: UsageProviderId::MiniMaxTokenPlanCn,
@@ -316,47 +336,35 @@ fn all_providers() -> Vec<UsageProvider> {
     ]
 }
 
-pub fn fetch_all() -> UsageFetchBatch {
-    fetch_providers(all_providers(), UnavailableProviderMode::Ignore)
-}
-
 pub fn fetch_enabled(enabled: &[UsageProviderId]) -> UsageFetchBatch {
     if enabled.is_empty() {
         return UsageFetchBatch::default();
     }
-    fetch_providers(
-        enabled_providers(all_providers(), enabled),
-        UnavailableProviderMode::Report,
-    )
+    fetch_providers(enabled_providers(all_providers(), enabled))
 }
 
 fn enabled_providers(
     providers: Vec<UsageProvider>,
     enabled: &[UsageProviderId],
 ) -> Vec<UsageProvider> {
-    let enabled: std::collections::HashSet<_> = enabled.iter().copied().collect();
-    providers
-        .into_iter()
-        .filter(|provider| enabled.contains(&provider.id))
+    enabled
+        .iter()
+        .filter_map(|id| {
+            providers
+                .iter()
+                .find(|provider| provider.id == *id)
+                .copied()
+        })
         .collect()
 }
 
-#[derive(Clone, Copy)]
-enum UnavailableProviderMode {
-    Ignore,
-    Report,
-}
-
-fn fetch_providers(
-    providers: Vec<UsageProvider>,
-    unavailable_mode: UnavailableProviderMode,
-) -> UsageFetchBatch {
+fn fetch_providers(providers: Vec<UsageProvider>) -> UsageFetchBatch {
     let mut batch = UsageFetchBatch::default();
     let mut active = Vec::new();
     for provider in providers {
         if (provider.is_available)() {
             active.push(provider);
-        } else if matches!(unavailable_mode, UnavailableProviderMode::Report) {
+        } else {
             batch.errors.push(UsageProviderError::new(
                 provider.label,
                 provider.unavailable_message,
@@ -402,107 +410,6 @@ fn fetch_providers(
         }
         batch
     })
-}
-
-// ── Light-mode rendering ──
-
-const BAR_WIDTH: usize = 12;
-const CARD_WIDTH: usize = 62;
-
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        return s.to_string();
-    }
-    let truncated: String = s.chars().take(max_len - 1).collect();
-    format!("{truncated}…")
-}
-
-fn render_light(output: &UsageOutput) {
-    println!("╭{}╮", "─".repeat(CARD_WIDTH));
-    // Provider header
-    println!(
-        "│ {:<width$}│",
-        output.display_name(),
-        width = CARD_WIDTH - 1
-    );
-    for m in &output.metrics {
-        let rem = m
-            .remaining_label
-            .clone()
-            .unwrap_or_else(|| format!("{:.0}% left", m.remaining_percent));
-        let rem = truncate(&rem, 11);
-        let bar = helpers::render_ascii_bar(m.remaining_percent, BAR_WIDTH);
-        let reset = m
-            .resets_at
-            .as_ref()
-            .map(|r| helpers::format_reset_time(r))
-            .unwrap_or_default();
-        let label = truncate(&m.label, 14);
-        println!("│ {:<14}{:<11}{:<14}{:<22}│", label, rem, bar, reset);
-    }
-    if let Some(ref email) = output.email {
-        let email = truncate(email, CARD_WIDTH - 11);
-        println!(
-            "│ {:<10}{:<width$}│",
-            "Account",
-            email,
-            width = CARD_WIDTH - 11
-        );
-    }
-    if let Some(ref plan) = output.plan {
-        let plan = truncate(plan, CARD_WIDTH - 11);
-        println!("│ {:<10}{:<width$}│", "Plan", plan, width = CARD_WIDTH - 11);
-    }
-    println!("╰{}╯", "─".repeat(CARD_WIDTH));
-}
-
-fn render_light_error(error: &UsageProviderError) {
-    eprintln!("{}: {}", error.provider, error.message);
-}
-
-#[derive(serde::Serialize)]
-struct UsageProviderErrorReport<'a> {
-    kind: &'static str,
-    errors: &'a [UsageProviderError],
-}
-
-fn failed_provider_summary(errors: &[UsageProviderError]) -> String {
-    errors
-        .iter()
-        .map(|error| error.provider.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-pub fn run(json: bool) -> Result<()> {
-    let batch = fetch_all();
-    if json {
-        println!("{}", serde_json::to_string_pretty(&batch.outputs)?);
-        if !batch.errors.is_empty() {
-            eprintln!(
-                "{}",
-                serde_json::to_string_pretty(&UsageProviderErrorReport {
-                    kind: "usage_provider_errors",
-                    errors: &batch.errors,
-                })?
-            );
-        }
-    } else {
-        for o in &batch.outputs {
-            render_light(o);
-        }
-        for error in &batch.errors {
-            render_light_error(error);
-        }
-    }
-
-    if !batch.errors.is_empty() {
-        return Err(anyhow!(
-            "subscription usage partial failure: {}",
-            failed_provider_summary(&batch.errors)
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -570,22 +477,6 @@ mod tests {
         assert_eq!(output.display_name(), "Codex (Account 123e45...4000)");
     }
 
-    #[test]
-    fn usage_output_deserializes_legacy_json_without_account() -> Result<()> {
-        let output: UsageOutput = serde_json::from_str(
-            r#"{
-                "provider": "Codex",
-                "plan": null,
-                "email": null,
-                "metrics": []
-            }"#,
-        )?;
-
-        assert!(output.account.is_none());
-        assert_eq!(output.display_name(), "Codex");
-        Ok(())
-    }
-
     fn test_has_credentials() -> bool {
         true
     }
@@ -605,30 +496,27 @@ mod tests {
     }
 
     fn test_fetch_err() -> Result<UsageOutput> {
-        Err(anyhow!("token expired"))
+        Err(anyhow::anyhow!("token expired"))
     }
 
     #[test]
     fn fetch_providers_preserves_outputs_and_errors() {
-        let batch = fetch_providers(
-            vec![
-                UsageProvider {
-                    id: UsageProviderId::Claude,
-                    label: "Ok",
-                    is_available: test_has_credentials,
-                    unavailable_message: "missing ok credentials",
-                    fetch: Fetch::Single(test_fetch_ok),
-                },
-                UsageProvider {
-                    id: UsageProviderId::Codex,
-                    label: "Broken",
-                    is_available: test_has_credentials,
-                    unavailable_message: "missing broken credentials",
-                    fetch: Fetch::Single(test_fetch_err),
-                },
-            ],
-            UnavailableProviderMode::Report,
-        );
+        let batch = fetch_providers(vec![
+            UsageProvider {
+                id: UsageProviderId::Claude,
+                label: "Ok",
+                is_available: test_has_credentials,
+                unavailable_message: "missing ok credentials",
+                fetch: Fetch::Single(test_fetch_ok),
+            },
+            UsageProvider {
+                id: UsageProviderId::Codex,
+                label: "Broken",
+                is_available: test_has_credentials,
+                unavailable_message: "missing broken credentials",
+                fetch: Fetch::Single(test_fetch_err),
+            },
+        ]);
 
         assert_eq!(batch.outputs.len(), 1);
         assert_eq!(batch.outputs[0].provider, "Ok");
@@ -643,17 +531,14 @@ mod tests {
 
     #[test]
     fn fetch_enabled_provider_reports_unavailable_provider() {
-        let batch = fetch_providers(
-            vec![UsageProvider {
-                id: UsageProviderId::Zai,
-                label: "Z.ai GLM Coding Plan",
-                is_available: test_unavailable,
-                unavailable_message:
-                    "enabled in usageProviders but TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY is not set",
-                fetch: Fetch::Single(test_fetch_ok),
-            }],
-            UnavailableProviderMode::Report,
-        );
+        let batch = fetch_providers(vec![UsageProvider {
+            id: UsageProviderId::Zai,
+            label: "Z.ai GLM Coding Plan",
+            is_available: test_unavailable,
+            unavailable_message:
+                "enabled in usageProviders but TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY is not set",
+            fetch: Fetch::Single(test_fetch_ok),
+        }]);
 
         assert!(batch.outputs.is_empty());
         assert_eq!(
@@ -695,7 +580,7 @@ mod tests {
             ],
             &[UsageProviderId::Codex],
         );
-        let batch = fetch_providers(providers, UnavailableProviderMode::Report);
+        let batch = fetch_providers(providers);
 
         assert_eq!(batch.outputs.len(), 1);
         assert_eq!(DISPATCH_COUNT.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -704,20 +589,150 @@ mod tests {
     #[test]
     fn parse_provider_settings_keeps_known_unique_ids() {
         let ids = parse_provider_settings(&[
-            "z.ai".to_string(),
             "zai".to_string(),
-            "kimi-code".to_string(),
+            "kimi-coding-plan-key".to_string(),
+            "zai".to_string(),
+            "kimi-coding-plan-credential".to_string(),
             "minimax-token-plan-cn".to_string(),
-            "unknown".to_string(),
+            "not-a-provider".to_string(),
         ]);
 
         assert_eq!(
             ids,
             vec![
                 UsageProviderId::Zai,
-                UsageProviderId::Kimi,
+                UsageProviderId::KimiCodingPlanKey,
+                UsageProviderId::KimiCodingPlanCredential,
                 UsageProviderId::MiniMaxTokenPlanCn
             ]
         );
+    }
+
+    #[test]
+    fn kimi_providers_have_distinct_current_identities() {
+        let providers = all_providers();
+        let key = providers
+            .iter()
+            .find(|provider| provider.id == UsageProviderId::KimiCodingPlanKey)
+            .expect("Kimi key provider");
+        let credential = providers
+            .iter()
+            .find(|provider| provider.id == UsageProviderId::KimiCodingPlanCredential)
+            .expect("Kimi credential provider");
+
+        assert_eq!(key.label, "Kimi Coding Plan (key)");
+        assert_eq!(credential.label, "Kimi Coding Plan (credential)");
+    }
+
+    #[test]
+    fn enabled_providers_preserve_settings_order() {
+        let providers = enabled_providers(
+            all_providers(),
+            &[
+                UsageProviderId::MiniMaxTokenPlanGlobal,
+                UsageProviderId::Codex,
+                UsageProviderId::Claude,
+            ],
+        );
+
+        assert_eq!(
+            providers
+                .into_iter()
+                .map(|provider| provider.id)
+                .collect::<Vec<_>>(),
+            vec![
+                UsageProviderId::MiniMaxTokenPlanGlobal,
+                UsageProviderId::Codex,
+                UsageProviderId::Claude
+            ]
+        );
+    }
+
+    fn cached_output() -> UsageOutput {
+        UsageOutput {
+            provider: "Codex".to_string(),
+            account: Some(UsageAccount {
+                id: "account-1".to_string(),
+                label: Some("Work".to_string()),
+                is_active: true,
+            }),
+            plan: Some("Pro".to_string()),
+            email: Some("work@example.com".to_string()),
+            metrics: vec![UsageMetric {
+                label: "Weekly".to_string(),
+                used_percent: 20.0,
+                remaining_percent: 80.0,
+                remaining_label: Some("80% left".to_string()),
+                resets_at: Some("2026-07-30T00:00:00Z".to_string()),
+            }],
+        }
+    }
+
+    #[test]
+    fn cache_round_trip_uses_closed_v1_envelope() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("subscription-usage-cache.json");
+        let output = cached_output();
+
+        save_cache_at(&path, std::slice::from_ref(&output), 1_000)?;
+
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        assert_eq!(value["schema"], CACHE_SCHEMA);
+        assert_eq!(value["version"], CACHE_VERSION);
+        assert_eq!(load_cache_at(&path, 1_300)?, Some(vec![output]));
+        assert_eq!(load_cache_at(&path, 1_301)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn cache_rejects_unknown_envelope_and_normalized_fields() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("subscription-usage-cache.json");
+        save_cache_at(&path, &[cached_output()], 1_000)?;
+
+        let mut envelope: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        envelope["unexpected"] = serde_json::json!(true);
+        std::fs::write(&path, serde_json::to_vec(&envelope)?)?;
+        assert!(load_cache_at(&path, 1_000).is_err());
+
+        save_cache_at(&path, &[cached_output()], 1_000)?;
+        let mut nested: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        nested["data"][0]["metrics"][0]["raw_response"] = serde_json::json!("secret");
+        std::fs::write(&path, serde_json::to_vec(&nested)?)?;
+        assert!(load_cache_at(&path, 1_000).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cache_schema_version_and_io_faults_are_explicit() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("subscription-usage-cache.json");
+        save_cache_at(&path, &[cached_output()], 1_000)?;
+
+        let mut envelope: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        envelope["schema"] = serde_json::json!("other.schema");
+        std::fs::write(&path, serde_json::to_vec(&envelope)?)?;
+        assert!(load_cache_at(&path, 1_000)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported schema"));
+
+        save_cache_at(&path, &[cached_output()], 1_000)?;
+        let mut envelope: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        envelope["version"] = serde_json::json!(2);
+        std::fs::write(&path, serde_json::to_vec(&envelope)?)?;
+        assert!(load_cache_at(&path, 1_000)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported version"));
+
+        std::fs::write(&path, b"{")?;
+        assert!(load_cache_at(&path, 1_000)
+            .unwrap_err()
+            .to_string()
+            .contains("malformed subscription cache"));
+
+        assert!(load_cache_at(temp.path(), 1_000).is_err());
+        Ok(())
     }
 }

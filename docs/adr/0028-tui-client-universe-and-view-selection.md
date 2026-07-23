@@ -20,8 +20,10 @@ This ADR defines the complete contract for those responsibilities.
 Bare `tokscale` and `tokscale tui` launch the complete interactive product.
 `--tab` changes only initial focus among Overview, Usage, Models, Monthly,
 Weekly, Daily, Hourly, Stats, Agents, and Sessions. Every tab participates in
-the same process, generation, Client scope, and action system. ADR 0022 defines
-the independent headless Models projection and the complete command grammar.
+the same process, navigation, and action system. The local-report tabs share
+one generation and Client scope; Subscription Usage follows ADR 0014's
+independent remote lifecycle. ADR 0022 defines the independent headless Models
+projection and the complete command grammar.
 
 ### Client scope
 
@@ -43,20 +45,25 @@ an outside click discards it. The picker has no per-client hotkeys.
 
 ### Generation and acquisition
 
-One local generation contains the input manifest, Data Health, Client-space
-accounting, report scope, Client universe, inventory signature, session
-snapshot, client-aware canonical accumulator, one Common usage projection, and
-all four Grouped projections. Common contains Agents, daily/hourly totals and
-Client membership, contribution graph, report totals, and streaks exactly once.
-Each Grouped projection contains only Models and daily/hourly model buckets.
-The generation is published and installed atomically, so local report tabs
-cannot mix generations.
+One local generation contains Data Health, Client-space accounting, report
+scope, Client universe, inventory signature, session snapshot, client-aware
+canonical accumulator, one Common usage projection, and all four Grouped
+projections. Common contains Agents, daily/hourly totals and Client membership,
+contribution graph, report totals, and streaks exactly once. Each Grouped
+projection contains only Models and daily/hourly model buckets. The generation
+is published and installed atomically, so local report tabs cannot mix
+generations.
 
 Only these events may scan inputs:
 
 1. startup with a stale or missing generation;
 2. automatic refresh;
 3. explicit local refresh.
+
+Built-in discovery resolves only the fixed platform paths for the current home
+directory. `scanner.extraScanPaths` is the sole authority for additional
+recursive client roots, while OpenCode uses the file-specific
+`scanner.opencodeDbPaths`.
 
 Acquisition stays in the background. Before the first generation exists, the
 local TUI is either loading or has an explicit cold failure; it cannot claim a
@@ -146,12 +153,12 @@ no row to operate on.
 
 `UsageData.graph` is a total value. A valid empty graph is
 `UsageGraphData { weeks: [] }`; `Option<UsageGraphData>` is not part of the
-domain. Schema 45 stores the graph once in Common. A missing or `null` graph,
+domain. Schema 46 stores the graph once in Common. A missing or `null` graph,
 a missing Common or Grouped part, a model Client outside the immutable
 universe, or disagreeing Common/Grouped daily or hourly shapes makes the
 complete generation a cache miss.
 
-The TUI accepts only schema 45 and validates all four Grouped projections,
+The TUI accepts only schema 47 and validates all four Grouped projections,
 including inactive ones, before installing the generation. No omitted field,
 partial projection, synthesized default, or alternative schema is accepted.
 

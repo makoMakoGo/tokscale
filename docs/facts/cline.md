@@ -10,17 +10,11 @@ content were inspected.
 
 ## Shared storage
 
-VS Code 4.0+ and CLI 3.x use the same SDK v1 session artifacts. The session
-root is selected by this exclusive precedence chain:
+VS Code 4.0+ and CLI 3.x use the same SDK v1 session artifacts. Tokscale reads
+the fixed `~/.cline/data/sessions` root; additional roots are configured with
+`scanner.extraScanPaths.cline`.
 
-```text
-CLINE_SESSION_DATA_DIR
-CLINE_DATA_DIR/sessions
-CLINE_DIR/data/sessions
-<home>/.cline/data/sessions
-```
-
-The default layout is:
+The layout is:
 
 ```text
 ~/.cline/data/
@@ -84,7 +78,7 @@ with metrics. Those turns used model `poolside/laguna-m.1:free` and provider
 
 ## Evidence index
 
-- `sdk/packages/shared/src/storage/paths.ts` -- storage-root precedence;
+- `sdk/packages/shared/src/storage/paths.ts` -- default storage layout;
 - `sdk/packages/core/src/services/session-artifacts.ts` -- artifact layout and
   child file stems;
 - `sdk/packages/core/src/services/session-data.ts` -- v1 envelope and per-turn

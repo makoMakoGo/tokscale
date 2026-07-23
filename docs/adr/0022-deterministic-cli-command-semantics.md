@@ -21,7 +21,6 @@ The complete root command set is:
 tui
 models
 pricing
-usage
 wrapped
 cache
 ```
@@ -41,14 +40,14 @@ client,provider,model
 workspace,model
 ```
 
-`pricing` queries catalogs or overrides, `usage` fetches Subscription Usage
-under ADR 0014, `wrapped` renders the annual Top Clients artifact, and `cache`
-performs explicit cache maintenance.
+`pricing` queries catalogs or overrides, `wrapped` renders the annual Top
+Clients artifact, and `cache` performs explicit cache maintenance.
+
+Subscription Usage belongs exclusively to the TUI Usage tab under ADR 0014.
 
 Only this grammar is accepted. Unrecognized commands, options, client ids, and
-values are ordinary parse failures with no alias rewriting or post-parse
-translation. Parse-failure diagnostics are derived from this grammar alone;
-there is no secondary recognizer for another command vocabulary.
+values are ordinary parse failures. Parse-failure diagnostics are derived from
+this grammar alone.
 
 ### Resolution and terminal presentation
 
@@ -58,7 +57,6 @@ Options live on the narrowest command that owns them:
 - date scope: one preset or inclusive `--since` and `--until`;
 - Models grouping: `--group-by`;
 - Models presentation: `--json`, `--benchmark`, and `--no-spinner`;
-- Subscription Usage presentation: `--json`;
 - Wrapped output: `--output`, `--year`, `--short`, and `--no-spinner`; and
 - TUI behavior: `--theme`, `--refresh`, `--no-refresh`, `--debug`, and
   `--tab`.
@@ -73,10 +71,11 @@ Every accepted explicit argument changes the plan. An option that cannot affect
 its command is rejected.
 
 An explicit `--home` must be an existing directory and is authoritative for
-settings and input discovery. It does not fall through to the process home or a
-client-specific environment root. Client ids come from the current ADR 0007
-catalog and are deduplicated. Date presets are mutually exclusive, dates use
-inclusive local-time boundaries, and `since` cannot be later than `until`.
+settings and input discovery. Every built-in input root is derived from that
+directory; configured extra scan inputs remain explicit additional
+authorities. Client ids come from the current ADR 0007 catalog and are
+deduplicated. Date presets are mutually exclusive, dates use inclusive
+local-time boundaries, and `since` cannot be later than `until`.
 
 A TUI requires interactive stdin and stdout. Otherwise invocation fails as
 invalid usage with a report-command hint. A disabled optional tab also fails
@@ -118,11 +117,8 @@ writes the TUI generation. Its JSON `data` contains `groupBy`, `models`, and
 `totals`; Data Health and processing time use the common envelope fields.
 
 Pricing uses `pricing lookup <model>` or `pricing overrides`;
-`--pricing-source` selects a public catalog. ADR 0010 owns exact lookup
-semantics.
-
-`usage` has only its JSON presentation option and follows ADR 0014's independent
-remote lifecycle.
+`--pricing-source` selects exactly one Pricing Source. ADR 0010 distinguishes
+custom pricing from the three public catalogs and owns exact lookup semantics.
 
 `wrapped` produces one annual Top Clients image for its resolved local input
 scope. Agent ranking is not a Wrapped identity.

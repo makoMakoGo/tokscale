@@ -29,17 +29,28 @@ impl LocalInputAdapter for KiloAdapter {
         let mut paths = Vec::new();
         adapter_discover::push_existing_file(
             ClientId::Kilo,
-            def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
+            def.resolve_path(ctx.home_dir),
             &mut paths,
         )?;
-        Ok(paths
-            .into_iter()
-            .map(|path| {
-                InputUnit::sqlite_with_wal(ClientId::Kilo, path).with_parser_version(
-                    ParserVersion::new(ParserId::Kilo, KILO_RECORD_REJECTION_REVISION),
-                )
-            })
-            .collect())
+        paths.extend(adapter_discover::scan_roots(
+            ClientId::Kilo,
+            adapter_discover::extra_roots_for_client(ClientId::Kilo, ctx)?,
+            def.pattern,
+        )?);
+
+        Ok(adapter_discover::input_units_from_paths_preserving_order(
+            ClientId::Kilo,
+            paths,
+            crate::adapters::FingerprintPolicy::SqliteWithWal,
+        )?
+        .into_iter()
+        .map(|unit| {
+            unit.with_parser_version(ParserVersion::new(
+                ParserId::Kilo,
+                KILO_RECORD_REJECTION_REVISION,
+            ))
+        })
+        .collect())
     }
 
     fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
@@ -74,29 +85,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kilo_adapter_discovers_default_sqlite_db() {
+    fn kilo_adapter_discovers_default_and_multiple_configured_databases() {
         let home = tempfile::TempDir::new().unwrap();
-        let db_path = home.path().join(".local/share/kilo/kilo.db");
-        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-        std::fs::write(&db_path, "").unwrap();
-        let settings = crate::scanner::ScannerSettings::default();
+        let default_db = home.path().join(".local/share/kilo/kilo.db");
+        let first_extra_root = home.path().join("imports/one");
+        let first_extra_db = first_extra_root.join("nested/kilo.db");
+        let second_extra_root = home.path().join("imports/two");
+        let second_extra_db = second_extra_root.join("project/deeper/kilo.db");
+        for path in [&default_db, &first_extra_db, &second_extra_db] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        std::fs::write(first_extra_root.join("nested/other.db"), "").unwrap();
+
+        let mut extra_scan_paths = std::collections::BTreeMap::new();
+        extra_scan_paths.insert(
+            "kilo".to_string(),
+            vec![
+                home.path().join(".local/share/kilo"),
+                first_extra_root,
+                second_extra_root,
+            ],
+        );
+        let settings = crate::scanner::ScannerSettings {
+            extra_scan_paths,
+            ..Default::default()
+        };
         let ctx = AdapterScanContext {
             home_dir: home.path().to_str().unwrap(),
-            use_env_roots: false,
             scanner_settings: &settings,
         };
 
         let units = KILO_ADAPTER.discover_checked(&ctx).unwrap();
 
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].path, db_path);
         assert_eq!(
-            units[0].parser_version,
-            ParserVersion::new(ParserId::Kilo, KILO_RECORD_REJECTION_REVISION)
+            units
+                .iter()
+                .map(|unit| unit.path.clone())
+                .collect::<Vec<_>>(),
+            vec![default_db, first_extra_db, second_extra_db]
         );
-        assert_eq!(
-            units[0].fingerprint_policy,
-            crate::adapters::FingerprintPolicy::SqliteWithWal
-        );
+        assert!(units.iter().all(|unit| {
+            unit.parser_version
+                == ParserVersion::new(ParserId::Kilo, KILO_RECORD_REJECTION_REVISION)
+                && unit.fingerprint_policy == crate::adapters::FingerprintPolicy::SqliteWithWal
+        }));
     }
 }

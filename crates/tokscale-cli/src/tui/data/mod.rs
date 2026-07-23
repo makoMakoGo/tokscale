@@ -119,15 +119,12 @@ impl DataLoader {
     }
 
     pub fn prepare(&self, enabled_clients: &[ClientId]) -> Result<PreparedDataLoad> {
-        let (home, use_env_roots) = match &self.home_dir {
-            Some(home) => (home.to_string_lossy().into_owned(), false),
-            None => (
-                dirs::home_dir()
-                    .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
-                    .to_string_lossy()
-                    .into_owned(),
-                true,
-            ),
+        let home = match &self.home_dir {
+            Some(home) => home.to_string_lossy().into_owned(),
+            None => dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+                .to_string_lossy()
+                .into_owned(),
         };
 
         let clients: Vec<String> = enabled_clients
@@ -137,7 +134,6 @@ impl DataLoader {
 
         let opts = LocalParseOptions {
             home_dir: Some(home),
-            use_env_roots,
             clients: Some(clients),
             since: self.since.clone(),
             until: self.until.clone(),
@@ -235,15 +231,12 @@ mod tests {
         group_by: &GroupBy,
         pricing: Option<&PricingService>,
     ) -> Result<UsageData> {
-        let (home, use_env_roots) = match &loader.home_dir {
-            Some(home) => (home.to_string_lossy().into_owned(), false),
-            None => (
-                dirs::home_dir()
-                    .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
-                    .to_string_lossy()
-                    .into_owned(),
-                true,
-            ),
+        let home = match &loader.home_dir {
+            Some(home) => home.to_string_lossy().into_owned(),
+            None => dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+                .to_string_lossy()
+                .into_owned(),
         };
 
         let clients: Vec<String> = enabled_clients
@@ -253,7 +246,6 @@ mod tests {
 
         let opts = LocalParseOptions {
             home_dir: Some(home),
-            use_env_roots,
             clients: Some(clients),
             since: loader.since.clone(),
             until: loader.until.clone(),
@@ -641,7 +633,8 @@ after"#,
         assert_eq!(usage.models.len(), 1);
         assert_eq!(usage.models[0].client, "opencode");
         assert_eq!(usage.models[0].provider, "fireworks");
-        assert_eq!(usage.models[0].model, "deepseek-v3");
+        assert_eq!(usage.models[0].model_id, "deepseek-v3");
+        assert_eq!(usage.models[0].display_name, "deepseek-v3");
         assert_eq!(usage.models[0].tokens.total(), 15);
         assert_cost_matches(usage.models[0].cost, expected_cost);
 

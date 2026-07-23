@@ -10,7 +10,8 @@ pub(crate) fn build_models_export_value(data: &UsageData, group_by: &GroupBy) ->
         "groupBy": group_by.to_string(),
         "models": data.models.iter().map(|m| {
             let mut entry = json!({
-                "model": m.model,
+                "modelId": m.model_id,
+                "displayName": m.display_name,
                 "provider": m.provider,
                 "client": m.client,
                 "tokens": {
@@ -139,7 +140,8 @@ mod tests {
 
     fn model_entry(workspace_key: Option<&str>, workspace_label: Option<&str>) -> ModelUsage {
         ModelUsage {
-            model: "claude-sonnet-4.5".to_string(),
+            model_id: "claude-sonnet-4.5".to_string(),
+            display_name: "Claude Sonnet 4.5".to_string(),
             provider: "anthropic".to_string(),
             client: "claude".to_string(),
             workspace_key: workspace_key.map(str::to_string),
@@ -166,6 +168,9 @@ mod tests {
                 .unwrap();
 
         assert_eq!(json["groupBy"], "workspace,model");
+        assert_eq!(json["models"][0]["modelId"], "claude-sonnet-4.5");
+        assert_eq!(json["models"][0]["displayName"], "Claude Sonnet 4.5");
+        assert!(json["models"][0].get("model").is_none());
         assert_eq!(json["models"][0]["workspaceKey"], "/repo-a");
         assert_eq!(json["models"][0]["workspaceLabel"], "repo-a");
         assert_eq!(json["models"][1]["workspaceKey"], serde_json::Value::Null);

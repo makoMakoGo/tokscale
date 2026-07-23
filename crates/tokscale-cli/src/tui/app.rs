@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::commands::usage::UsageProviderId;
+use super::subscription_usage::UsageProviderId;
 use anyhow::Result;
 use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -522,17 +522,20 @@ pub struct App {
 
     pub hourly_view_mode: HourlyViewMode,
 
-    pub subscription_usage: Vec<crate::commands::usage::UsageOutput>,
-    pub subscription_usage_errors: Vec<crate::commands::usage::UsageProviderError>,
+    pub subscription_usage: Vec<crate::tui::subscription_usage::UsageOutput>,
+    pub subscription_usage_errors: Vec<crate::tui::subscription_usage::UsageProviderError>,
     subscription_provider_ids: Vec<UsageProviderId>,
 
     pub usage_fetch_attempted: bool,
     usage_initial_fetch_started: bool,
-    usage_rx: Option<std::sync::mpsc::Receiver<crate::commands::usage::UsageFetchBatch>>,
+    usage_rx: Option<std::sync::mpsc::Receiver<crate::tui::subscription_usage::UsageFetchBatch>>,
 }
 
 impl App {
     pub fn new_with_cached_data(config: TuiConfig, cached_data: Option<UsageData>) -> Result<Self> {
+        #[cfg(test)]
+        let settings = Settings::default();
+        #[cfg(not(test))]
         let settings =
             Settings::load_for_home_override(config.home_dir.as_deref().map(std::path::Path::new))?;
         Self::new_with_cached_data_and_settings(config, cached_data, settings)
@@ -543,6 +546,9 @@ impl App {
         cached_data: Option<UsageData>,
         settings: Settings,
     ) -> Result<Self> {
+        #[cfg(test)]
+        super::config::TokscaleConfig::initialize_default_for_tests();
+        #[cfg(not(test))]
         super::config::TokscaleConfig::initialize()?;
         let theme_name = match config.theme.as_deref() {
             Some(theme) => theme.parse::<ThemeName>().map_err(|_| {
@@ -585,7 +591,7 @@ impl App {
         };
         let usage_tab_enabled = settings.usage_tab_enabled;
         let subscription_provider_ids =
-            crate::commands::usage::parse_provider_settings(&settings.usage_providers);
+            crate::tui::subscription_usage::parse_provider_settings(&settings.usage_providers);
 
         let data_loader = DataLoader::with_filters(
             config.home_dir.map(std::path::PathBuf::from),
@@ -609,6 +615,28 @@ impl App {
         }
         let current_tab = requested_tab;
         let (sort_field, sort_direction) = Self::default_sort_for_tab(current_tab);
+        let (subscription_usage, subscription_usage_errors) = if usage_tab_enabled {
+            #[cfg(not(test))]
+            {
+                match crate::tui::subscription_usage::load_cache() {
+                    Ok(Some(outputs)) => (outputs, Vec::new()),
+                    Ok(None) => (Vec::new(), Vec::new()),
+                    Err(error) => (
+                        Vec::new(),
+                        vec![crate::tui::subscription_usage::UsageProviderError {
+                            provider: "Subscription cache".to_string(),
+                            message: error.to_string(),
+                        }],
+                    ),
+                }
+            }
+            #[cfg(test)]
+            {
+                (Vec::new(), Vec::new())
+            }
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
         let mut app = Self {
             current_tab,
@@ -676,19 +704,8 @@ impl App {
             dialog_client_changed,
             dialog_group_changed,
             hourly_view_mode: HourlyViewMode::default(),
-            subscription_usage: if usage_tab_enabled {
-                #[cfg(not(test))]
-                {
-                    crate::commands::usage::load_cache().unwrap_or_default()
-                }
-                #[cfg(test)]
-                {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            },
-            subscription_usage_errors: Vec::new(),
+            subscription_usage,
+            subscription_usage_errors,
             subscription_provider_ids,
             usage_fetch_attempted: false,
             usage_initial_fetch_started: false,
@@ -1052,30 +1069,17 @@ impl App {
             match rx.try_recv() {
                 Ok(batch) => {
                     self.usage_rx = None;
-                    self.subscription_usage = batch.outputs;
-                    self.subscription_usage_errors = batch.errors;
-                    if !self.subscription_usage.is_empty() {
-                        crate::commands::usage::save_cache(&self.subscription_usage);
-                        if self.subscription_usage_errors.is_empty() {
-                            self.set_subscription_status("Usage data loaded");
-                        } else {
-                            self.set_subscription_status("Usage data loaded with provider errors");
-                        }
-                    } else {
-                        crate::commands::usage::clear_cache();
-                        if self.subscription_usage_errors.is_empty() {
-                            self.set_subscription_status("No usage data available");
-                        } else {
-                            self.set_subscription_status("Usage fetch failed");
-                        }
-                    }
+                    self.install_subscription_usage_batch(
+                        batch,
+                        crate::tui::subscription_usage::save_cache,
+                    );
                     let now = std::time::Instant::now();
                     self.last_subscription_usage_check = Some(now);
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.usage_rx = None;
                     self.subscription_usage_errors =
-                        vec![crate::commands::usage::UsageProviderError {
+                        vec![crate::tui::subscription_usage::UsageProviderError {
                             provider: "unknown".to_string(),
                             message: "usage fetch worker disconnected".to_string(),
                         }];
@@ -1084,6 +1088,36 @@ impl App {
                     self.set_subscription_status("Usage fetch failed");
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+    }
+
+    fn install_subscription_usage_batch(
+        &mut self,
+        batch: crate::tui::subscription_usage::UsageFetchBatch,
+        persist: impl FnOnce(&[crate::tui::subscription_usage::UsageOutput]) -> anyhow::Result<()>,
+    ) {
+        let mut errors = batch.errors;
+        if !batch.outputs.is_empty() {
+            self.subscription_usage = batch.outputs;
+            if let Err(error) = persist(&self.subscription_usage) {
+                errors.push(crate::tui::subscription_usage::UsageProviderError {
+                    provider: "Subscription cache".to_string(),
+                    message: error.to_string(),
+                });
+            }
+            self.subscription_usage_errors = errors;
+            if self.subscription_usage_errors.is_empty() {
+                self.set_subscription_status("Usage data loaded");
+            } else {
+                self.set_subscription_status("Usage data loaded with provider errors");
+            }
+        } else {
+            self.subscription_usage_errors = errors;
+            if self.subscription_usage_errors.is_empty() {
+                self.set_subscription_status("No usage data available");
+            } else {
+                self.set_subscription_status("Usage fetch failed");
             }
         }
     }
@@ -1260,7 +1294,7 @@ impl App {
         self.usage_rx = Some(rx);
         let enabled = self.subscription_provider_ids.clone();
         std::thread::spawn(move || {
-            let batch = crate::commands::usage::fetch_enabled(&enabled);
+            let batch = crate::tui::subscription_usage::fetch_enabled(&enabled);
             let _ = tx.send(batch);
         });
     }
@@ -1288,7 +1322,7 @@ impl App {
     #[cfg(test)]
     fn start_subscription_usage_fetch_for_test(
         &mut self,
-        rx: std::sync::mpsc::Receiver<crate::commands::usage::UsageFetchBatch>,
+        rx: std::sync::mpsc::Receiver<crate::tui::subscription_usage::UsageFetchBatch>,
     ) {
         self.usage_fetch_attempted = true;
         self.set_subscription_status("Fetching subscription usage...");
@@ -1916,7 +1950,7 @@ impl App {
         ClientId::from_str(client).is_some_and(|client| selected.contains(&client))
     }
 
-    /// Group By only reshapes the group-keyed projections (ADR 0026):
+    /// Group By only reshapes the group-keyed projections (ADR 0010):
     /// Models plus the Daily/Monthly/Weekly tables built from them. The
     /// picker and its footer hint apply only on those tabs.
     pub fn group_by_applies_to_current_tab(&self) -> bool {
@@ -1949,7 +1983,7 @@ impl App {
     }
 
     fn model_detail_matches(selection: &ModelDetailSelection, model: &ModelUsage) -> bool {
-        model.model == selection.model
+        model.model_id == selection.model
             && selection
                 .client
                 .as_deref()
@@ -2000,7 +2034,7 @@ impl App {
             models
                 .get(self.selected_index)
                 .map(|model| ModelDetailSelection {
-                    model: model.model.clone(),
+                    model: model.model_id.clone(),
                     client: (self.data_group_by == tokscale_core::GroupBy::ClientModel)
                         .then(|| model.client.clone()),
                 })
@@ -2270,10 +2304,16 @@ impl App {
 
     fn selected_copy_text(&self) -> Option<String> {
         match self.current_tab {
-            Tab::Overview | Tab::Models => self
-                .get_sorted_models()
-                .get(self.selected_index)
-                .map(|m| format!("{}: {} tokens, ${:.4}", m.model, m.tokens.total(), m.cost)),
+            Tab::Overview | Tab::Models => {
+                self.get_sorted_models().get(self.selected_index).map(|m| {
+                    format!(
+                        "{}: {} tokens, ${:.4}",
+                        m.display_name,
+                        m.tokens.total(),
+                        m.cost
+                    )
+                })
+            }
             Tab::Agents => self.get_sorted_agents().get(self.selected_index).map(|a| {
                 format!(
                     "{} / {}: {} tokens, ${:.4}, {} instances",
@@ -2370,7 +2410,13 @@ impl App {
             "tokscale-export-{}.json",
             chrono::Utc::now().format("%Y%m%d-%H%M%S")
         );
-        let export_dir = crate::paths::get_config_dir().join("exports");
+        let export_dir = match crate::paths::try_get_config_dir() {
+            Ok(directory) => directory.join("exports"),
+            Err(error) => {
+                self.set_status(&format!("Export failed: {error}"));
+                return;
+            }
+        };
         let path = export_dir.join(filename);
         let group_by = self.export_group_by();
 
@@ -2431,8 +2477,8 @@ impl App {
         };
 
         let tie_breaker = |a: &&ModelUsage, b: &&ModelUsage| {
-            a.model
-                .cmp(&b.model)
+            a.model_id
+                .cmp(&b.model_id)
                 .then_with(|| a.workspace_label.cmp(&b.workspace_label))
                 .then_with(|| a.workspace_key.cmp(&b.workspace_key))
                 .then_with(|| a.provider.cmp(&b.provider))
@@ -2831,7 +2877,8 @@ mod tests {
         // Add some mock data
         app.data.models = vec![
             ModelUsage {
-                model: "model1".to_string(),
+                model_id: "model1".to_string(),
+                display_name: "model1".to_string(),
                 provider: "provider1".to_string(),
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
@@ -2842,7 +2889,8 @@ mod tests {
                 workspace_label: None,
             },
             ModelUsage {
-                model: "model2".to_string(),
+                model_id: "model2".to_string(),
+                display_name: "model2".to_string(),
                 provider: "provider2".to_string(),
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
@@ -2881,7 +2929,8 @@ mod tests {
         // Add some mock data
         app.data.models = vec![
             ModelUsage {
-                model: "model1".to_string(),
+                model_id: "model1".to_string(),
+                display_name: "model1".to_string(),
                 provider: "provider1".to_string(),
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
@@ -2892,7 +2941,8 @@ mod tests {
                 workspace_label: None,
             },
             ModelUsage {
-                model: "model2".to_string(),
+                model_id: "model2".to_string(),
+                display_name: "model2".to_string(),
                 provider: "provider2".to_string(),
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
@@ -2930,7 +2980,8 @@ mod tests {
 
         // Add some mock data
         app.data.models = vec![ModelUsage {
-            model: "model1".to_string(),
+            model_id: "model1".to_string(),
+            display_name: "model1".to_string(),
             provider: "provider1".to_string(),
             client: "opencode".to_string(),
             tokens: TokenBreakdown::default(),
@@ -3145,7 +3196,8 @@ mod tests {
         let mut app = make_app();
         app.data.models = (0..n)
             .map(|i| ModelUsage {
-                model: format!("model{}", i),
+                model_id: format!("model{}", i),
+                display_name: format!("model{}", i),
                 provider: "provider".to_string(),
                 client: "opencode".to_string(),
                 tokens: TokenBreakdown::default(),
@@ -4172,7 +4224,8 @@ mod tests {
         let mut app = make_app();
         app.data.models = vec![
             ModelUsage {
-                model: "expensive-low-token".to_string(),
+                model_id: "expensive-low-token".to_string(),
+                display_name: "expensive-low-token".to_string(),
                 provider: "anthropic".to_string(),
                 client: "claude".to_string(),
                 tokens: TokenBreakdown {
@@ -4189,7 +4242,8 @@ mod tests {
                 workspace_label: None,
             },
             ModelUsage {
-                model: "cheap-high-token".to_string(),
+                model_id: "cheap-high-token".to_string(),
+                display_name: "cheap-high-token".to_string(),
                 provider: "anthropic".to_string(),
                 client: "claude".to_string(),
                 tokens: TokenBreakdown {
@@ -4211,7 +4265,7 @@ mod tests {
 
         assert_eq!(app.sort_field, SortField::Tokens);
         assert_eq!(app.sort_direction, SortDirection::Descending);
-        assert_eq!(app.get_sorted_models()[0].model, "cheap-high-token");
+        assert_eq!(app.get_sorted_models()[0].model_id, "cheap-high-token");
     }
 
     #[test]
@@ -4543,7 +4597,7 @@ mod tests {
         app.selected_index = app
             .get_sorted_models()
             .iter()
-            .position(|model| model.model == "shared-model")
+            .position(|model| model.model_id == "shared-model")
             .unwrap();
 
         app.handle_key_event(key(KeyCode::Enter));
@@ -4577,7 +4631,7 @@ mod tests {
         app.selected_index = app
             .get_sorted_models()
             .iter()
-            .position(|model| model.model == "shared-model" && model.client == "claude")
+            .position(|model| model.model_id == "shared-model" && model.client == "claude")
             .unwrap();
 
         app.handle_key_event(key(KeyCode::Enter));
@@ -4609,7 +4663,7 @@ mod tests {
         app.selected_index = app
             .get_sorted_models()
             .iter()
-            .position(|model| model.model == "shared-model")
+            .position(|model| model.model_id == "shared-model")
             .unwrap();
         let outer_selection = app.selected_index;
 
@@ -4644,7 +4698,7 @@ mod tests {
         app.selected_index = app
             .get_sorted_models()
             .iter()
-            .position(|model| model.model == "shared-model")
+            .position(|model| model.model_id == "shared-model")
             .unwrap();
         let outer_selection = app.selected_index;
         let outer_models = app.data.models.len();
@@ -4683,7 +4737,7 @@ mod tests {
         app.selected_index = app
             .get_sorted_models()
             .iter()
-            .position(|model| model.model == "shared-model")
+            .position(|model| model.model_id == "shared-model")
             .unwrap();
         app.handle_key_event(key(KeyCode::Enter));
         assert!(app.model_detail_models.is_some());
@@ -4695,7 +4749,7 @@ mod tests {
         app.selected_index = app
             .get_sorted_models()
             .iter()
-            .position(|model| model.model == "shared-model")
+            .position(|model| model.model_id == "shared-model")
             .unwrap();
         app.handle_key_event(key(KeyCode::Enter));
         assert!(app.model_detail_models.is_some());
@@ -4725,7 +4779,7 @@ mod tests {
 
         assert!(!app.is_model_detail_active());
         assert_eq!(
-            app.get_sorted_models()[app.selected_index].model,
+            app.get_sorted_models()[app.selected_index].model_id,
             "shared-model"
         );
     }
@@ -4736,7 +4790,7 @@ mod tests {
         app.selected_index = app
             .get_sorted_models()
             .iter()
-            .position(|model| model.model == "shared-model" && model.client == "codex")
+            .position(|model| model.model_id == "shared-model" && model.client == "codex")
             .unwrap();
         app.handle_key_event(key(KeyCode::Enter));
         assert!(app.is_model_detail_active());
@@ -4760,7 +4814,7 @@ mod tests {
         app.selected_index = app
             .get_sorted_models()
             .iter()
-            .position(|model| model.model == "shared-model")
+            .position(|model| model.model_id == "shared-model")
             .unwrap();
         app.handle_key_event(key(KeyCode::Enter));
         let original_clients = app.data_clients.clone();
@@ -5268,7 +5322,7 @@ mod tests {
         let mut app = make_app();
         let (tx, rx) = std::sync::mpsc::channel();
         app.start_subscription_usage_fetch_for_test(rx);
-        tx.send(crate::commands::usage::UsageFetchBatch::default())
+        tx.send(crate::tui::subscription_usage::UsageFetchBatch::default())
             .unwrap();
 
         app.on_tick();
@@ -5280,6 +5334,76 @@ mod tests {
         assert!(app.status_message.is_none());
         assert!(app.last_subscription_usage_check.is_some());
         assert!(!app.is_fetching_usage());
+    }
+
+    fn subscription_output(provider: &str) -> crate::tui::subscription_usage::UsageOutput {
+        crate::tui::subscription_usage::UsageOutput {
+            provider: provider.to_string(),
+            account: None,
+            plan: None,
+            email: None,
+            metrics: vec![crate::tui::subscription_usage::UsageMetric {
+                label: "Weekly".to_string(),
+                used_percent: 20.0,
+                remaining_percent: 80.0,
+                remaining_label: None,
+                resets_at: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn empty_subscription_batch_retains_installed_snapshot() {
+        let mut app = make_app();
+        let installed = subscription_output("Codex");
+        app.subscription_usage = vec![installed.clone()];
+
+        app.install_subscription_usage_batch(
+            crate::tui::subscription_usage::UsageFetchBatch {
+                outputs: Vec::new(),
+                errors: vec![crate::tui::subscription_usage::UsageProviderError {
+                    provider: "Claude".to_string(),
+                    message: "credential expired".to_string(),
+                }],
+            },
+            |_| panic!("empty fetch must not overwrite the persisted snapshot"),
+        );
+
+        assert_eq!(app.subscription_usage, vec![installed]);
+        assert_eq!(app.subscription_usage_errors.len(), 1);
+        assert_eq!(
+            app.subscription_status_message.as_deref(),
+            Some("Usage fetch failed")
+        );
+    }
+
+    #[test]
+    fn nonempty_subscription_batch_replaces_snapshot_and_keeps_all_faults_visible() {
+        let mut app = make_app();
+        app.subscription_usage = vec![subscription_output("Old")];
+        let replacement = subscription_output("Codex");
+
+        app.install_subscription_usage_batch(
+            crate::tui::subscription_usage::UsageFetchBatch {
+                outputs: vec![replacement.clone()],
+                errors: vec![crate::tui::subscription_usage::UsageProviderError {
+                    provider: "Claude".to_string(),
+                    message: "credential rejected".to_string(),
+                }],
+            },
+            |_| Err(anyhow::anyhow!("cache directory is read-only")),
+        );
+
+        assert_eq!(app.subscription_usage, vec![replacement]);
+        assert_eq!(app.subscription_usage_errors.len(), 2);
+        assert_eq!(
+            app.subscription_usage_errors[1].provider,
+            "Subscription cache"
+        );
+        assert_eq!(
+            app.subscription_status_message.as_deref(),
+            Some("Usage data loaded with provider errors")
+        );
     }
 
     #[test]

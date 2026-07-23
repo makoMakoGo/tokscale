@@ -1,8 +1,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
-use crate::commands::usage::{helpers, UsageOutput, UsageProviderError};
 use crate::tui::app::App;
+use crate::tui::subscription_usage::{helpers, UsageOutput, UsageProviderError};
 use crate::tui::themes::Theme;
 use crate::tui::ui::widgets::viewport_scrollbar_state;
 
@@ -107,7 +107,7 @@ pub(crate) fn build_usage_lines(
         }
 
         lines.push(Line::from(Span::styled(
-            format!(" {} ", output.provider),
+            format!(" {} ", output.display_name()),
             Style::default()
                 .fg(theme.foreground)
                 .add_modifier(Modifier::BOLD),
@@ -227,10 +227,10 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::usage::{UsageMetric, UsageProviderId};
     use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::UsageData;
     use crate::tui::settings::Settings;
+    use crate::tui::subscription_usage::{UsageAccount, UsageMetric, UsageProviderId};
     use crate::tui::themes::{Theme, ThemeName};
     use ratatui::{backend::TestBackend, Terminal};
 
@@ -312,6 +312,27 @@ mod tests {
         assert!(text.contains("Provider errors"));
         assert!(text.contains("MiniMax Token Plan CN"));
         assert!(text.contains("session expired"));
+    }
+
+    #[test]
+    fn usage_lines_render_the_normalized_display_identity() {
+        let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+        let output = UsageOutput {
+            provider: "Codex".to_string(),
+            account: Some(UsageAccount {
+                id: "account-1".to_string(),
+                label: Some("Work".to_string()),
+                is_active: true,
+            }),
+            plan: None,
+            email: None,
+            metrics: Vec::new(),
+        };
+
+        let lines = build_usage_lines(&theme, &[output], &[]);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(text.contains("Codex (Work)"));
     }
 
     #[test]

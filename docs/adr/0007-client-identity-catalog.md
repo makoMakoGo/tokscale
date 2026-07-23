@@ -44,11 +44,12 @@ Every catalog entry has exactly one registered local-input adapter and one scan
 definition. These three sets must have exact parity and no duplicate entries.
 
 The scan definition and the adapter's discovery implementation are the sole
-authority for default roots, environment-root precedence, filename selection,
-companion files, database sidecars, and custom-root support. The adapter's
-session schema/parser is the sole authority for accepted envelopes, database
-schemas, required fields, record semantics, deduplication, and token
-interpretation.
+authority for fixed default roots beneath the selected home, filename
+selection, companion files, database sidecars, and custom-root support.
+Additional roots come only from `scanner.extraScanPaths`; OpenCode database
+files come only from `scanner.opencodeDbPaths`. The adapter's session
+schema/parser is the sole authority for accepted envelopes, database schemas,
+required fields, record semantics, deduplication, and token interpretation.
 
 `docs/clients.md` is the user-facing discovery map generated from that contract.
 It does not create a second path or schema authority.

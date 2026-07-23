@@ -22,7 +22,7 @@ pub struct ClientDiagnostic {
 const CLAUDE_DESKTOP_MESSAGE: &str =
     "Claude Desktop app data was detected, but Tokscale counts Claude Code JSONL transcripts only.";
 
-const CLAUDE_DESKTOP_HELP: &str = "Claude Desktop chat storage and Claude data exports do not expose a documented per-message token ledger. Use `tokscale usage` for Claude subscription quota bars; organization/API billing requires Anthropic Admin Usage/Cost API outside local scanning.";
+const CLAUDE_DESKTOP_HELP: &str = "Claude Desktop chat storage and Claude data exports do not expose a documented per-message token ledger. The TUI Usage tab shows Claude subscription quota bars; organization/API billing requires Anthropic Admin Usage/Cost API outside local scanning.";
 
 pub fn diagnostics_for_empty_explicit_report(
     home_dir: &Path,
