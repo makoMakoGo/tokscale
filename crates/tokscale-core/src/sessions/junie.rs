@@ -3,7 +3,7 @@
 //! Junie stores local sessions under `~/.junie/sessions/<session-id>/events.jsonl`.
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::{dedup_hash_str, UnifiedMessage};
+use super::{dedup_hash_str, normalize_agent_name, UnifiedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use chrono::{Local, LocalResult, NaiveDateTime, TimeZone};
@@ -227,7 +227,8 @@ fn agent_name(agent_event: &Value) -> Option<String> {
     let agent = agent_event.get("agent")?;
     string_field(agent, "name")
         .or_else(|| string_field(agent, "id"))
-        .map(str::to_string)
+        .map(normalize_agent_name)
+        .filter(|agent| !agent.is_empty())
 }
 
 fn provider_from_usage(usage: &Value, model_id: &str) -> String {
@@ -373,6 +374,18 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn blank_agent_name_falls_back_to_normalized_id() {
+        let event = serde_json::json!({
+            "agent": {
+                "name": "  ",
+                "id": "code-review"
+            }
+        });
+
+        assert_eq!(agent_name(&event).as_deref(), Some("Code Review"));
+    }
+
+    #[test]
     fn string_encoded_i64_max_is_accepted() {
         assert_eq!(
             number_value(&Value::String(i64::MAX.to_string())).unwrap(),
@@ -429,7 +442,7 @@ mod tests {
         assert_eq!(message.tokens.reasoning, 3);
         assert_eq!(message.cost, 0.0);
         assert_eq!(message.duration_ms, Some(2500));
-        assert_eq!(message.agent.as_deref(), Some("main"));
+        assert_eq!(message.agent.as_deref(), Some("Main"));
         assert!(message.is_turn_start);
     }
 

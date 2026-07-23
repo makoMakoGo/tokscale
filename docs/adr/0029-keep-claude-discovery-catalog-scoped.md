@@ -17,7 +17,7 @@ contract.
   is attributed to the catalog client `claude`.
 - Bump the Claude parser revision so previously derived shards cannot preserve
   retired attribution behavior.
-- Accept only TUI cache schema 44. It serializes the identity fields as
+- Accept only TUI cache schema 45. It serializes the identity fields as
   `clientUniverse`, `clientSpace`, `clientBreakdown`, and session `client`,
   and uses `inputInventorySignature` for acquisition freshness. Every older
   schema is an explicit cache miss and is rebuilt from accepted inputs.

@@ -62,17 +62,6 @@ where
             Self::Many(values) => values.len(),
         }
     }
-
-    pub(crate) fn to_vec(&self) -> Vec<T>
-    where
-        T: Clone,
-    {
-        match self {
-            Self::Empty => panic!("identity set must contain a value before materialization"),
-            Self::One(value) => vec![value.clone()],
-            Self::Many(values) => values.iter().cloned().collect(),
-        }
-    }
 }
 
 impl<T> IdentitySet<T>

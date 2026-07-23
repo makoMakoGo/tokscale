@@ -100,25 +100,7 @@ pub fn dedup_hash_str(key: &str) -> u64 {
 pub fn normalize_agent_name(agent: &str) -> String {
     let cleaned = strip_zero_width_chars(agent);
     let trimmed = cleaned.trim();
-    let stripped = strip_agent_prefix(trimmed);
-    let canonical = canonicalize_agent_name(stripped);
-    let agent_lower = canonical.to_lowercase();
-
-    if agent_lower.contains("plan") {
-        if agent_lower.contains("omo") || agent_lower.contains("sisyphus") {
-            return "Planner-Sisyphus".to_string();
-        }
-        return titlecase_agent(&canonical);
-    }
-
-    if agent_lower == "omo" || agent_lower == "sisyphus" {
-        return "Sisyphus".to_string();
-    }
-
-    if agent_lower == "orchestrator-sisyphus" {
-        return "Atlas".to_string();
-    }
-
+    let canonical = canonicalize_agent_name(trimmed);
     titlecase_agent(&canonical)
 }
 
@@ -129,6 +111,14 @@ pub fn normalize_opencode_agent_name(agent: &str) -> String {
     let canonical = canonicalize_agent_name(stripped);
     let agent_lower = canonical.to_lowercase();
 
+    if agent_lower.contains("plan")
+        && (agent_lower.contains("omo") || agent_lower.contains("sisyphus"))
+    {
+        return "Planner-Sisyphus".to_string();
+    }
+    if agent_lower == "omo" {
+        return "Sisyphus".to_string();
+    }
     if let Some(normalized) = normalize_oh_my_opencode_agent_name(&agent_lower) {
         return normalized;
     }
@@ -645,14 +635,15 @@ mod tests {
 
     #[test]
     fn test_normalize_agent_name() {
-        assert_eq!(normalize_agent_name("OmO"), "Sisyphus");
+        assert_eq!(normalize_agent_name("OmO"), "OmO");
         assert_eq!(normalize_agent_name("Sisyphus"), "Sisyphus");
-        assert_eq!(normalize_agent_name("omo"), "Sisyphus");
+        assert_eq!(normalize_agent_name("omo"), "Omo");
         assert_eq!(normalize_agent_name("sisyphus"), "Sisyphus");
         assert_eq!(
             normalize_agent_name("Sisyphus (Ultraworker)"),
             "Sisyphus (Ultraworker)"
         );
+        assert_eq!(normalize_opencode_agent_name("OmO"), "Sisyphus");
 
         assert_eq!(
             normalize_opencode_agent_name("Sisyphus (Ultraworker)"),
@@ -714,11 +705,18 @@ mod tests {
             "Momus"
         );
 
-        assert_eq!(normalize_agent_name("OmO-Plan"), "Planner-Sisyphus");
-        assert_eq!(normalize_agent_name("Planner-Sisyphus"), "Planner-Sisyphus");
-        assert_eq!(normalize_agent_name("omo-plan"), "Planner-Sisyphus");
+        assert_eq!(normalize_agent_name("OmO-Plan"), "OmO Plan");
+        assert_eq!(normalize_agent_name("Planner-Sisyphus"), "Planner Sisyphus");
+        assert_eq!(normalize_agent_name("omo-plan"), "Omo Plan");
+        assert_eq!(
+            normalize_opencode_agent_name("OmO-Plan"),
+            "Planner-Sisyphus"
+        );
 
-        assert_eq!(normalize_agent_name("orchestrator-sisyphus"), "Atlas");
+        assert_eq!(
+            normalize_agent_name("orchestrator-sisyphus"),
+            "Orchestrator Sisyphus"
+        );
         assert_eq!(
             normalize_opencode_agent_name("orchestrator-sisyphus"),
             "Atlas"
@@ -738,16 +736,19 @@ mod tests {
         );
         assert_eq!(
             normalize_agent_name("astrape:executor-high"),
-            "Executor High"
+            "Astrape:executor High"
         );
         assert_eq!(
             normalize_agent_name("oh-my-claudecode:code-reviewer"),
-            "Code Reviewer"
+            "Oh My Claudecode:code Reviewer"
         );
-        assert_eq!(normalize_agent_name("oh-my-codex:librarian"), "Librarian");
-        assert_eq!(normalize_agent_name("astrape:executor"), "Executor");
+        assert_eq!(
+            normalize_agent_name("oh-my-codex:librarian"),
+            "Oh My Codex:librarian"
+        );
+        assert_eq!(normalize_agent_name("astrape:executor"), "Astrape:executor");
         assert_eq!(normalize_agent_name("plan-reviewer"), "Plan Reviewer");
-        assert_eq!(normalize_agent_name("astrape:planner"), "Planner");
+        assert_eq!(normalize_agent_name("astrape:planner"), "Astrape:planner");
 
         assert_eq!(
             normalize_opencode_agent_name("astrape:sisyphus"),

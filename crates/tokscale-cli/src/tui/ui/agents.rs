@@ -112,7 +112,7 @@ pub fn render(
         .unwrap_or(AGENT_MIN_WIDTH);
     let client_content_width = agents
         .iter()
-        .map(|agent| client_labels_display_width(&agent.clients))
+        .map(|agent| display_width(&get_client_display_name(&agent.client)))
         .max()
         .unwrap_or(CLIENT_MIN_WIDTH);
     let table_layout =
@@ -146,7 +146,7 @@ pub fn render(
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
 
-            let client_labels = client_labels(&agent.clients);
+            let client_label = get_client_display_name(&agent.client);
             let cell_for_column =
                 |column: AgentColumn| -> Cell {
                     match column {
@@ -162,7 +162,7 @@ pub fn render(
                                 .add_modifier(Modifier::BOLD),
                         ),
                         AgentColumn::Client => Cell::from(truncate_display_width(
-                            &client_labels,
+                            &client_label,
                             table_layout.width_for(AgentColumn::Client),
                         ))
                         .style(Style::default().fg(theme_muted)),
@@ -315,30 +315,11 @@ fn agents_table_layout(
     }
 }
 
-fn client_labels(clients: &str) -> String {
-    clients
-        .split(", ")
-        .map(get_client_display_name)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn client_labels_display_width(clients: &str) -> u16 {
-    clients
-        .split(", ")
-        .enumerate()
-        .map(|(index, client)| {
-            let separator_width = if index == 0 { 0 } else { 2 };
-            display_width(&get_client_display_name(client)).saturating_add(separator_width)
-        })
-        .fold(0u16, u16::saturating_add)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        agents_table_layout, client_labels_display_width, AgentColumn, AGENT_MAX_WIDTH,
-        CLIENT_MAX_WIDTH, COST_WIDTH, INSTANCES_WIDTH, MSGS_WIDTH, TOKENS_WIDTH,
+        agents_table_layout, AgentColumn, AGENT_MAX_WIDTH, CLIENT_MAX_WIDTH, COST_WIDTH,
+        INSTANCES_WIDTH, MSGS_WIDTH, TOKENS_WIDTH,
     };
     use ratatui::prelude::Constraint;
 
@@ -347,15 +328,6 @@ mod tests {
             Constraint::Length(width) => width,
             other => panic!("expected Length at index {index}, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn client_labels_display_width_counts_rendered_labels_without_joining() {
-        crate::tui::config::TokscaleConfig::initialize_default_for_tests();
-        assert_eq!(
-            client_labels_display_width("codex, opencode"),
-            super::display_width("Codex, OpenCode")
-        );
     }
 
     #[test]

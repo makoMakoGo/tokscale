@@ -2276,7 +2276,8 @@ impl App {
                 .map(|m| format!("{}: {} tokens, ${:.4}", m.model, m.tokens.total(), m.cost)),
             Tab::Agents => self.get_sorted_agents().get(self.selected_index).map(|a| {
                 format!(
-                    "{}: {} tokens, ${:.4}, {} instances",
+                    "{} / {}: {} tokens, ${:.4}, {} instances",
+                    a.client,
                     a.agent,
                     a.tokens.total(),
                     a.cost,
@@ -2469,9 +2470,7 @@ impl App {
         let mut agents: Vec<&AgentUsage> = self.data.agents.iter().collect();
 
         let tie_breaker = |a: &&AgentUsage, b: &&AgentUsage| {
-            a.agent
-                .cmp(&b.agent)
-                .then_with(|| a.clients.cmp(&b.clients))
+            a.agent.cmp(&b.agent).then_with(|| a.client.cmp(&b.client))
         };
 
         match (self.sort_field, self.sort_direction) {
@@ -3509,7 +3508,7 @@ mod tests {
         app.data.agents = vec![
             AgentUsage {
                 agent: "builder".to_string(),
-                clients: "opencode".to_string(),
+                client: "opencode".to_string(),
                 tokens: TokenBreakdown {
                     input: 10,
                     output: 5,
@@ -3523,7 +3522,7 @@ mod tests {
             },
             AgentUsage {
                 agent: "reviewer".to_string(),
-                clients: "roocode".to_string(),
+                client: "roocode".to_string(),
                 tokens: TokenBreakdown {
                     input: 50,
                     output: 20,
@@ -3550,7 +3549,7 @@ mod tests {
         app.data.agents = vec![
             AgentUsage {
                 agent: "builder".to_string(),
-                clients: "opencode".to_string(),
+                client: "opencode".to_string(),
                 tokens: TokenBreakdown {
                     input: 100,
                     output: 0,
@@ -3564,7 +3563,7 @@ mod tests {
             },
             AgentUsage {
                 agent: "reviewer".to_string(),
-                clients: "roocode".to_string(),
+                client: "roocode".to_string(),
                 tokens: TokenBreakdown {
                     input: 20,
                     output: 0,

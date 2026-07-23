@@ -11,7 +11,7 @@ use crate::{sessions, ClientId};
 
 pub(crate) struct JunieAdapter;
 
-const JUNIE_RECORD_REJECTION_REVISION: u32 = EXPLICIT_TOKEN_OVERFLOW_REVISION + 2;
+const JUNIE_RECORD_REJECTION_REVISION: u32 = EXPLICIT_TOKEN_OVERFLOW_REVISION + 3;
 
 impl LocalInputAdapter for JunieAdapter {
     fn client(&self) -> ClientId {

@@ -36,8 +36,11 @@ an outside click discards it. The picker has no per-client hotkeys.
 ### Generation and acquisition
 
 One local generation contains the input manifest, data-health result, session
-snapshot, client-aware canonical accumulator, and all exposed Group By usage
-projections. It is published and installed atomically. Local usage projections,
+snapshot, client-aware canonical accumulator, one Common usage projection, and
+all four exposed Grouped projections. Common contains Agents, daily/hourly
+totals and Client membership, graph, report totals, and streaks exactly once.
+Each Grouped projection contains only Models and daily/hourly model buckets.
+The generation is published and installed atomically. Local usage projections,
 Sessions, and the other local report tabs therefore cannot mix generations.
 
 Only these events may scan inputs:
@@ -63,11 +66,14 @@ refresh clock. Projection controls are unavailable until a generation exists
 and remain usable during a warm background refresh.
 
 A usage projection is installed atomically with its `data_clients`, grouping,
-and usage data. Sessions filters the fixed generation snapshot through that
-same committed client scope. Failure restores the complete prior usage
-projection and reports an explicit diagnostic. Detail selections are
-reconciled by semantic identity after a projection; a detail that no longer
-exists closes explicitly instead of becoming an empty detail page.
+and usage data. For the full Client universe, that usage data is assembled from
+Common and the selected Grouped projection read from the same pinned bundle
+inode. A proper Client subset is derived from canonical state, loaded lazily on
+first use. Sessions filters the fixed generation snapshot through that same
+committed Client scope. Failure restores the complete prior usage projection
+and reports an explicit diagnostic. Detail selections are reconciled by
+semantic identity after a projection; a detail that no longer exists closes
+explicitly instead of becoming an empty detail page.
 
 Data Health and scanned input bytes describe the immutable generation-wide
 client universe. Usage rows, charts, agents, and Sessions follow the selected
@@ -128,11 +134,12 @@ and row hit areas are absent when there is no row to operate on.
 
 `UsageData.graph` is a total value. A valid empty graph is
 `UsageGraphData { weeks: [] }`; `Option<UsageGraphData>` is not part of the
-domain. The current cache schema stores the graph object in every projection.
-A missing or `null` graph is an invalid current-schema generation and becomes
-an ordinary cache miss.
+domain. Schema 45 stores the graph once in Common. A missing or `null` graph,
+a missing Common or Grouped part, or incompatible Common/Grouped daily or
+hourly shapes is an invalid current-schema generation and becomes an ordinary
+cache miss.
 
-The TUI accepts only the current schema 44 generation bundle. It has no
+The TUI accepts only the current schema 45 generation bundle. It has no
 compatibility decoder, migration branch, or synthesized defaults for older or
 partial bundle shapes.
 

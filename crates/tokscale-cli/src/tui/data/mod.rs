@@ -21,9 +21,11 @@ pub(crate) use overview::{CacheRate, OverviewSummary};
 // historical names this crate already uses, so downstream modules keep their
 // existing imports.
 pub use tokscale_core::usage_views::{
-    AgentEntry as AgentUsage, ContributionDay, DailyClientInfo, DailyModelInfo, DailyUsage,
-    HourlyModelInfo, HourlyUsage, PeriodKind, PeriodUsage, UsageData, UsageGraphData as GraphData,
-    UsageModelEntry as ModelUsage, UsageTokenBreakdown as TokenBreakdown,
+    AgentEntry as AgentUsage, ContributionDay, DailyClientCommon, DailyClientInfo, DailyModelInfo,
+    DailyModelProjection, DailyUsage, DailyUsageCommon, HourlyModelInfo, HourlyModelProjection,
+    HourlyUsage, HourlyUsageCommon, PeriodKind, PeriodUsage, UsageCommonData, UsageData,
+    UsageGraphData as GraphData, UsageGroupedData, UsageModelEntry as ModelUsage,
+    UsageTokenBreakdown as TokenBreakdown,
 };
 pub use tokscale_core::{aggregate_by_period, build_period_usage, find_peak_hour};
 
@@ -565,7 +567,7 @@ after"#,
 
         assert_eq!(usage.agents.len(), 2);
         assert_eq!(usage.agents[0].agent, "Architect");
-        assert_eq!(usage.agents[0].clients, "roocode");
+        assert_eq!(usage.agents[0].client, "roocode");
         assert_eq!(usage.agents[0].message_count, 2);
         assert_cost_matches(usage.agents[0].cost, architect_expected);
         assert_eq!(usage.agents[0].tokens.total(), 734_000);

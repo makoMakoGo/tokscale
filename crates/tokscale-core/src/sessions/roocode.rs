@@ -6,7 +6,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
-use super::UnifiedMessage;
+use super::{normalize_agent_name, UnifiedMessage};
 use crate::input_health::{RecordRejectionReason, RejectionSummary, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde_json::Value;
@@ -210,7 +210,10 @@ fn extract_optional_model_and_agent(content: &str) -> (Option<String>, Option<St
         offset = end_idx + ENV_END.len();
     }
 
-    let agent = last_slug.or(last_name);
+    let agent = last_slug
+        .or(last_name)
+        .map(|agent| normalize_agent_name(&agent))
+        .filter(|agent| !agent.is_empty());
     (last_model, agent)
 }
 
@@ -354,7 +357,7 @@ after"#;
         assert_eq!(messages[0].tokens.cache_read, 20);
         assert_eq!(messages[0].tokens.cache_write, 5);
         assert_eq!(messages[0].cost, 0.0);
-        assert_eq!(messages[0].agent.as_deref(), Some("architect"));
+        assert_eq!(messages[0].agent.as_deref(), Some("Architect"));
     }
 
     #[test]
@@ -465,7 +468,7 @@ after"#;
         let (model, agent) =
             extract_model_and_agent(Path::new("api_conversation_history.json"), content).unwrap();
         assert_eq!(model, "gpt-5.1");
-        assert_eq!(agent.as_deref(), Some("reviewer"));
+        assert_eq!(agent.as_deref(), Some("Reviewer"));
     }
 
     #[test]

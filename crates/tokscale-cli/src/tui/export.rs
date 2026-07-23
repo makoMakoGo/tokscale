@@ -60,10 +60,11 @@ pub fn build_export_json(data: &UsageData, group_by: &GroupBy) -> Result<String>
             .iter()
             .map(|a| json!({
                 "agent": a.agent,
-                "clients": a.clients,
+                "client": a.client,
                 "tokens": {
                     "input": a.tokens.input,
                     "output": a.tokens.output,
+                    "reasoning": a.tokens.reasoning,
                     "cacheRead": a.tokens.cache_read,
                     "cacheWrite": a.tokens.cache_write,
                     "total": a.tokens.total()
@@ -84,6 +85,7 @@ pub fn build_export_json(data: &UsageData, group_by: &GroupBy) -> Result<String>
                 "tokens": {
                     "input": d.tokens.input,
                     "output": d.tokens.output,
+                    "reasoning": d.tokens.reasoning,
                     "cacheRead": d.tokens.cache_read,
                     "cacheWrite": d.tokens.cache_write,
                     "total": d.tokens.total()
@@ -102,7 +104,9 @@ pub fn build_export_json(data: &UsageData, group_by: &GroupBy) -> Result<String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::data::ModelUsage;
+    use crate::tui::data::{AgentUsage, DailyUsage, ModelUsage, TokenBreakdown};
+    use chrono::NaiveDate;
+    use std::collections::BTreeMap;
 
     #[test]
     fn exported_report_keeps_degraded_input_health() {
@@ -181,5 +185,40 @@ mod tests {
         assert_eq!(json["groupBy"], "model");
         assert!(json["models"][0].get("workspaceKey").is_none());
         assert!(json["models"][0].get("workspaceLabel").is_none());
+    }
+
+    #[test]
+    fn exported_agent_and_daily_tokens_include_reasoning() {
+        let tokens = TokenBreakdown {
+            input: 10,
+            output: 5,
+            reasoning: 3,
+            ..Default::default()
+        };
+        let data = UsageData {
+            agents: vec![AgentUsage {
+                agent: "Builder".to_string(),
+                client: "opencode".to_string(),
+                tokens: tokens.clone(),
+                cost: 0.0,
+                message_count: 1,
+                instance_count: 1,
+            }],
+            daily: vec![DailyUsage {
+                date: NaiveDate::from_ymd_opt(2026, 7, 23).unwrap(),
+                tokens,
+                cost: 0.0,
+                client_breakdown: BTreeMap::new(),
+                message_count: 1,
+                turn_count: 1,
+            }],
+            ..UsageData::default()
+        };
+
+        let json: serde_json::Value =
+            serde_json::from_str(&build_export_json(&data, &GroupBy::Model).unwrap()).unwrap();
+
+        assert_eq!(json["agents"][0]["tokens"]["reasoning"], 3);
+        assert_eq!(json["daily"][0]["tokens"]["reasoning"], 3);
     }
 }

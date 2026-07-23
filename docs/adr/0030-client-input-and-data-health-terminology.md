@@ -30,7 +30,7 @@ configuration and lookup DTOs use `pricingSource`. Old field names, issue
 identifiers, and CLI flags have no aliases.
 
 Internal acquisition, snapshot, cache, planning, parsing, and fold types use
-`Input` terminology. TUI cache schema 44 is the only accepted generation
+`Input` terminology. TUI cache schema 45 is the only accepted generation
 schema. Message-shard format 8 is the only format used by ordinary reads;
 older recognized formats may be classified only by explicit pruning so they
 can be deleted safely.

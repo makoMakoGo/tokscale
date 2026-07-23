@@ -7,7 +7,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;
-use super::UnifiedMessage;
+use super::{normalize_agent_name, UnifiedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -194,7 +194,13 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
             continue;
         };
 
-        let agent = msg.agent.or(msg.mode);
+        let agent = [msg.agent.as_deref(), msg.mode.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|agent| !agent.is_empty())
+            .map(normalize_agent_name)
+            .filter(|agent| !agent.is_empty());
         let session_id = msg
             .session_id
             .map(|session| session.trim().to_string())
@@ -342,11 +348,42 @@ mod tests {
         assert_eq!(msg.tokens.cache_read, 75);
         assert_eq!(msg.tokens.cache_write, 25);
         assert_eq!(msg.cost, 0.0);
-        assert_eq!(msg.agent.as_deref(), Some("architect"));
+        assert_eq!(msg.agent.as_deref(), Some("Architect"));
         assert_eq!(
             msg.dedup_key,
             Some(crate::sessions::dedup_hash_str("embedded-msg-1"))
         );
+    }
+
+    #[test]
+    fn blank_agent_falls_back_to_normalized_mode() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_kilo_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+
+        insert_kilo_message(
+            &conn,
+            "row-msg-mode",
+            "sess-mode",
+            r#"{
+                "role": "assistant",
+                "modelID": "gpt-5.4",
+                "agent": "  ",
+                "mode": "code-review",
+                "tokens": {
+                    "input": 1,
+                    "output": 0,
+                    "cache": {"read": 0, "write": 0}
+                },
+                "time": {"created": 1700000000000.0}
+            }"#,
+        );
+        drop(conn);
+
+        let messages = parse_kilo_sqlite(&db_path).unwrap().messages;
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("Code Review"));
     }
 
     #[test]
