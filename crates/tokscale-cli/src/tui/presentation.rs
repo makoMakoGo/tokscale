@@ -1,5 +1,5 @@
 use super::app::{App, ChartGranularity, Tab};
-use super::data::{build_period_usage, PeriodKind};
+use super::data::PeriodKind;
 use super::view_state::ViewState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,13 +67,13 @@ fn empty_subject(app: &App, state: &ViewState) -> Option<EmptySubject> {
         Tab::Hourly if app.data.hourly.is_empty() => Usage,
         Tab::Monthly
             if !app.is_period_detail_active_for_kind(PeriodKind::Monthly)
-                && build_period_usage(&app.data.daily, PeriodKind::Monthly).is_empty() =>
+                && app.data.daily.is_empty() =>
         {
             Usage
         }
         Tab::Weekly
             if !app.is_period_detail_active_for_kind(PeriodKind::Weekly)
-                && build_period_usage(&app.data.daily, PeriodKind::Weekly).is_empty() =>
+                && app.data.daily.is_empty() =>
         {
             Usage
         }
@@ -98,7 +98,9 @@ mod tests {
     use super::*;
     use crate::tui::app::{ProjectionBackend, TuiConfig};
     use crate::tui::settings::Settings;
-    use tokscale_core::{GroupBy, TuiAcc};
+    use tokscale_core::{
+        build_tui_accumulator, DateRange, GroupBy, TokenBreakdown, TuiAcc, UnifiedMessage,
+    };
 
     fn app(tab: Tab, installed: bool) -> App {
         let settings = Settings {
@@ -123,17 +125,38 @@ mod tests {
         .expect("test app initializes");
 
         if installed {
-            let accumulator = TuiAcc::default();
-            let data = accumulator.project(&GroupBy::Model);
-            app.install_tui_snapshot(
-                data,
-                Vec::new(),
-                Default::default(),
-                ProjectionBackend::Memory(accumulator),
-                GroupBy::Model,
-            );
+            install_generation(&mut app, TuiAcc::default());
         }
         app
+    }
+
+    fn install_generation(app: &mut App, accumulator: TuiAcc) {
+        let data = accumulator.project(&GroupBy::Model);
+        app.install_tui_snapshot(
+            data,
+            Vec::new(),
+            Default::default(),
+            ProjectionBackend::Memory(accumulator),
+            GroupBy::Model,
+        );
+    }
+
+    fn populated_accumulator() -> TuiAcc {
+        build_tui_accumulator(
+            &[UnifiedMessage::new(
+                "codex",
+                "gpt-5",
+                "openai",
+                "session-1",
+                1_700_000_000_000,
+                TokenBreakdown {
+                    input: 1,
+                    ..TokenBreakdown::default()
+                },
+                0.0,
+            )],
+            DateRange::none(),
+        )
     }
 
     #[test]
@@ -164,5 +187,25 @@ mod tests {
             Presentation::for_view(&app, &ViewState::default()),
             Presentation::Ready
         );
+    }
+
+    #[test]
+    fn period_roots_classify_empty_state_from_daily_structure() {
+        let state = ViewState::default();
+
+        for tab in [Tab::Monthly, Tab::Weekly] {
+            let empty = app(tab, true);
+            assert_eq!(
+                Presentation::for_view(&empty, &state),
+                Presentation::Empty(EmptySubject::Usage)
+            );
+
+            let mut populated = app(tab, false);
+            install_generation(&mut populated, populated_accumulator());
+            assert_eq!(
+                Presentation::for_view(&populated, &state),
+                Presentation::Ready
+            );
+        }
     }
 }
