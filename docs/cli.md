@@ -20,9 +20,8 @@ with an installed fork package. Pass `--no-spinner` in automation.
 | `tokscale wrapped` | Generate the year-in-review image from local usage. |
 | `tokscale cache ...` | Explicitly maintain Tokscale's local caches. |
 
-There are no root `monthly`, `weekly`, `daily`, `hourly`, `stats`, `agents`,
-`sessions`, `time-metrics`, `graph`, `clients`, `doctor`, or `warp` commands.
-Unknown commands fail as invalid CLI usage; they are not compatibility aliases.
+The table is the complete accepted root grammar. Every other command name is
+invalid CLI usage.
 
 ## Interactive TUI
 
@@ -39,8 +38,8 @@ tokscale tui --no-refresh
 
 `--tab` launches the same complete TUI and sets its initial focus. It does not
 run a hidden one-tab application. Every real TUI tab is accepted:
-`overview`, `models`, `monthly`, `weekly`, `daily`, `hourly`, `stats`,
-`agents`, `usage`, and `sessions`.
+`overview`, `usage`, `models`, `monthly`, `weekly`, `daily`, `hourly`,
+`stats`, `agents`, and `sessions`.
 
 Requesting a tab disabled by settings is an error rather than a silent jump to
 Overview. The TUI requires interactive stdin and stdout; for example,
@@ -88,9 +87,8 @@ The four supported grouping strategies exactly match the TUI Group By picker:
 | `client,provider,model` | One row per Client, Provider, and model. |
 | `workspace,model` | One row per workspace and model. |
 
-Session-based grouping values are invalid. Sessions are their own TUI tab, not
-a hidden Models grouping. Hyphenated compatibility spellings are also rejected;
-the comma-separated values above are the complete public set.
+The comma-separated values above are the complete public set. Sessions is an
+independent TUI view rather than a Models grouping dimension.
 
 All local Models JSON uses this top-level envelope:
 
@@ -174,11 +172,10 @@ parsed token history. The CLI command is explicit consent to query configured
 providers under ADR 0014. `--json` exists for scripts and status integrations;
 it serializes the same provider/account/plan domain model as the TUI Usage tab.
 
-Tokscale consumes provider-owned credentials. It does not provide login,
-logout, account switching, credential copying, or provider-specific sync
-namespaces. In particular, the removed remote `tokscale warp ...` integration
-has no replacement. Warp remains a normal local Client whose `warp.sqlite`
-usage is scanned by Models and the TUI.
+Tokscale consumes provider-owned credentials. Login, logout, account switching,
+credential copying, and provider-specific synchronization are outside its
+command grammar. Warp is a normal local Client whose `warp.sqlite` usage is
+scanned by Models and the TUI.
 
 ## Wrapped
 

@@ -1,70 +1,132 @@
-# ADR 0009: Ahead-only upstream policy and the unified architecture track
+# ADR 0009: Fork boundary, upstream policy, and release identity
 
 Status: Accepted
 
 ## Context
 
-`personal/local-clients` has tracked `junhoyeo/tokscale` upstream since the
-fork, merging main regularly (ADR 0001-0008 all assume that posture). Two
-things changed:
+This fork maintains a local Rust CLI and TUI whose input, aggregation, cache,
+and presentation architecture deliberately differs from upstream. Importing
+upstream content through merges would make that architecture depend on
+upstream's tree shape. Publishing under upstream package names would
+also make fork behavior appear to be an upstream release.
 
-1. ADR 0008's Phase A+B landed: `UnifiedMessage` now uses interned
-   `Arc<str>` identity fields, a hashed `dedup_key`, and a derived date.
-   Upstream parser changes already need mechanical adaptation on merge.
-2. The remaining roadmap (streaming fold aggregation, sharded message
-   cache, client adapters, a unified aggregation module) rewrites the
-   parse driver and aggregation surfaces — the exact zones where every
-   upstream client/feature commit lands. After that work, structural
-   merge conflicts are permanent, not occasional.
-
-Holding the architecture hostage to merge-ability would mean forgoing the
-deep-module cleanup this fork exists for (#33).
+The repository therefore needs one contract for its maintained product surface,
+upstream ancestry, selective ports, npm identity, and release-note authority.
 
 ## Decision
 
-- The branch is **content-ahead-only** from 2026-06-13. We do not take
-  upstream content via merge anymore.
-- The "behind" counter is kept at zero with **ancestry-only merges**
-  (established practice on this branch since 2026-05):
+### Maintained product surface
 
-  ```
-  git fetch origin
-  git merge -s ours --no-ff origin/main \
-    -m "chore: record upstream ancestry without content (ADR 0009)"
-  ```
+The product surface is the local Rust CLI and TUI plus the npm launcher needed
+to install them. This includes local reports, the TUI, Wrapped output, scanner
+settings, current client adapters, pricing, and explicitly bounded Subscription
+Usage.
 
-  `-s ours` keeps the tree byte-identical to ours (no conflicts are
-  possible) while recording upstream commits as ancestors, which is what
-  resets the GitHub behind counter. Run it whenever the compare banner
-  reappears. Side effects, accepted: upstream commits show in the
-  branch's full history (use `git log --first-parent` for the
-  personal-only view), and those commits can never be content-merged
-  afterwards — which enforces this policy by construction.
-- Upstream changes are **ported, not merged**: cherry-pick or hand-port
-  leaf-level fixes we want (pricing data and lookup fixes, parser format
-  fixes for clients we use, security fixes). Port commits reference the
-  upstream SHA in the body: `ported from upstream <sha>`.
-- New upstream clients are adopted by writing an adapter in our
-  architecture, treating the upstream parser as a reference
-  implementation, not a patch basis.
-- The unified architecture track (streaming fold + sharded cache + client
-  adapters + deep aggregation module — issues #54, #36, #37 under #33) is
-  one campaign with output-parity gates between phases, not three
-  separate refactors.
-- Frontend/platform directories (`packages/`) stay close to upstream and
-  may still take direct ports; they are outside the core rewrite.
+Hosted applications, hosted account/data workflows, social or leaderboard
+products, and their deployment infrastructure are outside the repository's
+product and release authority. Expanding that authority requires an explicit
+decision covering deployment, authentication, retention, and release
+ownership.
+
+`packages/` follows upstream only where useful for the npm wrapper, dispatcher,
+and native launchers.
+
+### Content-ahead-only upstream policy
+
+The fork never takes upstream content through a merge. A plain
+`git merge origin/main` is an error and must be aborted.
+
+When the fork's behind counter needs to return to zero, record ancestry without
+content:
+
+```bash
+git fetch origin
+git merge -s ours --no-ff origin/main \
+  -m "chore: record upstream ancestry without content (ADR 0009)"
+```
+
+The resulting tree must be byte-identical to the first parent; verify
+`git diff HEAD^1 HEAD` is empty before pushing. Use first-parent history for
+the fork's content history.
+
+Wanted upstream changes are cherry-picked or hand-ported as bounded fixes.
+Port commits include `ported from upstream <sha>` in the body. New upstream
+clients are adopted by implementing a current adapter in this architecture,
+using the upstream parser only as a reference.
+
+Every upstream review or port batch is recorded under
+`docs/upstream/yyyy-mm-dd.md` with upstream commit, disposition, scope, and
+maintainer-relevant decisions. Fixes for excluded clients are recorded as
+aborted rather than copied into inactive code.
+
+### Fork npm identity
+
+Fork releases use:
+
+- wrapper: `@juya-ai/tokscale`;
+- TypeScript dispatcher: `@juya-ai/tokscale-cli`;
+- native packages: `@juya-ai/tokscale-cli-*`; and
+- installed command: `tokscale`.
+
+The upstream names `tokscale` and `@tokscale/*` are never reused.
+
+Published native packages are limited to:
+
+- `@juya-ai/tokscale-cli-darwin-arm64`;
+- `@juya-ai/tokscale-cli-linux-x64-gnu`; and
+- `@juya-ai/tokscale-cli-win32-x64-msvc`.
+
+Package and release metadata targets `makoMakoGo/tokscale`. Versions use normal
+semver, Git tags use `v<version>`, stable releases use npm `latest`, and
+prereleases use the publish helper's prerelease dist-tag.
+
+### Release authority and notes
+
+Release notes are derived only from first-parent fork changes:
+
+- choose the prior tag and included commits from first-parent history;
+- link a pull request only when its base repository is
+  `makoMakoGo/tokscale`; otherwise link the exact fork commit;
+- do not synthesize contributor mentions from commit history;
+- do not reuse upstream marketing copy or hero assets; and
+- show the fork package identity, previous fork release boundary, and
+  exact-version install command.
+
+Generation fails when required GitHub metadata cannot be read or a non-initial
+release contains no fork changes. It does not fabricate incomplete notes.
+
+The release version is committed before publication. Publication is triggered
+by that committed version change; GitHub Actions does not create or push the
+version commit. Normal releases use a version-only pull request, while the
+repository owner may use an equivalent direct default-branch commit. Manual
+recovery requires both the exact version and exact version-bump commit so a
+later commit cannot publish under an already selected manifest version.
+
+Release tooling has one shared validation entry point:
+`scripts/test-release-tooling.sh`. Launcher validation remains
+`scripts/test-package-launchers.sh`.
+
+The root `package.json` owns the exact Bun version through `packageManager`.
+GitHub Actions installs Bun only through `.github/actions/setup-bun`, whose
+external setup action is pinned to a full commit SHA. Workflows do not declare
+independent Bun versions.
+
+Before publication, validate:
+
+```bash
+bun install
+bun run build:cli
+bash scripts/test-package-launchers.sh
+bash scripts/test-release-tooling.sh
+```
+
+A partial publish is recovered with the existing recovery mode and the same
+version, never by publishing under upstream names.
 
 ## Consequences
 
-- Core refactors no longer pay an upstream-conflict tax; interfaces can
-  be shaped for clarity instead of merge-ability.
-- Upstream fixes arrive only when we notice and port them. Periodically
-  review `git log origin/main` (e.g. when something breaks or monthly)
-  for portable fixes.
-- A plain `git merge origin/main` (without `-s ours`) is an error from
-  now on; if one is attempted it will conflict structurally and should
-  be aborted. Only the ancestry-only form above is permitted.
-- With periodic ancestry merges the compare banner stays at
-  "ahead only, 0 behind"; the behind counter is no longer a content
-  signal either way. Leaving the fork network remains the nuclear option
-  if the fork relationship itself becomes unwanted.
+Core architecture can evolve without merge-driven adaptation branches.
+Upstream changes enter only through explicit review and adaptation, while
+ancestry-only merges preserve fork-network bookkeeping without changing
+content. Users install the fork through `@juya-ai/tokscale`, and release notes
+describe only fork-owned changes.

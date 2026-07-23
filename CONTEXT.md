@@ -7,7 +7,7 @@ file take precedence when upstream semantics conflict with local needs.
 
 ## Vocabulary
 
-Terminology follows ADR 0030.
+Terminology follows ADR 0007.
 
 - `client` is the canonical product identity for a concrete local tool or
   integration, including its parsing policy, display facts, and filters.
@@ -36,37 +36,34 @@ Terminology follows ADR 0030.
 - Do not reject a positive, timestamped usage record with a non-empty model
   label merely because provider attribution cannot be resolved. Keep the model
   and tokens, infer centrally when possible, and otherwise use `unknown`.
-- Read local client storage in its accepted current format only, as established
-  by ADR 0019. OpenCode reads current SQLite databases, not legacy message JSON;
-  obsolete schemas and database I/O/query failures are explicit errors.
+- Read local client storage through the catalog and registered adapter for its
+  accepted current format, as established by ADR 0007. Schema and database
+  I/O/query failures are explicit errors.
 - Keep Claude Code handling for `model = "<synthetic>"` placeholder records.
   That placeholder is malformed input cleanup, not a real model or client.
-- Remove upstream `synthetic.new` as a client concept. It does not belong in
-  filters, scanner defaults, TUI Client pickers, or docs.
 - Keep Pi and OMP as separate client identities. OMP usage must not be
   counted as Pi usage by display or aggregation code.
 - Treat `cwd` workspace attribution as branch behavior, not as caller folklore.
   Reports and TUI views should share the same workspace rules.
 
-## Architecture Direction
+## Architecture
 
-- Client identity should come from a small catalog of display facts and stable
-  ids, not from repeated switch statements across core, CLI, and TUI.
+- Client identity comes from one catalog of display facts and stable ids shared
+  by core, CLI, and TUI.
 - This fork's active product surface is local Rust CLI/TUI. Hosted account
-  auth, hosted data submission, and the Next.js social frontend were removed
-  by ADR 0015.
-- Local parsing policy should move behind client adapters one client at a time.
-  Do not design a large framework before a tracer-bullet migration proves the
-  interface.
-- Usage aggregation should become a deep core module shared by report and TUI
-  paths. Caches may store derived data but never own aggregation rules.
-- TUI views should share an interaction seam for scroll, hitbox, and selection
-  behavior where duplication is already causing drift.
+  auth, hosted data submission, and the Next.js social frontend are outside
+  ADR 0009's maintained surface.
+- Each local client's discovery, fingerprint, parser, and input contract is
+  owned by its registered adapter.
+- The TUI is the complete local-report product. Models is its only headless
+  projection, and both consume the same canonical usage aggregation and export
+  semantics under ADR 0010 and ADR 0022.
+- Caches store derived data but never own aggregation rules.
+- TUI views share explicit scroll, hitbox, selection, presentation-state, and
+  action authorities under ADR 0028.
 
 ## Non-goals
 
 - This branch does not attempt to mirror every upstream client idea.
-- This branch does not preserve compatibility shims for concepts that have been
-  rejected locally.
 - This branch does not hide parser, scanner, pricing, or aggregation errors in
   order to keep the UI quiet.

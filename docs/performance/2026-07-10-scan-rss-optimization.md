@@ -14,8 +14,8 @@ keeps the prior rows so later improvements cannot quietly replace the baseline.
 - Timing: CLI `processingTimeMs` plus `/usr/bin/time` wall/user/sys and maximum
   RSS.
 - Historical command at measurement time:
-  `tokscale time-metrics --json --no-spinner -c <clients>`. ADR 0033 later
-  removed that parallel report; the maintained probe now uses
+  `tokscale time-metrics --json --no-spinner -c <clients>`. The current ADR
+  0022 measurement surface uses
   `tokscale models --group-by model --json --no-spinner -c <clients>`.
 - Reported values in the cumulative table are medians. Raw samples remain below.
 - The input corpus is live local data. Each stage records cache/input facts,
@@ -532,8 +532,8 @@ cargo test -p tokscale-cli
 ```
 
 Workspace all-target Clippy with `-D warnings`, rustfmt, diff checks, and the
-release build passed. ADR 0018 records the bounded ownership, ordering, planner,
-and Codex raw-write contracts; ADR 0008 now points to that implemented follow-up.
+release build passed. ADR 0008 records the bounded ownership, ordering, planner,
+and Codex raw-write contracts.
 
 ### C5 — structured aggregation identities
 
@@ -1066,7 +1066,7 @@ token, and cache-token fields remain strict. The current query orders by the
 unique message id and does not build a redundant second-key sorter.
 
 The TUI aggregate cache schema advances to 26 so aggregates that may contain
-retired JSON-only OpenCode history rebuild once. ADR 0019 records the breaking
+retired JSON-only OpenCode history rebuild once. ADR 0007 defines the
 current-format boundary. Since this report and implementation are in the same
 terminal commit, the cumulative table names the commit `C8 (this commit)`;
 the release binary hash below pins the exact measured code.
@@ -1285,7 +1285,7 @@ production path with deterministic output and resource measurements.
 A full-PR review found that the C8 metadata-only warm-hit contract could return
 stale data after a same-size/same-mtime atomic replacement. It also found
 remaining success-shaped parser, cache-I/O, settings, and compatibility paths.
-ADR 0020 replaces those contracts; the historical measurements above remain
+ADR 0001 defines the resulting contract; the historical measurements above remain
 unchanged and must not be read as validation of the corrected formats.
 
 The corrected implementation persists Unix or Windows file identity in every

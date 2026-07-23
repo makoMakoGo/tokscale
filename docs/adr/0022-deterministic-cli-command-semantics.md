@@ -2,72 +2,92 @@
 
 Status: Accepted
 
-ADR 0033 supersedes this ADR's local report-command list and public Graph
-command. Its deterministic argv, option ownership, output, and failure
-contracts remain accepted.
-
 ## Context
 
-The v4 CLI mixed interactive navigation and report generation in the same
-argument space. `tokscale models` could open a TUI on a terminal but print a
-report in a pipe, root-level flags were copied into multiple execution paths,
-and some successfully parsed options were ignored by the selected path. The
-`--light` display flag also controlled whether a report wrote the TUI aggregate
-cache. This made command meaning depend on TTY state, argument position, and
-unrelated presentation choices.
-
-Those are not compatibility conveniences. They make automation impossible to
-reason about and allow the parser to claim an option was accepted without a
-single authoritative owner applying it.
+Automation must be able to derive command role, semantic options, output shape,
+and exit behavior from argv. Terminal state may control presentation but cannot
+change the selected product operation or make an accepted option inert.
 
 ## Decision
 
-### Commands have one role
+### Command roles
 
-The bare `tokscale` command is an exact shorthand for an unconfigured
-`tokscale tui`. The root owns only help, version, and subcommand selection. Any
-TUI option requires the explicit `tui` subcommand.
+Bare `tokscale` is the exact shorthand for an unconfigured `tokscale tui`. TUI
+options belong to the explicit `tui` subcommand.
 
-`models` is the canonical headless local report. It always emits a
-human-readable table by default and a JSON document with `--json`; its function
-never changes with TTY state. Opening any report tab is spelled `tokscale tui
---tab <tab>`. Monthly, Weekly, Daily, Hourly, Stats, Agents, and Sessions are
-TUI-only under ADR 0033.
+The complete root command set is:
 
-TTY detection may control terminal presentation such as color and progress,
-but it may not select a different command. A TUI requires interactive stdin
-and stdout; otherwise it fails as invalid usage with a report-command hint.
-Requesting a disabled optional tab also fails instead of silently opening a
-different tab.
+```text
+tui
+models
+pricing
+usage
+wrapped
+cache
+```
 
-### Every option has one owner
+The TUI is the complete local-report product. `--tab` sets its initial focus to
+Overview, Usage, Models, Monthly, Weekly, Daily, Hourly, Stats, Agents, or
+Sessions without creating a separate command or partial application.
 
-Business options live on the narrowest command that applies them. Shared local
-input scope consists of `--home` and repeatable or comma-separated
-`--client`; shared date scope consists of one preset or an inclusive
-`--since`/`--until` range. `--group-by` belongs only to `models`. `--json`,
-`--benchmark`, and `--no-spinner` belong only to report commands that use
-them. `--theme`, `--refresh`, `--no-refresh`, `--debug`, and `--tab` belong
-only to `tui`.
+`models` is the only headless local report. It consumes the same canonical
+Models projection and export builder as the TUI. Its default grouping is
+`model`; the complete Group By value set is:
 
-Parsing is followed by one resolve-and-validate step that produces a typed
-`ExecutionPlan`. Execution consumes that plan and does not inspect Clap state
-or TTY state again. The invariant is:
+```text
+model
+client,model
+client,provider,model
+workspace,model
+```
 
-> Every explicit argument accepted by the parser must change the execution
-> plan; otherwise parsing must fail.
+`pricing` queries catalogs or overrides, `usage` fetches Subscription Usage
+under ADR 0014, `wrapped` renders the annual Top Clients artifact, and `cache`
+performs explicit cache maintenance.
 
-An explicit `--home` must name an existing directory and is authoritative for
-scan-input discovery and settings. It never falls back to the process home or
-client-specific environment roots. Client ids are canonicalized and
-deduplicated. Date presets are mutually exclusive, dates use local-time
-inclusive boundaries, and `since` may not be later than `until`.
+Only this grammar is accepted. Unrecognized commands, options, client ids, and
+values are ordinary parse failures with no alias rewriting or post-parse
+translation. Parse-failure diagnostics are derived from this grammar alone;
+there is no secondary recognizer for another command vocabulary.
 
-### Output and failures are stable
+### Resolution and terminal presentation
 
-Stdout contains only the command's primary product. Progress, benchmark
-timing, health summaries, warnings, and errors use stderr. Local JSON commands
-emit one common envelope:
+Options live on the narrowest command that owns them:
+
+- local input scope: `--home` and repeatable or comma-separated `--client`;
+- date scope: one preset or inclusive `--since` and `--until`;
+- Models grouping: `--group-by`;
+- Models presentation: `--json`, `--benchmark`, and `--no-spinner`;
+- Subscription Usage presentation: `--json`;
+- Wrapped output: `--output`, `--year`, `--short`, and `--no-spinner`; and
+- TUI behavior: `--theme`, `--refresh`, `--no-refresh`, `--debug`, and
+  `--tab`.
+
+Parsing is followed by one resolve-and-validate pass that creates a typed
+`ExecutionPlan`. Execution uses that plan for command role, input scope, date
+scope, grouping, output format, and behavior. Renderers may inspect terminal
+width, color capability, and TTY presence only to choose table layout, color,
+progress presentation, or other semantically equivalent formatting.
+
+Every accepted explicit argument changes the plan. An option that cannot affect
+its command is rejected.
+
+An explicit `--home` must be an existing directory and is authoritative for
+settings and input discovery. It does not fall through to the process home or a
+client-specific environment root. Client ids come from the current ADR 0007
+catalog and are deduplicated. Date presets are mutually exclusive, dates use
+inclusive local-time boundaries, and `since` cannot be later than `until`.
+
+A TUI requires interactive stdin and stdout. Otherwise invocation fails as
+invalid usage with a report-command hint. A disabled optional tab also fails
+rather than selecting another tab.
+
+### Output and failure behavior
+
+Stdout contains only the command's primary product. Progress, benchmark timing,
+health summaries, warnings, and errors use stderr.
+
+Models JSON uses one envelope:
 
 ```json
 {
@@ -77,41 +97,47 @@ emit one common envelope:
 }
 ```
 
-Third-party record or input damage remains in `health` under ADR 0020 and
-does not change a successfully produced report's exit code. Invalid CLI usage
-or environment is exit code `2`; internal, I/O, network, and authentication
-failures are exit code `1`; user interruption remains `130` where the child or
-terminal supplies it.
+Third-party record or input damage appears in `health` under ADR 0001 and does
+not change the exit code when the requested report was produced.
 
-Invalid environment includes malformed or out-of-range environment variables
-and settings values. Failure to read or write an otherwise valid settings path
-is an operational I/O failure, so it remains exit code `1`.
+- invalid CLI usage or environment: exit `2`;
+- internal, I/O, network, or authentication failure: exit `1`;
+- user interruption: exit `130` when supplied by the child or terminal.
 
-Inside the TUI, `q` is an ordinary successful quit and returns `0`. `Ctrl-C`
-is a typed user interruption and returns `130`, but only after terminal modes
-and the alternate screen have been restored.
+Malformed or out-of-range environment and settings values are invalid
+environment. Failure to read or write an otherwise valid settings path is
+operational I/O.
 
-### Explicit maintenance and leaf commands
+Inside the TUI, `q` is a successful quit. `Ctrl-C` is an interruption after
+terminal modes and the alternate screen are restored.
 
-Pricing is `pricing lookup <model>` or `pricing overrides`; the lookup's
-catalog selector is named `--pricing-source`. Cache maintenance is `cache warm` or
-`cache prune`. Reports never write the TUI aggregate cache, and the removed
-`--write-cache`, `--no-write-cache`, and `light.writeCache` controls have no
-replacement inside a report command. Tokscale does not expose a subprocess
-capture command; provider-owned non-interactive sessions are discovered as
-ordinary local usage under ADR 0005.
+### Leaf command contracts
 
-The old spellings are not aliases and are never rewritten into a successful
-command. Known v4 invocations may receive one migration hint only after Clap
-rejects them.
+`models` reads local inputs for its resolved client and date scope but never
+writes the TUI generation. Its JSON `data` contains `groupBy`, `models`, and
+`totals`; Data Health and processing time use the common envelope fields.
+
+Pricing uses `pricing lookup <model>` or `pricing overrides`;
+`--pricing-source` selects a public catalog. ADR 0010 owns exact lookup
+semantics.
+
+`usage` has only its JSON presentation option and follows ADR 0014's independent
+remote lifecycle.
+
+`wrapped` produces one annual Top Clients image for its resolved local input
+scope. Agent ranking is not a Wrapped identity.
+
+`cache warm` accepts local input scope and builds one complete all-date TUI
+generation. `cache prune` accepts no input scope and operates only on
+scan-input message shards; ADR 0008 owns classification and deletion.
+
+Local input locations are documented by ADR 0007 and `docs/clients.md`.
+Unavailable or damaged inputs are reported through Models Data Health and the
+TUI rather than through another discovery implementation.
 
 ## Consequences
 
-Scripts can determine output shape from argv alone, and help output exposes
-only options the selected command will execute. TUI navigation is slightly
-more verbose but unambiguous. The aggregate cache becomes an explicit product
-boundary instead of a side effect of table rendering.
-
-This is a breaking CLI change and must ship in the next major release. The
-version bump remains a separate release change so merging the implementation
-does not implicitly publish packages before the release checks are complete.
+Scripts can determine the operation and semantic output from accepted argv.
+Terminal inspection is presentation-only, help describes the executable
+grammar, and report rendering cannot mutate the TUI generation as a side
+effect.

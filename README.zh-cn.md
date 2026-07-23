@@ -27,7 +27,7 @@ Tokscale 会读取本地 AI 编码客户端状态，把带 token 信息的记录
 - **行为显式。** 解析失败、缺失数据、未知客户端和无法匹配的价格保持可见，不用猜测别名或假成功路径掩盖。
 - **稳定客户端身份。** 客户端 id、展示信息和前端 registry 由
   `crates/tokscale-core/client-catalog.json` 统一定义。
-- **共享聚合语义。** CLI 和 TUI 应该描述同一套本地用量，而不是对同一批 transcript 做两套解释。
+- **唯一报表模型。** 完整 TUI 与无头 Models 投影消费同一份规范用量数据。
 - **更低内存占用。** 消息管线避免不必要的 clone，并在源文件没有变化时跳过完整 reload。
 - **选择性吸收上游。** 上游修复会经过审查后选择性移植。这个 fork 不会自动接收每个上游客户端、托管功能或发布策略。
 
@@ -59,8 +59,8 @@ bun run cli
 # 适合脚本的报表
 bun run cli -- models --no-spinner
 
-# 查看检测到的客户端和扫描位置
-bun run cli -- clients
+# 执行一个 Client adapter 并查看 Data Health
+bun run cli -- models --client codex --json --no-spinner
 ```
 
 `bun run cli` 会通过 `packages/cli` 执行当前 checkout 中的代码。npm 上名为 `tokscale` 的公开包仍然是上游包。
@@ -73,17 +73,23 @@ tokscale
 tokscale tui
 tokscale tui --tab models
 
-# 报表
+# 唯一无头 Models 投影
 tokscale models --no-spinner
 tokscale models --no-spinner --json
-tokscale monthly --no-spinner
-tokscale hourly --no-spinner
-tokscale graph --no-spinner --output graph.json
+tokscale models --group-by client,model --no-spinner
 
 # 过滤
 tokscale tui --client opencode,claude --week
 tokscale models --since 2026-01-01 --until 2026-01-31
 tokscale models --group-by client,provider,model --json
+
+# TUI 内的期间报表与 Sessions
+tokscale tui --tab monthly
+tokscale tui --tab sessions
+
+# 独立的远程订阅额度
+tokscale usage
+tokscale usage --json
 
 # 查询价格目录
 tokscale pricing lookup claude-sonnet-4-5 --no-spinner
@@ -99,20 +105,22 @@ tokscale pricing overrides --json
 
 当前 catalog 包括：
 
-OpenCode、Claude Code、Codex CLI、Gemini CLI、Amp、Droid、OpenClaw、Pi、OMP、Kimi、Qwen CLI、Roo Code、Mux、Kilo、Hermes Agent、Copilot、Goose、Codebuff、Antigravity、Zed Agent、ZCode、Kiro、Junie、Warp、Cline、Command Code 和 Grok Build。
+OpenCode、Claude Code、Codex CLI、Gemini CLI、Amp、Droid、OpenClaw、Pi、OMP、Kimi、Qwen CLI、Roo Code、Mux、Kilo、Hermes Agent、Copilot、Goose、Codebuff、CodeBuddy、Antigravity、Zed Agent、ZCode、Kiro、Junie、Warp、Cline、Command Code 和 Grok Build。
 
 部分 catalog 条目有明确边界：
 
-- `grok` 和本地 `warp.sqlite` 只提供没有 bucket 拆分的 token 总数，因此 Tokscale 使用 ADR 0017 定义的固定 bucket 分配。
+- `grok` 和本地 `warp.sqlite` 只提供没有 bucket 拆分的 token 总数，因此 Tokscale 使用 ADR 0010 定义的固定 bucket 分配。
 - `commandcode` 是基于 transcript 的估算用量，不是供应商权威 token 记账。
-- `antigravity` 直接读取当前 AGY CLI 的 SQLite/WAL 数据；已退役的 IDE/2.0
-  私有 RPC bridge 不受支持（ADR 0025）。
+- `antigravity` 通过已注册 adapter 直接读取当前 AGY CLI 的 SQLite/WAL 数据
+  （ADR 0007）。
 
 ## 数据和定价语义
 
 本地报表只有一种成本含义：把解析出的 token bucket 套用 Tokscale 定价服务后得到的估算价格。普通本地报表会忽略应用自己上报的成本字段，因为那些字段可能代表订阅、积分、套餐余额、渠道加价、四舍五入后的 UI 总额或聚合花费。
 
-`custom-pricing.json` 里的精确自定义覆盖会最先检查。否则，Tokscale 会用 provider-aware 的精确匹配和确定性规范化匹配搜索 LiteLLM、OpenRouter 和 models.dev。三个公开目录之间没有简单固定的全局优先级；规范化是匹配策略，不是单独的价格来源。
+`custom-pricing.json` 里的精确自定义覆盖会最先检查。否则，Tokscale
+只用规范模型 ID 的精确匹配或 provider-scoped 模型 ID 的精确匹配搜索
+LiteLLM、OpenRouter 和 models.dev；不会按前缀、子串或模糊匹配猜价格。
 
 如果模型无法定价，派生成本保持 `$0.00`，不会使用私有猜测价格。细节见
 [定价语义](docs/pricing.md)。
@@ -133,7 +141,7 @@ OpenCode、Claude Code、Codex CLI、Gemini CLI、Amp、Droid、OpenClaw、Pi、
 这个仓库有意保留在 GitHub fork 网络中，以保留项目来源。`personal/local-clients` 分支按
 content-ahead 变体维护：上游变更会经过审查并选择性移植，而不是整体合并。
 
-不保证和上游行为兼容。上游官方包、托管服务、社区链接和文档请参考上游仓库。
+Fork 行为以本仓库 ADR 为准，可能与上游不同。上游官方包、托管服务、社区链接和文档请参考上游仓库。
 
 ## 许可和署名
 

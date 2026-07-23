@@ -58,7 +58,7 @@ matching the split documented in `docs/development.md`.
 
 - Read `docs/adr/0001-no-silent-fallback.md` before classifying behavior as a
   fallback. The policy prohibits hidden failure and invented success; it does
-  not prohibit documented normalization, reconciliation, migrations, report
+  not prohibit documented normalization, reconciliation, report
   projections, or explicit authority-priority rules.
 - Do not remove existing behavior merely because an identifier or comment uses
   the word `fallback`. Identify the authoritative contract and a concrete
@@ -69,7 +69,7 @@ matching the split documented in `docs/development.md`.
 - Provider attribution is optional usage metadata: retain valid model/token
   records, infer centrally, and use `unknown` when inference fails. Only an
   explicitly documented ownership/filter/dedup field may gate eligibility; see
-  ADR 0020 and the Zed ownership boundary.
+  ADR 0001 and the Zed ownership boundary.
 
 ## Git Identity & Merge Discipline
 
@@ -173,7 +173,7 @@ Before publishing, verify the release identity and recovery plan:
 - whether upstream package names are intentionally reused or replaced;
 - validation commands and rollback/recovery steps.
 
-Generated release notes must follow ADR 0016: enumerate only first-parent fork
+Generated release notes must follow ADR 0009: enumerate only first-parent fork
 changes, link a pull request only when its base repository is this fork, and do
 not synthesize contributor mentions or fork PR URLs from upstream ancestry.
 

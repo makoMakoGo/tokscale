@@ -1,236 +1,242 @@
-# ADR 0008: Single-copy memory pipeline
+# ADR 0008: Prepared input, single-copy fold, and cache storage
 
 Status: Accepted
 
-ADR 0020 owns input failure containment, input-dependency completeness,
-snapshot revalidation, and usage identity. ADR 0028 owns the TUI client scope,
-generation lifecycle, projection, presentation, and action contract. This ADR
-owns the single-copy pipeline, cache-envelope/pruning contract, and atomic
-storage mechanics used to publish a TUI generation.
-
 ## Context
 
-On a real corpus (~255K messages, ~1.5GB of input transcripts) one parse
-pass peaked above 1GB RSS and the TUI idled around 600MB. Profiling showed
-the cost was not any single feature but the pipeline holding the same
-message corpus in memory two to four times at once, plus glibc retaining
-the freed peak instead of returning it to the OS. Before input shards were
-introduced, the main causes were:
+Tokscale processes large transcript collections. Materializing one adapter's
+complete output, cloning cache hits into another collection, and rebuilding a
+monolithic cache can keep several copies of the same messages alive. Discovery
+performed separately from freshness checks or execution can also make one load
+describe different filesystem generations.
 
-1. `InputMessageCache::load()` materialized the whole bincode store.
-2. Cache hits were `clone()`d out of the store into `all_messages`.
-3. `save_if_dirty()` re-read the store from disk, cloned dirty entries
-   into it, then cloned the merged map again into the serialized form.
-4. Every `UnifiedMessage` owned up to ten heap `String`s with no sharing;
-   `date` duplicated `timestamp`; codex `dedup_key`s were 80-150 byte
-   formatted strings persisted three times over.
-5. The TUI auto-refresh reran the full pipeline on a timer even when no
-   input file changed, re-pinning peak RSS and rewriting the full cache.
+The pipeline therefore needs one consumptive input inventory, bounded ordered
+execution, per-input derived shards, and an atomic generation publication
+boundary. ADR 0001 owns input-integrity semantics, ADR 0007 owns accepted
+current formats, and ADR 0028 owns the TUI lifecycle built on this pipeline.
 
 ## Decision
 
-The parse pipeline must hold at most one owned copy of any message.
+### Acquisition authority
 
-- Parsed messages are stored in per-input shards with a separately encoded
-  header and body. Cache discovery reads only the header; a confirmed hit
-  loads and moves the body once, without cloning it through an in-memory
-  cache store.
-- A planned generic cache hit is not a successful read until its body has been
-  opened, identity-checked, decoded, and matched against the header message
-  count. Body failures are typed with the input path, parser version, shard
-  path, and retained root cause. The CLI emits an explicit stderr diagnostic;
-  it never converts the failure into an empty message list.
-- Generic body-fault recovery invalidates that read for the rest of the scan
-  and reparses the current input through its registered adapter. A successful
-  cacheable parse atomically replaces the shard. A definitively missing,
-  malformed, undecodable, or identity-invalid shard is removed when no atomic
-  replacement can be written. Fingerprint mismatches caused by an in-memory or
-  on-disk atomic replacement are non-destructive: the stale plan is bypassed,
-  but a potentially valid replacement shard is retained if reparsing cannot
-  produce a new one, unless that reparse independently detects an input race or
-  non-cacheable result that requires invalidation.
-- OMP consumes planned-hit bodies before it builds the parent-task agent index.
-  Every failed hit joins the complete miss set before one index is built, so
-  repaired child sessions retain the same attribution as ordinary misses while
-  valid hits are still folded one at a time. Codex remains on its dedicated
-  incremental read/reparse path because its cached fallback-timestamp state and
-  append-prefix validation are not the generic adapter contract. That dedicated
-  path still returns typed cache-read failures, carries whether proven body
-  corruption requires removal, and treats recovery as successful only when the
-  atomic replacement writer returns success.
-- Cache writes serialize borrowed message slices when possible. They must not
-  clone entries merely to build a serialized cache representation.
-- After a TUI data load completes, return freed pages to the OS
-  (`malloc_trim(0)` on Linux). After refreshed aggregates replace the previous
-  TUI data, drop the previous aggregate before trimming again. Steady-state RSS
-  tracks the current live aggregate, not the parse or prior-aggregate
-  high-water mark.
-- A production TUI load folds one `PreparedLocalInputs` inventory once. The
-  same bounded message stream constructs the fine-grained usage accumulator
-  and the session projection; a full `Vec<UnifiedMessage>` is not part of this
-  path. APIs whose explicit public contract returns all messages remain
-  unchanged.
-- Schema 45 stores one immutable TUI generation in one atomic JSON bundle. It
-  contains the manifest, session projection, client-aware canonical aggregate,
-  one group-agnostic Common usage projection, and four Grouped projections.
-  Common stores `agents`, daily/hourly totals and Client membership, graph,
-  report totals, and streaks exactly once. Each Grouped projection stores only
-  `models` and the daily/hourly model buckets for its Group By value. The
-  canonical accumulator records token and cost totals per Client during the
-  message fold. Full-universe and proper-subset Common totals derive from those
-  buckets, never from a Grouped model projection. The
-  writer serializes borrowed views through a buffered temporary file and
-  publishes the complete generation with one rename. The bundle carries a
-  SHA-256 digest for the canonical aggregate, which startup verifies before
-  accepting the generation. Before acceptance, startup also decodes and
-  validates all four Grouped projections, including inactive ones, for required
-  fields, authoritative model identity, model Client attribution within the
-  immutable Client universe, and agreement with Common's daily/hourly shape.
-  Corruption in any projection invalidates the whole bundle. A reader pins the
-  opened bundle inode, so a view switch cannot combine Common and Grouped data
-  from different refreshes even while a newer generation is being published.
-- Startup treats that generation as one logical bundle. A fresh bundle serves
-  every local-report tab, including Sessions, without scanning inputs. A stale
-  bundle remains wholly visible while one background fold prepares its
-  replacement. A cold miss keeps the UI responsive while one background fold
-  builds local usage, sessions, and all grouping projections together.
-- A successful automatic or manual refresh atomically replaces usage,
-  sessions, and every Group By projection with one generation. A failed
-  refresh preserves the prior complete generation and reports an explicit
-  degraded state; it never publishes a partially refreshed mix.
-- For the full Client universe, the TUI assembles the active `UsageData` by
-  reading Common and the selected eager Grouped projection from the same
-  pinned inode. `ProjectionStore` does not retain a second Common DTO in
-  memory. The persisted fine-grained `TuiAcc` is loaded lazily only when a
-  proper Client subset is requested, then retained for subsequent subset
-  projections. If generation persistence fails, the TUI reports that failure
-  and may explicitly retain the in-memory accumulator as a degraded projection
-  backend so Group By and Clients filtering remain usable.
-- On Linux/glibc the TUI bounds the allocator to one arena before it starts
-  worker threads, then trims after transient fold state is dropped and after a
-  snapshot is replaced. This prevents short-lived background folds from
-  leaving detached arenas resident at their high-water mark. Other platforms
-  retain their native allocator behavior.
-- Session client-space accounting is the total byte size of scan inputs from
-  the snapshots confirmed at the final cache-decision/fold boundary, grouped by
-  client. It is derived from those same confirmed snapshots as Usage, Sessions,
-  health, and the inventory signature rather than by a second filesystem scan.
-- Every cacheable input has one input policy that enumerates the primary
-  file and all parser-relevant related files. Related inputs include SQLite
-  WAL files, Claude `.meta.json`, and declared sibling files. `InputStamp`
-  values and full fingerprints use exactly this same set, including absent
-  related files so additions and deletions invalidate.
-- Discovery and its pre-parse metadata snapshot form a consumptive
-  `PreparedLocalInputs` inventory. The inventory keeps selected-adapter order,
-  per-adapter unit order, and each unit's parser identity and input policy.
-  Probing freshness and executing a load must use the same inventory; execution
-  never rediscovers inputs. An input added after preparation belongs to the
-  next inventory, not the current load. Prepared snapshots retain only compact
-  presence, size, mtime, and ephemeral file identity entries; labels and paths
-  remain owned by the input policy, which reconstructs an `InputStamp` only
-  when cache comparison or fingerprinting needs one.
-- A persisted `InputStamp` records each input's path, presence, size, and
-  mtime. Cache lookup is header-first: read the cached stamp, collect current
-  metadata, and load the cached body without reading or hashing input bytes
-  when the stamps match. Only a changed stamp triggers a full content
-  fingerprint and parse.
-- A cold or invalidated parse may write a shard only when a post-parse snapshot
-  still matches its pre-parse snapshot. The transient snapshot also records
-  file identity, so an atomic path replacement cannot bind messages and a
-  digest from the old open file to the replacement's stamp. File identity is
-  a race check, not part of the persisted warm-hit freshness contract.
-- The stamp is the deliberate warm-cache freshness contract. A content
-  rewrite that preserves path and size and restores the exact mtime is not
-  detected; detecting it would require reading input bytes on every warm
-  hit, contradicting the zero-input-read requirement. There is no sampling
-  fallback.
-- Codex computes its full content digest in the parser's own read pass. On an
-  append, the old full digest is the expected prefix digest; one hasher reads
-  and verifies that prefix, then continues across the parsed tail. Exact hits
-  use only the stamp and cached digest consistency, with no input-byte read.
-- OpenCode reads current SQLite message rows without owning the potentially
-  large payload TEXT. A first streaming JSON pass requires and classifies the
-  role while validating the complete document; only assistant rows enter the
-  strict full decoder. This keeps large user prompts out of the live parse
-  representation without turning malformed JSON, missing roles, or assistant
-  field errors into empty usage.
-- Each prepared inventory has two related keys. A versioned SHA-256
-  `InputInventorySignature` hashes the canonical requested-client set,
-  adapter and unit order, parser/unit identity, and every declared input's
-  native path, label, presence, size, and mtime without reading input bytes.
-  This signature is persisted in the TUI cache. A process-local `u64` digest is
-  only `DefaultHasher` over those stable signature bytes and is never persisted.
-- Auto-refresh prepares once. If its process digest is unchanged, the
-  consumptive inventory is dropped and parse, aggregation, and cache writes are
-  skipped; otherwise that same inventory is executed. Forced refresh also
-  prepares once and executes the resulting inventory.
-- A fresh TUI cache establishes its initial process digest directly from the
-  persisted inventory signature, without startup discovery. Therefore the
-  first automatic refresh compares current inventory B with cached baseline A:
-  equal inventories are skipped, while different inventories reload B. Stale
-  and missing caches always prepare and execute a background load.
-- `UnifiedMessage` stores no derivable or redundant data: `date` is
-  computed from `timestamp` on demand; `dedup_key` is a 64-bit hash, not
-  a string; high-repetition identity fields (client, model, provider,
-  session, workspace, agent) are interned `Arc<str>`.
-- The process-wide identity interner is a hash index of `Weak<str>` entries,
-  never a strong owner. Hash matches are always confirmed with full string
-  equality. Successful local streaming loads remove dead weak entries only
-  after input messages and Arc-backed accumulators have been dropped and
-  public String DTOs have been materialized. Failed loads first drop their
-  partial accumulators, then perform the same cleanup before returning the
-  original error. Generic aggregation over caller-owned message slices does
-  not sweep the index.
-- Model grouping and client/provider/session/workspace identity maps use
-  structured Arc-backed keys. They match the requested `GroupBy` before cloning
-  any unrelated workspace or session field, and create public Strings only when
-  a bucket is materialized. Distinct identity collections keep empty and
-  singleton states inline and allocate a hash table only after a second value.
-  Distinct structured buckets are never coalesced through legacy
-  delimiter-based public keys. Persisted DTO maps use a
-  versioned, variant-tagged, byte-length-prefixed storage key, including a
-  distinct tag for unknown workspace identity.
-- Serialization layout changes bump `CACHE_FORMAT_VERSION`; parser-only
-  changes bump the relevant parser revision. The shard envelope stores a
-  fixed magic and format version before the bincode header. Ordinary reads
-  accept only v8; explicit pruning recognizes classified v1 through v7 shards
-  only for deletion. Unknown, future, or malformed-current envelopes stop
-  classification before deletion.
+Selected client adapters own input discovery, input identity, parsing, and
+error attribution. Public report paths do not use a central `ScanResult`,
+`scan_all_clients*`, generic scanner error, or dead per-client database slots.
+`ScannerSettings` and focused scanner primitives remain adapter and test seams;
+they do not define another product command or discovery authority.
 
-ADR 0018 implements the planned streaming follow-up with a bounded ordered
-input-fold pipeline. Aggregation paths no longer retain adapter-wide parsed
-results; APIs whose explicit contract returns all messages still materialize
-that final output.
+Discovery produces one consumptive `PreparedLocalInputs` inventory. It records:
+
+- requested clients in canonical order;
+- selected-adapter and per-adapter unit order;
+- parser and unit identity;
+- one `InputPolicy` per unit, including its primary and parser-relevant related
+  inputs; and
+- compact pre-execution metadata snapshots.
+
+Freshness probing and execution consume the same inventory and never rediscover
+inputs. A file added after preparation belongs to the next inventory. Related
+inputs include SQLite WAL files, Claude `.meta.json`, optional workspace
+manifests, and any declared sibling that can affect messages or health. Absent
+related files are represented so creation and deletion invalidate derived data.
+
+### Input identity and freshness
+
+A persisted `InputStamp` contains, for every declared input:
+
+- its native path and label;
+- presence;
+- size;
+- nanosecond mtime; and
+- native file identity: Unix device/inode or Windows volume/file index.
+
+Native file identity is part of the persisted warm-hit contract, not merely an
+ephemeral race check. Atomic path replacement therefore invalidates a shard even
+when size and mtime are preserved. Unsupported platforms fail compilation
+rather than weakening identity.
+
+Cache lookup is header-first. When the persisted stamp and current metadata
+match, the body may be loaded without reading or hashing authoritative input
+bytes. Only a changed stamp requires a full fingerprint and parse. A cold or
+invalidated parse may publish a shard only when a post-parse snapshot still
+matches the prepared snapshot.
+
+Each inventory has two freshness keys:
+
+- a versioned SHA-256 `InputInventorySignature` over canonical clients, adapter
+  and unit order, parser/unit identity, and every declared input's native path,
+  label, presence, size, mtime, and native identity; and
+- a process-local `u64` digest over those stable signature bytes, which is never
+  persisted.
+
+Automatic refresh prepares once. An unchanged process digest drops the
+inventory and skips parse, aggregation, and cache writes; a changed digest
+executes that same inventory. Forced refresh also prepares and executes once. A
+fresh TUI generation establishes the initial process digest from its persisted
+signature without startup discovery; stale or missing generations prepare and
+execute in the background.
+
+Codex computes its full digest during the parser's read. Append handling verifies
+the previous full digest as the expected prefix, then continues the same hasher
+across the tail. Exact hits require stamp and cached-digest consistency without
+another input-byte pass.
+
+### Single-copy bounded fold
+
+The production local load constructs the usage accumulator, health summary,
+input-space accounting, and session projection from one bounded message stream.
+A full `Vec<UnifiedMessage>` is not part of that path. APIs whose explicit
+contract returns all messages still materialize the final vector.
+
+Prepared adapter groups execute in ordered batches:
+
+- batch width is `rayon::current_num_threads()`, with a minimum of one;
+- generic cache users first perform one indexed parallel header/stamp planning
+  pass without reading input bytes;
+- exact hits remain compact deferred body-read plans;
+- misses parse in prepared order with at most one Rayon-width batch owning
+  messages;
+- hits and misses are woven back into unit order, folded sequentially, and
+  dropped before the next miss batch; and
+- cache reads, writes, invalidation, filtering, deduplication, and sink emission
+  remain in that sequential fold order.
+
+A one-shot definitive-miss marker prevents a duplicate header lookup while
+retaining the same snapshot, fingerprint, parse, and post-parse race checks.
+Indeterminate misses recheck. Deduplication and merge state is created once per
+adapter group and survives all batches.
+
+OpenCode keeps one deduplication set across all current SQLite databases and
+batches. OMP builds one parent-task index from all miss paths, consumes planned
+hit bodies before that index is built, and then folds hits and misses in bounded
+order. Codex retains its dedicated exact-hit, stale, append, and recovery path
+because its incremental parse state is not the generic adapter contract.
+
+Codex cold parses, append merges, and race reparses own one raw message vector.
+When cacheable, the fold serializes a borrowed raw slice before applying
+timestamp completion, token normalization/filtering, canonical identity,
+pricing, and exec-session attribution in place.
+
+OpenCode borrows potentially large message TEXT. It stream-validates the full
+JSON document and required role envelope, then fully decodes assistant payloads
+only. Malformed JSON, missing roles, and assistant-field errors remain visible
+instead of becoming empty usage.
+
+### Message representation and aggregation
+
+`UnifiedMessage` stores no redundant derivable value:
+
+- date is derived from timestamp;
+- `dedup_key` is a 64-bit hash rather than a formatted string; and
+- repeated client, model, provider, session, workspace, and agent identities
+  use interned `Arc<str>`.
+
+The process interner indexes `Weak<str>`, confirms hash matches with full string
+equality, and is swept after transient messages and Arc-backed accumulators are
+dropped. Failed loads drop partial accumulators before sweeping and return the
+original error. Aggregation over caller-owned slices does not sweep global
+state.
+
+Grouping uses structured Arc-backed keys, matches the requested grouping before
+cloning unrelated fields, and creates public strings only for materialized
+buckets. Composite identities never use delimiter-concatenated public keys.
+Persisted map keys are versioned, variant-tagged, byte-length-prefixed values
+with a distinct unknown-workspace tag.
+
+Session client-space accounting is the deduplicated byte size of the input
+snapshots confirmed at the final cache-decision/fold boundary. Usage, Sessions,
+Data Health, input space, and the inventory signature all derive from those
+same confirmed snapshots.
+
+### Shard contract and recovery
+
+Each cacheable input has an independent shard with a separately encoded header
+and body. Header discovery does not materialize the body. A planned hit succeeds
+only after the body is opened, its identity is checked, it decodes, and its
+message count matches the header.
+
+Body failures retain the input, parser revision, shard path, and root cause.
+The CLI emits an explicit diagnostic and reparses the authoritative current
+input through its registered adapter. A successful cacheable reparse atomically
+replaces the shard.
+
+A definitively missing, malformed, undecodable, or identity-invalid shard is
+deleted when no replacement can be written. A fingerprint mismatch caused by
+an atomic in-memory or on-disk replacement is non-destructive: the stale plan is
+bypassed, but a potentially valid replacement shard remains unless the reparse
+independently proves it invalid or non-cacheable. Partial and unavailable input
+never publishes a shard.
+
+Cache writes serialize borrowed message slices and do not clone messages merely
+to construct a cache representation. Parser-semantic changes bump the owning
+parser revision; serialization-layout changes bump the shard format.
+
+The current message-shard format is **v9**. Its envelope is the `TOKSHRD\0`
+magic, little-endian format version `9`, a little-endian `u64` header length,
+the bincode header, and the bincode message body. Ordinary reads and explicit
+pruning accept only this envelope.
+
+`tokscale cache prune` is an explicit full traversal of current shard files;
+ordinary report and TUI loads never invoke it. Pruning first validates and
+classifies the complete traversal. An unsupported version, unknown magic,
+truncated envelope, malformed header, undecodable header, oversized shard, or
+filesystem inspection failure aborts the operation before deletion begins.
+After successful classification, pruning removes a shard only when its
+authoritative input is absent, its path is not the canonical path
+derived from the input and parser key, or a higher parser revision exists for
+the same live input and parser. Once deletion begins, an unlink failure is
+reported explicitly; already completed removals are not rolled back.
+
+### Atomic TUI generation storage
+
+One local fold produces the manifest, health data, client-space accounting,
+sessions, client-aware canonical accumulator, one group-agnostic Common
+projection, and four full-universe Grouped projections. The current schema 45
+TUI cache stores them in one atomic JSON bundle.
+
+Common stores Agents, daily and hourly totals with Client membership, the
+contribution graph, report totals, and streaks exactly once. Each Grouped
+projection stores only Models plus daily and hourly model buckets for one
+Group By value. The canonical accumulator records token and cost totals per
+Client so a proper Client subset can reproduce Common without deriving totals
+from a Grouped model projection.
+
+- borrowed canonical, Common, Grouped, session, and metadata views are streamed
+  through a buffered temporary file;
+- one rename publishes the complete bundle;
+- a SHA-256 digest protects the canonical accumulator;
+- startup verifies the digest and decodes all four Grouped projections,
+  including inactive ones;
+- acceptance requires every projection's fields and model Client attribution
+  to belong to the immutable Client universe and requires Common/Grouped daily
+  and hourly shapes to agree; and
+- a reader pins the opened inode so Common and Grouped data cannot cross
+  generations during replacement.
+
+Failure of any schema, digest, projection, Client-membership, or shape check
+invalidates the complete bundle. For the full Client universe, the active view
+is assembled from Common plus one Grouped projection from the same pinned
+inode. The canonical accumulator is loaded lazily only for a proper Client
+subset and then retained for subsequent subset projections.
+
+Generation persistence failure is explicit. The running TUI may retain the
+same in-memory accumulator as a degraded projection backend, but it must not
+claim that persistence succeeded. ADR 0028 defines current schema acceptance,
+refresh installation, and projection behavior.
+
+### Resident-memory behavior
+
+After transient load state or a replaced generation is dropped, Linux/glibc
+builds trim freed pages. The TUI limits glibc to one arena before worker threads
+start so short-lived folds do not leave detached arena high-water marks.
+Other platforms retain native allocator behavior.
 
 ## Consequences
 
-- Peak RSS drops substantially because clean cache entries are loaded lazily
-  from independent input shards and messages are not cloned between stores.
-- The total serialized shard payload shrinks roughly in half (no date
-  strings, no string dedup keys, interned strings still serialize as strings).
-- Cache layout changes cause a one-time shard rebuild after the format bump.
-  Legacy v1 through v7 files remain until explicit prune, so disk usage can
-  temporarily include multiple layouts.
-- A corrupt generic shard produces one visible warning and a same-run input
-  reparse instead of silently suppressing usage. Normal exact hits still read
-  no input bytes and do not eagerly materialize adapter-wide cache bodies.
-- The TUI accepts only schema 45 generation bundles. Any other schema or a
-  bundle missing its inventory signature, canonical client-aware aggregate, or
-  canonical digest is an explicit miss and rebuilds once. Missing Common,
-  missing any of the four Grouped projections, or incompatible Common/Grouped
-  daily or hourly shapes is also an explicit miss. Startup validates all four
-  Grouped projections, including inactive ones, and requires every top-level
-  model row's Client attribution to belong to the immutable Client universe.
-  An accepted bundle supports Clients and Group By projection without a
-  background scan.
-- The full-universe TUI reads Common plus the selected Grouped projection from
-  the pinned generation while steady-state memory holds only the active
-  assembled view and session snapshot. Selecting a proper Client subset lazily
-  loads canonical aggregate state and retains it for later local projections.
-  Refresh failure leaves the previous cross-tab snapshot coherent and visible.
-- Code touching `UnifiedMessage.date` or `dedup_key` as `String` must go
-  through the new accessors; new parsers must intern identity fields.
-- High-cardinality scans no longer leave the interner strongly retaining every
-  identity, and aggregation no longer formats composite String keys for every
-  message. This memory design does not otherwise alter report or TUI DTOs;
-  ADR 0030 owns their explicit terminology migration.
+Peak intermediate memory is bounded by one miss batch, persistent cross-batch
+indexes, and the consumer's required aggregate rather than an adapter-wide
+message collection. Exact warm hits read no authoritative input bytes, while
+native file identity prevents same-size/same-mtime path replacement from
+reusing stale data. Cache faults remain visible and recover from authoritative
+input, and explicit pruning deletes shards outside the current input and parser
+inventory.

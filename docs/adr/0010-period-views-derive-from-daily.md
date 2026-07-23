@@ -1,71 +1,220 @@
-# ADR 0010: Period views derive from daily, not per-message
+# ADR 0010: Report aggregation, identity, and pricing contract
 
 Status: Accepted
 
 ## Context
 
-ADR 0008 made the parse pipeline single-copy and leans hard on keeping the
-per-message main loop (`DataLoader::aggregate_messages`) cheap. The view
-layer had one holdout that worked against that: the Minutely tab folded
-usage per-message inside that hot loop. Per-minute buckets are
-high-cardinality (up to ~525K/year), so the tab had to be gated behind
-`minutely_tab_enabled`, backed by a `MinutelySortCache`, and given a
-special-case in `cache.rs` (`if minutely_enabled && data.minutely.is_empty()
-{ return Stale }`) just to keep its cost off users who never opened the tab.
+Local reports combine authoritative model/token facts with several derived
+views: time buckets, workspace and agent attribution, Group By projections,
+estimated cost, and graph metadata. If those layers independently reinterpret
+identity or refold the same messages, reports can disagree and the single-copy
+pipeline loses its benefit.
 
-Monthly and Weekly tabs were added as new time-dimension views. The design
-question was whether to fold them per-message in the main loop like hourly,
-or derive them some other way.
-
-Corpus scale matters here: ~255K messages on the real dataset, against a
-`daily` aggregate of ≤365 entries/year. That is a 2–3 order-of-magnitude
-difference in input size.
+This ADR defines the complete local-report projection, identity, pricing, and
+contribution-graph contract. ADR 0008 owns input execution and storage; ADR
+0028 owns TUI generation and interaction.
 
 ## Decision
 
-Time-dimension views **coarser than daily** (monthly, weekly, and any future
-period) are derived from the already-aggregated `daily` buckets via
-`build_period_usage(daily, kind)` in
-`crates/tokscale-core/src/aggregate/tui.rs`. They are **not** re-folded
-per-message in `DataLoader`'s main loop, and no new per-message time map may
-be added for a coarse view.
+### Aggregation boundary
 
-The granularity boundary is the rule's hinge:
+Usage aggregation lives in the core and is shared by reports and the TUI.
+Per-message folding produces the canonical model/client/provider/session/
+workspace facts, daily totals, and finer-than-daily data that cannot be
+recovered later.
 
-- **Coarser than daily** (month, week, year, …): derivable from `daily`
-  without losing information, because a period spans many days. Fold the
-  ≤365 daily entries, not the ~255K messages.
-- **Finer than daily** (hourly, and the removed minutely): must be captured
-  per-message in the hot loop, because `daily` has already discarded that
-  finer granularity. Minutely was removed rather than kept because its
-  per-message, high-cardinality cost was not worth a niche view; hourly is
-  kept because it is broadly useful and there is no coarser projection to
-  derive it from.
+Maintained time views coarser than daily are derived from the already aggregated
+daily buckets with `build_period_usage(daily, kind)`:
 
-Why from-daily, not per-message:
+- monthly and weekly never add another per-message map;
+- hourly remains a per-message aggregate because daily has discarded hour
+  identity; and
+- minutely is not a maintained view because its high-cardinality per-message
+  cost is not justified.
 
-- `daily` is a **hot aggregate** — the contribution graph, Overview, and
-  Daily tabs all consume it, so it is computed on every load regardless.
-  Period is a **cold view**, needed only on its own tab. Folding a cold
-  view from the hot `daily` product keeps the per-message loop lean
-  instead of opening another aggregation branch there (ADR 0008's posture).
-- At ≤365 days/year, `build_period_usage` is microseconds and is computed
-  on demand (even per-frame) with no cache. That removes the entire gating
-  apparatus the per-message approach forced: the `minutely_enabled` toggle,
-  `MinutelySortCache`, the `cache.rs` special-case, and the
-  `background_data_loader` parameter are all gone.
+Daily buckets retain the client/model token detail needed to make supported
+period projections lossless. A new coarse metric must first exist in daily or
+must justify a separate per-message fold explicitly.
+
+Local `cwd` workspace attribution is core behavior shared by CLI, TUI, and
+cache paths. Callers do not reconstruct it independently. Unknown or ambiguous
+workspace identity remains explicit rather than being mapped to a convenient
+workspace.
+
+### Stable agent identity
+
+Agents group by stable type or role, not per-run presentation labels:
+
+- runtime nicknames, path segments, and generated names are not primary keys;
+- instance ids belong in `agent_instance` and may contribute to Instances;
+- Codex uses stable role, subagent, or exec-session labels, never
+  `agent_nickname`;
+- Claude preserves recognized stable subagent types and maps unknown temporary
+  sidechains to `Claude Subagent`;
+- OMP recovers roles from parent `task` calls; canonical swarm artifacts group
+  as `OMP Swarm` while the full artifact stem remains the instance;
+- Kimi uses only known explicit `config.update.profileName` values, not `main`
+  or `agent-N` path segments; and
+- a message without a recognized stable agent identity creates no Agents row.
+
+Parsers write stable identity into `UnifiedMessage.agent`; aggregation does not
+reinterpret runtime labels. Agent aggregation uses the structured
+`(client, agent)` identity and every public Agent entry carries exactly one
+Client, so equal labels from different Clients never merge. Identity-semantic
+changes invalidate affected message shards and the persisted TUI generation
+through the appropriate parser revision and schema/version change.
+
+### Group By projections
+
+Group By is a projection of an installed canonical aggregate. It changes model
+row keys and labels, never authoritative totals, health, input space, sessions,
+the refresh clock, or the underlying generation.
+
+The TUI and headless Models report share the complete public Group By set:
+
+```text
+model
+client,model
+client,provider,model
+workspace,model
+```
+
+Models defaults to `model`. Sessions is an independent generation-scoped view,
+not a model grouping dimension.
+
+Every projection field is classified as:
+
+- **group-keyed:** the Models table and per-client model sub-buckets in daily,
+  hourly, and derived period views; or
+- **group-agnostic:** day/hour totals, agents, contribution graph, streaks, and
+  every Top Model ranking.
+
+Top Model rankings always group by the bare canonical `model_id`, regardless of
+active grouping. WorkspaceModel and Model projections of the same generation
+therefore rank identically.
+
+Model-carrying view entries have disjoint fields:
+
+- `model_id` is the bare canonical semantic identity and the only key for
+  ranking, model grouping, and model color;
+- `display_name` is presentation only and never encodes workspace; and
+- grouping dimensions such as `workspace_key` and `workspace_label` travel in
+  dedicated structured fields.
+
+`GroupedModelKey::map_key` is a collision-free internal storage encoding, not a
+display or semantic fallback. `color_key` is not part of the model contract.
+Model color is the fixed brand color selected from canonical model family; an
+unclassified model receives the explicit neutral color. Provider, route, cost,
+rank, client, workspace, and Group By do not affect that color.
+
+Exports identify `groupBy` and emit structured grouping fields such as
+`workspaceKey` and `workspaceLabel`, so payloads are self-describing.
+
+Models detail is reversible and generation-scoped:
+
+- under Model, Enter locks the model and shows Client + Provider rows;
+- under ClientModel, Enter locks client and model and shows Provider rows;
+- both use the installed ClientProviderModel projection;
+- locked dimensions move into the title and are omitted from varying table
+  columns;
+- Esc restores the outer list and sort state;
+- client reprojection preserves a lock when every locked dimension remains in
+  scope, otherwise the detail closes with an explicit status; and
+- generation refresh invalidates the detail projection.
+
+Groupings already exposing Provider or Workspace do not offer that transition.
+
+### Canonical model and pricing authority
+
+Observed model strings may include provider, route, plan, reasoning, service
+tier, release date, or private alias information. Core canonicalization runs
+before grouping and pricing and produces the report's authoritative
+`model_id`; provider remains a separate dimension.
+
+Model identity and token buckets are primary accounting facts. Cost is a
+secondary projection and never controls eligibility.
+
+- Parsers ignore app/vendor `cost`, credits, spend, and billing-total fields.
+- Finalization clears any parser/cache cost and derives cost only from
+  canonical model identity, provider scope, and token buckets.
+- Custom pricing has highest priority and matches the final canonical model id
+  exactly, case-insensitively.
+- Public Pricing Sources have the deterministic order LiteLLM, OpenRouter, then
+  models.dev. A forced `--pricing-source` limits lookup to that catalog. An
+  explicit `0.0` row is valid; a row without price fields is not pricing data.
+- Public lookup receives one canonical model id without a provider or route
+  prefix. It admits only catalog rows whose model component equals that id
+  case-insensitively.
+- Provider scope comes from a non-empty observed provider, then the shared
+  deterministic model-family inference. With known scope, exact rows for that
+  provider are considered across all catalogs before any exact unscoped row;
+  catalog order breaks ties inside each class. With unknown scope, only an exact
+  unscoped row is eligible.
+- Prefix matching, substring matching, fuzzy/edit-distance matching, arbitrary
+  separator rewriting, route-prefix guessing, private aliases, and global
+  model-to-model aliases are prohibited.
+- Parser-side syntactic decoding and canonicalization are not pricing aliases.
+  Canonicalization may deliberately remove a documented release, free-channel,
+  reasoning, service-tier, or client-route decoration before exact lookup.
+- Standalone `pricing lookup <model>` accepts the canonical model component and
+  follows the same exact catalog and source-order rules.
+- If no exact custom or public row matches, tokens remain and cost is `0.0`.
+
+Built-in private price overrides are not allowed. Service tier is not a
+separate pricing dimension; canonicalization may currently collapse route-tier
+labels, so derived cost may differ from provider invoices or subscription
+billing.
+
+### Total-only token projection
+
+Inputs that expose a positive authoritative total but no bucket split may enter
+normal reports through one fixed allocation. The five bucket weights are:
+
+| Bucket | Numerator | Ratio |
+| --- | ---: | ---: |
+| input | 2,182,896,619 | 8.090371475% |
+| output | 112,659,190 | 0.417543685% |
+| cache read | 24,546,162,069 | 90.974335525% |
+| cache write | 104,142,575 | 0.385978938% |
+| reasoning | 35,553,511 | 0.131770377% |
+
+The denominator is `26,981,413,964`. Integer largest-remainder rounding ensures
+each row's allocated buckets equal its exact total. For multiple rows from one
+input unit, allocation is batched so row totals remain exact and aggregate
+buckets equal the allocation of the aggregate total.
+
+This is a fixed documented projection, not evidence that the input supplied
+real buckets. Grok Build and local Warp use it. Changing the ratio is a report
+semantic change requiring this ADR, focused tests, and parser/cache revision
+review.
+
+### Report and contribution-graph surface
+
+The complete local-report product is the TUI. `models` is its one headless
+projection and consumes the same canonical `UsageData.models` result and export
+builder. Its JSON envelope contains `data.groupBy`, `data.models`,
+`data.totals`, Data Health, and `metadata.processingTimeMs`.
+
+Monthly, Weekly, Daily, Hourly, Stats, Agents, Sessions, and the contribution
+graph remain projections of the same TUI generation. The graph is the total
+`UsageCommonData.graph` value stored once in Common; it is not an independent
+command, JSON product, acquisition path, or pricing authority.
+
+Raw unified-message APIs remain available when materialized messages are their
+stated result. Cross-crate aggregate types used to connect core and CLI are
+implementation seams for the canonical local-report pipeline, not separate
+product contracts.
+
+Pricing caches are fresh for one hour. A missing or expired cache may refresh;
+a failed refresh may use an any-age disk cache with an explicit pricing
+diagnostic. Without usable pricing, local usage still succeeds and unpriceable
+cost remains `0.0`. Pricing status belongs to the load/TUI diagnostic state,
+not to graph metadata.
 
 ## Consequences
 
-- Adding a new period view = a new `PeriodKind` + descriptor function, not a
-  new map in the per-message main loop.
-- `build_period_usage` belongs in the aggregation engine as a derived
-  finalization step from `daily`, not as its own per-message accumulator.
-- The design depends on `daily` retaining enough detail
-  (`client_breakdown` with per-model `TokenBreakdown`) for the period to be
-  lossless. A period-level metric `daily` does not store cannot be derived
-  this way — extend `daily` first, or fold per-message with explicit
-  justification.
-- Under ADR 0009's ahead-only policy, if upstream later adds period-style
-  views, they are ported against this rule (derive from daily), not copied
-  verbatim as per-message folds.
+All local views share one aggregation and identity authority. Coarse periods are
+cheap projections, Group By cannot change totals or rankings, agent/workspace
+identity stays stable, and pricing uncertainty cannot discard usage. Exact
+canonical/provider-scoped lookup makes unpriced usage visible as `$0.00`
+instead of inventing a plausible cost.
