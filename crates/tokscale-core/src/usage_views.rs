@@ -64,6 +64,10 @@ impl UsageTokenBreakdown {
 pub struct UsageModelEntry {
     pub model: String,
     pub provider: String,
+    /// Canonical display of every Client contributing to this model bucket.
+    ///
+    /// Client-scoped groupings contain one key. Groupings that merge Clients
+    /// join their keys with [`MODEL_CLIENT_SEPARATOR`].
     pub client: String,
     pub workspace_key: Option<String>,
     pub workspace_label: Option<String>,
@@ -71,6 +75,18 @@ pub struct UsageModelEntry {
     pub cost: f64,
     pub performance: ModelPerformance,
     pub session_count: u32,
+}
+
+pub const MODEL_CLIENT_SEPARATOR: &str = ", ";
+
+impl UsageModelEntry {
+    /// Iterate the canonical Client keys represented by [`Self::client`].
+    ///
+    /// Keep consumers on this helper rather than duplicating the display
+    /// delimiter contract.
+    pub fn client_keys(&self) -> impl Iterator<Item = &str> {
+        self.client.split(MODEL_CLIENT_SEPARATOR)
+    }
 }
 
 #[derive(Debug, Clone)]

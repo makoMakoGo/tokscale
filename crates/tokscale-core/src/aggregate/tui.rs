@@ -724,7 +724,7 @@ fn materialize_tui_model(mut bucket: TuiModelBucket) -> UsageModelEntry {
             .iter()
             .map(|(client, _)| client.as_ref())
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(crate::usage_views::MODEL_CLIENT_SEPARATOR)
     } else {
         bucket.client.to_string()
     };

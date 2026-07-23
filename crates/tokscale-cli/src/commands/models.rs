@@ -59,10 +59,7 @@ fn aggregate_performance(models: &[UsageModelEntry], total_tokens: u64) -> Model
 }
 
 fn model_clients_include(model: &UsageModelEntry, client: &str) -> bool {
-    model
-        .client
-        .split(", ")
-        .any(|candidate| candidate == client)
+    model.client_keys().any(|candidate| candidate == client)
 }
 
 #[allow(clippy::too_many_arguments)]

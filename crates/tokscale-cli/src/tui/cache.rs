@@ -620,6 +620,50 @@ mod bundle_tests {
 
     #[test]
     #[serial]
+    fn schema_45_rejects_model_clients_outside_universe_in_active_and_inactive_projections() {
+        let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let accumulator = same_named_cross_client_agent_accumulator();
+        let clients = HashSet::from([ClientId::OpenCode, ClientId::RooCode]);
+        let client_space = BTreeMap::from([
+            ("opencode".to_string(), 1024),
+            ("roocode".to_string(), 2048),
+        ]);
+        let path = cache_file().unwrap();
+
+        for (boundary, projection) in [("active", "model"), ("inactive", "workspaceModel")] {
+            save_tui_bundle_cache(
+                &accumulator,
+                &[],
+                &client_space,
+                &Default::default(),
+                &clients,
+                &scope,
+                signature(),
+            )
+            .unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+            let model = &mut value["projections"][projection]["models"][0];
+            assert!(
+                model["client"].as_str().unwrap().contains(", "),
+                "fixture must exercise a model bucket that merges Clients"
+            );
+            model["client"] = serde_json::Value::from("opencode, foreign-client");
+            tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+                .unwrap();
+
+            assert!(
+                matches!(
+                    load_cache(&clients, &GroupBy::Model, &scope),
+                    CacheResult::Miss
+                ),
+                "{boundary} model Client corruption must invalidate the schema-45 bundle"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
     fn schema_45_rejects_missing_required_projection_fields() {
         type Mutation = fn(&mut serde_json::Value);
 
@@ -2083,9 +2127,14 @@ fn cache_usage_clients_are_enabled(client_universe: &HashSet<ClientId>, data: &U
         .map(|client| client.as_str())
         .collect();
 
-    data.agents
+    data.models
         .iter()
-        .all(|agent| enabled.contains(agent.client.as_str()))
+        .flat_map(ModelUsage::client_keys)
+        .all(|client| enabled.contains(client))
+        && data
+            .agents
+            .iter()
+            .all(|agent| enabled.contains(agent.client.as_str()))
         && data.daily.iter().all(|day| {
             day.client_breakdown
                 .keys()
@@ -2438,7 +2487,13 @@ fn grouped_projection_shape_skeleton(data: &UsageGroupedData) -> UsageGroupedDat
 
 struct ValidatedProjectionSet {
     selected: UsageGroupedData,
-    shape_skeletons: Vec<(&'static str, UsageGroupedData)>,
+    validation_shapes: Vec<ValidatedProjectionShape>,
+}
+
+struct ValidatedProjectionShape {
+    field: &'static str,
+    shape: UsageGroupedData,
+    model_clients: BTreeSet<String>,
 }
 
 struct ValidatedProjectionSetSeed<'a> {
@@ -2474,7 +2529,7 @@ impl<'de> Visitor<'de> for ValidatedProjectionSetVisitor {
         A: MapAccess<'de>,
     {
         let mut selected = None;
-        let mut shape_skeletons = Vec::with_capacity(4);
+        let mut validation_shapes = Vec::with_capacity(4);
         let mut present = 0_u8;
 
         while let Some(field) = map.next_key::<String>()? {
@@ -2496,7 +2551,17 @@ impl<'de> Visitor<'de> for ValidatedProjectionSetVisitor {
                     "cached TUI projection `{field}` is missing authoritative model identity"
                 )));
             }
-            shape_skeletons.push((field, grouped_projection_shape_skeleton(&grouped)));
+            let model_clients = grouped
+                .models
+                .iter()
+                .flat_map(ModelUsage::client_keys)
+                .map(str::to_owned)
+                .collect();
+            validation_shapes.push(ValidatedProjectionShape {
+                field,
+                shape: grouped_projection_shape_skeleton(&grouped),
+                model_clients,
+            });
             if field == self.selected_field {
                 selected = Some(grouped);
             }
@@ -2514,7 +2579,7 @@ impl<'de> Visitor<'de> for ValidatedProjectionSetVisitor {
                     self.selected_field
                 ))
             })?,
-            shape_skeletons,
+            validation_shapes,
         })
     }
 }
@@ -2635,7 +2700,7 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
     {
         let mut schema_version: Option<u32> = None;
         let mut timestamp = None;
-        let mut client_universe = None;
+        let mut client_universe: Option<Vec<String>> = None;
         let mut report_scope = None;
         let mut input_inventory_signature = None;
         let mut health = None;
@@ -2703,17 +2768,31 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
             .try_into()
             .map_err(serde::de::Error::custom)?;
         let grouped = required(grouped, "projections")?;
-        for (field, shape) in &grouped.shape_skeletons {
-            UsageData::validate_projection_parts(&common, shape).map_err(|error| {
+        let cached_client_universe = required(client_universe, "clientUniverse")?;
+        let enabled_clients: HashSet<&str> =
+            cached_client_universe.iter().map(String::as_str).collect();
+        for validation in &grouped.validation_shapes {
+            UsageData::validate_projection_parts(&common, &validation.shape).map_err(|error| {
                 serde::de::Error::custom(format!(
-                    "cached TUI projection `{field}` does not match Common: {error}"
+                    "cached TUI projection `{}` does not match Common: {error}",
+                    validation.field
                 ))
             })?;
+            if !validation
+                .model_clients
+                .iter()
+                .all(|client| enabled_clients.contains(client.as_str()))
+            {
+                return Err(serde::de::Error::custom(format!(
+                    "cached TUI projection `{}` contains a model Client outside the cached universe",
+                    validation.field
+                )));
+            }
         }
         Ok(ParsedTuiBundle {
             schema_version: required(schema_version, "schemaVersion")?,
             timestamp: required(timestamp, "timestamp")?,
-            client_universe: required(client_universe, "clientUniverse")?,
+            client_universe: cached_client_universe,
             report_scope: required(report_scope, "reportScope")?,
             input_inventory_signature: required(
                 input_inventory_signature,

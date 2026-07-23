@@ -84,11 +84,11 @@ The parse pipeline must hold at most one owned copy of any message.
   SHA-256 digest for the canonical aggregate, which startup verifies before
   accepting the generation. Before acceptance, startup also decodes and
   validates all four Grouped projections, including inactive ones, for required
-  fields, authoritative model identity, and agreement with Common's
-  daily/hourly shape. Corruption in any projection invalidates the whole
-  bundle. A reader pins the opened bundle inode, so a view switch cannot combine
-  Common and Grouped data from different refreshes even while a newer
-  generation is being published.
+  fields, authoritative model identity, model Client attribution within the
+  immutable Client universe, and agreement with Common's daily/hourly shape.
+  Corruption in any projection invalidates the whole bundle. A reader pins the
+  opened bundle inode, so a view switch cannot combine Common and Grouped data
+  from different refreshes even while a newer generation is being published.
 - Startup treats that generation as one logical bundle. A fresh bundle serves
   every local-report tab, including Sessions, without scanning inputs. A stale
   bundle remains wholly visible while one background fold prepares its
@@ -218,8 +218,11 @@ that final output.
   bundle missing its inventory signature, canonical client-aware aggregate, or
   canonical digest is an explicit miss and rebuilds once. Missing Common,
   missing any of the four Grouped projections, or incompatible Common/Grouped
-  daily or hourly shapes is also an explicit miss. An accepted bundle supports
-  Clients and Group By projection without a background scan.
+  daily or hourly shapes is also an explicit miss. Startup validates all four
+  Grouped projections, including inactive ones, and requires every top-level
+  model row's Client attribution to belong to the immutable Client universe.
+  An accepted bundle supports Clients and Group By projection without a
+  background scan.
 - The full-universe TUI reads Common plus the selected Grouped projection from
   the pinned generation while steady-state memory holds only the active
   assembled view and session snapshot. Selecting a proper Client subset lazily
