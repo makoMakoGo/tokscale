@@ -51,11 +51,7 @@ impl ViewState {
 
         match key.code {
             KeyCode::Enter if !self.session_detail_active() => {
-                if let Some(client) = self
-                    .client_rows(app)
-                    .get(self.session_clients.selected)
-                    .map(|row| row.client.clone())
-                {
+                if let Some(client) = self.selected_client_row(app).map(|row| row.client.clone()) {
                     self.selected_session_client = Some(client);
                     self.session_details = ListInteraction::default();
                 }
@@ -172,24 +168,31 @@ impl ViewState {
         )
     }
 
-    pub(crate) fn client_rows(&self, app: &App) -> Vec<ClientSummary> {
-        let mut rows = app
-            .session_snapshot
+    pub(crate) fn client_rows<'a>(&self, app: &'a App) -> Vec<&'a ClientSummary> {
+        let mut rows = self.visible_client_rows(app);
+        rows.sort_by(|left, right| compare_client_rows(app, left, right));
+        rows
+    }
+
+    pub(crate) fn selected_client_row<'a>(&self, app: &'a App) -> Option<&'a ClientSummary> {
+        let selected = self.session_clients.selected;
+        let mut rows = self.visible_client_rows(app);
+        if selected >= rows.len() {
+            return None;
+        }
+
+        let (_, row, _) = rows.select_nth_unstable_by(selected, |left, right| {
+            compare_client_rows(app, left, right)
+        });
+        Some(*row)
+    }
+
+    fn visible_client_rows<'a>(&self, app: &'a App) -> Vec<&'a ClientSummary> {
+        app.session_snapshot
             .client_summaries()
             .iter()
             .filter(|summary| app.is_client_selected(&summary.client))
-            .cloned()
-            .collect::<Vec<_>>();
-        rows.sort_by(|left, right| {
-            let ordering = match app.sort_field {
-                SortField::Date => left.last_seen.cmp(&right.last_seen),
-                SortField::Tokens => left.session_count.cmp(&right.session_count),
-                SortField::Cost => left.space_bytes.cmp(&right.space_bytes),
-            };
-            apply_direction(ordering, app.sort_direction)
-                .then_with(|| left.client.cmp(&right.client))
-        });
-        rows
+            .collect()
     }
 
     pub(crate) fn session_rows<'a>(&self, app: &'a App) -> Vec<&'a SessionEntry> {
@@ -274,6 +277,15 @@ fn apply_direction(ordering: Ordering, direction: SortDirection) -> Ordering {
         SortDirection::Ascending => ordering,
         SortDirection::Descending => ordering.reverse(),
     }
+}
+
+fn compare_client_rows(app: &App, left: &ClientSummary, right: &ClientSummary) -> Ordering {
+    let ordering = match app.sort_field {
+        SortField::Date => left.last_seen.cmp(&right.last_seen),
+        SortField::Tokens => left.session_count.cmp(&right.session_count),
+        SortField::Cost => left.space_bytes.cmp(&right.space_bytes),
+    };
+    apply_direction(ordering, app.sort_direction).then_with(|| left.client.cmp(&right.client))
 }
 
 fn move_command(code: KeyCode) -> Option<MoveCommand> {

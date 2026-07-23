@@ -235,8 +235,7 @@ fn view_actions(app: &App, state: &ViewState) -> Vec<Action> {
         Tab::Hourly => vec![Action::ToggleView],
         Tab::Sessions if state.session_detail_active() => vec![Action::Back],
         Tab::Sessions => state
-            .client_rows(app)
-            .get(state.client_selected())
+            .selected_client_row(app)
             .is_some_and(|row| row.session_count > 0)
             .then_some(Action::OpenDetails)
             .into_iter()
@@ -256,7 +255,7 @@ mod tests {
     use tokscale_core::{GroupBy, TuiAcc, TuiSessionEntry};
 
     use super::*;
-    use crate::tui::app::{ProjectionBackend, TuiConfig};
+    use crate::tui::app::{ProjectionBackend, SortDirection, TuiConfig};
     use crate::tui::data::{
         ContributionDay, DailyClientInfo, DailyModelInfo, DailyUsage, GraphData, HourlyModelInfo,
         HourlyUsage, TokenBreakdown,
@@ -494,6 +493,30 @@ mod tests {
         assert!(set.contains(Action::Sort(SortField::Tokens)));
         assert!(set.contains(Action::OpenDetails));
         assert!(set.contains(Action::Export));
+    }
+
+    #[test]
+    fn session_detail_action_follows_the_selected_row_in_sort_order() {
+        let mut app = make_app(Tab::Sessions, true);
+        app.session_snapshot = SessionSnapshot::new(
+            vec![TuiSessionEntry {
+                client: "claude".to_string(),
+                session_id: "session-1".to_string(),
+                ..TuiSessionEntry::default()
+            }],
+            BTreeMap::from([("codex".to_string(), 0)]),
+        );
+        app.sort_field = SortField::Tokens;
+        app.sort_direction = SortDirection::Ascending;
+
+        let mut state = ViewState::default();
+        assert!(!action_set(&app, &state).contains(Action::OpenDetails));
+        assert!(state.handle_key(&app, &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(action_set(&app, &state).contains(Action::OpenDetails));
+
+        app.sort_direction = SortDirection::Descending;
+        let state = ViewState::default();
+        assert!(action_set(&app, &state).contains(Action::OpenDetails));
     }
 
     #[test]
