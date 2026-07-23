@@ -77,7 +77,7 @@ pub struct UsageModelEntry {
     pub session_count: u32,
 }
 
-pub const MODEL_CLIENT_SEPARATOR: &str = ", ";
+pub(crate) const MODEL_CLIENT_SEPARATOR: &str = ", ";
 
 impl UsageModelEntry {
     /// Iterate the canonical Client keys represented by [`Self::client`].
