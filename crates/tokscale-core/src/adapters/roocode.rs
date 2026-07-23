@@ -14,7 +14,7 @@ use crate::message_cache::{ParserId, ParserVersion, RelatedInputFailurePolicy};
 use crate::sessions;
 
 const ROOCODE_SIBLINGS: &[&str] = &["api_conversation_history.json"];
-const ROOCODE_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 3;
+const ROOCODE_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 4;
 const ROOCODE_PARSER_VERSION: ParserVersion =
     ParserVersion::new(ParserId::RooCode, ROOCODE_RECORD_REJECTION_REVISION);
 

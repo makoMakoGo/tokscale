@@ -13,7 +13,6 @@ pub mod paths;
 pub mod pricing;
 mod provider_identity;
 pub mod scanner;
-pub mod sessionize;
 pub mod sessions;
 mod token_imputation;
 
@@ -22,13 +21,13 @@ pub mod usage_views;
 
 pub use aggregate::{
     aggregate_by_period, build_contribution_graph, build_contribution_graph_for_today,
-    build_period_usage, calculate_streaks, calculate_streaks_for_today, calculate_summary,
-    calculate_years, find_peak_hour, AgentUsage, AggregatedViews, AggregationConfig, DateRange,
-    PeriodBucket, TuiAcc, TuiSessionEntry, TuiSessionTokens, ViewSet, UNKNOWN_WORKSPACE_LABEL,
+    build_period_usage, calculate_streaks, calculate_streaks_for_today, find_peak_hour,
+    AggregatedViews, AggregationConfig, DateRange, PeriodBucket, TuiAcc, TuiSessionEntry,
+    TuiSessionTokens, ViewSet, UNKNOWN_WORKSPACE_LABEL,
 };
 pub use clients::{
-    cline_session_data_dir_with_env_strategy, warp_sqlite_roots_with_env_strategy, ClientCounts,
-    ClientId, ClientIdentity, LocalClientDef, PathRoot,
+    cline_session_data_dir_with_env_strategy, warp_sqlite_roots_with_env_strategy, ClientId,
+    ClientIdentity, LocalClientDef, PathRoot,
 };
 pub use input_health::{
     DataHealth, InputFailure, InputHealth, InputStatus, RecordRejectionReason, RejectionEntry,
@@ -37,16 +36,11 @@ pub use input_health::{
 pub use local_report_error::{LocalReportError, LocalReportErrorKind};
 pub use message_cache::{prune_input_message_cache, InputCachePruneError, InputCachePruneStats};
 pub use provider_identity::{inferred_provider_from_model, normalize_provider_for_grouping};
-pub use sessionize::{
-    compute_daily_active_time, compute_time_metrics, sessionize, sessionize_time_intervals,
-    SessionInterval, TimeMetrics, TimeSessionInterval, DEFAULT_IDLE_GAP_MS,
-};
 pub use sessions::UnifiedMessage;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hasher;
 use std::sync::Arc;
-use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 
@@ -104,19 +98,13 @@ pub(crate) fn selected_client_ids_include(client: &str, selected: &HashSet<Clien
     ClientId::from_str(client).is_some_and(|client_id| selected.contains(&client_id))
 }
 
-fn client_count_bucket(client: &str) -> Option<ClientId> {
-    ClientId::from_str(client)
-}
-
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub enum GroupBy {
-    Model,
     #[default]
+    Model,
     ClientModel,
     ClientProviderModel,
     WorkspaceModel,
-    Session,
-    ClientSession,
 }
 
 impl std::fmt::Display for GroupBy {
@@ -126,8 +114,6 @@ impl std::fmt::Display for GroupBy {
             GroupBy::ClientModel => write!(f, "client,model"),
             GroupBy::ClientProviderModel => write!(f, "client,provider,model"),
             GroupBy::WorkspaceModel => write!(f, "workspace,model"),
-            GroupBy::Session => write!(f, "session,model"),
-            GroupBy::ClientSession => write!(f, "client,session,model"),
         }
     }
 }
@@ -139,15 +125,11 @@ impl std::str::FromStr for GroupBy {
         let normalized: String = s.split(',').map(|p| p.trim()).collect::<Vec<_>>().join(",");
         match normalized.to_lowercase().as_str() {
             "model" => Ok(GroupBy::Model),
-            "client,model" | "client-model" => Ok(GroupBy::ClientModel),
-            "client,provider,model" | "client-provider-model" => Ok(GroupBy::ClientProviderModel),
-            "workspace,model" | "workspace-model" => Ok(GroupBy::WorkspaceModel),
-            "session" | "session,model" | "session-model" => Ok(GroupBy::Session),
-            "client,session" | "client-session" | "client,session,model" | "client-session-model" => {
-                Ok(GroupBy::ClientSession)
-            }
+            "client,model" => Ok(GroupBy::ClientModel),
+            "client,provider,model" => Ok(GroupBy::ClientProviderModel),
+            "workspace,model" => Ok(GroupBy::WorkspaceModel),
             _ => Err(format!(
-                "Invalid group-by value: '{}'. Valid options: model, client,model, client,provider,model, workspace,model, session,model, client,session,model",
+                "Invalid group-by value: '{}'. Valid options: model, client,model, client,provider,model, workspace,model",
                 s
             )),
         }
@@ -291,13 +273,6 @@ impl ModelPerformance {
         self.timed_tokens = checked_token_add(self.timed_tokens, other.timed_tokens);
         self.sample_count = self.sample_count.saturating_add(other.sample_count);
     }
-}
-
-#[derive(Debug)]
-pub struct LocalClientMessageCounts {
-    pub counts: ClientCounts,
-    pub processing_time_ms: u32,
-    pub health: input_health::HealthReport,
 }
 
 #[derive(Debug, Clone)]
@@ -464,97 +439,6 @@ fn confirmed_input_data_bytes(
     (totals, global_total)
 }
 
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct DailyTotals {
-    pub tokens: i64,
-    pub cost: f64,
-    pub messages: i32,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ClientContribution {
-    pub client: String,
-    pub model_id: String,
-    pub provider_id: String,
-    pub tokens: TokenBreakdown,
-    pub cost: f64,
-    pub messages: i32,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DailyContribution {
-    pub date: String,
-    pub totals: DailyTotals,
-    pub intensity: u8,
-    pub token_breakdown: TokenBreakdown,
-    pub clients: Vec<ClientContribution>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_time_ms: Option<i64>,
-}
-
-/// Per-session aggregate of token usage, cost, and timing — keyed on
-/// `session_id` so downstream consumers can attribute cost to a specific
-/// agent-CLI session rather than just a date or model rollup.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct SessionContribution {
-    pub session_id: String,
-    pub client: String,
-    pub provider: String,
-    pub model: String,
-    pub totals: DailyTotals,
-    pub token_breakdown: TokenBreakdown,
-    pub clients: Vec<ClientContribution>,
-    /// Earliest message timestamp (unix seconds) in the session.
-    pub first_seen: i64,
-    /// Latest message timestamp (unix seconds) in the session.
-    pub last_seen: i64,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct YearSummary {
-    pub year: String,
-    pub total_tokens: i64,
-    pub total_cost: f64,
-    pub range_start: String,
-    pub range_end: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DataSummary {
-    pub total_tokens: i64,
-    pub total_cost: f64,
-    pub total_days: i32,
-    pub active_days: i32,
-    pub average_per_day: f64,
-    pub max_cost_in_single_day: f64,
-    pub clients: Vec<String>,
-    pub models: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct GraphMeta {
-    pub generated_at: String,
-    pub version: String,
-    pub date_range_start: String,
-    pub date_range_end: String,
-    pub processing_time_ms: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pricing_status: Option<pricing::PricingStatus>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub pricing_diagnostics: pricing::PricingDiagnostics,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct GraphResult {
-    pub meta: GraphMeta,
-    pub summary: DataSummary,
-    pub years: Vec<YearSummary>,
-    pub contributions: Vec<DailyContribution>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub time_metrics: Option<sessionize::TimeMetrics>,
-    pub health: input_health::HealthReport,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct ReportOptions {
     pub home_dir: Option<String>,
@@ -567,84 +451,6 @@ pub struct ReportOptions {
     /// Persistent scanner config loaded from `~/.config/tokscale/settings.json`.
     /// Defaults to empty when callers don't care about user-configured paths.
     pub scanner_settings: scanner::ScannerSettings,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ModelUsage {
-    pub client: String,
-    pub merged_clients: Option<String>,
-    pub workspace_key: Option<String>,
-    pub workspace_label: Option<String>,
-    pub session_id: Option<String>,
-    pub model: String,
-    pub provider: String,
-    pub input: i64,
-    pub output: i64,
-    pub cache_read: i64,
-    pub cache_write: i64,
-    pub reasoning: i64,
-    pub message_count: i32,
-    pub cost: f64,
-    pub performance: ModelPerformance,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct MonthlyUsage {
-    pub month: String,
-    pub models: Vec<String>,
-    pub input: i64,
-    pub output: i64,
-    pub cache_read: i64,
-    pub cache_write: i64,
-    pub reasoning: i64,
-    pub message_count: i32,
-    pub cost: f64,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ModelReport {
-    pub entries: Vec<ModelUsage>,
-    pub total_input: i64,
-    pub total_output: i64,
-    pub total_cache_read: i64,
-    pub total_cache_write: i64,
-    pub total_messages: i32,
-    pub total_cost: f64,
-    pub processing_time_ms: u32,
-    pub health: input_health::HealthReport,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct MonthlyReport {
-    pub entries: Vec<MonthlyUsage>,
-    pub total_cost: f64,
-    pub processing_time_ms: u32,
-    pub health: input_health::HealthReport,
-}
-
-/// Hourly usage entry for a single hour slot (e.g. "03-23 14:00")
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct HourlyUsage {
-    pub hour: String,
-    pub clients: Vec<String>,
-    pub models: Vec<String>,
-    pub input: i64,
-    pub output: i64,
-    pub cache_read: i64,
-    pub cache_write: i64,
-    pub message_count: i32,
-    /// Number of user interaction turns (user→assistant boundaries).
-    pub turn_count: i32,
-    pub reasoning: i64,
-    pub cost: f64,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct HourlyReport {
-    pub entries: Vec<HourlyUsage>,
-    pub total_cost: f64,
-    pub processing_time_ms: u32,
-    pub health: input_health::HealthReport,
 }
 
 pub fn get_home_dir_string(home_dir_option: &Option<String>) -> Result<String, String> {
@@ -818,33 +624,6 @@ struct AggregationSink<'a>(&'a mut crate::aggregate::AggregationEngine);
 impl adapters::MessageSink for AggregationSink<'_> {
     fn push_message(&mut self, message: UnifiedMessage) {
         self.0.push(&message);
-    }
-}
-
-struct ClientCountSink {
-    counts: ClientCounts,
-    date_range: DateRange,
-}
-
-impl ClientCountSink {
-    fn new(date_range: DateRange) -> Self {
-        Self {
-            counts: ClientCounts::new(),
-            date_range,
-        }
-    }
-}
-
-impl adapters::MessageSink for ClientCountSink {
-    fn push_message(&mut self, message: UnifiedMessage) {
-        let date = message.date_string();
-        if !self.date_range.contains(&date) {
-            return;
-        }
-
-        if let Some(client) = client_count_bucket(&message.client) {
-            self.counts.add(client, message.message_count.max(0));
-        }
     }
 }
 
@@ -1047,31 +826,6 @@ fn filter_unified_messages(
     filtered
 }
 
-/// Test-only entry point: delegates to the aggregation engine. Kept as the
-/// stable name the model-grouping unit tests call.
-#[cfg(test)]
-fn aggregate_model_usage_entries(
-    messages: Vec<UnifiedMessage>,
-    group_by: &GroupBy,
-) -> Vec<ModelUsage> {
-    // Delegate to the aggregation engine (the single authority for the
-    // model fold). The old inline implementation is gone (#33: one copy).
-    let mut engine =
-        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-            group_by: group_by.clone(),
-            date_range: crate::aggregate::DateRange::none(),
-            views: crate::aggregate::ViewSet::MODEL,
-        });
-    for msg in &messages {
-        engine.push(msg);
-    }
-    engine
-        .finish()
-        .model_report
-        .expect("model view requested")
-        .entries
-}
-
 pub(crate) fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
     checked_token_sum(
         [
@@ -1216,170 +970,25 @@ pub fn load_aggregated_views_with_pricing(
     load_aggregated_views_for_resolved_report(options, &home_dir, &clients, views, pricing)
 }
 
-pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, LocalReportError> {
-    let start = Instant::now();
-    let (home_dir, clients) = resolve_report_request(&options)?;
-    let pricing = load_pricing_for_local_parse().await;
-    let mut views = load_aggregated_views_for_resolved_report(
-        &options,
-        &home_dir,
-        &clients,
-        ViewSet::MODEL,
-        pricing.as_deref(),
-    )?;
-    let mut report = views.model_report.take().expect("model view requested");
-    report.health = views.health.to_report();
-    report.processing_time_ms = start.elapsed().as_millis() as u32;
-    Ok(report)
-}
-
-pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport, LocalReportError> {
-    let start = Instant::now();
-    let (home_dir, clients) = resolve_report_request(&options)?;
-    let pricing = load_pricing_for_local_parse().await;
-    let mut views = load_aggregated_views_for_resolved_report(
-        &options,
-        &home_dir,
-        &clients,
-        ViewSet::MONTHLY,
-        pricing.as_deref(),
-    )?;
-    let mut report = views.monthly_report.take().expect("monthly view requested");
-    report.health = views.health.to_report();
-    report.processing_time_ms = start.elapsed().as_millis() as u32;
-    Ok(report)
-}
-
-/// Generate hourly usage report with hour labels formatted as "MM-DD HH:00".
+/// Build the same canonical usage projection consumed by the TUI.
 ///
-/// Derives the hour slot from `UnifiedMessage.timestamp` (Unix ms). Messages
-/// without a valid timestamp are not included in the hourly distribution.
-pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, LocalReportError> {
-    let start = Instant::now();
+/// Headless renderers select fields from this value instead of maintaining
+/// command-specific aggregation rules.
+pub async fn get_usage_data(
+    options: ReportOptions,
+) -> Result<usage_views::UsageData, LocalReportError> {
     let (home_dir, clients) = resolve_report_request(&options)?;
     let pricing = load_pricing_for_local_parse().await;
     let mut views = load_aggregated_views_for_resolved_report(
         &options,
         &home_dir,
         &clients,
-        ViewSet::HOURLY,
+        ViewSet::TUI,
         pricing.as_deref(),
     )?;
-    let mut report = views.hourly_report.take().expect("hourly view requested");
-    report.health = views.health.to_report();
-    report.processing_time_ms = start.elapsed().as_millis() as u32;
-    Ok(report)
-}
-
-async fn generate_graph_with_loaded_pricing(
-    options: ReportOptions,
-    pricing: Option<&pricing::PricingService>,
-) -> Result<GraphResult, LocalReportError> {
-    let start = Instant::now();
-    let (home_dir, clients) = resolve_report_request(&options)?;
-    let mut views = load_aggregated_views_for_resolved_report(
-        &options,
-        &home_dir,
-        &clients,
-        ViewSet::GRAPH | ViewSet::TIME_METRICS,
-        pricing,
-    )?;
-    let mut result = views.graph.take().expect("graph view requested");
-    result.health = views.health.to_report();
-    result.meta.processing_time_ms = start.elapsed().as_millis() as u32;
-    Ok(result)
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct TimeMetricsReport {
-    pub metrics: sessionize::TimeMetrics,
-    pub processing_time_ms: u32,
-    pub health: input_health::HealthReport,
-}
-
-pub async fn get_time_metrics_report(
-    options: ReportOptions,
-) -> Result<TimeMetricsReport, LocalReportError> {
-    let start = Instant::now();
-    let (home_dir, clients) = resolve_report_request(&options)?;
-    let views = load_aggregated_views_for_resolved_report(
-        &options,
-        &home_dir,
-        &clients,
-        ViewSet::TIME_METRICS,
-        None,
-    )?;
-    let mut report = views.time_metrics.expect("time-metrics view requested");
-    report.health = views.health.to_report();
-    report.processing_time_ms = start.elapsed().as_millis() as u32;
-    Ok(report)
-}
-
-/// Generate a usage graph without making pricing a report-availability gate.
-///
-/// A failed pricing refresh uses an older cache when available. Without any
-/// pricing data, token usage is still returned, affected costs remain zero,
-/// and [`GraphMeta::pricing_status`] plus diagnostics expose the condition.
-pub async fn generate_graph(options: ReportOptions) -> Result<GraphResult, LocalReportError> {
-    let mut pricing_diagnostics = pricing::PricingDiagnostics::new();
-    let pricing = load_pricing_for_local_parse_with_diagnostics(&mut pricing_diagnostics).await;
-    let pricing_status = pricing::PricingStatus::from_diagnostics(&pricing_diagnostics);
-    let mut graph = generate_graph_with_loaded_pricing(options, pricing.as_deref()).await?;
-    graph.meta.pricing_status = Some(pricing_status);
-    graph.meta.pricing_diagnostics = pricing_diagnostics;
-    Ok(graph)
-}
-
-// Test-only thin wrappers exposing the live aggregation logic with a message
-// list as input, so aggregate::parity_tests can exercise the same entrypoint
-// shape as production without parse/pricing setup. They are not public API.
-#[cfg(test)]
-pub(crate) fn aggregate_model_usage_entries_pub(
-    messages: Vec<UnifiedMessage>,
-    group_by: &GroupBy,
-) -> Vec<ModelUsage> {
-    aggregate_model_usage_entries(messages, group_by)
-}
-
-#[cfg(test)]
-pub(crate) fn monthly_report_from_messages_pub(messages: Vec<UnifiedMessage>) -> MonthlyReport {
-    // Delegate to the engine (single authority). The parity harness uses
-    // this message-list entry point to confirm the engine is deterministic and
-    // matches what the async production path produces.
-    let mut engine =
-        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-            group_by: crate::GroupBy::ClientModel,
-            date_range: crate::aggregate::DateRange::none(),
-            views: crate::aggregate::ViewSet::MONTHLY,
-        });
-    for msg in &messages {
-        engine.push(msg);
-    }
-    let mut report = engine
-        .finish()
-        .monthly_report
-        .expect("monthly view requested");
-    report.processing_time_ms = 0;
-    report
-}
-
-#[cfg(test)]
-pub(crate) fn hourly_report_from_messages_pub(messages: Vec<UnifiedMessage>) -> HourlyReport {
-    let mut engine =
-        crate::aggregate::AggregationEngine::new(crate::aggregate::AggregationConfig {
-            group_by: crate::GroupBy::ClientModel,
-            date_range: crate::aggregate::DateRange::none(),
-            views: crate::aggregate::ViewSet::HOURLY,
-        });
-    for msg in &messages {
-        engine.push(msg);
-    }
-    let mut report = engine
-        .finish()
-        .hourly_report
-        .expect("hourly view requested");
-    report.processing_time_ms = 0;
-    report
+    let mut data = views.tui_usage.take().expect("tui view requested");
+    data.health = views.health.to_report();
+    Ok(data)
 }
 
 fn apply_token_pricing(message: &mut UnifiedMessage, pricing: Option<&pricing::PricingService>) {
@@ -1569,25 +1178,6 @@ fn parse_prepared_local_unified_messages(
         },
     })
 }
-#[doc(hidden)]
-pub fn count_local_client_messages(
-    options: LocalParseOptions,
-) -> Result<LocalClientMessageCounts, LocalReportError> {
-    let start = Instant::now();
-    let prepared = prepare_local_inputs(options)?;
-    let mut sink = ClientCountSink::new(DateRange {
-        since: prepared.options.since.clone(),
-        until: prepared.options.until.clone(),
-        year: prepared.options.year.clone(),
-    });
-    let health = fold_prepared_local_inputs_with_pricing(prepared, None, &mut sink)?.health;
-    Ok(LocalClientMessageCounts {
-        counts: sink.counts,
-        processing_time_ms: start.elapsed().as_millis() as u32,
-        health: health.to_report(),
-    })
-}
-
 #[doc(hidden)]
 pub async fn parse_local_unified_messages_with_pricing(
     options: LocalParseOptions,

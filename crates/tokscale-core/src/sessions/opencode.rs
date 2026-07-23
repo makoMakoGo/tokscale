@@ -604,9 +604,13 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedInput, OpenCodeSql
             provider_id.as_deref().unwrap_or_default(),
             &model_id,
         );
-        let agent = mode
-            .or(agent)
-            .map(|value| normalize_opencode_agent_name(&value));
+        let agent = [mode.as_deref(), agent.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|value| !value.is_empty())
+            .map(normalize_opencode_agent_name)
+            .filter(|value| !value.is_empty());
 
         let dedup_key = message_id.clone().unwrap_or(row_id);
         let fingerprint = OpenCodeSqliteFingerprint {
@@ -923,6 +927,33 @@ mod tests {
             Some(crate::sessions::dedup_hash_str("row_1"))
         );
         assert!(messages[0].is_main_session);
+    }
+
+    #[test]
+    fn blank_mode_falls_back_to_normalized_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        let conn = create_directory_only_current_db(&path);
+        conn.execute(
+            "INSERT INTO session (id, directory) VALUES (?1, ?2)",
+            rusqlite::params!["ses_1", "/repo"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "row_1",
+                "ses_1",
+                r#"{"role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":10,"output":5,"cache":{"read":0,"write":0}},"time":{"created":1766000000000},"mode":"  ","agent":"omo"}"#
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&path).unwrap().messages;
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("Sisyphus"));
     }
 
     #[test]

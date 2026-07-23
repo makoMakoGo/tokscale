@@ -54,27 +54,13 @@ impl DateRange {
     }
 }
 
-/// Bit-set selecting which views the engine accumulates, so a caller pays only
-/// for the maps it asked for. A `u16` newtype (not `bitflags`) to honor the
-/// campaign's no-new-dependency stance.
+/// Bit-set selecting canonical local projections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ViewSet(u16);
+pub struct ViewSet(u8);
 
 impl ViewSet {
     pub const TUI: ViewSet = ViewSet(0b0000_0001);
-    pub const MODEL: ViewSet = ViewSet(0b0000_0010);
-    pub const MONTHLY: ViewSet = ViewSet(0b0000_0100);
-    pub const HOURLY: ViewSet = ViewSet(0b0000_1000);
-    pub const GRAPH: ViewSet = ViewSet(0b0001_0000);
-    pub const SESSIONS: ViewSet = ViewSet(0b0010_0000);
-    pub const TIME_METRICS: ViewSet = ViewSet(0b0100_0000);
-    pub const AGENTS: ViewSet = ViewSet(0b1000_0000);
-    pub const TUI_SESSIONS: ViewSet = ViewSet(0b0001_0000_0000);
-
-    /// The empty set.
-    pub const fn empty() -> ViewSet {
-        ViewSet(0)
-    }
+    pub const TUI_SESSIONS: ViewSet = ViewSet(0b0000_0010);
 
     /// True iff every bit set in `other` is also set in `self`.
     pub fn contains(self, other: ViewSet) -> bool {

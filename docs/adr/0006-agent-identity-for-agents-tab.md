@@ -16,10 +16,15 @@ a stable agent type or role, not a per-run presentation label.
 
 ## Decision
 
-Group `Agents` rows by stable agent identity only.
+An `Agents` row has the structured identity `(Client, Agent)`, where `Agent`
+is the stable agent type or role produced by that Client's parser.
 
 - Runtime nicknames, path segments, and one-off generated names must not be used
   as the primary aggregation key.
+- Provider is usage attribution and is not part of Agent identity.
+- The same Agent name within one Client is one row. The same Agent name emitted
+  by different Clients remains separate rows; aggregation must never merge it
+  across Clients.
 - Instance identifiers belong in `agent_instance` and may contribute to the
   `Instances` count.
 - Codex uses stable role, subagent, or exec-session labels; `agent_nickname` is not
@@ -35,14 +40,22 @@ Group `Agents` rows by stable agent identity only.
 - Messages without a recognized stable agent identity should not create an
   `Agents` row.
 
-Changing parsed agent identity semantics must bump both input-message cache and
-TUI cache schema versions so stale labels are rebuilt.
+Each Client parser owns any Client-specific Agent extraction and
+normalization. The value written to `UnifiedMessage.agent` is authoritative;
+the aggregate and TUI cache preserve it without another alias table, case
+normalization, comma-joined Client set, or cross-Client reconciliation.
+
+Changing parsed Agent semantics must bump the affected parser revision, and
+changing its persisted TUI shape must bump the TUI cache schema, so stale
+labels or identities are rebuilt.
 
 ## Consequences
 
-Client parsers may keep client-specific recovery logic, but the value written to
-`UnifiedMessage.agent` must already be a stable reporting identity. Aggregation
-and cache code should not attempt to reinterpret runtime labels after parsing.
+Client parsers may keep Client-specific recovery logic, but the value written
+to `UnifiedMessage.agent` must already be a stable reporting identity.
+Aggregation and cache code do not reinterpret runtime labels after parsing.
+The public Agent DTO carries one `client` field because every row represents
+exactly one `(Client, Agent)` identity.
 
 New local client support must identify its stable agent field before populating
 `UnifiedMessage.agent`. If no stable field exists, leave the agent unset instead

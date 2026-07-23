@@ -2,6 +2,10 @@
 
 Status: Accepted
 
+ADR 0033 supersedes this ADR's public Graph operation and JSON policy. Its
+adapter-owned Input discovery and removal of superseded public wrappers remain
+accepted.
+
 ## Context
 
 The original core scanner centrally resolved every client path into a
@@ -26,16 +30,9 @@ used another that preserved usage without pricing.
   and their generic `ScannerError`. Keep `ScannerSettings` and the focused
   scanner primitives that adapters and input-inspection commands actually
   consume.
-- Keep one public graph operation, `generate_graph`. Model identity and token
-  usage are authoritative; pricing remains a derived projection under ADR
-  0013. Graph generation first uses the process pricing service, whose pricing
-  caches are valid for one hour. Missing or expired caches may trigger a
-  refresh. If refresh fails, an any-age disk cache is used when available; if
-  none exists, usage is still returned and unpriceable cost remains `0.0`.
-- Every generated graph exposes `meta.pricingStatus` and, when non-empty,
-  `meta.pricingDiagnostics`. The statuses are `available`,
-  `availableWithWarnings`, `cachedFallback`, and `unavailable`. There is no
-  strict-pricing graph alias or alternate public branch.
+- Contribution-graph data is an internal TUI projection. ADR 0033 removes the
+  public Graph command and `generate_graph` Rust operation rather than keeping
+  a second pricing and serialization policy.
 - Remove public wrappers that expose superseded implementation phases:
   standalone usage-data diagnostics, standalone usage-accumulator diagnostics,
   the unused weekday aggregate, and Claude parent-cache wrappers. Keep the raw
@@ -52,9 +49,8 @@ used another that preserved usage without pricing.
 - Kilo, Goose, Kiro, and other clients have one discovery authority: their
   active adapter. No dead central database slot can disagree with the path the
   parser actually opens.
-- A pricing outage cannot discard valid graph usage. The outage or stale-cache
-  choice remains explicit in JSON metadata and CLI diagnostics instead of
-  being converted into either a fabricated success or a global report error.
+- TUI contribution-graph usage remains part of the canonical local generation
+  and is not gated by a separate public graph-pricing path.
 - Removing warehouse-dead code is not expected to make input parsing faster
   by itself. Release RSS and elapsed-time comparisons remain regression gates,
   not claimed performance wins.

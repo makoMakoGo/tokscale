@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-binary=${1:?usage: measure-scan-performance.sh BINARY LABEL CLIENTS [RUNS] [REPORT]}
-label=${2:?usage: measure-scan-performance.sh BINARY LABEL CLIENTS [RUNS] [REPORT]}
-clients=${3:?usage: measure-scan-performance.sh BINARY LABEL CLIENTS [RUNS] [REPORT]}
+binary=${1:?usage: measure-scan-performance.sh BINARY LABEL CLIENTS [RUNS]}
+label=${2:?usage: measure-scan-performance.sh BINARY LABEL CLIENTS [RUNS]}
+clients=${3:?usage: measure-scan-performance.sh BINARY LABEL CLIENTS [RUNS]}
 runs=${4:-3}
-report=${5:-time-metrics}
+
+if (( $# > 4 )); then
+  echo "error: usage: measure-scan-performance.sh BINARY LABEL CLIENTS [RUNS]" >&2
+  exit 1
+fi
 
 if [[ ! "$runs" =~ ^[1-9][0-9]*$ ]]; then
   echo "error: RUNS must be a positive integer, got: $runs" >&2
@@ -20,18 +24,7 @@ if [[ ! -x "$binary" ]]; then
   exit 1
 fi
 
-case "$report" in
-  time-metrics)
-    report_args=(time-metrics --json --no-spinner -c "$clients")
-    ;;
-  graph)
-    report_args=(graph --no-spinner -c "$clients")
-    ;;
-  *)
-    echo "error: REPORT must be time-metrics or graph, got: $report" >&2
-    exit 1
-    ;;
-esac
+report_args=(models --group-by model --json --no-spinner -c "$clients")
 
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT

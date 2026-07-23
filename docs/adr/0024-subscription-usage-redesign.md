@@ -82,6 +82,11 @@ Codex and ChatGPT subscription lookup reads the active provider-owned Codex
 authentication artifact under ADR 0023. It does not restore Tokscale account
 switching or a second credential store.
 
+ADR 0033 applies the same boundary to Warp: Tokscale no longer stores Warp
+credentials, contacts its GraphQL quota surface, maintains a synchronized quota
+cache, or exposes a `tokscale warp ...` namespace. This does not remove the
+separate local Warp Client that reads provider-owned `warp.sqlite`.
+
 The existing `TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY` contract remains valid.
 Future support for multiple Z.ai plans must reference multiple external
 secrets rather than copy their values into Tokscale.

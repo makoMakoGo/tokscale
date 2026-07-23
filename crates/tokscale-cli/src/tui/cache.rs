@@ -16,20 +16,19 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
-use tokscale_core::{
-    sessions, GroupBy, InputInventorySignature, ModelPerformance, TuiAcc, TuiSessionEntry,
-};
+use tokscale_core::{GroupBy, InputInventorySignature, ModelPerformance, TuiAcc, TuiSessionEntry};
 
 use tokscale_core::ClientId;
 
 use super::data::{
-    AgentUsage, ContributionDay, DailyClientInfo, DailyModelInfo, DailyUsage, GraphData,
-    HourlyModelInfo, HourlyUsage, ModelUsage, TokenBreakdown, UsageData,
+    AgentUsage, ContributionDay, DailyClientCommon, DailyModelInfo, DailyModelProjection,
+    DailyUsageCommon, GraphData, HourlyModelInfo, HourlyModelProjection, HourlyUsageCommon,
+    ModelUsage, TokenBreakdown, UsageCommonData, UsageData, UsageGroupedData,
 };
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 44;
+const CACHE_SCHEMA_VERSION: u32 = 45;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -59,7 +58,7 @@ mod bundle_tests {
     use std::ffi::{OsStr, OsString};
     use std::{env, fs};
     use tempfile::TempDir;
-    use tokscale_core::TuiSessionTokens;
+    use tokscale_core::{DateRange, TokenBreakdown, TuiSessionTokens, UnifiedMessage};
 
     struct EnvVarGuard {
         key: &'static str,
@@ -182,9 +181,13 @@ mod bundle_tests {
     }
 
     fn assert_projection_eq(actual: &UsageData, expected: &UsageData) {
-        let actual = serde_json::to_value(CachedProjectionUsageDataRef::from(actual)).unwrap();
-        let expected = serde_json::to_value(CachedProjectionUsageDataRef::from(expected)).unwrap();
-        assert_eq!(actual, expected);
+        let mut actual = actual.clone();
+        actual.health = Default::default();
+        actual.error = None;
+        let mut expected = expected.clone();
+        expected.health = Default::default();
+        expected.error = None;
+        assert_eq!(format!("{actual:#?}"), format!("{expected:#?}"));
     }
 
     fn refresh_canonical_digest(value: &mut serde_json::Value) {
@@ -192,9 +195,42 @@ mod bundle_tests {
         value["canonicalDigest"] = serde_json::Value::from(sha256_hex(&canonical));
     }
 
+    fn same_named_cross_client_agent_accumulator() -> TuiAcc {
+        let tokens = TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 2,
+            cache_write: 1,
+            reasoning: 3,
+        };
+        let messages = [
+            UnifiedMessage::new_with_agent(
+                "opencode",
+                "gpt-5.5",
+                "openai",
+                "open-session",
+                1_779_876_000_000,
+                tokens.clone(),
+                0.25,
+                Some("Builder".into()),
+            ),
+            UnifiedMessage::new_with_agent(
+                "roocode",
+                "gpt-5.5",
+                "openai",
+                "roo-session",
+                1_779_876_100_000,
+                tokens,
+                0.5,
+                Some("Builder".into()),
+            ),
+        ];
+        tokscale_core::build_tui_accumulator(&messages, DateRange::none())
+    }
+
     #[test]
     #[serial]
-    fn schema_44_bundle_round_trips_sessions_and_metadata() {
+    fn schema_45_bundle_round_trips_sessions_and_metadata() {
         let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
         let accumulator = TuiAcc::new();
         let expected_signature = signature();
@@ -234,18 +270,63 @@ mod bundle_tests {
         assert!(raw["sessions"][0].get("source").is_none());
         assert_eq!(raw["health"]["inputDataBytes"], 4096);
         assert_eq!(raw["canonicalDigest"].as_str().unwrap().len(), 64);
-        assert!(raw["projections"]["model"].get("health").is_none());
-        assert_eq!(
-            raw["projections"]["model"]["graph"],
-            serde_json::json!({ "weeks": [] })
-        );
+        assert!(raw["common"].get("health").is_none());
+        assert!(raw["common"].get("models").is_none());
+        assert!(raw["projections"]["model"].get("agents").is_none());
+        assert_eq!(raw["common"]["graph"], serde_json::json!({ "weeks": [] }));
 
         let CacheResult::Fresh(loaded) = load_cache(&clients, &GroupBy::Model, &scope) else {
-            panic!("expected a fresh schema-44 bundle");
+            panic!("expected a fresh schema-45 bundle");
         };
         assert_eq!(loaded.sessions, sessions);
         assert_eq!(loaded.client_space, client_space);
         assert_eq!(loaded.data.health, health);
+    }
+
+    #[test]
+    #[serial]
+    fn schema_45_keeps_same_named_agents_separate_across_clients() {
+        let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let accumulator = same_named_cross_client_agent_accumulator();
+        let clients = HashSet::from([ClientId::OpenCode, ClientId::RooCode]);
+        let client_space = BTreeMap::from([
+            ("opencode".to_string(), 1024),
+            ("roocode".to_string(), 2048),
+        ]);
+
+        save_tui_bundle_cache(
+            &accumulator,
+            &[],
+            &client_space,
+            &Default::default(),
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+
+        let CacheResult::Fresh(loaded) = load_cache(&clients, &GroupBy::Model, &scope) else {
+            panic!("expected a fresh schema-45 bundle");
+        };
+        assert_eq!(loaded.data.agents.len(), 2);
+        let identities = loaded
+            .data
+            .agents
+            .iter()
+            .map(|agent| (agent.client.as_str(), agent.agent.as_str()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            identities,
+            BTreeSet::from([("opencode", "Builder"), ("roocode", "Builder")])
+        );
+
+        let raw: serde_json::Value =
+            serde_json::from_reader(File::open(cache_file().unwrap()).unwrap()).unwrap();
+        assert!(raw["common"]["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|agent| agent.get("client").is_some() && agent.get("clients").is_none()));
     }
 
     #[test]
@@ -268,12 +349,9 @@ mod bundle_tests {
             let mut value: serde_json::Value =
                 serde_json::from_reader(File::open(&path).unwrap()).unwrap();
             match graph.clone() {
-                Some(graph) => value["projections"]["model"]["graph"] = graph,
+                Some(graph) => value["common"]["graph"] = graph,
                 None => {
-                    value["projections"]["model"]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("graph");
+                    value["common"].as_object_mut().unwrap().remove("graph");
                 }
             }
             tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
@@ -288,7 +366,7 @@ mod bundle_tests {
 
     #[test]
     #[serial]
-    fn schema_44_nonempty_bundle_round_trips_all_four_public_groupings() {
+    fn schema_45_nonempty_bundle_round_trips_all_four_public_groupings() {
         let (temp, _guard, _clients, scope, _sessions, _client_space) = fixture();
         let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
         let accumulator = nonempty_accumulator(temp.path());
@@ -357,12 +435,22 @@ mod bundle_tests {
         .unwrap();
         let raw: serde_json::Value =
             serde_json::from_reader(File::open(cache_file().unwrap()).unwrap()).unwrap();
-        let cached_day = &raw["projections"]["model"]["daily"][0];
-        assert!(cached_day.get("clientBreakdown").is_some());
-        assert!(cached_day.get("sourceBreakdown").is_none());
+        let cached_common_day = &raw["common"]["daily"][0];
+        assert!(cached_common_day.get("clients").is_some());
+        assert!(cached_common_day.get("clientBreakdown").is_none());
+        assert!(cached_common_day["clients"][0][1].get("models").is_none());
+        let cached_grouped_day = &raw["projections"]["model"]["daily"][0];
+        assert!(cached_grouped_day.get("clientModels").is_some());
+        assert!(cached_grouped_day.get("tokens").is_none());
+        let cached_common_hour = &raw["common"]["hourly"][0];
+        assert!(cached_common_hour.get("models").is_none());
+        let cached_grouped_hour = &raw["projections"]["model"]["hourly"][0];
+        assert!(cached_grouped_hour.get("models").is_some());
+        assert!(cached_grouped_hour.get("clients").is_none());
+        assert!(raw["projections"]["model"].get("graph").is_none());
         assert!(
             !raw.to_string().contains("\"colorKey\""),
-            "schema 44 must derive model colors from modelId"
+            "schema 45 must derive model colors from modelId"
         );
 
         for group_by in [
@@ -374,7 +462,7 @@ mod bundle_tests {
             let expected = accumulator.project(&group_by);
             let loaded = match load_cache(&clients, &group_by, &scope) {
                 CacheResult::Fresh(loaded) | CacheResult::Stale(loaded) => loaded,
-                CacheResult::Miss => panic!("schema-44 bundle must load for {group_by}"),
+                CacheResult::Miss => panic!("schema-45 bundle must load for {group_by}"),
             };
             assert_projection_eq(&loaded.data, &expected);
             assert_eq!(loaded.data.health, health);
@@ -397,14 +485,347 @@ mod bundle_tests {
                 .iter()
                 .all(|model| !model.client.contains("opencode")));
         }
-        assert!(store.project(&GroupBy::Session, &clients).is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn schema_45_rejects_common_and_grouped_shape_mismatches() {
+        type Mutation = fn(&mut serde_json::Value);
+
+        fn mismatch_daily_date(value: &mut serde_json::Value) {
+            value["projections"]["model"]["daily"][0]["date"] =
+                serde_json::Value::from("2026-05-28");
+        }
+
+        fn mismatch_daily_clients(value: &mut serde_json::Value) {
+            value["projections"]["model"]["daily"][0]["clientModels"][0][0] =
+                serde_json::Value::from("foreign-client");
+        }
+
+        fn mismatch_hourly_datetime(value: &mut serde_json::Value) {
+            value["projections"]["model"]["hourly"][0]["datetime"] =
+                serde_json::Value::from("2026-05-28 00:00:00");
+        }
+
+        let (temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
+        let accumulator = nonempty_accumulator(temp.path());
+        let clients = HashSet::from([ClientId::Claude, ClientId::OpenCode]);
+        let client_space =
+            BTreeMap::from([("claude".to_string(), 8192), ("opencode".to_string(), 4096)]);
+        let path = cache_file().unwrap();
+
+        for (boundary, mutate) in [
+            ("daily date", mismatch_daily_date as Mutation),
+            ("daily client keys", mismatch_daily_clients as Mutation),
+            ("hourly datetime", mismatch_hourly_datetime as Mutation),
+        ] {
+            save_tui_bundle_cache(
+                &accumulator,
+                &[],
+                &client_space,
+                &Default::default(),
+                &clients,
+                &scope,
+                signature(),
+            )
+            .unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+            mutate(&mut value);
+            tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+                .unwrap();
+
+            assert!(
+                matches!(
+                    load_cache(&clients, &GroupBy::Model, &scope),
+                    CacheResult::Miss
+                ),
+                "{boundary} mismatch must invalidate the schema-45 bundle"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn schema_45_rejects_corrupt_inactive_projections_during_default_load() {
+        type Mutation = fn(&mut serde_json::Value);
+
+        fn mismatch_client_model_date(value: &mut serde_json::Value) {
+            value["projections"]["clientModel"]["daily"][0]["date"] =
+                serde_json::Value::from("2026-05-28");
+        }
+
+        fn remove_client_provider_model_performance(value: &mut serde_json::Value) {
+            value["projections"]["clientProviderModel"]["models"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("performance");
+        }
+
+        fn remove_workspace_daily_model_id(value: &mut serde_json::Value) {
+            value["projections"]["workspaceModel"]["daily"][0]["clientModels"][0][1][0][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("modelId");
+        }
+
+        let (temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
+        let accumulator = nonempty_accumulator(temp.path());
+        let clients = HashSet::from([ClientId::Claude, ClientId::OpenCode]);
+        let client_space =
+            BTreeMap::from([("claude".to_string(), 8192), ("opencode".to_string(), 4096)]);
+        let path = cache_file().unwrap();
+
+        for (boundary, mutate) in [
+            (
+                "inactive daily shape",
+                mismatch_client_model_date as Mutation,
+            ),
+            (
+                "inactive required model field",
+                remove_client_provider_model_performance as Mutation,
+            ),
+            (
+                "inactive authoritative model identity",
+                remove_workspace_daily_model_id as Mutation,
+            ),
+        ] {
+            save_tui_bundle_cache(
+                &accumulator,
+                &[],
+                &client_space,
+                &Default::default(),
+                &clients,
+                &scope,
+                signature(),
+            )
+            .unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+            mutate(&mut value);
+            tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+                .unwrap();
+
+            assert!(
+                matches!(
+                    load_cache(&clients, &GroupBy::Model, &scope),
+                    CacheResult::Miss
+                ),
+                "{boundary} corruption must invalidate the schema-45 bundle at startup"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn schema_45_rejects_model_clients_outside_universe_in_active_and_inactive_projections() {
+        let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let accumulator = same_named_cross_client_agent_accumulator();
+        let clients = HashSet::from([ClientId::OpenCode, ClientId::RooCode]);
+        let client_space = BTreeMap::from([
+            ("opencode".to_string(), 1024),
+            ("roocode".to_string(), 2048),
+        ]);
+        let path = cache_file().unwrap();
+
+        for (boundary, projection) in [("active", "model"), ("inactive", "workspaceModel")] {
+            save_tui_bundle_cache(
+                &accumulator,
+                &[],
+                &client_space,
+                &Default::default(),
+                &clients,
+                &scope,
+                signature(),
+            )
+            .unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+            let model = &mut value["projections"][projection]["models"][0];
+            assert!(
+                model["client"].as_str().unwrap().contains(", "),
+                "fixture must exercise a model bucket that merges Clients"
+            );
+            model["client"] = serde_json::Value::from("opencode, foreign-client");
+            tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+                .unwrap();
+
+            assert!(
+                matches!(
+                    load_cache(&clients, &GroupBy::Model, &scope),
+                    CacheResult::Miss
+                ),
+                "{boundary} model Client corruption must invalidate the schema-45 bundle"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn schema_45_rejects_missing_required_projection_fields() {
+        type Mutation = fn(&mut serde_json::Value);
+
+        fn remove_model_performance(value: &mut serde_json::Value) {
+            value["projections"]["model"]["models"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("performance");
+        }
+
+        fn remove_agent_instance_count(value: &mut serde_json::Value) {
+            value["common"]["agents"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("instanceCount");
+        }
+
+        fn remove_hourly_message_count(value: &mut serde_json::Value) {
+            value["common"]["hourly"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("messageCount");
+        }
+
+        fn remove_hourly_turn_count(value: &mut serde_json::Value) {
+            value["common"]["hourly"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("turnCount");
+        }
+
+        fn remove_daily_model_id(value: &mut serde_json::Value) {
+            value["projections"]["model"]["daily"][0]["clientModels"][0][1][0][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("modelId");
+        }
+
+        let (temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
+        let accumulator = nonempty_accumulator(temp.path());
+        let clients = HashSet::from([ClientId::Claude, ClientId::OpenCode]);
+        let client_space =
+            BTreeMap::from([("claude".to_string(), 8192), ("opencode".to_string(), 4096)]);
+        let path = cache_file().unwrap();
+
+        for (field, mutate) in [
+            ("model performance", remove_model_performance as Mutation),
+            (
+                "Agent instance count",
+                remove_agent_instance_count as Mutation,
+            ),
+            (
+                "hourly message count",
+                remove_hourly_message_count as Mutation,
+            ),
+            ("hourly turn count", remove_hourly_turn_count as Mutation),
+            ("daily model id", remove_daily_model_id as Mutation),
+        ] {
+            save_tui_bundle_cache(
+                &accumulator,
+                &[],
+                &client_space,
+                &Default::default(),
+                &clients,
+                &scope,
+                signature(),
+            )
+            .unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+            mutate(&mut value);
+            tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+                .unwrap();
+
+            assert!(
+                matches!(
+                    load_cache(&clients, &GroupBy::Model, &scope),
+                    CacheResult::Miss
+                ),
+                "missing {field} must invalidate the schema-45 bundle"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn schema_45_rejects_duplicate_client_agent_identity() {
+        let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let accumulator = same_named_cross_client_agent_accumulator();
+        let clients = HashSet::from([ClientId::OpenCode, ClientId::RooCode]);
+        let client_space = BTreeMap::from([
+            ("opencode".to_string(), 1024),
+            ("roocode".to_string(), 2048),
+        ]);
+
+        save_tui_bundle_cache(
+            &accumulator,
+            &[],
+            &client_space,
+            &Default::default(),
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+        let path = cache_file().unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        let duplicate = value["common"]["agents"][0].clone();
+        value["common"]["agents"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+            .unwrap();
+
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Miss
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn schema_45_rejects_agent_outside_client_universe() {
+        let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let accumulator = same_named_cross_client_agent_accumulator();
+        let clients = HashSet::from([ClientId::OpenCode, ClientId::RooCode]);
+        let client_space = BTreeMap::from([
+            ("opencode".to_string(), 1024),
+            ("roocode".to_string(), 2048),
+        ]);
+
+        save_tui_bundle_cache(
+            &accumulator,
+            &[],
+            &client_space,
+            &Default::default(),
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+        let path = cache_file().unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        value["common"]["agents"][0]["client"] = serde_json::Value::from("foreign-client");
+        tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+            .unwrap();
+
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Miss
+        ));
     }
 
     #[test]
     #[serial]
     fn legacy_schema_versions_are_explicit_misses() {
         let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
-        for schema_version in [38, 39, 40, 41, 42, 43] {
+        for schema_version in [38, 39, 40, 41, 42, 43, 44] {
             save_tui_bundle_cache(
                 &TuiAcc::new(),
                 &sessions,
@@ -463,6 +884,34 @@ mod bundle_tests {
                 CacheResult::Miss
             ));
         }
+
+        save_tui_bundle_cache(
+            &TuiAcc::new(),
+            &sessions,
+            &client_space,
+            &Default::default(),
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        value["canonical"]
+            .as_object_mut()
+            .unwrap()
+            .remove("usage_totals_by_client");
+        refresh_canonical_digest(&mut value);
+        tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+            .unwrap();
+
+        assert!(
+            matches!(
+                load_cache(&clients, &GroupBy::Model, &scope),
+                CacheResult::Miss
+            ),
+            "missing canonical Client totals must invalidate the schema-45 bundle"
+        );
 
         save_tui_bundle_cache(
             &TuiAcc::new(),
@@ -665,9 +1114,9 @@ impl CacheReportScope {
     }
 }
 
-/// Default usage projection selected when the TUI starts. Schema 44 stores all
-/// four public projections plus canonical client-aware state, so Group By and
-/// Clients are presentation state rather than cache keys.
+/// Default usage projection selected when the TUI starts. Schema 45 stores one
+/// Common part, all four Grouped parts, and canonical client-aware state, so
+/// Group By and Clients are presentation state rather than cache keys.
 pub const TUI_DEFAULT_GROUP_BY: GroupBy = GroupBy::Model;
 
 /// Get the cache directory path
@@ -681,19 +1130,27 @@ fn cache_file() -> Result<PathBuf, tokscale_core::paths::ConfigDirUnavailable> {
     cache_dir().map(|directory| directory.join("tui-data-cache.json"))
 }
 
-/// Serializable version of UsageData
+/// Serializable group-agnostic projection stored once per generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CachedUsageData {
-    models: Vec<CachedModelUsage>,
+struct CachedUsageCommonData {
     agents: Vec<CachedAgentUsage>,
-    daily: Vec<CachedDailyUsage>,
-    hourly: Vec<CachedHourlyUsage>,
+    daily: Vec<CachedDailyUsageCommon>,
+    hourly: Vec<CachedHourlyUsageCommon>,
     graph: CachedGraphData,
     total_tokens: u64,
     total_cost: f64,
     current_streak: u32,
     longest_streak: u32,
+}
+
+/// Serializable fields reshaped by one Group By projection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedUsageGroupedData {
+    models: Vec<CachedModelUsage>,
+    daily: Vec<CachedDailyModelProjection>,
+    hourly: Vec<CachedHourlyModelProjection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -718,7 +1175,6 @@ struct CachedModelUsage {
     workspace_label: Option<String>,
     tokens: CachedTokenBreakdown,
     cost: f64,
-    #[serde(default)]
     performance: ModelPerformance,
     session_count: u32,
 }
@@ -727,11 +1183,10 @@ struct CachedModelUsage {
 #[serde(rename_all = "camelCase")]
 struct CachedAgentUsage {
     agent: String,
-    clients: String,
+    client: String,
     tokens: CachedTokenBreakdown,
     cost: f64,
     message_count: u32,
-    #[serde(default)]
     instance_count: u32,
 }
 
@@ -739,7 +1194,6 @@ struct CachedAgentUsage {
 #[serde(rename_all = "camelCase")]
 struct CachedDailyModelInfo {
     provider: String,
-    #[serde(default)]
     model_id: String,
     display_name: String,
     #[serde(default)]
@@ -753,28 +1207,33 @@ struct CachedDailyModelInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CachedDailyClientInfo {
+struct CachedDailyClientCommon {
     tokens: CachedTokenBreakdown,
     cost: f64,
-    models: Vec<(String, CachedDailyModelInfo)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CachedDailyUsage {
+struct CachedDailyUsageCommon {
     date: String, // NaiveDate serialized as string
     tokens: CachedTokenBreakdown,
     cost: f64,
-    client_breakdown: Vec<(String, CachedDailyClientInfo)>,
+    clients: Vec<(String, CachedDailyClientCommon)>,
     message_count: u32,
     turn_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CachedDailyModelProjection {
+    date: String,
+    client_models: Vec<(String, Vec<(String, CachedDailyModelInfo)>)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CachedHourlyModelInfo {
     provider: String,
-    #[serde(default)]
     model_id: String,
     display_name: String,
     tokens: CachedTokenBreakdown,
@@ -783,16 +1242,20 @@ struct CachedHourlyModelInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CachedHourlyUsage {
+struct CachedHourlyUsageCommon {
     datetime: String, // NaiveDateTime as "YYYY-MM-DD HH:MM:SS"
     tokens: CachedTokenBreakdown,
     cost: f64,
     clients: Vec<String>,
-    models: Vec<(String, CachedHourlyModelInfo)>,
-    #[serde(default)]
     message_count: u32,
-    #[serde(default)]
     turn_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedHourlyModelProjection {
+    datetime: String,
+    models: Vec<(String, CachedHourlyModelInfo)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -890,7 +1353,7 @@ impl Serialize for CachedAgentsRef<'_> {
 #[serde(rename_all = "camelCase")]
 struct CachedAgentUsageRef<'a> {
     agent: &'a str,
-    clients: &'a str,
+    client: &'a str,
     tokens: CachedTokenBreakdownRef,
     cost: f64,
     message_count: u32,
@@ -901,7 +1364,7 @@ impl<'a> From<&'a AgentUsage> for CachedAgentUsageRef<'a> {
     fn from(agent: &'a AgentUsage) -> Self {
         Self {
             agent: &agent.agent,
-            clients: &agent.clients,
+            client: &agent.client,
             tokens: (&agent.tokens).into(),
             cost: agent.cost,
             message_count: agent.message_count,
@@ -955,25 +1418,23 @@ impl Serialize for CachedDailyModelsRef<'_> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CachedDailyClientInfoRef<'a> {
+struct CachedDailyClientCommonRef {
     tokens: CachedTokenBreakdownRef,
     cost: f64,
-    models: CachedDailyModelsRef<'a>,
 }
 
-impl<'a> From<&'a DailyClientInfo> for CachedDailyClientInfoRef<'a> {
-    fn from(value: &'a DailyClientInfo) -> Self {
+impl From<&DailyClientCommon> for CachedDailyClientCommonRef {
+    fn from(value: &DailyClientCommon) -> Self {
         Self {
             tokens: (&value.tokens).into(),
             cost: value.cost,
-            models: CachedDailyModelsRef(&value.models),
         }
     }
 }
 
-struct CachedDailyClientBreakdownRef<'a>(&'a BTreeMap<String, DailyClientInfo>);
+struct CachedDailyClientsRef<'a>(&'a BTreeMap<String, DailyClientCommon>);
 
-impl Serialize for CachedDailyClientBreakdownRef<'_> {
+impl Serialize for CachedDailyClientsRef<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -981,7 +1442,7 @@ impl Serialize for CachedDailyClientBreakdownRef<'_> {
         serializer.collect_seq(
             self.0
                 .iter()
-                .map(|(key, value)| (key, CachedDailyClientInfoRef::from(value))),
+                .map(|(key, value)| (key, CachedDailyClientCommonRef::from(value))),
         )
     }
 }
@@ -999,36 +1460,78 @@ impl Serialize for CachedDateRef<'_> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CachedDailyUsageRef<'a> {
+struct CachedDailyUsageCommonRef<'a> {
     date: CachedDateRef<'a>,
     tokens: CachedTokenBreakdownRef,
     cost: f64,
-    client_breakdown: CachedDailyClientBreakdownRef<'a>,
+    clients: CachedDailyClientsRef<'a>,
     message_count: u32,
     turn_count: u32,
 }
 
-impl<'a> From<&'a DailyUsage> for CachedDailyUsageRef<'a> {
-    fn from(daily: &'a DailyUsage) -> Self {
+impl<'a> From<&'a DailyUsageCommon> for CachedDailyUsageCommonRef<'a> {
+    fn from(daily: &'a DailyUsageCommon) -> Self {
         Self {
             date: CachedDateRef(&daily.date),
             tokens: (&daily.tokens).into(),
             cost: daily.cost,
-            client_breakdown: CachedDailyClientBreakdownRef(&daily.client_breakdown),
+            clients: CachedDailyClientsRef(&daily.clients),
             message_count: daily.message_count,
             turn_count: daily.turn_count,
         }
     }
 }
 
-struct CachedDailyEntriesRef<'a>(&'a [DailyUsage]);
+struct CachedDailyCommonEntriesRef<'a>(&'a [DailyUsageCommon]);
 
-impl Serialize for CachedDailyEntriesRef<'_> {
+impl Serialize for CachedDailyCommonEntriesRef<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        serializer.collect_seq(self.0.iter().map(CachedDailyUsageRef::from))
+        serializer.collect_seq(self.0.iter().map(CachedDailyUsageCommonRef::from))
+    }
+}
+
+struct CachedDailyClientModelsRef<'a>(&'a BTreeMap<String, BTreeMap<String, DailyModelInfo>>);
+
+impl Serialize for CachedDailyClientModelsRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(
+            self.0
+                .iter()
+                .map(|(client, models)| (client, CachedDailyModelsRef(models))),
+        )
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedDailyModelProjectionRef<'a> {
+    date: CachedDateRef<'a>,
+    client_models: CachedDailyClientModelsRef<'a>,
+}
+
+impl<'a> From<&'a DailyModelProjection> for CachedDailyModelProjectionRef<'a> {
+    fn from(projection: &'a DailyModelProjection) -> Self {
+        Self {
+            date: CachedDateRef(&projection.date),
+            client_models: CachedDailyClientModelsRef(&projection.client_models),
+        }
+    }
+}
+
+struct CachedDailyModelProjectionsRef<'a>(&'a [DailyModelProjection]);
+
+impl Serialize for CachedDailyModelProjectionsRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(self.0.iter().map(CachedDailyModelProjectionRef::from))
     }
 }
 
@@ -1082,38 +1585,63 @@ impl Serialize for CachedDateTimeRef<'_> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CachedHourlyUsageRef<'a> {
+struct CachedHourlyUsageCommonRef<'a> {
     datetime: CachedDateTimeRef<'a>,
     tokens: CachedTokenBreakdownRef,
     cost: f64,
     clients: &'a BTreeSet<String>,
-    models: CachedHourlyModelsRef<'a>,
     message_count: u32,
     turn_count: u32,
 }
 
-impl<'a> From<&'a HourlyUsage> for CachedHourlyUsageRef<'a> {
-    fn from(hourly: &'a HourlyUsage) -> Self {
+impl<'a> From<&'a HourlyUsageCommon> for CachedHourlyUsageCommonRef<'a> {
+    fn from(hourly: &'a HourlyUsageCommon) -> Self {
         Self {
             datetime: CachedDateTimeRef(&hourly.datetime),
             tokens: (&hourly.tokens).into(),
             cost: hourly.cost,
             clients: &hourly.clients,
-            models: CachedHourlyModelsRef(&hourly.models),
             message_count: hourly.message_count,
             turn_count: hourly.turn_count,
         }
     }
 }
 
-struct CachedHourlyEntriesRef<'a>(&'a [HourlyUsage]);
+struct CachedHourlyCommonEntriesRef<'a>(&'a [HourlyUsageCommon]);
 
-impl Serialize for CachedHourlyEntriesRef<'_> {
+impl Serialize for CachedHourlyCommonEntriesRef<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        serializer.collect_seq(self.0.iter().map(CachedHourlyUsageRef::from))
+        serializer.collect_seq(self.0.iter().map(CachedHourlyUsageCommonRef::from))
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedHourlyModelProjectionRef<'a> {
+    datetime: CachedDateTimeRef<'a>,
+    models: CachedHourlyModelsRef<'a>,
+}
+
+impl<'a> From<&'a HourlyModelProjection> for CachedHourlyModelProjectionRef<'a> {
+    fn from(projection: &'a HourlyModelProjection) -> Self {
+        Self {
+            datetime: CachedDateTimeRef(&projection.datetime),
+            models: CachedHourlyModelsRef(&projection.models),
+        }
+    }
+}
+
+struct CachedHourlyModelProjectionsRef<'a>(&'a [HourlyModelProjection]);
+
+impl Serialize for CachedHourlyModelProjectionsRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(self.0.iter().map(CachedHourlyModelProjectionRef::from))
     }
 }
 
@@ -1210,11 +1738,20 @@ impl From<CachedAgentUsage> for AgentUsage {
     fn from(a: CachedAgentUsage) -> Self {
         Self {
             agent: a.agent,
-            clients: a.clients,
+            client: a.client,
             tokens: a.tokens.into(),
             cost: a.cost,
             message_count: a.message_count,
             instance_count: a.instance_count,
+        }
+    }
+}
+
+impl From<CachedDailyClientCommon> for DailyClientCommon {
+    fn from(value: CachedDailyClientCommon) -> Self {
+        Self {
+            tokens: value.tokens.into(),
+            cost: value.cost,
         }
     }
 }
@@ -1232,21 +1769,17 @@ fn daily_model_info_from_cached(value: CachedDailyModelInfo) -> DailyModelInfo {
     }
 }
 
-impl From<CachedDailyClientInfo> for DailyClientInfo {
-    fn from(value: CachedDailyClientInfo) -> Self {
-        Self {
-            tokens: value.tokens.into(),
-            cost: value.cost,
-            models: value
-                .models
-                .into_iter()
-                .map(|(key, value)| {
-                    let model_info = daily_model_info_from_cached(value);
-                    (key, model_info)
-                })
-                .collect(),
+fn collect_unique_string_map<V>(
+    entries: impl IntoIterator<Item = (String, V)>,
+    context: &'static str,
+) -> Result<BTreeMap<String, V>, CacheDataError> {
+    let mut values = BTreeMap::new();
+    for (key, value) in entries {
+        if values.insert(key.clone(), value).is_some() {
+            return Err(CacheDataError::DuplicateKey { context, key });
         }
     }
+    Ok(values)
 }
 
 fn hourly_model_info_from_cached(value: CachedHourlyModelInfo) -> HourlyModelInfo {
@@ -1259,47 +1792,92 @@ fn hourly_model_info_from_cached(value: CachedHourlyModelInfo) -> HourlyModelInf
     }
 }
 
-impl TryFrom<CachedHourlyUsage> for HourlyUsage {
-    type Error = chrono::ParseError;
+impl TryFrom<CachedDailyUsageCommon> for DailyUsageCommon {
+    type Error = CacheDataError;
 
-    fn try_from(h: CachedHourlyUsage) -> Result<Self, Self::Error> {
-        use chrono::NaiveDateTime;
+    fn try_from(value: CachedDailyUsageCommon) -> Result<Self, Self::Error> {
+        use chrono::NaiveDate;
         Ok(Self {
-            datetime: NaiveDateTime::parse_from_str(&h.datetime, "%Y-%m-%d %H:%M:%S")?,
-            tokens: h.tokens.into(),
-            cost: h.cost,
-            clients: h.clients.into_iter().collect(),
-            models: h
-                .models
-                .into_iter()
-                .map(|(key, value)| {
-                    let model_info = hourly_model_info_from_cached(value);
-                    (key, model_info)
-                })
-                .collect(),
-            message_count: h.message_count,
-            turn_count: h.turn_count,
+            date: NaiveDate::parse_from_str(&value.date, "%Y-%m-%d")?,
+            tokens: value.tokens.into(),
+            cost: value.cost,
+            clients: collect_unique_string_map(
+                value
+                    .clients
+                    .into_iter()
+                    .map(|(key, value)| (key, value.into())),
+                "daily Common Client",
+            )?,
+            message_count: value.message_count,
+            turn_count: value.turn_count,
         })
     }
 }
 
-impl TryFrom<CachedDailyUsage> for DailyUsage {
-    type Error = chrono::ParseError;
+impl TryFrom<CachedDailyModelProjection> for DailyModelProjection {
+    type Error = CacheDataError;
 
-    fn try_from(d: CachedDailyUsage) -> Result<Self, Self::Error> {
+    fn try_from(value: CachedDailyModelProjection) -> Result<Self, Self::Error> {
         use chrono::NaiveDate;
-
+        let client_models = value
+            .client_models
+            .into_iter()
+            .map(|(client, models)| {
+                let models = collect_unique_string_map(
+                    models
+                        .into_iter()
+                        .map(|(key, model)| (key, daily_model_info_from_cached(model))),
+                    "daily Grouped model",
+                )?;
+                Ok((client, models))
+            })
+            .collect::<Result<Vec<_>, CacheDataError>>()?;
         Ok(Self {
-            date: NaiveDate::parse_from_str(&d.date, "%Y-%m-%d")?,
-            tokens: d.tokens.into(),
-            cost: d.cost,
-            client_breakdown: d
-                .client_breakdown
-                .into_iter()
-                .map(|(key, value)| (key, value.into()))
-                .collect(),
-            message_count: d.message_count,
-            turn_count: d.turn_count,
+            date: NaiveDate::parse_from_str(&value.date, "%Y-%m-%d")?,
+            client_models: collect_unique_string_map(client_models, "daily Grouped Client")?,
+        })
+    }
+}
+
+impl TryFrom<CachedHourlyUsageCommon> for HourlyUsageCommon {
+    type Error = CacheDataError;
+
+    fn try_from(value: CachedHourlyUsageCommon) -> Result<Self, Self::Error> {
+        use chrono::NaiveDateTime;
+        let mut clients = BTreeSet::new();
+        for client in value.clients {
+            if !clients.insert(client.clone()) {
+                return Err(CacheDataError::DuplicateKey {
+                    context: "hourly Common Client",
+                    key: client,
+                });
+            }
+        }
+        Ok(Self {
+            datetime: NaiveDateTime::parse_from_str(&value.datetime, "%Y-%m-%d %H:%M:%S")?,
+            tokens: value.tokens.into(),
+            cost: value.cost,
+            clients,
+            message_count: value.message_count,
+            turn_count: value.turn_count,
+        })
+    }
+}
+
+impl TryFrom<CachedHourlyModelProjection> for HourlyModelProjection {
+    type Error = CacheDataError;
+
+    fn try_from(value: CachedHourlyModelProjection) -> Result<Self, Self::Error> {
+        use chrono::NaiveDateTime;
+        Ok(Self {
+            datetime: NaiveDateTime::parse_from_str(&value.datetime, "%Y-%m-%d %H:%M:%S")?,
+            models: collect_unique_string_map(
+                value
+                    .models
+                    .into_iter()
+                    .map(|(key, model)| (key, hourly_model_info_from_cached(model))),
+                "hourly Grouped model",
+            )?,
         })
     }
 }
@@ -1338,16 +1916,18 @@ impl TryFrom<CachedGraphData> for GraphData {
 #[derive(Debug)]
 enum CacheDataError {
     InvalidDate(chrono::ParseError),
-    AgentTokenOverflow,
+    DuplicateKey { context: &'static str, key: String },
+    ProjectionShape(tokscale_core::usage_views::UsageProjectionShapeError),
 }
 
 impl std::fmt::Display for CacheDataError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidDate(err) => err.fmt(f),
-            Self::AgentTokenOverflow => {
-                f.write_str("cached TUI agent token buckets exceed u64::MAX")
+            Self::DuplicateKey { context, key } => {
+                write!(f, "cached TUI {context} contains duplicate key `{key}`")
             }
+            Self::ProjectionShape(err) => err.fmt(f),
         }
     }
 }
@@ -1360,96 +1940,144 @@ impl From<chrono::ParseError> for CacheDataError {
     }
 }
 
-impl TryFrom<CachedUsageData> for UsageData {
+impl From<tokscale_core::usage_views::UsageProjectionShapeError> for CacheDataError {
+    fn from(err: tokscale_core::usage_views::UsageProjectionShapeError) -> Self {
+        Self::ProjectionShape(err)
+    }
+}
+
+fn reject_duplicate_daily_dates<T>(
+    rows: &[T],
+    date_of: impl Fn(&T) -> chrono::NaiveDate,
+    context: &'static str,
+) -> Result<(), CacheDataError> {
+    let mut dates = BTreeSet::new();
+    for row in rows {
+        let date = date_of(row);
+        if !dates.insert(date) {
+            return Err(CacheDataError::DuplicateKey {
+                context,
+                key: date.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn reject_duplicate_hourly_datetimes<T>(
+    rows: &[T],
+    datetime_of: impl Fn(&T) -> chrono::NaiveDateTime,
+    context: &'static str,
+) -> Result<(), CacheDataError> {
+    let mut datetimes = BTreeSet::new();
+    for row in rows {
+        let datetime = datetime_of(row);
+        if !datetimes.insert(datetime) {
+            return Err(CacheDataError::DuplicateKey {
+                context,
+                key: datetime.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+impl TryFrom<CachedUsageCommonData> for UsageCommonData {
     type Error = CacheDataError;
 
-    fn try_from(u: CachedUsageData) -> Result<Self, Self::Error> {
-        let daily: Result<Vec<DailyUsage>, _> = u.daily.into_iter().map(|d| d.try_into()).collect();
-        let hourly: Result<Vec<HourlyUsage>, _> =
-            u.hourly.into_iter().map(|h| h.try_into()).collect();
+    fn try_from(value: CachedUsageCommonData) -> Result<Self, Self::Error> {
+        let daily = value
+            .daily
+            .into_iter()
+            .map(DailyUsageCommon::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        reject_duplicate_daily_dates(&daily, |row| row.date, "daily Common rows")?;
+        let hourly = value
+            .hourly
+            .into_iter()
+            .map(HourlyUsageCommon::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        reject_duplicate_hourly_datetimes(&hourly, |row| row.datetime, "hourly Common rows")?;
+        let mut agent_identities = HashSet::with_capacity(value.agents.len());
+        let mut agents = Vec::with_capacity(value.agents.len());
+        for agent in value.agents {
+            let identity = (agent.client.clone(), agent.agent.clone());
+            if !agent_identities.insert(identity.clone()) {
+                return Err(CacheDataError::DuplicateKey {
+                    context: "Common Agent identity",
+                    key: format!("{}/{}", identity.0, identity.1),
+                });
+            }
+            agents.push(agent.into());
+        }
         Ok(Self {
-            health: Default::default(),
-            models: u.models.into_iter().map(|m| m.into()).collect(),
-            agents: normalize_cached_agents(u.agents)?,
-            daily: daily?,
-            hourly: hourly?,
-            graph: u.graph.try_into()?,
-            total_tokens: u.total_tokens,
-            total_cost: u.total_cost,
-            error: None,
-            current_streak: u.current_streak,
-            longest_streak: u.longest_streak,
+            agents,
+            daily,
+            hourly,
+            graph: value.graph.try_into()?,
+            total_tokens: value.total_tokens,
+            total_cost: value.total_cost,
+            current_streak: value.current_streak,
+            longest_streak: value.longest_streak,
         })
     }
 }
 
-fn normalize_cached_agents(
-    agents: Vec<CachedAgentUsage>,
-) -> Result<Vec<AgentUsage>, CacheDataError> {
-    let mut merged: BTreeMap<String, AgentUsage> = BTreeMap::new();
-    let mut clients_by_agent: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+impl TryFrom<CachedUsageGroupedData> for UsageGroupedData {
+    type Error = CacheDataError;
 
-    for cached in agents {
-        let normalized_agent = normalize_cached_agent_name(&cached.agent, &cached.clients);
-        let entry = merged
-            .entry(normalized_agent.clone())
-            .or_insert_with(|| AgentUsage {
-                agent: normalized_agent.clone(),
-                clients: String::new(),
-                tokens: TokenBreakdown::default(),
-                cost: 0.0,
-                message_count: 0,
-                instance_count: 0,
-            });
-
-        let tokens: TokenBreakdown = cached.tokens.into();
-        entry.tokens = entry
-            .tokens
-            .checked_add(&tokens)
-            .ok_or(CacheDataError::AgentTokenOverflow)?;
-        entry.cost += cached.cost;
-        entry.message_count = entry.message_count.saturating_add(cached.message_count);
-        entry.instance_count = entry.instance_count.saturating_add(cached.instance_count);
-
-        let client_set = clients_by_agent.entry(normalized_agent).or_default();
-        for client in cached
-            .clients
-            .split(", ")
-            .filter(|client| !client.is_empty())
-        {
-            client_set.insert(client.to_string());
-        }
-    }
-
-    let mut agents = merged.into_values().collect::<Vec<_>>();
-    for agent in &mut agents {
-        if let Some(clients) = clients_by_agent.get(&agent.agent) {
-            agent.clients = clients.iter().cloned().collect::<Vec<_>>().join(", ");
-        }
-    }
-    Ok(agents)
-}
-
-fn normalize_cached_agent_name(agent: &str, clients: &str) -> String {
-    let has_client = |name: &str| clients.split(", ").any(|client| client == name);
-    if has_client("opencode") {
-        sessions::normalize_opencode_agent_name(agent)
-    } else if has_client("copilot") {
-        sessions::normalize_copilot_agent_name(agent)
-    } else {
-        sessions::normalize_agent_name(agent)
+    fn try_from(value: CachedUsageGroupedData) -> Result<Self, Self::Error> {
+        let daily = value
+            .daily
+            .into_iter()
+            .map(DailyModelProjection::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        reject_duplicate_daily_dates(&daily, |row| row.date, "daily Grouped rows")?;
+        let hourly = value
+            .hourly
+            .into_iter()
+            .map(HourlyModelProjection::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        reject_duplicate_hourly_datetimes(&hourly, |row| row.datetime, "hourly Grouped rows")?;
+        Ok(Self {
+            models: value.models.into_iter().map(ModelUsage::from).collect(),
+            daily,
+            hourly,
+        })
     }
 }
 
-/// Since schema 38, `modelId` is the authoritative model identity (ADR 0026),
-/// but the cached field still deserializes with `#[serde(default)]`. A cache
-/// written without it would load with an empty id and merge unrelated entries
-/// under the empty key downstream, so treat it as a miss and rescan.
+fn usage_data_from_cached(
+    common: CachedUsageCommonData,
+    grouped: CachedUsageGroupedData,
+) -> Result<UsageData, CacheDataError> {
+    Ok(UsageData::from_projection_parts(
+        common.try_into()?,
+        grouped.try_into()?,
+    )?)
+}
+
+/// Since schema 38, `modelId` is the authoritative model identity (ADR 0026).
+/// Reject an explicitly empty id so unrelated entries cannot merge under the
+/// empty key downstream.
 fn cached_models_missing_identity(data: &UsageData) -> bool {
     data.daily
         .iter()
         .flat_map(|day| day.client_breakdown.values())
         .flat_map(|client| client.models.values())
+        .any(|model| model.model_id.is_empty())
+        || data
+            .hourly
+            .iter()
+            .flat_map(|hour| hour.models.values())
+            .any(|model| model.model_id.is_empty())
+}
+
+fn grouped_models_missing_identity(data: &UsageGroupedData) -> bool {
+    data.daily
+        .iter()
+        .flat_map(|day| day.client_models.values())
+        .flat_map(|models| models.values())
         .any(|model| model.model_id.is_empty())
         || data
             .hourly
@@ -1493,6 +2121,32 @@ fn cache_session_clients_are_enabled(
     })
 }
 
+fn cache_usage_clients_are_enabled(client_universe: &HashSet<ClientId>, data: &UsageData) -> bool {
+    let enabled: HashSet<&str> = client_universe
+        .iter()
+        .map(|client| client.as_str())
+        .collect();
+
+    data.models
+        .iter()
+        .flat_map(ModelUsage::client_keys)
+        .all(|client| enabled.contains(client))
+        && data
+            .agents
+            .iter()
+            .all(|agent| enabled.contains(agent.client.as_str()))
+        && data.daily.iter().all(|day| {
+            day.client_breakdown
+                .keys()
+                .all(|client| enabled.contains(client.as_str()))
+        })
+        && data.hourly.iter().all(|hour| {
+            hour.clients
+                .iter()
+                .all(|client| enabled.contains(client.as_str()))
+        })
+}
+
 /// A complete, generation-consistent TUI cache snapshot.
 ///
 /// `projection_store` owns the same file handle that was used to deserialize
@@ -1507,7 +2161,7 @@ pub struct LoadedTuiCache {
     pub input_inventory_signature: InputInventorySignature,
 }
 
-/// Result of loading the schema-44 TUI bundle.
+/// Result of loading the schema-45 TUI bundle.
 pub enum CacheResult {
     Fresh(LoadedTuiCache),
     Stale(LoadedTuiCache),
@@ -1576,8 +2230,11 @@ impl ProjectionStore {
             deserializer.end()?;
             cached
         };
-        let mut data: UsageData = cached.try_into()?;
+        let mut data = usage_data_from_cached(cached.common, cached.grouped)?;
         data.health = self.health.clone();
+        if !cache_usage_clients_are_enabled(&self.universe, &data) {
+            anyhow::bail!("cached TUI usage contains a Client outside the cached universe");
+        }
         if cached_models_missing_identity(&data) {
             anyhow::bail!("cached TUI projection is missing authoritative model identity");
         }
@@ -1614,18 +2271,19 @@ struct CachedTuiBundleRef<'a> {
     client_space: &'a BTreeMap<String, u64>,
     canonical_digest: &'a str,
     canonical: &'a RawValue,
+    common: CachedCommonProjectionRef<'a>,
     projections: CachedProjectionSetRef<'a>,
 }
 
+struct CachedCommonProjectionRef<'a>(&'a TuiAcc);
 struct CachedProjectionSetRef<'a>(&'a TuiAcc);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CachedProjectionUsageDataRef<'a> {
-    models: CachedModelsRef<'a>,
+struct CachedUsageCommonDataRef<'a> {
     agents: CachedAgentsRef<'a>,
-    daily: CachedDailyEntriesRef<'a>,
-    hourly: CachedHourlyEntriesRef<'a>,
+    daily: CachedDailyCommonEntriesRef<'a>,
+    hourly: CachedHourlyCommonEntriesRef<'a>,
     graph: CachedGraphDataRef<'a>,
     total_tokens: u64,
     total_cost: f64,
@@ -1633,19 +2291,46 @@ struct CachedProjectionUsageDataRef<'a> {
     longest_streak: u32,
 }
 
-impl<'a> From<&'a UsageData> for CachedProjectionUsageDataRef<'a> {
-    fn from(data: &'a UsageData) -> Self {
+impl<'a> From<&'a UsageCommonData> for CachedUsageCommonDataRef<'a> {
+    fn from(data: &'a UsageCommonData) -> Self {
         Self {
-            models: CachedModelsRef(&data.models),
             agents: CachedAgentsRef(&data.agents),
-            daily: CachedDailyEntriesRef(&data.daily),
-            hourly: CachedHourlyEntriesRef(&data.hourly),
+            daily: CachedDailyCommonEntriesRef(&data.daily),
+            hourly: CachedHourlyCommonEntriesRef(&data.hourly),
             graph: CachedGraphDataRef::from(&data.graph),
             total_tokens: data.total_tokens,
             total_cost: data.total_cost,
             current_streak: data.current_streak,
             longest_streak: data.longest_streak,
         }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedUsageGroupedDataRef<'a> {
+    models: CachedModelsRef<'a>,
+    daily: CachedDailyModelProjectionsRef<'a>,
+    hourly: CachedHourlyModelProjectionsRef<'a>,
+}
+
+impl<'a> From<&'a UsageGroupedData> for CachedUsageGroupedDataRef<'a> {
+    fn from(data: &'a UsageGroupedData) -> Self {
+        Self {
+            models: CachedModelsRef(&data.models),
+            daily: CachedDailyModelProjectionsRef(&data.daily),
+            hourly: CachedHourlyModelProjectionsRef(&data.hourly),
+        }
+    }
+}
+
+impl Serialize for CachedCommonProjectionRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let common = self.0.project_common();
+        CachedUsageCommonDataRef::from(&common).serialize(serializer)
     }
 }
 
@@ -1656,28 +2341,28 @@ impl Serialize for CachedProjectionSetRef<'_> {
     {
         let mut map = serializer.serialize_map(Some(4))?;
 
-        let model = self.0.project(&GroupBy::Model);
-        map.serialize_entry("model", &CachedProjectionUsageDataRef::from(&model))?;
+        let model = self.0.project_grouped(&GroupBy::Model);
+        map.serialize_entry("model", &CachedUsageGroupedDataRef::from(&model))?;
         drop(model);
 
-        let client_model = self.0.project(&GroupBy::ClientModel);
+        let client_model = self.0.project_grouped(&GroupBy::ClientModel);
         map.serialize_entry(
             "clientModel",
-            &CachedProjectionUsageDataRef::from(&client_model),
+            &CachedUsageGroupedDataRef::from(&client_model),
         )?;
         drop(client_model);
 
-        let client_provider_model = self.0.project(&GroupBy::ClientProviderModel);
+        let client_provider_model = self.0.project_grouped(&GroupBy::ClientProviderModel);
         map.serialize_entry(
             "clientProviderModel",
-            &CachedProjectionUsageDataRef::from(&client_provider_model),
+            &CachedUsageGroupedDataRef::from(&client_provider_model),
         )?;
         drop(client_provider_model);
 
-        let workspace_model = self.0.project(&GroupBy::WorkspaceModel);
+        let workspace_model = self.0.project_grouped(&GroupBy::WorkspaceModel);
         map.serialize_entry(
             "workspaceModel",
-            &CachedProjectionUsageDataRef::from(&workspace_model),
+            &CachedUsageGroupedDataRef::from(&workspace_model),
         )?;
 
         map.end()
@@ -1690,35 +2375,42 @@ fn projection_field(group_by: &GroupBy) -> anyhow::Result<&'static str> {
         GroupBy::ClientModel => Ok("clientModel"),
         GroupBy::ClientProviderModel => Ok("clientProviderModel"),
         GroupBy::WorkspaceModel => Ok("workspaceModel"),
-        GroupBy::Session | GroupBy::ClientSession => {
-            anyhow::bail!("session groupings are not public TUI usage projections")
-        }
     }
 }
 
-struct ProjectionSetSeed<'a> {
+fn projection_descriptor(field: &str) -> Option<(&'static str, u8)> {
+    match field {
+        "model" => Some(("model", 1)),
+        "clientModel" => Some(("clientModel", 2)),
+        "clientProviderModel" => Some(("clientProviderModel", 4)),
+        "workspaceModel" => Some(("workspaceModel", 8)),
+        _ => None,
+    }
+}
+
+struct SelectedProjectionSetSeed<'a> {
     group_by: &'a GroupBy,
 }
 
-impl<'de> DeserializeSeed<'de> for ProjectionSetSeed<'_> {
-    type Value = CachedUsageData;
+impl<'de> DeserializeSeed<'de> for SelectedProjectionSetSeed<'_> {
+    type Value = CachedUsageGroupedData;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_map(ProjectionSetVisitor {
+        deserializer.deserialize_map(SelectedProjectionSetVisitor {
             selected_field: projection_field(self.group_by).map_err(serde::de::Error::custom)?,
         })
     }
 }
 
-struct ProjectionSetVisitor {
+struct SelectedProjectionSetVisitor {
     selected_field: &'static str,
 }
 
-impl<'de> Visitor<'de> for ProjectionSetVisitor {
-    type Value = CachedUsageData;
+impl<'de> Visitor<'de> for SelectedProjectionSetVisitor {
+    type Value = CachedUsageGroupedData;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("the four public TUI usage projections")
@@ -1732,15 +2424,9 @@ impl<'de> Visitor<'de> for ProjectionSetVisitor {
         let mut present = 0_u8;
 
         while let Some(field) = map.next_key::<String>()? {
-            let bit = match field.as_str() {
-                "model" => 1,
-                "clientModel" => 2,
-                "clientProviderModel" => 4,
-                "workspaceModel" => 8,
-                _ => {
-                    map.next_value::<IgnoredAny>()?;
-                    continue;
-                }
+            let Some((field, bit)) = projection_descriptor(&field) else {
+                map.next_value::<IgnoredAny>()?;
+                continue;
             };
             if present & bit != 0 {
                 return Err(serde::de::Error::custom(format!(
@@ -1770,6 +2456,134 @@ impl<'de> Visitor<'de> for ProjectionSetVisitor {
     }
 }
 
+/// Retain only the fields inspected by `UsageData::validate_projection_parts`.
+/// This lets startup validate all four projections without retaining four
+/// complete model payloads at once.
+fn grouped_projection_shape_skeleton(data: &UsageGroupedData) -> UsageGroupedData {
+    UsageGroupedData {
+        models: Vec::new(),
+        daily: data
+            .daily
+            .iter()
+            .map(|day| DailyModelProjection {
+                date: day.date,
+                client_models: day
+                    .client_models
+                    .keys()
+                    .map(|client| (client.clone(), BTreeMap::new()))
+                    .collect(),
+            })
+            .collect(),
+        hourly: data
+            .hourly
+            .iter()
+            .map(|hour| HourlyModelProjection {
+                datetime: hour.datetime,
+                models: BTreeMap::new(),
+            })
+            .collect(),
+    }
+}
+
+struct ValidatedProjectionSet {
+    selected: UsageGroupedData,
+    validation_shapes: Vec<ValidatedProjectionShape>,
+}
+
+struct ValidatedProjectionShape {
+    field: &'static str,
+    shape: UsageGroupedData,
+    model_clients: BTreeSet<String>,
+}
+
+struct ValidatedProjectionSetSeed<'a> {
+    group_by: &'a GroupBy,
+}
+
+impl<'de> DeserializeSeed<'de> for ValidatedProjectionSetSeed<'_> {
+    type Value = ValidatedProjectionSet;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ValidatedProjectionSetVisitor {
+            selected_field: projection_field(self.group_by).map_err(serde::de::Error::custom)?,
+        })
+    }
+}
+
+struct ValidatedProjectionSetVisitor {
+    selected_field: &'static str,
+}
+
+impl<'de> Visitor<'de> for ValidatedProjectionSetVisitor {
+    type Value = ValidatedProjectionSet;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the four valid public TUI usage projections")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut selected = None;
+        let mut validation_shapes = Vec::with_capacity(4);
+        let mut present = 0_u8;
+
+        while let Some(field) = map.next_key::<String>()? {
+            let Some((field, bit)) = projection_descriptor(&field) else {
+                map.next_value::<IgnoredAny>()?;
+                continue;
+            };
+            if present & bit != 0 {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate TUI projection `{field}`"
+                )));
+            }
+            present |= bit;
+
+            let cached: CachedUsageGroupedData = map.next_value()?;
+            let grouped: UsageGroupedData = cached.try_into().map_err(serde::de::Error::custom)?;
+            if grouped_models_missing_identity(&grouped) {
+                return Err(serde::de::Error::custom(format!(
+                    "cached TUI projection `{field}` is missing authoritative model identity"
+                )));
+            }
+            let model_clients = grouped
+                .models
+                .iter()
+                .flat_map(ModelUsage::client_keys)
+                .map(str::to_owned)
+                .collect();
+            validation_shapes.push(ValidatedProjectionShape {
+                field,
+                shape: grouped_projection_shape_skeleton(&grouped),
+                model_clients,
+            });
+            if field == self.selected_field {
+                selected = Some(grouped);
+            }
+        }
+
+        if present != 0b1111 {
+            return Err(serde::de::Error::custom(
+                "cached TUI bundle is missing one or more public projections",
+            ));
+        }
+        Ok(ValidatedProjectionSet {
+            selected: selected.ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "cached TUI bundle is missing projection `{}`",
+                    self.selected_field
+                ))
+            })?,
+            validation_shapes,
+        })
+    }
+}
+
 struct ParsedTuiBundle {
     schema_version: u32,
     timestamp: u64,
@@ -1779,7 +2593,8 @@ struct ParsedTuiBundle {
     health: tokscale_core::input_health::HealthReport,
     sessions: Vec<TuiSessionEntry>,
     client_space: BTreeMap<String, u64>,
-    data: CachedUsageData,
+    common: UsageCommonData,
+    grouped: UsageGroupedData,
 }
 
 struct FullBundleSeed<'a> {
@@ -1832,11 +2647,12 @@ impl<'de> Visitor<'de> for CanonicalShapeVisitor {
         let mut present = 0_u8;
         while let Some(field) = map.next_key::<String>()? {
             let bit = match field.as_str() {
-                "model_map" => 1,
-                "agent_map" => 2,
-                "daily_map" => 4,
-                "hourly_map" => 8,
-                "next_sequence" => 16,
+                "usage_totals_by_client" => 1,
+                "model_map" => 2,
+                "agent_map" => 4,
+                "daily_map" => 8,
+                "hourly_map" => 16,
+                "next_sequence" => 32,
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                     continue;
@@ -1851,7 +2667,7 @@ impl<'de> Visitor<'de> for CanonicalShapeVisitor {
             map.next_value::<IgnoredAny>()?;
         }
 
-        if present != 0b1_1111 {
+        if present != 0b11_1111 {
             return Err(serde::de::Error::custom(
                 "cached TUI bundle has incomplete canonical projection state",
             ));
@@ -1875,7 +2691,7 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
     type Value = ParsedTuiBundle;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-44 TUI cache bundle")
+        formatter.write_str("a schema-45 TUI cache bundle")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -1884,7 +2700,7 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
     {
         let mut schema_version: Option<u32> = None;
         let mut timestamp = None;
-        let mut client_universe = None;
+        let mut client_universe: Option<Vec<String>> = None;
         let mut report_scope = None;
         let mut input_inventory_signature = None;
         let mut health = None;
@@ -1892,7 +2708,8 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
         let mut client_space = None;
         let mut expected_canonical_digest: Option<String> = None;
         let mut actual_canonical_digest: Option<String> = None;
-        let mut data = None;
+        let mut common: Option<CachedUsageCommonData> = None;
+        let mut grouped: Option<ValidatedProjectionSet> = None;
 
         while let Some(field) = map.next_key::<String>()? {
             match field.as_str() {
@@ -1925,11 +2742,12 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
                     validate_canonical_shape::<A::Error>(&raw)?;
                     actual_canonical_digest = Some(sha256_hex(raw.get().as_bytes()));
                 }
+                "common" => set_once(&mut common, map.next_value()?, "common")?,
                 "projections" => {
-                    if data.is_some() {
+                    if grouped.is_some() {
                         return Err(serde::de::Error::duplicate_field("projections"));
                     }
-                    data = Some(map.next_value_seed(ProjectionSetSeed {
+                    grouped = Some(map.next_value_seed(ValidatedProjectionSetSeed {
                         group_by: self.group_by,
                     })?);
                 }
@@ -1946,10 +2764,35 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
                 "cached TUI canonical projection digest does not match its contents",
             ));
         }
+        let common: UsageCommonData = required(common, "common")?
+            .try_into()
+            .map_err(serde::de::Error::custom)?;
+        let grouped = required(grouped, "projections")?;
+        let cached_client_universe = required(client_universe, "clientUniverse")?;
+        let enabled_clients: HashSet<&str> =
+            cached_client_universe.iter().map(String::as_str).collect();
+        for validation in &grouped.validation_shapes {
+            UsageData::validate_projection_parts(&common, &validation.shape).map_err(|error| {
+                serde::de::Error::custom(format!(
+                    "cached TUI projection `{}` does not match Common: {error}",
+                    validation.field
+                ))
+            })?;
+            if !validation
+                .model_clients
+                .iter()
+                .all(|client| enabled_clients.contains(client.as_str()))
+            {
+                return Err(serde::de::Error::custom(format!(
+                    "cached TUI projection `{}` contains a model Client outside the cached universe",
+                    validation.field
+                )));
+            }
+        }
         Ok(ParsedTuiBundle {
             schema_version: required(schema_version, "schemaVersion")?,
             timestamp: required(timestamp, "timestamp")?,
-            client_universe: required(client_universe, "clientUniverse")?,
+            client_universe: cached_client_universe,
             report_scope: required(report_scope, "reportScope")?,
             input_inventory_signature: required(
                 input_inventory_signature,
@@ -1958,7 +2801,8 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
             health: required(health, "health")?,
             sessions: required(sessions, "sessions")?,
             client_space: required(client_space, "clientSpace")?,
-            data: required(data, "projections")?,
+            common,
+            grouped: grouped.selected,
         })
     }
 }
@@ -1984,8 +2828,13 @@ struct ProjectionBundleSeed<'a> {
     group_by: &'a GroupBy,
 }
 
+struct CachedProjectionParts {
+    common: CachedUsageCommonData,
+    grouped: CachedUsageGroupedData,
+}
+
 impl<'de> DeserializeSeed<'de> for ProjectionBundleSeed<'_> {
-    type Value = CachedUsageData;
+    type Value = CachedProjectionParts;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -2002,10 +2851,10 @@ struct ProjectionBundleVisitor<'a> {
 }
 
 impl<'de> Visitor<'de> for ProjectionBundleVisitor<'_> {
-    type Value = CachedUsageData;
+    type Value = CachedProjectionParts;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-44 TUI cache bundle")
+        formatter.write_str("a schema-45 TUI cache bundle")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -2013,17 +2862,19 @@ impl<'de> Visitor<'de> for ProjectionBundleVisitor<'_> {
         A: MapAccess<'de>,
     {
         let mut schema_version: Option<u32> = None;
-        let mut data = None;
+        let mut common = None;
+        let mut grouped = None;
         while let Some(field) = map.next_key::<String>()? {
             match field.as_str() {
                 "schemaVersion" => {
                     set_once(&mut schema_version, map.next_value()?, "schemaVersion")?
                 }
+                "common" => set_once(&mut common, map.next_value()?, "common")?,
                 "projections" => {
-                    if data.is_some() {
+                    if grouped.is_some() {
                         return Err(serde::de::Error::duplicate_field("projections"));
                     }
-                    data = Some(map.next_value_seed(ProjectionSetSeed {
+                    grouped = Some(map.next_value_seed(SelectedProjectionSetSeed {
                         group_by: self.group_by,
                     })?);
                 }
@@ -2039,7 +2890,10 @@ impl<'de> Visitor<'de> for ProjectionBundleVisitor<'_> {
                 "unsupported TUI cache schema {schema_version}"
             )));
         }
-        required(data, "projections")
+        Ok(CachedProjectionParts {
+            common: required(common, "common")?,
+            grouped: required(grouped, "projections")?,
+        })
     }
 }
 
@@ -2062,7 +2916,7 @@ impl<'de> Visitor<'de> for CanonicalBundleVisitor {
     type Value = TuiAcc;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a schema-44 TUI cache bundle with canonical projection state")
+        formatter.write_str("a schema-45 TUI cache bundle with canonical projection state")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -2129,8 +2983,11 @@ fn load_bundle_from_file(
         anyhow::bail!("cached TUI Sessions contain a client outside the client universe");
     }
 
-    let mut data: UsageData = parsed.data.try_into()?;
+    let mut data = UsageData::from_projection_parts(parsed.common, parsed.grouped)?;
     data.health = parsed.health.clone();
+    if !cache_usage_clients_are_enabled(client_universe, &data) {
+        anyhow::bail!("cached TUI usage contains a Client outside the client universe");
+    }
     if cached_models_missing_identity(&data) {
         anyhow::bail!("cached TUI projection is missing authoritative model identity");
     }
@@ -2188,7 +3045,7 @@ pub fn load_cache(
     }
 }
 
-/// Atomically persist one complete schema-44 TUI bundle.
+/// Atomically persist one complete schema-45 TUI bundle.
 ///
 /// Projection serialization borrows the canonical accumulator and materializes
 /// one grouping at a time, so the four projections never coexist in memory.
@@ -2232,6 +3089,7 @@ pub fn save_tui_bundle_cache(
         client_space,
         canonical_digest: &canonical_digest,
         canonical: canonical.as_ref(),
+        common: CachedCommonProjectionRef(accumulator),
         projections: CachedProjectionSetRef(accumulator),
     };
 

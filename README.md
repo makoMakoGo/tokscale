@@ -72,8 +72,8 @@ bun run cli
 # Script-friendly report
 bun run cli -- models --no-spinner
 
-# Inspect detected clients and scan locations
-bun run cli -- clients
+# Inspect one Client's local usage
+bun run cli -- models --client codex --no-spinner
 ```
 
 `bun run cli` executes the code in this checkout through `packages/cli`. The
@@ -92,17 +92,23 @@ tokscale
 tokscale tui
 tokscale tui --tab models
 
-# Deterministic table and JSON reports
+# Canonical headless Models projection
 tokscale models --no-spinner
-tokscale monthly --no-spinner
-tokscale hourly --no-spinner
 tokscale models --no-spinner --json
-tokscale graph --no-spinner --output graph.json
+tokscale models --group-by client,model --no-spinner
 
 # Filters
 tokscale tui --client opencode,claude --week
 tokscale models --since 2026-01-01 --until 2026-01-31
 tokscale models --group-by client,provider,model --json
+
+# TUI-only reports; --tab opens the full TUI focused on that tab
+tokscale tui --tab monthly
+tokscale tui --tab sessions
+
+# Remote subscription quota (separate from local reports)
+tokscale usage
+tokscale usage --json
 
 # Pricing catalog lookup
 tokscale pricing lookup claude-sonnet-4-5 --no-spinner

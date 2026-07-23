@@ -28,6 +28,7 @@ const MUX_RECORD_REJECTION_REVISION: u32 = MUX_STABLE_DEDUP_REVISION + 2;
 const AMP_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 2;
 const COPILOT_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const COPILOT_WORKSPACE_REVISION: u32 = COPILOT_RECORD_REJECTION_REVISION + 2;
+const COPILOT_AGENT_IDENTITY_REVISION: u32 = COPILOT_WORKSPACE_REVISION + 1;
 const GROK_RECORD_REJECTION_REVISION: u32 = GROK_TOTAL_ONLY_IMPUTATION_REVISION + 1;
 const GROK_RELATED_METADATA_REVISION: u32 = GROK_RECORD_REJECTION_REVISION + 1;
 const GEMINI_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
@@ -255,7 +256,7 @@ impl LocalInputAdapter for CopilotAdapter {
         .map(|unit| {
             unit.with_parser_version(ParserVersion::new(
                 ParserId::Copilot,
-                COPILOT_WORKSPACE_REVISION,
+                COPILOT_AGENT_IDENTITY_REVISION,
             ))
         })
         .collect())
@@ -1175,7 +1176,7 @@ model = "claude-sonnet-4"
 
         assert_eq!(
             unit.parser_version,
-            ParserVersion::new(ParserId::Copilot, COPILOT_WORKSPACE_REVISION)
+            ParserVersion::new(ParserId::Copilot, COPILOT_AGENT_IDENTITY_REVISION)
         );
     }
 

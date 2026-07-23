@@ -187,90 +187,6 @@ fn test_client_flags_parses_canonical_form() {
 }
 
 #[test]
-fn wrapped_ranking_is_one_typed_selection() {
-    let cli = Cli::try_parse_from(["tokscale", "wrapped"]).expect("parse ok");
-    let Some(Commands::Wrapped(args)) = cli.command else {
-        panic!("expected wrapped command");
-    };
-    assert_eq!(args.ranking, None);
-
-    let cli = Cli::try_parse_from(["tokscale", "wrapped", "--ranking", "agents"])
-        .expect("agents ranking parses");
-    let Some(Commands::Wrapped(args)) = cli.command else {
-        panic!("expected wrapped command");
-    };
-    assert_eq!(args.ranking, Some(WrappedRankingArg::Agents));
-
-    let cli = Cli::try_parse_from(["tokscale", "wrapped", "--ranking", "clients"])
-        .expect("clients ranking parses");
-    let Some(Commands::Wrapped(args)) = cli.command else {
-        panic!("expected wrapped command");
-    };
-    assert_eq!(args.ranking, Some(WrappedRankingArg::Clients));
-
-    for removed in ["--agents", "--clients"] {
-        assert!(Cli::try_parse_from(["tokscale", "wrapped", removed]).is_err());
-    }
-}
-
-#[test]
-fn wrapped_ranking_resolves_without_boolean_precedence() {
-    let resolve = |args: &[&str]| {
-        let cli = Cli::try_parse_from(args).expect("wrapped arguments parse");
-        ExecutionPlan::resolve(
-            cli,
-            TerminalState {
-                stdin: false,
-                stdout: false,
-            },
-        )
-    };
-
-    let ExecutionPlan::Wrapped(plan) =
-        resolve(&["tokscale", "wrapped"]).expect("default ranking resolves")
-    else {
-        panic!("expected wrapped plan");
-    };
-    assert_eq!(plan.ranking, WrappedRanking::Auto);
-
-    let ExecutionPlan::Wrapped(plan) = resolve(&[
-        "tokscale",
-        "wrapped",
-        "--ranking",
-        "agents",
-        "--client",
-        "opencode",
-    ])
-    .expect("agents ranking resolves") else {
-        panic!("expected wrapped plan");
-    };
-    assert_eq!(plan.ranking, WrappedRanking::Agents);
-
-    let error = resolve(&[
-        "tokscale",
-        "wrapped",
-        "--ranking",
-        "agents",
-        "--client",
-        "claude",
-    ])
-    .expect_err("agents ranking without OpenCode must fail during resolve");
-    assert_eq!(error.exit_code(), 2);
-    assert!(error.to_string().contains("requires `opencode`"));
-
-    let error = resolve(&[
-        "tokscale",
-        "wrapped",
-        "--ranking",
-        "clients",
-        "--disable-pinned",
-    ])
-    .expect_err("client ranking cannot accept an ignored agent option");
-    assert_eq!(error.exit_code(), 2);
-    assert!(error.to_string().contains("does not apply"));
-}
-
-#[test]
 fn test_legacy_client_flags_are_removed() {
     assert!(Cli::try_parse_from(["tokscale", "--claude"]).is_err());
     assert!(Cli::try_parse_from(["tokscale", "--opencode"]).is_err());
@@ -451,43 +367,6 @@ fn test_normalize_year_filter_with_month() {
 fn test_normalize_year_filter_no_year() {
     let year = normalize_year_filter(false, false, false, None);
     assert_eq!(year, None);
-}
-
-#[test]
-fn test_format_tokens_with_commas_small() {
-    assert_eq!(format_tokens_with_commas(123), "123");
-}
-
-#[test]
-fn test_format_tokens_with_commas_thousands() {
-    assert_eq!(format_tokens_with_commas(1234), "1,234");
-}
-
-#[test]
-fn test_format_tokens_with_commas_millions() {
-    assert_eq!(format_tokens_with_commas(1234567), "1,234,567");
-}
-
-#[test]
-fn test_format_tokens_with_commas_billions() {
-    assert_eq!(format_tokens_with_commas(1234567890), "1,234,567,890");
-}
-
-#[test]
-fn test_format_tokens_with_commas_zero() {
-    assert_eq!(format_tokens_with_commas(0), "0");
-}
-
-#[test]
-fn test_format_tokens_with_commas_negative() {
-    assert_eq!(format_tokens_with_commas(-123), "-123");
-    assert_eq!(format_tokens_with_commas(-1234), "-1,234");
-    assert_eq!(format_tokens_with_commas(-123456), "-123,456");
-    assert_eq!(format_tokens_with_commas(-1234567), "-1,234,567");
-    assert_eq!(
-        format_tokens_with_commas(i64::MIN),
-        "-9,223,372,036,854,775,808"
-    );
 }
 
 #[test]
@@ -706,17 +585,11 @@ fn legacy_v4_invocations_get_one_migration_hint_without_becoming_aliases() {
         legacy_invocation_hint(&strings(&["tui", "--json"])).as_deref(),
         Some("use `tokscale models --json`")
     );
+    assert_eq!(legacy_invocation_hint(&strings(&["graph", "--json"])), None);
+    assert_eq!(legacy_invocation_hint(&strings(&["--json", "graph"])), None);
     assert_eq!(
-        legacy_invocation_hint(&strings(&["graph", "--json"])).as_deref(),
-        Some("use `tokscale graph`")
-    );
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["--json", "graph"])).as_deref(),
-        Some("use `tokscale graph`")
-    );
-    assert_eq!(
-        legacy_invocation_hint(&strings(&["graph", "--json", "--output", "graph.json"])).as_deref(),
-        Some("use `tokscale graph --output graph.json`")
+        legacy_invocation_hint(&strings(&["graph", "--json", "--output", "graph.json"])),
+        None
     );
     assert_eq!(
         legacy_invocation_hint(&strings(&["--client=codex", "models"])).as_deref(),
@@ -741,7 +614,7 @@ fn legacy_v4_invocations_get_one_migration_hint_without_becoming_aliases() {
     );
     for unrelated in [
         &["wrapped", "--json"][..],
-        &["clients", "--benchmark"],
+        &["monthly", "--benchmark"],
         &["pricing", "--json"],
         &["graph", "--group-by", "model"],
     ] {
@@ -851,14 +724,26 @@ fn tui_execution_plan_requires_both_interactive_streams() {
 }
 
 #[test]
-fn tui_tab_uses_sessions_as_its_only_cli_name() {
-    let cli = Cli::try_parse_from(["tokscale", "tui", "--tab", "sessions"])
-        .expect("Sessions tab name must parse");
-    let Some(Commands::Tui(args)) = cli.command else {
-        panic!("expected TUI command");
-    };
-    assert_eq!(args.tab, Some(TuiTab::Sessions));
-    assert_eq!(Tab::from(TuiTab::Sessions), Tab::Sessions);
+fn tui_tab_accepts_every_tui_tab_name() {
+    for (name, expected) in [
+        ("overview", Tab::Overview),
+        ("usage", Tab::Usage),
+        ("models", Tab::Models),
+        ("monthly", Tab::Monthly),
+        ("weekly", Tab::Weekly),
+        ("daily", Tab::Daily),
+        ("hourly", Tab::Hourly),
+        ("stats", Tab::Stats),
+        ("agents", Tab::Agents),
+        ("sessions", Tab::Sessions),
+    ] {
+        let cli = Cli::try_parse_from(["tokscale", "tui", "--tab", name])
+            .unwrap_or_else(|error| panic!("{name} tab name must parse: {error}"));
+        let Some(Commands::Tui(args)) = cli.command else {
+            panic!("expected TUI command");
+        };
+        assert_eq!(args.tab, Some(expected));
+    }
 
     let error = Cli::try_parse_from(["tokscale", "tui", "--tab", "issues"])
         .expect_err("the removed Issues tab name must not remain as an alias");
@@ -917,6 +802,8 @@ fn removed_report_and_cache_flags_are_rejected() {
     for flag in ["--light", "--write-cache", "--no-write-cache"] {
         assert!(Cli::try_parse_from(["tokscale", "models", flag]).is_err());
     }
+    assert!(Cli::try_parse_from(["tokscale", "wrapped", "--ranking", "agents"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "wrapped", "--disable-pinned"]).is_err());
 }
 
 #[test]
@@ -949,14 +836,8 @@ fn cli_rejects_removed_account_management_namespaces() {
     assert!(Cli::try_parse_from(["tokscale", "codex", "accounts"]).is_err());
     assert!(Cli::try_parse_from(["tokscale", "codex", "switch", "work"]).is_err());
     assert!(Cli::try_parse_from(["tokscale", "trae", "status"]).is_err());
-}
-
-#[test]
-fn clap_accepts_warp_status_and_sync_commands() {
-    assert!(Cli::try_parse_from(["tokscale", "warp", "status"]).is_ok());
-    assert!(Cli::try_parse_from(["tokscale", "warp", "status", "--json"]).is_ok());
-    assert!(Cli::try_parse_from(["tokscale", "warp", "sync"]).is_ok());
-    assert!(Cli::try_parse_from(["tokscale", "warp", "sync", "--json"]).is_ok());
+    assert!(Cli::try_parse_from(["tokscale", "warp", "status"]).is_err());
+    assert!(Cli::try_parse_from(["tokscale", "warp", "sync"]).is_err());
 }
 
 #[test]

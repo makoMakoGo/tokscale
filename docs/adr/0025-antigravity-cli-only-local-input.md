@@ -40,9 +40,8 @@ databases.
 - Do not inspect Antigravity processes, extract transient credentials, connect
   to private language-server RPCs, or create a shadow JSONL usage input.
 - Remove the `tokscale antigravity sync`, `status`, and `purge-cache` command
-  surface. Client input visibility belongs to
-  `tokscale clients --client antigravity`; reports and the TUI scan AGY CLI
-  databases directly.
+  surface. Models and the TUI scan AGY CLI databases directly, and Data Health
+  owns Input visibility.
 - Keep the canonical `antigravity` client identity and the persisted
   `antigravity-cli` identity migration owned by ADR 0007.
 

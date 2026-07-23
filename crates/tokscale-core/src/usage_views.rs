@@ -1,12 +1,10 @@
 //! TUI-facing usage view types and the aggregation that produces them.
 //!
 //! These types (`UsageData`, `UsageModelEntry`, `AgentEntry`, `DailyUsage`,
-//! `HourlyUsage`, …) are the TUI's view models. They live in core so the
-//! core's aggregation engine can produce them directly (#37: one aggregation
-//! site), but they stay distinct from the report types in
-//! [`crate`] (e.g. core `TokenBreakdown` is the parsed `i64` form; the
-//! [`UsageTokenBreakdown`] here is the sanitized `u64` form the TUI
-//! renders).
+//! `HourlyUsage`, …) are the canonical presentation models shared by the TUI
+//! and headless renderers. The parsed [`crate::TokenBreakdown`] remains the
+//! signed input form; [`UsageTokenBreakdown`] is the sanitized unsigned form
+//! presented to users.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -66,6 +64,10 @@ impl UsageTokenBreakdown {
 pub struct UsageModelEntry {
     pub model: String,
     pub provider: String,
+    /// Canonical display of every Client contributing to this model bucket.
+    ///
+    /// Client-scoped groupings contain one key. Groupings that merge Clients
+    /// join their keys with [`MODEL_CLIENT_SEPARATOR`].
     pub client: String,
     pub workspace_key: Option<String>,
     pub workspace_label: Option<String>,
@@ -75,10 +77,22 @@ pub struct UsageModelEntry {
     pub session_count: u32,
 }
 
+pub(crate) const MODEL_CLIENT_SEPARATOR: &str = ", ";
+
+impl UsageModelEntry {
+    /// Iterate the canonical Client keys represented by [`Self::client`].
+    ///
+    /// Keep consumers on this helper rather than duplicating the display
+    /// delimiter contract.
+    pub fn client_keys(&self) -> impl Iterator<Item = &str> {
+        self.client.split(MODEL_CLIENT_SEPARATOR)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentEntry {
     pub agent: String,
-    pub clients: String,
+    pub client: String,
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
     pub message_count: u32,
@@ -97,8 +111,7 @@ pub struct DailyModelInfo {
     pub provider: String,
     /// Bare canonical model ID: the authoritative model identity (ADR 0026).
     pub model_id: String,
-    /// Pure display label; never carries the workspace dimension. Session
-    /// groupings still prefix the session id ("session / model").
+    /// Pure display label; never carries another grouping dimension.
     pub display_name: String,
     /// Workspace dimension, populated only under `GroupBy::WorkspaceModel`.
     pub workspace_key: Option<String>,
@@ -113,6 +126,34 @@ pub struct DailyClientInfo {
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
     pub models: BTreeMap<String, DailyModelInfo>,
+}
+
+/// Group-agnostic per-client totals for one day.
+///
+/// Model buckets live in [`DailyModelProjection`] so a Group By switch can
+/// reuse these totals instead of materializing them again.
+#[derive(Debug, Clone)]
+pub struct DailyClientCommon {
+    pub tokens: UsageTokenBreakdown,
+    pub cost: f64,
+}
+
+/// Group-agnostic portion of one daily row.
+#[derive(Debug, Clone)]
+pub struct DailyUsageCommon {
+    pub date: NaiveDate,
+    pub tokens: UsageTokenBreakdown,
+    pub cost: f64,
+    pub clients: BTreeMap<String, DailyClientCommon>,
+    pub message_count: u32,
+    pub turn_count: u32,
+}
+
+/// Group-keyed model buckets for one daily row.
+#[derive(Debug, Clone)]
+pub struct DailyModelProjection {
+    pub date: NaiveDate,
+    pub client_models: BTreeMap<String, BTreeMap<String, DailyModelInfo>>,
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +185,24 @@ pub struct HourlyUsage {
     pub models: BTreeMap<String, HourlyModelInfo>,
     pub message_count: u32,
     pub turn_count: u32,
+}
+
+/// Group-agnostic portion of one hourly row.
+#[derive(Debug, Clone)]
+pub struct HourlyUsageCommon {
+    pub datetime: NaiveDateTime,
+    pub tokens: UsageTokenBreakdown,
+    pub cost: f64,
+    pub clients: BTreeSet<String>,
+    pub message_count: u32,
+    pub turn_count: u32,
+}
+
+/// Group-keyed model buckets for one hourly row.
+#[derive(Debug, Clone)]
+pub struct HourlyModelProjection {
+    pub datetime: NaiveDateTime,
+    pub models: BTreeMap<String, HourlyModelInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +240,52 @@ pub struct UsageGraphData {
     pub weeks: Vec<Vec<Option<ContributionDay>>>,
 }
 
+/// Group-agnostic usage projection for one committed Client selection.
+///
+/// This is materialized once per Client scope. Group By only replaces the
+/// sibling [`UsageGroupedData`].
+#[derive(Debug, Clone, Default)]
+pub struct UsageCommonData {
+    pub agents: Vec<AgentEntry>,
+    pub daily: Vec<DailyUsageCommon>,
+    pub hourly: Vec<HourlyUsageCommon>,
+    pub graph: UsageGraphData,
+    pub total_tokens: u64,
+    pub total_cost: f64,
+    pub current_streak: u32,
+    pub longest_streak: u32,
+}
+
+/// Group-keyed model projection for one committed Client selection.
+#[derive(Debug, Clone, Default)]
+pub struct UsageGroupedData {
+    pub models: Vec<UsageModelEntry>,
+    pub daily: Vec<DailyModelProjection>,
+    pub hourly: Vec<HourlyModelProjection>,
+}
+
+/// A Common/Grouped pair was not produced from the same Client projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageProjectionShapeError {
+    detail: String,
+}
+
+impl UsageProjectionShapeError {
+    fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for UsageProjectionShapeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for UsageProjectionShapeError {}
+
 #[derive(Debug, Clone, Default)]
 pub struct UsageData {
     /// Data Health for the load that produced this data. Empty/complete
@@ -198,9 +303,152 @@ pub struct UsageData {
     pub longest_streak: u32,
 }
 
+impl UsageData {
+    /// Validate that a Group By-independent projection and one Group By
+    /// projection describe the same daily and hourly row shape.
+    ///
+    /// Cache loading uses this borrowed form to validate every persisted
+    /// Group By projection without retaining all four model projections in
+    /// memory at once.
+    pub fn validate_projection_parts(
+        common: &UsageCommonData,
+        grouped: &UsageGroupedData,
+    ) -> Result<(), UsageProjectionShapeError> {
+        if common.daily.len() != grouped.daily.len() {
+            return Err(UsageProjectionShapeError::new(format!(
+                "daily Common/Grouped row count differs: {} != {}",
+                common.daily.len(),
+                grouped.daily.len()
+            )));
+        }
+        for (common, grouped) in common.daily.iter().zip(&grouped.daily) {
+            if common.date != grouped.date {
+                return Err(UsageProjectionShapeError::new(format!(
+                    "daily Common/Grouped date differs: {} != {}",
+                    common.date, grouped.date
+                )));
+            }
+            if common.clients.keys().ne(grouped.client_models.keys()) {
+                return Err(UsageProjectionShapeError::new(format!(
+                    "daily Common/Grouped Clients differ for {}",
+                    common.date
+                )));
+            }
+        }
+
+        if common.hourly.len() != grouped.hourly.len() {
+            return Err(UsageProjectionShapeError::new(format!(
+                "hourly Common/Grouped row count differs: {} != {}",
+                common.hourly.len(),
+                grouped.hourly.len()
+            )));
+        }
+        for (common, grouped) in common.hourly.iter().zip(&grouped.hourly) {
+            if common.datetime != grouped.datetime {
+                return Err(UsageProjectionShapeError::new(format!(
+                    "hourly Common/Grouped datetime differs: {} != {}",
+                    common.datetime, grouped.datetime
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Assemble the presentation DTO from one group-agnostic projection and
+    /// one Group By projection. Shape mismatches are explicit corruption or
+    /// programming errors; they are never reconciled with invented empty
+    /// model buckets.
+    pub fn from_projection_parts(
+        common: UsageCommonData,
+        grouped: UsageGroupedData,
+    ) -> Result<Self, UsageProjectionShapeError> {
+        Self::validate_projection_parts(&common, &grouped)?;
+
+        let UsageCommonData {
+            agents,
+            daily: common_daily,
+            hourly: common_hourly,
+            graph,
+            total_tokens,
+            total_cost,
+            current_streak,
+            longest_streak,
+        } = common;
+        let UsageGroupedData {
+            models,
+            daily: grouped_daily,
+            hourly: grouped_hourly,
+        } = grouped;
+
+        let mut daily = Vec::with_capacity(common_daily.len());
+        for (common, grouped) in common_daily.into_iter().zip(grouped_daily) {
+            let client_breakdown = common
+                .clients
+                .into_iter()
+                .zip(grouped.client_models)
+                .map(|((common_client, common), (grouped_client, models))| {
+                    debug_assert_eq!(common_client, grouped_client);
+                    (
+                        common_client,
+                        DailyClientInfo {
+                            tokens: common.tokens,
+                            cost: common.cost,
+                            models,
+                        },
+                    )
+                })
+                .collect();
+            daily.push(DailyUsage {
+                date: common.date,
+                tokens: common.tokens,
+                cost: common.cost,
+                client_breakdown,
+                message_count: common.message_count,
+                turn_count: common.turn_count,
+            });
+        }
+
+        let mut hourly = Vec::with_capacity(common_hourly.len());
+        for (common, grouped) in common_hourly.into_iter().zip(grouped_hourly) {
+            hourly.push(HourlyUsage {
+                datetime: common.datetime,
+                tokens: common.tokens,
+                cost: common.cost,
+                clients: common.clients,
+                models: grouped.models,
+                message_count: common.message_count,
+                turn_count: common.turn_count,
+            });
+        }
+
+        Ok(Self {
+            health: Default::default(),
+            models,
+            agents,
+            daily,
+            hourly,
+            graph,
+            total_tokens,
+            total_cost,
+            error: None,
+            current_streak,
+            longest_streak,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::UsageTokenBreakdown;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use chrono::{NaiveDate, NaiveDateTime};
+
+    use super::{
+        DailyClientCommon, DailyModelInfo, DailyModelProjection, DailyUsageCommon, HourlyModelInfo,
+        HourlyModelProjection, HourlyUsageCommon, UsageCommonData, UsageData, UsageGroupedData,
+        UsageTokenBreakdown,
+    };
 
     #[test]
     fn displayed_output_includes_reasoning_once() {
@@ -214,5 +462,141 @@ mod tests {
 
         assert_eq!(tokens.displayed_output(), 50);
         assert_eq!(tokens.total(), 165);
+    }
+
+    fn tokens(input: u64) -> UsageTokenBreakdown {
+        UsageTokenBreakdown {
+            input,
+            ..Default::default()
+        }
+    }
+
+    fn projection_parts() -> (UsageCommonData, UsageGroupedData) {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 23).unwrap();
+        let datetime =
+            NaiveDateTime::parse_from_str("2026-07-23 14:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let common = UsageCommonData {
+            daily: vec![DailyUsageCommon {
+                date,
+                tokens: tokens(10),
+                cost: 1.0,
+                clients: BTreeMap::from([(
+                    "codex".to_string(),
+                    DailyClientCommon {
+                        tokens: tokens(10),
+                        cost: 1.0,
+                    },
+                )]),
+                message_count: 2,
+                turn_count: 1,
+            }],
+            hourly: vec![HourlyUsageCommon {
+                datetime,
+                tokens: tokens(10),
+                cost: 1.0,
+                clients: BTreeSet::from(["codex".to_string()]),
+                message_count: 2,
+                turn_count: 1,
+            }],
+            total_tokens: 10,
+            total_cost: 1.0,
+            ..Default::default()
+        };
+        let grouped = UsageGroupedData {
+            daily: vec![DailyModelProjection {
+                date,
+                client_models: BTreeMap::from([(
+                    "codex".to_string(),
+                    BTreeMap::from([(
+                        "model-key".to_string(),
+                        DailyModelInfo {
+                            provider: "openai".to_string(),
+                            model_id: "gpt-5.6".to_string(),
+                            display_name: "gpt-5.6".to_string(),
+                            workspace_key: None,
+                            workspace_label: None,
+                            tokens: tokens(10),
+                            cost: 1.0,
+                            messages: 2,
+                        },
+                    )]),
+                )]),
+            }],
+            hourly: vec![HourlyModelProjection {
+                datetime,
+                models: BTreeMap::from([(
+                    "model-key".to_string(),
+                    HourlyModelInfo {
+                        provider: "openai".to_string(),
+                        model_id: "gpt-5.6".to_string(),
+                        display_name: "gpt-5.6".to_string(),
+                        tokens: tokens(10),
+                        cost: 1.0,
+                    },
+                )]),
+            }],
+            ..Default::default()
+        };
+        (common, grouped)
+    }
+
+    #[test]
+    fn projection_parts_preserve_common_totals_and_grouped_models() {
+        let (common, grouped) = projection_parts();
+        let usage = UsageData::from_projection_parts(common, grouped).unwrap();
+
+        assert_eq!(usage.total_tokens, 10);
+        assert_eq!(usage.daily[0].message_count, 2);
+        assert_eq!(usage.daily[0].client_breakdown["codex"].tokens.input, 10);
+        assert_eq!(
+            usage.daily[0].client_breakdown["codex"].models["model-key"].model_id,
+            "gpt-5.6"
+        );
+        assert_eq!(usage.hourly[0].clients, BTreeSet::from(["codex".into()]));
+        assert_eq!(usage.hourly[0].models["model-key"].model_id, "gpt-5.6");
+    }
+
+    #[test]
+    fn projection_parts_reject_daily_client_mismatch() {
+        let (common, mut grouped) = projection_parts();
+        grouped.daily[0]
+            .client_models
+            .insert("opencode".to_string(), BTreeMap::new());
+
+        let error = UsageData::from_projection_parts(common, grouped).unwrap_err();
+
+        assert!(error.to_string().contains("Clients differ"));
+    }
+
+    #[test]
+    fn projection_parts_reject_daily_row_count_mismatch() {
+        let (common, mut grouped) = projection_parts();
+        grouped.daily.clear();
+
+        let error = UsageData::from_projection_parts(common, grouped).unwrap_err();
+
+        assert!(error.to_string().contains("daily Common/Grouped row count"));
+    }
+
+    #[test]
+    fn projection_parts_reject_hourly_datetime_mismatch() {
+        let (common, mut grouped) = projection_parts();
+        grouped.hourly[0].datetime += chrono::Duration::hours(1);
+
+        let error = UsageData::from_projection_parts(common, grouped).unwrap_err();
+
+        assert!(error.to_string().contains("datetime differs"));
+    }
+
+    #[test]
+    fn projection_parts_reject_hourly_row_count_mismatch() {
+        let (common, mut grouped) = projection_parts();
+        grouped.hourly.clear();
+
+        let error = UsageData::from_projection_parts(common, grouped).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("hourly Common/Grouped row count"));
     }
 }

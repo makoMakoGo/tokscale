@@ -9,9 +9,8 @@ identity carried through them.
 ## Context
 
 The TUI `GroupBy` selector (`GroupBy::Model`, `ClientModel`,
-`ClientProviderModel`, `WorkspaceModel`; `Session` and `ClientSession` exist
-in core but are not exposed) reshapes `UsageData` when the user switches
-grouping. The authoritative numbers — totals, per-day and per-hour
+`ClientProviderModel`, and `WorkspaceModel`) reshapes `UsageData` when the user
+switches grouping. The authoritative numbers — totals, per-day and per-hour
 aggregates, the contribution graph, and streaks — do not depend on the
 grouping, but the model identity carried by the view types did: the
 canonical model identity was smuggled through a color key,
@@ -33,14 +32,20 @@ Group By is a display projection of the Models-class tables. Switching it
 changes how model rows are keyed and labeled; it must not change any
 authoritative number.
 
-Each atomic TUI generation contains every exposed full-universe grouping
-projection plus client-aware canonical aggregate state. The running TUI pins
-that generation. A Group By change selects an eager projection for the full
-universe or derives the requested grouping from the canonical state for a
-client subset. It never scans inputs, refreshes sessions, writes the cache, or
-changes the refresh clock. Canonical state is loaded lazily when a client
-subset first needs it. An explicitly reported cache-persistence failure may
-retain `TuiAcc` as a degraded in-memory projection backend.
+Each atomic TUI generation contains one group-agnostic Common projection,
+every exposed full-universe Grouped projection, and client-aware canonical
+aggregate state. Common is stored once; it contains Agents, daily/hourly
+totals and Client membership, graph, report totals, and streaks. Each of the
+four Grouped projections contains only Models plus daily/hourly model buckets.
+The running TUI pins that generation. A Group By change combines Common with
+one eager Grouped projection for the full universe or derives both parts from
+canonical state for a proper Client subset. Common and Grouped shape must agree
+on daily dates, daily Client keys, and hourly datetimes; mismatches are invalid
+instead of being reconciled with invented buckets. A Group By change never
+scans inputs, refreshes sessions, writes the cache, or changes the refresh
+clock. Canonical state is loaded lazily when a proper Client subset first needs
+it. An explicitly reported cache-persistence failure may retain `TuiAcc` as a
+degraded in-memory projection backend.
 
 Local usage projections and Sessions share the generation boundary defined by
 ADR 0028. Group By changes only the usage projection and never reshape the
@@ -48,11 +53,13 @@ generation's session snapshot.
 
 **Projection classification.** Every projection of `UsageData` is either:
 
-- **group-keyed** — reshaped by the grouping: `UsageData.models` (the Models
-  table) and the per-client model sub-buckets inside `daily`/`hourly` and
-  the period views derived from them; or
-- **group-agnostic** — invariant under grouping: day/hour totals, `agents`,
-  the contribution graph, streaks, and every "Top Model" ranking.
+- **Grouped** — reshaped by the grouping and persisted once per Group By
+  value: `UsageData.models` (the Models table) and the per-Client model
+  sub-buckets inside `daily`/`hourly` and the period views derived from them;
+  or
+- **Common** — invariant under grouping and persisted once per generation:
+  day/hour totals and Client membership, `agents`, the contribution graph,
+  report totals, and streaks.
 
 Sessions consume the local generation's separate session snapshot. Remote
 Subscription Usage has its own lifecycle. Neither is a member of `UsageData`
@@ -62,7 +69,9 @@ or a Group By projection.
 `rank_canonical_models`, Overview chart aggregation, overview snapshot,
 footer model count) groups by the bare canonical model ID read from
 `model_id`, regardless of the active grouping. A WorkspaceModel projection
-and a Model projection of the same data must produce identical rankings.
+and a Model projection of the same data must produce identical rankings. These
+rankings consume the active Grouped model entries but are semantically
+group-agnostic; they are not duplicated into Common.
 
 **Model presentation identity.** Model-carrying view entries keep two fields
 with disjoint duties:
@@ -70,9 +79,8 @@ with disjoint duties:
 - `model_id` — the bare canonical model ID. The authoritative semantic
   identity; the only field ranking, grouping, and model-color consumers may
   key on.
-- `display_name` — a pure label for rendering. It never carries the
-  workspace dimension. (Session groupings still prefix the session id; that
-  dimension is out of scope for this contract.)
+- `display_name` — a pure label for rendering. It never carries the workspace
+  dimension.
 
 `color_key` is removed. It duplicated model identity while allowing the color
 path to drift from the canonical model contract.
@@ -126,9 +134,10 @@ export) emit the grouping (`groupBy`) and the dimension fields
 - Any future grouping dimension follows the same rule: a structured field on
   the view entry plus an export field, never a label prefix.
 - An accepted TUI generation can switch among every exposed grouping without a
-  client load. The full-universe steady-state cost is the active usage
-  projection, session snapshot, and pinned file handles; fine-grained canonical
-  state enters memory only after client-subset projection needs it.
+  Client load. The full-universe steady-state cost is the active assembled
+  Common + Grouped usage view, session snapshot, and pinned file handles;
+  fine-grained canonical state enters memory only after a proper Client-subset
+  projection needs it.
 - Session projection and client-space values are generation-scoped even though
   Group By does not reshape them. Client space means the scan-input bytes
   confirmed for the report's final fold, not an earlier prepared snapshot or

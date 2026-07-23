@@ -21,7 +21,7 @@ pub(crate) static OMP_ADAPTER: OmpAdapter = OmpAdapter;
 // Earlier OMP revisions emitted per-agent swarm labels, could bind a
 // precomputed parent digest to a newer input snapshot, or missed dynamic and
 // nested task-agent names.
-const OMP_RECORD_REJECTION_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 10;
+const OMP_RECORD_REJECTION_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 11;
 const OMP_PARENT_HEALTH_REVISION: u32 = 2;
 
 impl LocalInputAdapter for OmpAdapter {

@@ -1,36 +1,65 @@
 use crate::claude_diagnostics;
-use crate::commands::render::{
-    aggregate_model_report_performance, dim_borders, format_currency, format_model_name,
-    format_ms_per_1k, format_tokens_with_commas, LightSpinner, TABLE_PRESET,
-};
+use crate::commands::render::{dim_borders, format_currency, LightSpinner, TABLE_PRESET};
 use crate::commands::shared::{
-    emit_client_diagnostics, get_date_range_label, model_usage_includes_client,
-    resolve_effective_home_dir, use_env_roots, ReportEnvelope,
+    emit_client_diagnostics, get_date_range_label, resolve_effective_home_dir, use_env_roots,
+    ReportEnvelope,
 };
 use crate::tui::{
-    self, get_client_display_name, get_provider_display_name, truncate_model_display_name,
+    self, format_cache_hit_rate, format_cost_per_million, format_ms_per_1k,
+    format_usage_tokens_with_commas, get_client_display_name, get_provider_display_name,
+    truncate_model_display_name,
 };
 use anyhow::Result;
 use std::io::{self, IsTerminal, Write};
+use tokscale_core::usage_views::{UsageData, UsageModelEntry, UsageTokenBreakdown};
+use tokscale_core::{GroupBy, ModelPerformance, ReportOptions};
 
-fn checked_token_total(tokens: impl IntoIterator<Item = i64>) -> i64 {
-    tokens
-        .into_iter()
-        .try_fold(0_i64, i64::checked_add)
-        .expect("displayed model token total exceeds i64::MAX")
+fn checked_add_tokens(
+    total: &UsageTokenBreakdown,
+    tokens: &UsageTokenBreakdown,
+) -> UsageTokenBreakdown {
+    total
+        .checked_add(tokens)
+        .expect("Models projection token totals exceed u64::MAX")
 }
 
-fn displayed_output(entry: &tokscale_core::ModelUsage) -> i64 {
-    checked_token_total([entry.output, entry.reasoning])
+fn model_totals(models: &[UsageModelEntry]) -> UsageTokenBreakdown {
+    models
+        .iter()
+        .fold(UsageTokenBreakdown::default(), |total, model| {
+            checked_add_tokens(&total, &model.tokens)
+        })
 }
 
-fn displayed_token_total(entry: &tokscale_core::ModelUsage) -> i64 {
-    checked_token_total([
-        entry.input,
-        displayed_output(entry),
-        entry.cache_read,
-        entry.cache_write,
-    ])
+fn aggregate_performance(models: &[UsageModelEntry], total_tokens: u64) -> ModelPerformance {
+    let total_duration_ms = models
+        .iter()
+        .map(|model| model.performance.total_duration_ms)
+        .fold(0_i64, i64::saturating_add);
+    let timed_tokens = models
+        .iter()
+        .map(|model| model.performance.timed_tokens)
+        .fold(0_i64, i64::saturating_add);
+    let sample_count = models
+        .iter()
+        .map(|model| model.performance.sample_count)
+        .fold(0_i32, i32::saturating_add);
+    ModelPerformance {
+        ms_per_1k_tokens: (timed_tokens > 0 && total_duration_ms > 0)
+            .then(|| total_duration_ms as f64 * 1000.0 / timed_tokens as f64),
+        total_duration_ms,
+        timed_tokens,
+        sample_count,
+        token_coverage: if total_tokens > 0 {
+            (timed_tokens.max(0) as f64 / total_tokens as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+    }
+}
+
+fn model_clients_include(model: &UsageModelEntry, client: &str) -> bool {
+    model.client_keys().any(|candidate| candidate == client)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -46,702 +75,197 @@ pub(crate) fn run_models_report(
     today: bool,
     week: bool,
     month_flag: bool,
-    group_by: tokscale_core::GroupBy,
+    group_by: GroupBy,
 ) -> Result<()> {
     use std::time::Instant;
     use tokio::runtime::Runtime;
-    use tokscale_core::{get_model_report, GroupBy, ReportOptions};
 
     if !json {
         tui::config::TokscaleConfig::initialize()?;
     }
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
     let effective_home_dir = resolve_effective_home_dir(&home_dir);
-
-    let spinner = if no_spinner {
-        None
-    } else {
-        Some(LightSpinner::start("Scanning session data..."))
-    };
-    let use_env_roots = use_env_roots(&home_dir);
+    let spinner = (!no_spinner).then(|| LightSpinner::start("Scanning session data..."));
     let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let start = Instant::now();
     let rt = Runtime::new()?;
-    let report = rt
-        .block_on(async {
-            get_model_report(ReportOptions {
-                home_dir: home_dir.clone(),
-                use_env_roots,
-                clients: clients.clone(),
-                since: since.clone(),
-                until: until.clone(),
-                year: year.clone(),
-                group_by: group_by.clone(),
-                scanner_settings,
-            })
-            .await
-        })
+    let data = rt
+        .block_on(tokscale_core::get_usage_data(ReportOptions {
+            home_dir: home_dir.clone(),
+            use_env_roots: use_env_roots(&home_dir),
+            clients: clients.clone(),
+            since,
+            until,
+            year,
+            group_by: group_by.clone(),
+            scanner_settings,
+        }))
         .map_err(anyhow::Error::new)?;
 
     if let Some(spinner) = spinner {
         spinner.stop();
     }
-    super::shared::emit_health_summary(&report.health);
+    crate::commands::shared::emit_health_summary(&data.health);
     let processing_time_ms = start.elapsed().as_millis();
-    let claude_message_count = report
-        .entries
+    let claude_has_usage = data
+        .models
         .iter()
-        .filter(|entry| model_usage_includes_client(entry, "claude"))
-        .map(|entry| entry.message_count)
-        .sum();
+        .any(|model| model_clients_include(model, "claude"));
     let diagnostics = effective_home_dir
         .as_deref()
         .map(|home| {
             claude_diagnostics::diagnostics_for_empty_explicit_report(
                 home,
                 &clients,
-                claude_message_count,
+                if claude_has_usage { 1 } else { 0 },
             )
         })
         .unwrap_or_default();
-    let total_reasoning = checked_token_total(report.entries.iter().map(|entry| entry.reasoning));
-    let displayed_total_output = checked_token_total([report.total_output, total_reasoning]);
-    let report_token_total = checked_token_total([
-        report.total_input,
-        displayed_total_output,
-        report.total_cache_read,
-        report.total_cache_write,
-    ]);
     emit_client_diagnostics(&diagnostics);
 
     if json {
-        #[derive(serde::Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct ModelUsageJson {
-            client: String,
-            merged_clients: Option<String>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            workspace_key: Option<serde_json::Value>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            workspace_label: Option<String>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            session_id: Option<String>,
-            model: String,
-            provider: String,
-            input: i64,
-            output: i64,
-            cache_read: i64,
-            cache_write: i64,
-            message_count: i32,
-            cost: f64,
-            performance: tokscale_core::ModelPerformance,
-        }
-
-        #[derive(serde::Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct ModelReportData {
-            group_by: String,
-            entries: Vec<ModelUsageJson>,
-            total_input: i64,
-            total_output: i64,
-            total_cache_read: i64,
-            total_cache_write: i64,
-            total_tokens: i64,
-            total_messages: i32,
-            total_cost: f64,
-        }
-
-        let health = report.health.clone();
-        let report_processing_time_ms = report.processing_time_ms;
-        let data = ModelReportData {
-            group_by: group_by.to_string(),
-            entries: report
-                .entries
-                .into_iter()
-                .map(|e| {
-                    let output = displayed_output(&e);
-                    ModelUsageJson {
-                        workspace_key: if group_by == GroupBy::WorkspaceModel {
-                            Some(
-                                e.workspace_key
-                                    .map(serde_json::Value::String)
-                                    .unwrap_or(serde_json::Value::Null),
-                            )
-                        } else {
-                            None
-                        },
-                        workspace_label: if group_by == GroupBy::WorkspaceModel {
-                            e.workspace_label
-                        } else {
-                            None
-                        },
-                        session_id: if matches!(group_by, GroupBy::Session | GroupBy::ClientSession)
-                        {
-                            e.session_id
-                        } else {
-                            None
-                        },
-                        client: e.client,
-                        merged_clients: e.merged_clients,
-                        model: e.model,
-                        provider: e.provider,
-                        input: e.input,
-                        output,
-                        cache_read: e.cache_read,
-                        cache_write: e.cache_write,
-                        message_count: e.message_count,
-                        cost: e.cost,
-                        performance: e.performance,
-                    }
-                })
-                .collect(),
-            total_input: report.total_input,
-            total_output: displayed_total_output,
-            total_cache_read: report.total_cache_read,
-            total_cache_write: report.total_cache_write,
-            total_tokens: report_token_total,
-            total_messages: report.total_messages,
-            total_cost: report.total_cost,
-        };
-        let output = ReportEnvelope::new(data, health, report_processing_time_ms as u64);
+        let health = data.health.clone();
+        let report_data = crate::tui::build_models_export_value(&data, &group_by);
+        let output = ReportEnvelope::new(report_data, health, processing_time_ms as u64);
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
-        let total_performance = aggregate_model_report_performance(&report.entries);
-        let term_width = crossterm::terminal::size()
-            .map(|(w, _)| w as usize)
-            .unwrap_or(120);
-        let compact = term_width < 100;
-
-        let mut table = Table::new();
-        table.load_preset(TABLE_PRESET);
-        let arrangement = if std::io::stdout().is_terminal() {
-            ContentArrangement::DynamicFullWidth
-        } else {
-            ContentArrangement::Dynamic
-        };
-        table.set_content_arrangement(arrangement);
-        table.enforce_styling();
-
-        let workspace_name = |label: Option<&str>| label.unwrap_or("Unknown workspace").to_string();
-
-        if compact {
-            match group_by {
-                GroupBy::Model => {
-                    table.set_header(vec![
-                        Cell::new("Clients").fg(Color::Cyan),
-                        Cell::new("Providers").fg(Color::Cyan),
-                        Cell::new("Model").fg(Color::Cyan),
-                        Cell::new("Input").fg(Color::Cyan),
-                        Cell::new("Output").fg(Color::Cyan),
-                        Cell::new("ms/1K").fg(Color::Cyan),
-                        Cell::new("Cost").fg(Color::Cyan),
-                    ]);
-
-                    for entry in &report.entries {
-                        let clients_str = entry.merged_clients.as_deref().unwrap_or(&entry.client);
-                        let display_clients = get_client_display_name(clients_str);
-                        table.add_row(vec![
-                            Cell::new(display_clients),
-                            Cell::new(get_provider_display_name(&entry.provider))
-                                .add_attribute(Attribute::Dim),
-                            Cell::new(truncate_model_display_name(&entry.model)),
-                            Cell::new(format_tokens_with_commas(entry.input))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(displayed_output(entry)))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_currency(entry.cost))
-                                .set_alignment(CellAlignment::Right),
-                        ]);
-                    }
-
-                    table.add_row(vec![
-                        Cell::new("Total")
-                            .fg(Color::Yellow)
-                            .add_attribute(Attribute::Bold),
-                        Cell::new(""),
-                        Cell::new(""),
-                        Cell::new(format_tokens_with_commas(report.total_input))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(displayed_total_output))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_currency(report.total_cost))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                    ]);
-                }
-                GroupBy::ClientModel | GroupBy::ClientProviderModel => {
-                    table.set_header(vec![
-                        Cell::new("Client").fg(Color::Cyan),
-                        Cell::new("Provider").fg(Color::Cyan),
-                        Cell::new("Model").fg(Color::Cyan),
-                        Cell::new("Input").fg(Color::Cyan),
-                        Cell::new("Output").fg(Color::Cyan),
-                        Cell::new("ms/1K").fg(Color::Cyan),
-                        Cell::new("Cost").fg(Color::Cyan),
-                    ]);
-
-                    for entry in &report.entries {
-                        table.add_row(vec![
-                            Cell::new(get_client_display_name(&entry.client)),
-                            Cell::new(get_provider_display_name(&entry.provider))
-                                .add_attribute(Attribute::Dim),
-                            Cell::new(truncate_model_display_name(&entry.model)),
-                            Cell::new(format_tokens_with_commas(entry.input))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(displayed_output(entry)))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_currency(entry.cost))
-                                .set_alignment(CellAlignment::Right),
-                        ]);
-                    }
-
-                    table.add_row(vec![
-                        Cell::new("Total")
-                            .fg(Color::Yellow)
-                            .add_attribute(Attribute::Bold),
-                        Cell::new(""),
-                        Cell::new(""),
-                        Cell::new(format_tokens_with_commas(report.total_input))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(displayed_total_output))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_currency(report.total_cost))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                    ]);
-                }
-                GroupBy::Session | GroupBy::ClientSession => {
-                    let show_client = group_by == GroupBy::ClientSession;
-                    let mut header = Vec::with_capacity(6);
-                    if show_client {
-                        header.push(Cell::new("Client").fg(Color::Cyan));
-                    }
-                    header.extend([
-                        Cell::new("Session").fg(Color::Cyan),
-                        Cell::new("Model").fg(Color::Cyan),
-                        Cell::new("Total").fg(Color::Cyan),
-                        Cell::new("Cost").fg(Color::Cyan),
-                    ]);
-                    table.set_header(header);
-
-                    for entry in &report.entries {
-                        let total_tokens = displayed_token_total(entry);
-                        let session_label = entry
-                            .session_id
-                            .clone()
-                            .unwrap_or_else(|| "(unknown)".to_string());
-                        let mut row = Vec::with_capacity(6);
-                        if show_client {
-                            row.push(Cell::new(get_client_display_name(&entry.client)));
-                        }
-                        row.extend([
-                            Cell::new(session_label),
-                            Cell::new(truncate_model_display_name(&entry.model)),
-                            Cell::new(format_tokens_with_commas(total_tokens))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_currency(entry.cost))
-                                .set_alignment(CellAlignment::Right),
-                        ]);
-                        table.add_row(row);
-                    }
-
-                    let mut total_row = Vec::with_capacity(6);
-                    if show_client {
-                        total_row.push(
-                            Cell::new("Total")
-                                .fg(Color::Yellow)
-                                .add_attribute(Attribute::Bold),
-                        );
-                        total_row.push(Cell::new(""));
-                    } else {
-                        total_row.push(
-                            Cell::new("Total")
-                                .fg(Color::Yellow)
-                                .add_attribute(Attribute::Bold),
-                        );
-                    }
-                    total_row.push(Cell::new(""));
-                    total_row.push(
-                        Cell::new(format_tokens_with_commas(report_token_total))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                    );
-                    total_row.push(
-                        Cell::new(format_currency(report.total_cost))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                    );
-                    table.add_row(total_row);
-                }
-                GroupBy::WorkspaceModel => {
-                    table.set_header(vec![
-                        Cell::new("Workspace").fg(Color::Cyan),
-                        Cell::new("Model").fg(Color::Cyan),
-                        Cell::new("ms/1K").fg(Color::Cyan),
-                        Cell::new("Cost").fg(Color::Cyan),
-                    ]);
-
-                    for entry in &report.entries {
-                        table.add_row(vec![
-                            Cell::new(workspace_name(entry.workspace_label.as_deref())),
-                            Cell::new(truncate_model_display_name(&entry.model)),
-                            Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_currency(entry.cost))
-                                .set_alignment(CellAlignment::Right),
-                        ]);
-                    }
-
-                    table.add_row(vec![
-                        Cell::new("Total")
-                            .fg(Color::Yellow)
-                            .add_attribute(Attribute::Bold),
-                        Cell::new(""),
-                        Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_currency(report.total_cost))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                    ]);
-                }
-            }
-        } else {
-            match group_by {
-                GroupBy::Model => {
-                    table.set_header(vec![
-                        Cell::new("Clients").fg(Color::Cyan),
-                        Cell::new("Providers").fg(Color::Cyan),
-                        Cell::new("Model").fg(Color::Cyan),
-                        Cell::new("Input").fg(Color::Cyan),
-                        Cell::new("Output").fg(Color::Cyan),
-                        Cell::new("Cache Write").fg(Color::Cyan),
-                        Cell::new("Cache Read").fg(Color::Cyan),
-                        Cell::new("Total").fg(Color::Cyan),
-                        Cell::new("ms/1K").fg(Color::Cyan),
-                        Cell::new("Cost").fg(Color::Cyan),
-                    ]);
-
-                    for entry in &report.entries {
-                        let total = displayed_token_total(entry);
-
-                        let clients_str = entry.merged_clients.as_deref().unwrap_or(&entry.client);
-                        let display_clients = get_client_display_name(clients_str);
-                        table.add_row(vec![
-                            Cell::new(display_clients),
-                            Cell::new(get_provider_display_name(&entry.provider))
-                                .add_attribute(Attribute::Dim),
-                            Cell::new(truncate_model_display_name(&entry.model)),
-                            Cell::new(format_tokens_with_commas(entry.input))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(displayed_output(entry)))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(entry.cache_write))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(entry.cache_read))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(total))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_currency(entry.cost))
-                                .set_alignment(CellAlignment::Right),
-                        ]);
-                    }
-
-                    table.add_row(vec![
-                        Cell::new("Total")
-                            .fg(Color::Yellow)
-                            .add_attribute(Attribute::Bold),
-                        Cell::new(""),
-                        Cell::new(""),
-                        Cell::new(format_tokens_with_commas(report.total_input))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(displayed_total_output))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report.total_cache_write))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report.total_cache_read))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report_token_total))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_currency(report.total_cost))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                    ]);
-                }
-                GroupBy::Session | GroupBy::ClientSession => {
-                    let show_client = group_by == GroupBy::ClientSession;
-                    let mut header = Vec::with_capacity(8);
-                    if show_client {
-                        header.push(Cell::new("Client").fg(Color::Cyan));
-                    }
-                    header.extend([
-                        Cell::new("Session").fg(Color::Cyan),
-                        Cell::new("Provider").fg(Color::Cyan),
-                        Cell::new("Model").fg(Color::Cyan),
-                        Cell::new("Input").fg(Color::Cyan),
-                        Cell::new("Output").fg(Color::Cyan),
-                        Cell::new("Total").fg(Color::Cyan),
-                        Cell::new("Cost").fg(Color::Cyan),
-                    ]);
-                    table.set_header(header);
-
-                    for entry in &report.entries {
-                        let total = displayed_token_total(entry);
-                        let session_label = entry
-                            .session_id
-                            .clone()
-                            .unwrap_or_else(|| "(unknown)".to_string());
-                        let mut row = Vec::with_capacity(8);
-                        if show_client {
-                            row.push(Cell::new(get_client_display_name(&entry.client)));
-                        }
-                        row.extend([
-                            Cell::new(session_label),
-                            Cell::new(get_provider_display_name(&entry.provider))
-                                .add_attribute(Attribute::Dim),
-                            Cell::new(truncate_model_display_name(&entry.model)),
-                            Cell::new(format_tokens_with_commas(entry.input))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(displayed_output(entry)))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(total))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_currency(entry.cost))
-                                .set_alignment(CellAlignment::Right),
-                        ]);
-                        table.add_row(row);
-                    }
-
-                    let mut total_row: Vec<Cell> = Vec::with_capacity(8);
-                    total_row.push(
-                        Cell::new("Total")
-                            .fg(Color::Yellow)
-                            .add_attribute(Attribute::Bold),
-                    );
-                    let blanks = if show_client { 3 } else { 2 };
-                    for _ in 0..blanks {
-                        total_row.push(Cell::new(""));
-                    }
-                    total_row.push(
-                        Cell::new(format_tokens_with_commas(report.total_input))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                    );
-                    total_row.push(
-                        Cell::new(format_tokens_with_commas(displayed_total_output))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                    );
-                    total_row.push(
-                        Cell::new(format_tokens_with_commas(report_token_total))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                    );
-                    total_row.push(
-                        Cell::new(format_currency(report.total_cost))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                    );
-                    table.add_row(total_row);
-                }
-                GroupBy::ClientModel | GroupBy::ClientProviderModel => {
-                    table.set_header(vec![
-                        Cell::new("Client").fg(Color::Cyan),
-                        Cell::new("Provider").fg(Color::Cyan),
-                        Cell::new("Model").fg(Color::Cyan),
-                        Cell::new("Resolved").fg(Color::Cyan),
-                        Cell::new("Input").fg(Color::Cyan),
-                        Cell::new("Output").fg(Color::Cyan),
-                        Cell::new("Cache Write").fg(Color::Cyan),
-                        Cell::new("Cache Read").fg(Color::Cyan),
-                        Cell::new("Total").fg(Color::Cyan),
-                        Cell::new("ms/1K").fg(Color::Cyan),
-                        Cell::new("Cost").fg(Color::Cyan),
-                    ]);
-
-                    for entry in &report.entries {
-                        let total = displayed_token_total(entry);
-
-                        table.add_row(vec![
-                            Cell::new(get_client_display_name(&entry.client)),
-                            Cell::new(get_provider_display_name(&entry.provider))
-                                .add_attribute(Attribute::Dim),
-                            Cell::new(truncate_model_display_name(&entry.model)),
-                            Cell::new(truncate_model_display_name(&format_model_name(
-                                &entry.model,
-                            ))),
-                            Cell::new(format_tokens_with_commas(entry.input))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(displayed_output(entry)))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(entry.cache_write))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(entry.cache_read))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(total))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_currency(entry.cost))
-                                .set_alignment(CellAlignment::Right),
-                        ]);
-                    }
-
-                    table.add_row(vec![
-                        Cell::new("Total")
-                            .fg(Color::Yellow)
-                            .add_attribute(Attribute::Bold),
-                        Cell::new(""),
-                        Cell::new(""),
-                        Cell::new(""),
-                        Cell::new(format_tokens_with_commas(report.total_input))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(displayed_total_output))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report.total_cache_write))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report.total_cache_read))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report_token_total))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_currency(report.total_cost))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                    ]);
-                }
-                GroupBy::WorkspaceModel => {
-                    table.set_header(vec![
-                        Cell::new("Workspace").fg(Color::Cyan),
-                        Cell::new("Providers").fg(Color::Cyan),
-                        Cell::new("Clients").fg(Color::Cyan),
-                        Cell::new("Model").fg(Color::Cyan),
-                        Cell::new("Input").fg(Color::Cyan),
-                        Cell::new("Output").fg(Color::Cyan),
-                        Cell::new("Cache Write").fg(Color::Cyan),
-                        Cell::new("Cache Read").fg(Color::Cyan),
-                        Cell::new("Total").fg(Color::Cyan),
-                        Cell::new("ms/1K").fg(Color::Cyan),
-                        Cell::new("Cost").fg(Color::Cyan),
-                    ]);
-
-                    for entry in &report.entries {
-                        let total = displayed_token_total(entry);
-                        let clients_str = entry.merged_clients.as_deref().unwrap_or(&entry.client);
-                        let display_clients = get_client_display_name(clients_str);
-
-                        table.add_row(vec![
-                            Cell::new(workspace_name(entry.workspace_label.as_deref())),
-                            Cell::new(get_provider_display_name(&entry.provider))
-                                .add_attribute(Attribute::Dim),
-                            Cell::new(display_clients),
-                            Cell::new(truncate_model_display_name(&entry.model)),
-                            Cell::new(format_tokens_with_commas(entry.input))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(displayed_output(entry)))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(entry.cache_write))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(entry.cache_read))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_tokens_with_commas(total))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_ms_per_1k(entry.performance.ms_per_1k_tokens))
-                                .set_alignment(CellAlignment::Right),
-                            Cell::new(format_currency(entry.cost))
-                                .set_alignment(CellAlignment::Right),
-                        ]);
-                    }
-
-                    table.add_row(vec![
-                        Cell::new("Total")
-                            .fg(Color::Yellow)
-                            .add_attribute(Attribute::Bold),
-                        Cell::new(""),
-                        Cell::new(""),
-                        Cell::new(""),
-                        Cell::new(format_tokens_with_commas(report.total_input))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(displayed_total_output))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report.total_cache_write))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report.total_cache_read))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_tokens_with_commas(report_token_total))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_ms_per_1k(total_performance.ms_per_1k_tokens))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                        Cell::new(format_currency(report.total_cost))
-                            .fg(Color::Yellow)
-                            .set_alignment(CellAlignment::Right),
-                    ]);
-                }
-            }
-        }
-
-        let title = match &date_range {
-            Some(range) => format!("Token Usage Report by Model ({})", range),
-            None => "Token Usage Report by Model".to_string(),
-        };
-        println!("\n  \x1b[36m{}\x1b[0m\n", title);
-        println!("{}", dim_borders(&table.to_string()));
-
-        println!(
-            "\x1b[90m\n  Total: {} messages, {} tokens, \x1b[32m{}\x1b[90m\x1b[0m",
-            format_tokens_with_commas(report.total_messages as i64),
-            format_tokens_with_commas(report_token_total),
-            format_currency(report.total_cost)
-        );
-
-        io::stdout().flush()?;
+        render_models_table(&data, &group_by, date_range.as_deref())?;
     }
 
     if benchmark {
         use colored::Colorize;
         eprintln!(
             "{}",
-            format!("  Processing time: {}ms (Rust native)", processing_time_ms).bright_black()
+            format!("  Processing time: {processing_time_ms}ms (Rust native)").bright_black()
         );
     }
 
     Ok(())
+}
+
+fn render_models_table(
+    data: &UsageData,
+    group_by: &GroupBy,
+    date_range: Option<&str>,
+) -> Result<()> {
+    use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table};
+
+    let mut table = Table::new();
+    table.load_preset(TABLE_PRESET);
+    table.set_content_arrangement(if std::io::stdout().is_terminal() {
+        ContentArrangement::DynamicFullWidth
+    } else {
+        ContentArrangement::Dynamic
+    });
+    table.enforce_styling();
+
+    let workspace_grouping = *group_by == GroupBy::WorkspaceModel;
+    let mut header = Vec::new();
+    if workspace_grouping {
+        header.push(Cell::new("Workspace").fg(Color::Cyan));
+    }
+    header.extend([
+        Cell::new("Model").fg(Color::Cyan),
+        Cell::new("Client").fg(Color::Cyan),
+        Cell::new("Provider").fg(Color::Cyan),
+        Cell::new("Input").fg(Color::Cyan),
+        Cell::new("Output").fg(Color::Cyan),
+        Cell::new("Cache×").fg(Color::Cyan),
+        Cell::new("Cache R").fg(Color::Cyan),
+        Cell::new("Cache W").fg(Color::Cyan),
+        Cell::new("Total").fg(Color::Cyan),
+        Cell::new("Cost").fg(Color::Cyan),
+        Cell::new("Cost/1M").fg(Color::Cyan),
+        Cell::new("ms/1K").fg(Color::Cyan),
+    ]);
+    table.set_header(header);
+
+    for model in &data.models {
+        let mut row = Vec::new();
+        if workspace_grouping {
+            row.push(Cell::new(
+                model
+                    .workspace_label
+                    .as_deref()
+                    .or(model.workspace_key.as_deref())
+                    .unwrap_or("Unknown workspace"),
+            ));
+        }
+        row.extend([
+            Cell::new(truncate_model_display_name(&model.model)),
+            Cell::new(get_client_display_name(&model.client)),
+            Cell::new(get_provider_display_name(&model.provider)),
+            numeric_cell(format_usage_tokens_with_commas(model.tokens.input)),
+            numeric_cell(format_usage_tokens_with_commas(
+                model.tokens.displayed_output(),
+            )),
+            numeric_cell(format_cache_hit_rate(
+                model.tokens.cache_read,
+                model.tokens.input,
+                model.tokens.cache_write,
+            )),
+            numeric_cell(format_usage_tokens_with_commas(model.tokens.cache_read)),
+            numeric_cell(format_usage_tokens_with_commas(model.tokens.cache_write)),
+            numeric_cell(format_usage_tokens_with_commas(model.tokens.total())),
+            numeric_cell(format_currency(model.cost)),
+            numeric_cell(format_cost_per_million(model.cost, model.tokens.total())),
+            numeric_cell(format_ms_per_1k(model.performance.ms_per_1k_tokens)),
+        ]);
+        table.add_row(row);
+    }
+
+    let totals = model_totals(&data.models);
+    debug_assert_eq!(totals.total(), data.total_tokens);
+    let total_performance = aggregate_performance(&data.models, totals.total());
+    let mut total_row = Vec::new();
+    if workspace_grouping {
+        total_row.push(Cell::new(""));
+    }
+    total_row.extend([
+        Cell::new("Total")
+            .fg(Color::Yellow)
+            .add_attribute(Attribute::Bold),
+        Cell::new(""),
+        Cell::new(""),
+        total_cell(format_usage_tokens_with_commas(totals.input)),
+        total_cell(format_usage_tokens_with_commas(totals.displayed_output())),
+        total_cell(format_cache_hit_rate(
+            totals.cache_read,
+            totals.input,
+            totals.cache_write,
+        )),
+        total_cell(format_usage_tokens_with_commas(totals.cache_read)),
+        total_cell(format_usage_tokens_with_commas(totals.cache_write)),
+        total_cell(format_usage_tokens_with_commas(totals.total())),
+        total_cell(format_currency(data.total_cost)),
+        total_cell(format_cost_per_million(data.total_cost, totals.total())),
+        total_cell(format_ms_per_1k(total_performance.ms_per_1k_tokens)),
+    ]);
+    table.add_row(total_row);
+
+    let title = date_range.map_or_else(
+        || "Token Usage Report by Model".to_string(),
+        |range| format!("Token Usage Report by Model ({range})"),
+    );
+    println!("\n  \x1b[36m{title}\x1b[0m\n");
+    println!("{}", dim_borders(&table.to_string()));
+    println!(
+        "\x1b[90m\n  Total: {} tokens, \x1b[32m{}\x1b[90m\x1b[0m",
+        format_usage_tokens_with_commas(data.total_tokens),
+        format_currency(data.total_cost)
+    );
+    io::stdout().flush()?;
+    Ok(())
+}
+
+fn numeric_cell(value: impl ToString) -> comfy_table::Cell {
+    use comfy_table::{Cell, CellAlignment};
+    Cell::new(value).set_alignment(CellAlignment::Right)
+}
+
+fn total_cell(value: impl ToString) -> comfy_table::Cell {
+    use comfy_table::{Cell, CellAlignment, Color};
+    Cell::new(value)
+        .fg(Color::Yellow)
+        .set_alignment(CellAlignment::Right)
 }

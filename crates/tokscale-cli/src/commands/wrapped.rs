@@ -1,7 +1,6 @@
 use ab_glyph::{point, Font, FontArc, GlyphId, PxScale, ScaleFont};
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, Local, NaiveDate};
-use colored::Colorize;
 use image::{imageops::FilterType, Rgba, RgbaImage};
 use imageproc::drawing::draw_filled_circle_mut;
 use std::cmp::Ordering;
@@ -13,8 +12,6 @@ use tokscale_core::{
     inferred_provider_from_model, load_aggregated_views_with_pricing, ClientId, GroupBy,
     ReportOptions, ViewSet,
 };
-
-use crate::cli::WrappedRanking;
 
 const SCALE: i32 = 2;
 const IMAGE_WIDTH: i32 = 1200 * SCALE;
@@ -44,8 +41,6 @@ const FIGTREE_BOLD_FILE: &str = "Figtree-Bold.ttf";
 const FIGTREE_BOLD_URL: &str =
     "https://fonts.gstatic.com/s/figtree/v9/_Xmz-HUzqDCFdgfMsYiV_F7wfS-Bs_eYR15e.ttf";
 
-const PINNED_AGENTS: [&str; 2] = ["Sisyphus", "Planner-Sisyphus"];
-
 const COLOR_BACKGROUND: Rgba<u8> = Rgba([0x10, 0x12, 0x1C, 0xFF]);
 const COLOR_TEXT_PRIMARY: Rgba<u8> = Rgba([0xFF, 0xFF, 0xFF, 0xFF]);
 const COLOR_TEXT_SECONDARY: Rgba<u8> = Rgba([0x88, 0x88, 0x88, 0xFF]);
@@ -54,7 +49,6 @@ const COLOR_GRADE1: Rgba<u8> = Rgba([0x00, 0xB2, 0xFF, 0x44]);
 const COLOR_GRADE2: Rgba<u8> = Rgba([0x00, 0xB2, 0xFF, 0x88]);
 const COLOR_GRADE3: Rgba<u8> = Rgba([0x00, 0xB2, 0xFF, 0xCC]);
 const COLOR_GRADE4: Rgba<u8> = Rgba([0x00, 0xB2, 0xFF, 0xFF]);
-const COLOR_SISYPHUS: Rgba<u8> = Rgba([0x00, 0xCE, 0xD1, 0xFF]);
 
 #[derive(Debug, Clone)]
 pub struct WrappedOptions {
@@ -63,8 +57,6 @@ pub struct WrappedOptions {
     pub home_dir: Option<String>,
     pub clients: Option<Vec<String>>,
     pub short: bool,
-    pub ranking: WrappedRanking,
-    pub pin_sisyphus: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -77,7 +69,6 @@ struct WrappedData {
     longest_streak: i32,
     top_models: Vec<WrappedRankedEntry>,
     top_clients: Vec<WrappedRankedEntry>,
-    top_agents: Option<Vec<WrappedAgentEntry>>,
     contributions: Vec<WrappedContribution>,
     total_messages: i32,
 }
@@ -89,13 +80,6 @@ struct WrappedRankedEntry {
     provider: Option<&'static str>,
     cost: f64,
     tokens: i64,
-}
-
-#[derive(Debug, Clone)]
-struct WrappedAgentEntry {
-    name: String,
-    tokens: i64,
-    messages: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,14 +103,6 @@ struct FontSet {
 #[derive(Debug, Clone)]
 struct RenderOptions {
     short: bool,
-    ranking: RenderRanking,
-    pin_sisyphus: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RenderRanking {
-    Agents,
-    Clients,
 }
 
 pub fn run(options: WrappedOptions) -> Result<String> {
@@ -138,45 +114,10 @@ async fn generate_wrapped(options: WrappedOptions) -> Result<String> {
     let data = load_wrapped_data(&options).await?;
     crate::commands::shared::emit_health_summary(&data.health);
 
-    let has_agent_data = data
-        .top_agents
-        .as_ref()
-        .map(|agents| !agents.is_empty())
-        .unwrap_or(false);
-    let opencode_enabled = options
-        .clients
-        .as_ref()
-        .is_none_or(|clients| clients.iter().any(|s| s == "opencode"));
-    let render_ranking = select_render_ranking(options.ranking, has_agent_data);
-
-    if options.ranking == WrappedRanking::Auto && opencode_enabled && !has_agent_data {
-        eprintln!(
-            "{}",
-            format!("\n  ⚠ No OpenCode agent data found for {}.", data.year).yellow()
-        );
-        eprintln!(
-            "{}",
-            "    Automatic ranking selected the clients view. Use --ranking clients to select it explicitly.\n"
-                .bright_black()
-        );
-    } else if options.ranking == WrappedRanking::Agents && !has_agent_data {
-        eprintln!(
-            "{}",
-            format!("\n  ⚠ No OpenCode agent data found for {}.", data.year).yellow()
-        );
-        eprintln!(
-            "{}",
-            "    Rendering the requested agents view with an explicit empty-state panel.\n"
-                .bright_black()
-        );
-    }
-
     let image = generate_wrapped_image(
         &data,
         &RenderOptions {
             short: options.short,
-            ranking: render_ranking,
-            pin_sisyphus: options.pin_sisyphus,
         },
     )
     .await?;
@@ -199,13 +140,8 @@ async fn generate_wrapped(options: WrappedOptions) -> Result<String> {
     Ok(absolute.to_string_lossy().to_string())
 }
 
-fn select_render_ranking(ranking: WrappedRanking, has_agent_data: bool) -> RenderRanking {
-    match ranking {
-        WrappedRanking::Auto if has_agent_data => RenderRanking::Agents,
-        WrappedRanking::Auto => RenderRanking::Clients,
-        WrappedRanking::Agents => RenderRanking::Agents,
-        WrappedRanking::Clients => RenderRanking::Clients,
-    }
+fn wrapped_active_day_count(daily: &[tokscale_core::usage_views::DailyUsage]) -> usize {
+    daily.iter().filter(|day| day.tokens.total() > 0).count()
 }
 
 async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
@@ -214,23 +150,14 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         .clone()
         .unwrap_or_else(|| Local::now().year().to_string());
     let clients = options.clients.clone().unwrap_or_else(default_clients);
-    let include_agent_view = options.ranking != WrappedRanking::Clients
-        && clients
-            .iter()
-            .any(|client| client == ClientId::OpenCode.as_str());
 
     let since = format!("{}-01-01", year);
     let until = format!("{}-12-31", year);
 
-    let mut views = ViewSet::GRAPH | ViewSet::TIME_METRICS;
-    if include_agent_view {
-        views |= ViewSet::AGENTS;
-    }
-
     let pricing = tokscale_core::pricing::PricingService::get_or_init()
         .await
         .map_err(anyhow::Error::msg)?;
-    let aggregated = load_aggregated_views_with_pricing(
+    let mut aggregated = load_aggregated_views_with_pricing(
         &ReportOptions {
             home_dir: options.home_dir.clone(),
             use_env_roots: crate::commands::shared::use_env_roots(&options.home_dir),
@@ -243,26 +170,64 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                 &options.home_dir,
             )?,
         },
-        views,
+        ViewSet::TUI,
         Some(pricing.as_ref()),
     )
     .map_err(anyhow::Error::new)?;
-    let health = wrapped_health_report(&aggregated);
-    let graph = aggregated.graph.expect("graph view requested");
+    let health = aggregated.health.to_report();
+    let mut data = aggregated.tui_usage.take().expect("tui view requested");
+    data.health = health.clone();
 
-    let mut model_map: HashMap<String, WrappedRankedEntry> = HashMap::new();
     let mut client_map: HashMap<String, WrappedRankedEntry> = HashMap::new();
     let mut total_messages = 0i32;
 
-    for day in &graph.contributions {
-        total_messages += day.totals.messages;
-
-        for client_contrib in &day.clients {
-            accumulate_wrapped_contribution(&mut model_map, &mut client_map, client_contrib);
+    for day in &data.daily {
+        total_messages = total_messages.saturating_add(
+            day.message_count
+                .try_into()
+                .expect("wrapped daily message count exceeds i32::MAX"),
+        );
+        for (client, client_usage) in &day.client_breakdown {
+            let client_name = client_display_name(client).unwrap_or(client).to_string();
+            let client_entry =
+                client_map
+                    .entry(client.clone())
+                    .or_insert_with(|| WrappedRankedEntry {
+                        name: client_name,
+                        client_id: Some(client.clone()),
+                        provider: None,
+                        cost: 0.0,
+                        tokens: 0,
+                    });
+            client_entry.cost += client_usage.cost;
+            client_entry.tokens = client_entry
+                .tokens
+                .checked_add(
+                    client_usage
+                        .tokens
+                        .total()
+                        .try_into()
+                        .expect("wrapped client token total exceeds i64::MAX"),
+                )
+                .expect("wrapped client token total exceeds i64::MAX");
         }
     }
 
-    let mut top_models: Vec<WrappedRankedEntry> = model_map.into_values().collect();
+    let mut top_models: Vec<WrappedRankedEntry> = data
+        .models
+        .iter()
+        .map(|model| WrappedRankedEntry {
+            name: format_model_name(&model.model),
+            client_id: None,
+            provider: get_provider_from_model(&model.model),
+            cost: model.cost,
+            tokens: model
+                .tokens
+                .total()
+                .try_into()
+                .expect("wrapped model token total exceeds i64::MAX"),
+        })
+        .collect();
     top_models.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(Ordering::Equal));
     top_models.truncate(3);
 
@@ -270,96 +235,39 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     top_clients.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(Ordering::Equal));
     top_clients.truncate(3);
 
-    let top_agents = if include_agent_view {
-        aggregated
-            .agent_usage
-            .as_ref()
-            .map(|agents| build_top_agents(agents))
-            .filter(|agents| !agents.is_empty())
-    } else {
-        None
-    };
-
-    let max_cost = graph
-        .contributions
+    let max_cost = data.daily.iter().map(|day| day.cost).fold(1.0, f64::max);
+    let contributions: Vec<WrappedContribution> = data
+        .daily
         .iter()
-        .map(|c| c.totals.cost)
-        .fold(1.0, f64::max);
-    let contributions: Vec<WrappedContribution> = graph
-        .contributions
-        .iter()
-        .map(|c| WrappedContribution {
-            date: c.date.clone(),
-            level: calculate_intensity(c.totals.cost, max_cost),
+        .map(|day| WrappedContribution {
+            date: day.date.to_string(),
+            level: calculate_intensity(day.cost, max_cost),
         })
         .collect();
-
-    let mut sorted_dates: Vec<String> = contributions
-        .iter()
-        .map(|c| c.date.clone())
-        .filter(|date| date.starts_with(&year))
-        .collect();
-    sorted_dates.sort();
-
-    let (_current_streak, longest_streak) = calculate_streaks(&sorted_dates);
-    let _first_day = sorted_dates
-        .first()
-        .cloned()
-        .unwrap_or_else(|| format!("{}-01-01", year));
 
     Ok(WrappedData {
         health,
         year,
-        active_days: graph.summary.active_days,
-        total_tokens: graph.summary.total_tokens,
-        total_cost: graph.summary.total_cost,
-        longest_streak,
+        active_days: wrapped_active_day_count(&data.daily)
+            .try_into()
+            .expect("wrapped active day count exceeds i32::MAX"),
+        total_tokens: data
+            .total_tokens
+            .try_into()
+            .expect("wrapped token total exceeds i64::MAX"),
+        total_cost: data.total_cost,
+        longest_streak: data
+            .longest_streak
+            .try_into()
+            .expect("wrapped longest streak exceeds i32::MAX"),
         top_models,
         top_clients,
-        top_agents,
         contributions,
         total_messages,
     })
 }
 
-fn wrapped_health_report(
-    aggregated: &tokscale_core::AggregatedViews,
-) -> tokscale_core::input_health::HealthReport {
-    aggregated.health.to_report()
-}
-
-fn accumulate_wrapped_contribution(
-    model_map: &mut HashMap<String, WrappedRankedEntry>,
-    client_map: &mut HashMap<String, WrappedRankedEntry>,
-    contribution: &tokscale_core::ClientContribution,
-) {
-    let contribution_tokens = contribution.tokens.total();
-    accumulate_wrapped_model(
-        model_map,
-        &contribution.model_id,
-        contribution.cost,
-        contribution_tokens,
-    );
-
-    let client_name = client_display_name(&contribution.client)
-        .unwrap_or(contribution.client.as_str())
-        .to_string();
-    let client_entry = client_map
-        .entry(contribution.client.clone())
-        .or_insert_with(|| WrappedRankedEntry {
-            name: client_name,
-            client_id: Some(contribution.client.clone()),
-            provider: None,
-            cost: 0.0,
-            tokens: 0,
-        });
-    client_entry.cost += contribution.cost;
-    client_entry.tokens = client_entry
-        .tokens
-        .checked_add(contribution_tokens)
-        .expect("wrapped client token total exceeds i64::MAX");
-}
-
+#[cfg(test)]
 fn accumulate_wrapped_model(
     model_map: &mut HashMap<String, WrappedRankedEntry>,
     model_id: &str,
@@ -380,56 +288,6 @@ fn accumulate_wrapped_model(
         .tokens
         .checked_add(tokens)
         .expect("wrapped model token total exceeds i64::MAX");
-}
-
-fn build_top_agents(agent_usage: &[tokscale_core::AgentUsage]) -> Vec<WrappedAgentEntry> {
-    let mut agent_map: HashMap<String, WrappedAgentEntry> = HashMap::new();
-
-    for agent in agent_usage {
-        if agent.client != ClientId::OpenCode.as_str() {
-            continue;
-        }
-
-        let tokens = agent.tokens.total();
-
-        let entry = agent_map
-            .entry(agent.agent.clone())
-            .or_insert_with(|| WrappedAgentEntry {
-                name: agent.agent.clone(),
-                tokens: 0,
-                messages: 0,
-            });
-        entry.tokens = entry
-            .tokens
-            .checked_add(tokens)
-            .expect("wrapped agent token total exceeds i64::MAX");
-        entry.messages += agent.message_count;
-    }
-
-    let mut agents: Vec<WrappedAgentEntry> = agent_map.into_values().collect();
-
-    let mut pinned = agents
-        .iter()
-        .filter(|agent| PINNED_AGENTS.contains(&agent.name.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut unpinned = agents
-        .drain(..)
-        .filter(|agent| !PINNED_AGENTS.contains(&agent.name.as_str()))
-        .collect::<Vec<_>>();
-
-    pinned.sort_by_key(|agent| {
-        PINNED_AGENTS
-            .iter()
-            .position(|name| *name == agent.name)
-            .unwrap_or(usize::MAX)
-    });
-    unpinned.sort_by_key(|b| std::cmp::Reverse(b.messages));
-
-    let mut combined = Vec::new();
-    combined.extend(pinned);
-    combined.extend(unpinned.into_iter().take(2));
-    combined
 }
 
 async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> Result<RgbaImage> {
@@ -559,164 +417,75 @@ async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> 
     }
     y_pos += 40 * SCALE;
 
-    if options.ranking == RenderRanking::Agents {
+    draw_text_mut_baseline(
+        &mut canvas,
+        &fonts.regular,
+        (20 * SCALE) as f32,
+        COLOR_TEXT_SECONDARY,
+        PADDING,
+        y_pos,
+        "Top Clients",
+    );
+    y_pos += 48 * SCALE;
+
+    for (index, client_entry) in data.top_clients.iter().enumerate() {
         draw_text_mut_baseline(
             &mut canvas,
-            &fonts.regular,
-            (20 * SCALE) as f32,
-            COLOR_TEXT_SECONDARY,
+            &fonts.bold,
+            (32 * SCALE) as f32,
+            COLOR_TEXT_PRIMARY,
             PADDING,
             y_pos,
-            "Top OpenCode Agents",
+            &(index + 1).to_string(),
         );
-        y_pos += 48 * SCALE;
 
-        let agents = data.top_agents.clone().unwrap_or_default();
-        if agents.is_empty() {
-            draw_text_mut_baseline(
-                &mut canvas,
-                &fonts.regular,
-                (28 * SCALE) as f32,
-                COLOR_TEXT_SECONDARY,
-                PADDING,
-                y_pos,
-                "No OpenCode agent data",
-            );
-        }
-        let mut rank_index = 1;
-
-        for agent in agents {
-            let is_sisyphus_agent = PINNED_AGENTS.contains(&agent.name.as_str());
-            let show_with_dash = options.pin_sisyphus && is_sisyphus_agent;
-            let prefix = if show_with_dash {
-                "\u{2022}".to_string()
-            } else {
-                rank_index.to_string()
-            };
-            let prefix_color = if show_with_dash {
-                COLOR_SISYPHUS
-            } else {
-                COLOR_TEXT_PRIMARY
-            };
-
-            draw_text_mut_baseline(
-                &mut canvas,
-                &fonts.bold,
-                (32 * SCALE) as f32,
-                prefix_color,
-                PADDING,
-                y_pos,
-                &prefix,
+        if let Some(client_id) = client_entry.client_id.as_deref() {
+            let logo_url = client_logo_url(client_id);
+            let filename = format!(
+                "client-{}@2x.png",
+                client_id.to_lowercase().replace('/', "-")
             );
 
-            if !show_with_dash {
-                rank_index += 1;
-            }
+            if let Some(logo_url) = logo_url {
+                if let Ok(path) = fetch_and_cache_image(&client, logo_url, &filename).await {
+                    if let Ok(logo) = load_rgba_image(&path) {
+                        let logo_x = PADDING + 40 * SCALE;
+                        let logo_y = y_pos - logo_size + 6 * SCALE;
 
-            let name_x = PADDING + 40 * SCALE;
-            let name_color = if is_sisyphus_agent {
-                COLOR_SISYPHUS
-            } else {
-                COLOR_TEXT_PRIMARY
-            };
-            draw_text_mut_baseline(
-                &mut canvas,
-                &fonts.regular,
-                (32 * SCALE) as f32,
-                name_color,
-                name_x,
-                y_pos,
-                &agent.name,
-            );
-
-            let name_width = measure_text_width(&fonts.regular, (32 * SCALE) as f32, &agent.name);
-            let suffix = format!(
-                " ({})",
-                format_number_with_commas_i64(agent.messages as i64)
-            );
-            draw_text_mut_baseline(
-                &mut canvas,
-                &fonts.regular,
-                (32 * SCALE) as f32,
-                COLOR_TEXT_SECONDARY,
-                name_x + name_width.round() as i32,
-                y_pos,
-                &suffix,
-            );
-
-            y_pos += 50 * SCALE;
-        }
-    } else {
-        draw_text_mut_baseline(
-            &mut canvas,
-            &fonts.regular,
-            (20 * SCALE) as f32,
-            COLOR_TEXT_SECONDARY,
-            PADDING,
-            y_pos,
-            "Top Clients",
-        );
-        y_pos += 48 * SCALE;
-
-        for (index, client_entry) in data.top_clients.iter().enumerate() {
-            draw_text_mut_baseline(
-                &mut canvas,
-                &fonts.bold,
-                (32 * SCALE) as f32,
-                COLOR_TEXT_PRIMARY,
-                PADDING,
-                y_pos,
-                &(index + 1).to_string(),
-            );
-
-            if let Some(client_id) = client_entry.client_id.as_deref() {
-                let logo_url = client_logo_url(client_id);
-                let filename = format!(
-                    "client-{}@2x.png",
-                    client_id.to_lowercase().replace('/', "-")
-                );
-
-                if let Some(logo_url) = logo_url {
-                    if let Ok(path) = fetch_and_cache_image(&client, logo_url, &filename).await {
-                        if let Ok(logo) = load_rgba_image(&path) {
-                            let logo_x = PADDING + 40 * SCALE;
-                            let logo_y = y_pos - logo_size + 6 * SCALE;
-
-                            draw_image_rounded(
-                                &mut canvas,
-                                &logo,
-                                logo_x,
-                                logo_y,
-                                logo_size,
-                                logo_size,
-                                logo_radius,
-                            );
-                            draw_rounded_border(
-                                &mut canvas,
-                                logo_x,
-                                logo_y,
-                                logo_size,
-                                logo_size,
-                                logo_radius,
-                                SCALE,
-                                COLOR_GRADE0,
-                            );
-                        }
+                        draw_image_rounded(
+                            &mut canvas,
+                            &logo,
+                            logo_x,
+                            logo_y,
+                            logo_size,
+                            logo_size,
+                            logo_radius,
+                        );
+                        draw_rounded_border(
+                            &mut canvas,
+                            logo_x,
+                            logo_y,
+                            logo_size,
+                            logo_size,
+                            logo_radius,
+                            SCALE,
+                            COLOR_GRADE0,
+                        );
                     }
                 }
             }
-
-            draw_text_mut_baseline(
-                &mut canvas,
-                &fonts.regular,
-                (32 * SCALE) as f32,
-                COLOR_TEXT_PRIMARY,
-                PADDING + 40 * SCALE + logo_size + 12 * SCALE,
-                y_pos,
-                &client_entry.name,
-            );
-            y_pos += 50 * SCALE;
         }
+
+        draw_text_mut_baseline(
+            &mut canvas,
+            &fonts.regular,
+            (32 * SCALE) as f32,
+            COLOR_TEXT_PRIMARY,
+            PADDING + 40 * SCALE + logo_size + 12 * SCALE,
+            y_pos,
+            &client_entry.name,
+        );
+        y_pos += 50 * SCALE;
     }
 
     y_pos += 40 * SCALE;
@@ -917,24 +686,6 @@ fn draw_text_mut_baseline(
         caret_x += scaled_font.h_advance(glyph_id);
         prev_glyph = Some(glyph_id);
     }
-}
-
-fn measure_text_width(font: &FontArc, font_size: f32, text: &str) -> f32 {
-    let scale = PxScale::from(font_size);
-    let scaled_font = font.as_scaled(scale);
-    let mut width = 0.0f32;
-    let mut prev_glyph: Option<GlyphId> = None;
-
-    for ch in text.chars() {
-        let glyph_id = scaled_font.glyph_id(ch);
-        if let Some(prev) = prev_glyph {
-            width += scaled_font.kern(prev, glyph_id);
-        }
-        width += scaled_font.h_advance(glyph_id);
-        prev_glyph = Some(glyph_id);
-    }
-
-    width
 }
 
 fn draw_image_rounded(
@@ -1247,62 +998,6 @@ fn calculate_intensity(cost: f64, max_cost: f64) -> u8 {
         2
     } else {
         1
-    }
-}
-
-fn calculate_streaks(sorted_dates: &[String]) -> (i32, i32) {
-    let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
-    calculate_streaks_with_today(sorted_dates, &today)
-}
-
-fn calculate_streaks_with_today(sorted_dates: &[String], today: &str) -> (i32, i32) {
-    if sorted_dates.is_empty() {
-        return (0, 0);
-    }
-
-    let mut current_streak = 0;
-    let mut longest_streak = 0;
-    let mut streak = 1;
-
-    for index in (0..sorted_dates.len()).rev() {
-        if index == sorted_dates.len() - 1 {
-            let days_diff = date_diff_days(&sorted_dates[index], today);
-            if days_diff <= 1 {
-                current_streak = 1;
-            } else {
-                break;
-            }
-        } else {
-            let days_diff = date_diff_days(&sorted_dates[index], &sorted_dates[index + 1]);
-            if days_diff == 1 {
-                current_streak += 1;
-            } else {
-                break;
-            }
-        }
-    }
-
-    for index in 1..sorted_dates.len() {
-        let days_diff = date_diff_days(&sorted_dates[index - 1], &sorted_dates[index]);
-        if days_diff == 1 {
-            streak += 1;
-        } else {
-            longest_streak = longest_streak.max(streak);
-            streak = 1;
-        }
-    }
-    longest_streak = longest_streak.max(streak);
-
-    (current_streak, longest_streak)
-}
-
-fn date_diff_days(date1: &str, date2: &str) -> i64 {
-    let parsed1 = NaiveDate::parse_from_str(date1, "%Y-%m-%d");
-    let parsed2 = NaiveDate::parse_from_str(date2, "%Y-%m-%d");
-
-    match (parsed1, parsed2) {
-        (Ok(d1), Ok(d2)) => (d2 - d1).num_days().abs(),
-        _ => 0,
     }
 }
 
@@ -1713,33 +1408,10 @@ fn default_clients() -> Vec<String> {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::collections::BTreeMap;
     use std::env;
     use tempfile::TempDir;
-    use tokscale_core::{DataHealth, InputFailure, InputHealth, InputStatus, RejectionSummary};
-
-    #[test]
-    fn automatic_ranking_uses_agents_only_when_agent_data_exists() {
-        assert_eq!(
-            select_render_ranking(WrappedRanking::Auto, true),
-            RenderRanking::Agents
-        );
-        assert_eq!(
-            select_render_ranking(WrappedRanking::Auto, false),
-            RenderRanking::Clients
-        );
-    }
-
-    #[test]
-    fn explicit_agents_ranking_never_changes_to_clients() {
-        assert_eq!(
-            select_render_ranking(WrappedRanking::Agents, false),
-            RenderRanking::Agents
-        );
-        assert_eq!(
-            select_render_ranking(WrappedRanking::Clients, true),
-            RenderRanking::Clients
-        );
-    }
+    use tokscale_core::usage_views::{DailyUsage, UsageTokenBreakdown};
 
     fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
         unsafe {
@@ -1751,27 +1423,29 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_health_report_preserves_failed_inputs() {
-        let mut health = DataHealth::default();
-        health.record(InputHealth {
-            client: ClientId::OpenCode,
-            path: PathBuf::from("/tmp/broken-opencode.db"),
-            status: InputStatus::Unavailable {
-                failure: InputFailure::new("open database", "invalid database"),
+    fn wrapped_active_days_exclude_zero_usage_buckets() {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 23).unwrap();
+        let empty = DailyUsage {
+            date,
+            tokens: UsageTokenBreakdown::default(),
+            cost: 0.0,
+            client_breakdown: BTreeMap::new(),
+            message_count: 0,
+            turn_count: 0,
+        };
+        let active = DailyUsage {
+            date: date.succ_opt().unwrap(),
+            tokens: UsageTokenBreakdown {
+                reasoning: 1,
+                ..Default::default()
             },
-            rejections: RejectionSummary::default(),
-        });
-        let aggregated = tokscale_core::AggregatedViews {
-            health,
-            ..Default::default()
+            cost: 0.0,
+            client_breakdown: BTreeMap::new(),
+            message_count: 1,
+            turn_count: 1,
         };
 
-        let report = wrapped_health_report(&aggregated);
-
-        assert!(!report.complete);
-        assert_eq!(report.failed_inputs, 1);
-        assert_eq!(report.issues[0].client, "opencode");
-        assert_eq!(report.issues[0].issue, "input-unavailable");
+        assert_eq!(wrapped_active_day_count(&[empty, active]), 1);
     }
 
     // ========== format_tokens_short tests ==========
@@ -1802,59 +1476,6 @@ mod tests {
         assert_eq!(format_tokens_short(123), "123");
         assert_eq!(format_tokens_short(0), "0");
         assert_eq!(format_tokens_short(999), "999");
-    }
-
-    #[test]
-    fn build_top_agents_filters_to_opencode_usage() {
-        let agents = build_top_agents(&[
-            tokscale_core::AgentUsage {
-                client: "opencode".to_string(),
-                agent: "Sisyphus".to_string(),
-                tokens: tokscale_core::TokenBreakdown {
-                    input: 10,
-                    output: 20,
-                    cache_read: 0,
-                    cache_write: 0,
-                    reasoning: 0,
-                },
-                cost: 0.0,
-                message_count: 2,
-            },
-            tokscale_core::AgentUsage {
-                client: "codex".to_string(),
-                agent: "Sisyphus".to_string(),
-                tokens: tokscale_core::TokenBreakdown {
-                    input: 1000,
-                    output: 0,
-                    cache_read: 0,
-                    cache_write: 0,
-                    reasoning: 0,
-                },
-                cost: 0.0,
-                message_count: 50,
-            },
-            tokscale_core::AgentUsage {
-                client: "opencode".to_string(),
-                agent: "Reviewer".to_string(),
-                tokens: tokscale_core::TokenBreakdown {
-                    input: 5,
-                    output: 5,
-                    cache_read: 5,
-                    cache_write: 0,
-                    reasoning: 0,
-                },
-                cost: 0.0,
-                message_count: 3,
-            },
-        ]);
-
-        assert_eq!(agents.len(), 2);
-        assert_eq!(agents[0].name, "Sisyphus");
-        assert_eq!(agents[0].tokens, 30);
-        assert_eq!(agents[0].messages, 2);
-        assert_eq!(agents[1].name, "Reviewer");
-        assert_eq!(agents[1].tokens, 15);
-        assert_eq!(agents[1].messages, 3);
     }
 
     // ========== format_cost tests ==========
@@ -2078,31 +1699,6 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_rankings_include_reasoning_tokens() {
-        let contribution = tokscale_core::ClientContribution {
-            client: "omp".to_string(),
-            model_id: "gpt-5.5".to_string(),
-            provider_id: "openai".to_string(),
-            tokens: tokscale_core::TokenBreakdown {
-                input: 100,
-                output: 25,
-                cache_read: 10,
-                cache_write: 5,
-                reasoning: 25,
-            },
-            cost: 1.0,
-            messages: 1,
-        };
-        let mut model_map = HashMap::new();
-        let mut client_map = HashMap::new();
-
-        accumulate_wrapped_contribution(&mut model_map, &mut client_map, &contribution);
-
-        assert_eq!(model_map["gpt-5.5"].tokens, 165);
-        assert_eq!(client_map["omp"].tokens, 165);
-    }
-
-    #[test]
     fn test_format_model_name_claude() {
         assert_eq!(
             format_model_name("claude-sonnet-4-20250514"),
@@ -2230,92 +1826,6 @@ mod tests {
     fn test_calculate_intensity_grade0() {
         assert_eq!(calculate_intensity(0.0, 100.0), 0);
         assert_eq!(calculate_intensity(0.0, 0.0), 0);
-    }
-
-    // ========== calculate_streaks tests ==========
-
-    #[test]
-    fn test_calculate_streaks_consecutive() {
-        let dates = vec![
-            "2024-01-01".to_string(),
-            "2024-01-02".to_string(),
-            "2024-01-03".to_string(),
-            "2024-01-04".to_string(),
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 4);
-    }
-
-    #[test]
-    fn test_calculate_streaks_with_gaps() {
-        let dates = vec![
-            "2024-01-01".to_string(),
-            "2024-01-02".to_string(),
-            "2024-01-05".to_string(),
-            "2024-01-06".to_string(),
-            "2024-01-07".to_string(),
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 3);
-    }
-
-    #[test]
-    fn test_calculate_streaks_empty() {
-        let dates: Vec<String> = vec![];
-        let (current, longest) = calculate_streaks(&dates);
-        assert_eq!(current, 0);
-        assert_eq!(longest, 0);
-    }
-
-    #[test]
-    fn test_calculate_streaks_single_day() {
-        let dates = vec!["2024-01-01".to_string()];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 1);
-    }
-
-    #[test]
-    fn test_calculate_streaks_current_uses_provided_today() {
-        let dates = vec![
-            "2026-03-01".to_string(),
-            "2026-03-02".to_string(),
-            "2026-03-03".to_string(),
-        ];
-        let (current, longest) = calculate_streaks_with_today(&dates, "2026-03-03");
-        assert_eq!(current, 3);
-        assert_eq!(longest, 3);
-    }
-
-    // ========== date_diff_days tests ==========
-
-    #[test]
-    fn test_date_diff_days_forward() {
-        assert_eq!(date_diff_days("2024-01-01", "2024-01-10"), 9);
-        assert_eq!(date_diff_days("2024-01-01", "2024-01-02"), 1);
-    }
-
-    #[test]
-    fn test_date_diff_days_backward() {
-        assert_eq!(date_diff_days("2024-01-10", "2024-01-01"), 9);
-        assert_eq!(date_diff_days("2024-01-02", "2024-01-01"), 1);
-    }
-
-    #[test]
-    fn test_date_diff_days_same_day() {
-        assert_eq!(date_diff_days("2024-01-01", "2024-01-01"), 0);
-    }
-
-    #[test]
-    fn test_date_diff_days_invalid() {
-        assert_eq!(date_diff_days("invalid", "2024-01-01"), 0);
-        assert_eq!(date_diff_days("2024-01-01", "invalid"), 0);
-        assert_eq!(date_diff_days("invalid", "invalid"), 0);
-    }
-
-    #[test]
-    fn test_date_diff_days_cross_month() {
-        assert_eq!(date_diff_days("2024-01-31", "2024-02-01"), 1);
-        assert_eq!(date_diff_days("2024-01-01", "2024-02-01"), 31);
     }
 
     // ========== client catalog tests ==========
@@ -2630,124 +2140,5 @@ mod tests {
     #[test]
     fn test_calculate_intensity_tiny_fraction() {
         assert_eq!(calculate_intensity(0.001, 100.0), 1);
-    }
-
-    // ========== date_diff_days edge case tests ==========
-
-    #[test]
-    fn test_date_diff_days_cross_year() {
-        assert_eq!(date_diff_days("2023-12-31", "2024-01-01"), 1);
-        assert_eq!(date_diff_days("2023-01-01", "2024-01-01"), 365);
-    }
-
-    #[test]
-    fn test_date_diff_days_leap_year() {
-        // 2024 is a leap year
-        assert_eq!(date_diff_days("2024-02-28", "2024-02-29"), 1);
-        assert_eq!(date_diff_days("2024-02-28", "2024-03-01"), 2);
-    }
-
-    #[test]
-    fn test_date_diff_days_large_gap() {
-        assert_eq!(date_diff_days("2020-01-01", "2025-01-01"), 1827);
-    }
-
-    #[test]
-    fn test_date_diff_days_partial_invalid() {
-        assert_eq!(date_diff_days("2024-13-01", "2024-01-01"), 0); // month 13 invalid
-        assert_eq!(date_diff_days("2024-01-01", "not-a-date"), 0);
-    }
-
-    #[test]
-    fn test_date_diff_days_empty_strings() {
-        assert_eq!(date_diff_days("", ""), 0);
-        assert_eq!(date_diff_days("", "2024-01-01"), 0);
-    }
-
-    // ========== calculate_streaks comprehensive tests ==========
-
-    #[test]
-    fn test_calculate_streaks_no_consecutive_dates() {
-        let dates = vec![
-            "2024-01-01".to_string(),
-            "2024-01-03".to_string(),
-            "2024-01-05".to_string(),
-            "2024-01-07".to_string(),
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 1); // each date is isolated
-    }
-
-    #[test]
-    fn test_calculate_streaks_multiple_separate_streaks() {
-        let dates = vec![
-            "2024-01-01".to_string(),
-            "2024-01-02".to_string(),
-            "2024-01-03".to_string(), // streak of 3
-            "2024-01-10".to_string(),
-            "2024-01-11".to_string(),
-            "2024-01-12".to_string(),
-            "2024-01-13".to_string(),
-            "2024-01-14".to_string(), // streak of 5 — longest
-            "2024-01-20".to_string(),
-            "2024-01-21".to_string(), // streak of 2
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 5);
-    }
-
-    #[test]
-    fn test_calculate_streaks_longest_at_beginning() {
-        let dates = vec![
-            "2024-01-01".to_string(),
-            "2024-01-02".to_string(),
-            "2024-01-03".to_string(),
-            "2024-01-04".to_string(), // streak of 4
-            "2024-01-10".to_string(),
-            "2024-01-11".to_string(), // streak of 2
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 4);
-    }
-
-    #[test]
-    fn test_calculate_streaks_all_consecutive() {
-        let dates = vec![
-            "2024-01-01".to_string(),
-            "2024-01-02".to_string(),
-            "2024-01-03".to_string(),
-            "2024-01-04".to_string(),
-            "2024-01-05".to_string(),
-            "2024-01-06".to_string(),
-            "2024-01-07".to_string(),
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 7);
-    }
-
-    #[test]
-    fn test_calculate_streaks_two_dates_consecutive() {
-        let dates = vec!["2024-06-15".to_string(), "2024-06-16".to_string()];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 2);
-    }
-
-    #[test]
-    fn test_calculate_streaks_two_dates_gap() {
-        let dates = vec!["2024-06-15".to_string(), "2024-06-20".to_string()];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 1);
-    }
-
-    #[test]
-    fn test_calculate_streaks_cross_month_boundary() {
-        let dates = vec![
-            "2024-01-30".to_string(),
-            "2024-01-31".to_string(),
-            "2024-02-01".to_string(),
-            "2024-02-02".to_string(),
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 4);
     }
 }

@@ -1,76 +1,32 @@
-//! [`AggregationEngine`] — owns the streaming fold. `push` dispatches each
-//! message to every enabled accumulator (after the date filter); `finish`
-//! materializes [`AggregatedViews`].
+//! Streaming owner for the canonical TUI usage and Sessions projections.
 
-use std::{collections::HashMap, sync::Arc};
-
-use crate::{
-    aggregate::accumulators::{
-        finish_daily_map, finish_graph_and_time_from_events, finish_hour_map, finish_month_map,
-        finish_session_map, hour_key, AgentEntries, DailyAcc, HourAcc, ModelEntries, MonthAcc,
-        SessionAcc,
-    },
-    aggregate::{tui::TuiAcc, tui_sessions::TuiSessionAcc},
-    checked_token_sum, AggregatedViews, AggregationConfig, ViewSet,
-};
-use crate::{
-    sessionize::SessionTimeEvent, HourlyReport, ModelReport, MonthlyReport, UnifiedMessage,
-};
+use crate::aggregate::{tui::TuiAcc, tui_sessions::TuiSessionAcc};
+use crate::{AggregatedViews, AggregationConfig, UnifiedMessage, ViewSet};
 
 pub struct AggregationEngine {
     config: AggregationConfig,
-    model_entries: Option<ModelEntries>,
     tui: Option<TuiAcc>,
     tui_sessions: Option<TuiSessionAcc>,
-    month_map: Option<HashMap<String, MonthAcc>>,
-    hour_map: Option<HashMap<String, HourAcc>>,
-    daily_map: Option<HashMap<String, DailyAcc>>,
-    session_map: Option<HashMap<Arc<str>, SessionAcc>>,
-    agent_entries: Option<AgentEntries>,
-    time_events: Option<Vec<SessionTimeEvent>>,
 }
 
 impl AggregationEngine {
     pub fn new(config: AggregationConfig) -> Self {
         let views = config.views;
-        let time_events_needed =
-            views.contains(ViewSet::GRAPH) || views.contains(ViewSet::TIME_METRICS);
         Self {
-            model_entries: views
-                .contains(ViewSet::MODEL)
-                .then(|| ModelEntries::new(config.group_by.clone())),
             tui: views.contains(ViewSet::TUI).then(TuiAcc::new),
             tui_sessions: views
                 .contains(ViewSet::TUI_SESSIONS)
                 .then(TuiSessionAcc::new),
-            month_map: views.contains(ViewSet::MONTHLY).then(HashMap::new),
-            hour_map: views.contains(ViewSet::HOURLY).then(HashMap::new),
-            daily_map: views.contains(ViewSet::GRAPH).then(HashMap::new),
-            session_map: views.contains(ViewSet::SESSIONS).then(HashMap::new),
-            agent_entries: views.contains(ViewSet::AGENTS).then(AgentEntries::default),
-            time_events: time_events_needed.then(Vec::new),
             config,
         }
     }
 
-    /// The per-message fold. `AggregationEngine` consumes finalized local-report
-    /// messages. Callers must run `finalize_token_priced_messages` before
-    /// pushing; this layer deliberately does not re-canonicalize model or
-    /// provider ids.
-    /// Applies the date filter once (mirroring `filter_messages_for_report`)
-    /// before dispatching to enabled accumulators.
+    /// Fold one finalized message into every requested canonical projection.
     pub fn push(&mut self, msg: &UnifiedMessage) {
-        let needs_date_key = !self.config.date_range.is_unfiltered()
-            || self.month_map.is_some()
-            || self.daily_map.is_some();
-        let date = needs_date_key.then(|| msg.date_string());
-        if let Some(date) = &date {
-            if !self.config.date_range.contains(date) {
-                return;
-            }
-        }
-        if let Some(entries) = &mut self.model_entries {
-            entries.push(msg);
+        if !self.config.date_range.is_unfiltered()
+            && !self.config.date_range.contains(&msg.date_string())
+        {
+            return;
         }
         if let Some(tui) = &mut self.tui {
             tui.push(msg);
@@ -78,39 +34,8 @@ impl AggregationEngine {
         if let Some(tui_sessions) = &mut self.tui_sessions {
             tui_sessions.push(msg);
         }
-        if let Some(month_map) = &mut self.month_map {
-            let date = date.as_ref().expect("monthly view date key computed");
-            if let Some(month) = MonthAcc::try_key_from_date(date) {
-                month_map.entry(month.to_string()).or_default().push(msg);
-            }
-        }
-        if let Some(hour_map) = &mut self.hour_map {
-            if let Some(key) = hour_key(msg) {
-                hour_map.entry(key).or_default().push(msg);
-            }
-        }
-        if let Some(daily_map) = &mut self.daily_map {
-            let date = date.as_ref().expect("graph view date key computed");
-            daily_map.entry(date.clone()).or_default().push(msg);
-        }
-        if let Some(session_map) = &mut self.session_map {
-            session_map
-                .entry(msg.session_id.clone())
-                .or_default()
-                .push(msg);
-        }
-        if let Some(agent_entries) = &mut self.agent_entries {
-            agent_entries.push(msg);
-        }
-        if let Some(events) = &mut self.time_events {
-            events.push(SessionTimeEvent::from_message(msg));
-        }
     }
 
-    /// Consume the engine and return the canonical TUI accumulator when the
-    /// TUI view was requested. Callers that switch groupings keep it and
-    /// re-project via [`TuiAcc::project`] instead of re-running the fold
-    /// (issue #161); any other requested views are discarded.
     pub(crate) fn into_tui_accumulator(self) -> Option<TuiAcc> {
         self.tui
     }
@@ -120,106 +45,9 @@ impl AggregationEngine {
     }
 
     pub fn finish(self) -> AggregatedViews {
-        let Self {
-            config,
-            model_entries,
-            tui,
-            tui_sessions: _,
-            month_map,
-            hour_map,
-            daily_map,
-            session_map,
-            agent_entries,
-            time_events,
-        } = self;
-
-        let model_report = model_entries.map(|entries| {
-            let list = entries.finish();
-            wrap_model_report(list)
-        });
-        let tui_usage = tui.map(|tui| tui.project(&config.group_by));
-
-        let monthly_report = month_map.map(|map| {
-            let entries = finish_month_map(map);
-            let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
-            MonthlyReport {
-                health: Default::default(),
-                entries,
-                total_cost: clean_total_cost(total_cost),
-                processing_time_ms: 0,
-            }
-        });
-
-        let hourly_report = hour_map.map(|map| {
-            let entries = finish_hour_map(map);
-            let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
-            HourlyReport {
-                health: Default::default(),
-                entries,
-                total_cost: clean_total_cost(total_cost),
-                processing_time_ms: 0,
-            }
-        });
-
-        let agent_usage = agent_entries.map(AgentEntries::finish);
-        let daily_contributions_for_graph = daily_map.map(finish_daily_map);
-        let session_contributions = session_map.map(finish_session_map);
-
-        // Graph and time-metrics share the same buffered time projection.
-        // `processing_time_ms` is the caller's responsibility (set after
-        // `finish`); 0 here.
-        let (graph, time_metrics, daily_contributions) = match time_events {
-            Some(events) => {
-                let views = finish_graph_and_time_from_events(
-                    &events,
-                    config.views,
-                    daily_contributions_for_graph,
-                );
-                (views.graph, views.time_metrics, views.daily_contributions)
-            }
-            None => (None, None, None),
-        };
-
         AggregatedViews {
-            health: crate::input_health::DataHealth::default(),
-            tui_usage,
-            model_report,
-            monthly_report,
-            hourly_report,
-            graph,
-            session_contributions,
-            time_metrics,
-            daily_contributions,
-            agent_usage,
+            tui_usage: self.tui.map(|tui| tui.project(&self.config.group_by)),
+            health: Default::default(),
         }
-    }
-}
-
-fn wrap_model_report(entries: Vec<crate::ModelUsage>) -> ModelReport {
-    let total_input = checked_token_sum(entries.iter().map(|entry| entry.input));
-    let total_output = checked_token_sum(entries.iter().map(|entry| entry.output));
-    let total_cache_read = checked_token_sum(entries.iter().map(|entry| entry.cache_read));
-    let total_cache_write = checked_token_sum(entries.iter().map(|entry| entry.cache_write));
-    let total_messages: i32 = entries.iter().map(|e| e.message_count).sum();
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
-    ModelReport {
-        health: Default::default(),
-        entries,
-        total_input,
-        total_output,
-        total_cache_read,
-        total_cache_write,
-        total_messages,
-        total_cost: clean_total_cost(total_cost),
-        processing_time_ms: 0,
-    }
-}
-
-/// Normalize `-0.0` to `0.0` so serialized reports do not display negative zero.
-fn clean_total_cost(cost: f64) -> f64 {
-    if cost == 0.0 {
-        0.0
-    } else {
-        cost
     }
 }

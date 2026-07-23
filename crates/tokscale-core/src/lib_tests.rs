@@ -1,13 +1,11 @@
 use super::{
-    aggregate_model_usage_entries, apply_token_pricing, finalize_token_priced_messages,
-    generate_graph_with_loaded_pricing, load_aggregated_views_with_pricing,
+    apply_token_pricing, finalize_token_priced_messages, load_aggregated_views_with_pricing,
     load_cache_only_pricing_with_diagnostics, load_usage_data_with_pricing, message_cache,
     normalize_model_for_grouping, parse_all_messages_with_health,
     parse_all_messages_with_health_with_env_strategy, parse_all_messages_with_pricing,
     parse_all_messages_with_pricing_with_env_strategy, positive_token_total, pricing,
     retain_for_requested_clients, scanner, select_local_parse_pricing, AggregatedViews,
-    AggregationConfig, ClientContribution, ClientCounts, ClientId, DailyTotals, DateRange,
-    GraphResult, GroupBy, LocalParseOptions, ReportOptions, SessionContribution, TimeMetricsReport,
+    AggregationConfig, ClientId, DateRange, GroupBy, LocalParseOptions, ReportOptions,
     TokenBreakdown, UnifiedMessage, ViewSet, UNKNOWN_WORKSPACE_LABEL,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -20,19 +18,45 @@ use std::sync::Arc;
 #[derive(Debug)]
 struct LocalMessagesForTest {
     messages: Vec<UnifiedMessage>,
-    counts: ClientCounts,
+    counts: TestClientCounts,
     health: super::DataHealth,
+}
+
+#[derive(Debug)]
+struct TestClientCounts([i32; ClientId::COUNT]);
+
+impl Default for TestClientCounts {
+    fn default() -> Self {
+        Self(std::array::from_fn(|_| 0))
+    }
+}
+
+impl TestClientCounts {
+    fn from_messages(messages: &[UnifiedMessage]) -> Self {
+        let mut counts = Self::default();
+        for message in messages {
+            if let Some(client) = ClientId::from_str(&message.client) {
+                counts.0[client as usize] =
+                    counts.0[client as usize].saturating_add(message.message_count.max(0));
+            }
+        }
+        counts
+    }
+
+    fn get(&self, client: ClientId) -> i32 {
+        self.0[client as usize]
+    }
 }
 
 fn load_local_messages_for_test(
     options: LocalParseOptions,
 ) -> Result<LocalMessagesForTest, super::LocalReportError> {
-    let counts = super::count_local_client_messages(options.clone())?.counts;
     let prepared = super::prepare_local_inputs(options.clone())?;
     let mut messages = Vec::new();
     let health =
         super::fold_prepared_local_inputs_with_pricing(prepared, None, &mut messages)?.health;
     let messages = super::filter_unified_messages(messages, &options);
+    let counts = TestClientCounts::from_messages(&messages);
     Ok(LocalMessagesForTest {
         messages,
         counts,
@@ -119,51 +143,6 @@ fn make_workspace_message(
     msg
 }
 
-#[test]
-fn test_session_contribution_serde_round_trip() {
-    let contribution = SessionContribution {
-        session_id: "019e1e27-af49-7cd1-89b7-7bad1c3f3be2".into(),
-        client: "codex".into(),
-        provider: "openai".into(),
-        model: "gpt-5".into(),
-        totals: DailyTotals {
-            tokens: 25_298,
-            cost: 0.0123,
-            messages: 12,
-        },
-        token_breakdown: TokenBreakdown {
-            input: 12_000,
-            output: 8_000,
-            cache_read: 5_000,
-            cache_write: 258,
-            reasoning: 40,
-        },
-        clients: vec![ClientContribution {
-            client: "codex".into(),
-            model_id: "gpt-5".into(),
-            provider_id: "openai".into(),
-            tokens: TokenBreakdown {
-                input: 12_000,
-                output: 8_000,
-                cache_read: 5_000,
-                cache_write: 258,
-                reasoning: 40,
-            },
-            cost: 0.0123,
-            messages: 12,
-        }],
-        first_seen: 1_715_551_577,
-        last_seen: 1_715_551_612,
-    };
-
-    let json = serde_json::to_string(&contribution).expect("serialize session contribution");
-    let parsed: SessionContribution =
-        serde_json::from_str(&json).expect("deserialize session contribution");
-
-    assert_eq!(parsed, contribution);
-    assert!(json.contains("\"session_id\":\"019e1e27"));
-}
-
 #[allow(clippy::too_many_arguments)]
 fn make_message_with_tokens(
     client: &str,
@@ -196,13 +175,28 @@ fn make_message_with_tokens(
 fn aggregate_finalized_model_usage_entries(
     mut messages: Vec<UnifiedMessage>,
     group_by: &GroupBy,
-) -> Vec<crate::ModelUsage> {
+) -> Vec<crate::usage_views::UsageModelEntry> {
     for msg in &mut messages {
         let model = crate::model_aliases::canonicalize_model_id(&msg.model_id);
         msg.model_id = crate::sessions::intern::intern(&model);
         msg.refresh_derived_fields();
     }
     aggregate_model_usage_entries(messages, group_by)
+}
+
+fn aggregate_model_usage_entries(
+    messages: Vec<UnifiedMessage>,
+    group_by: &GroupBy,
+) -> Vec<crate::usage_views::UsageModelEntry> {
+    let views = crate::aggregate_unified_messages(
+        &messages,
+        AggregationConfig {
+            group_by: group_by.clone(),
+            date_range: DateRange::none(),
+            views: ViewSet::TUI,
+        },
+    );
+    views.tui_usage.expect("TUI view requested").models
 }
 
 fn write_streaming_fold_fixture(home: &Path) {
@@ -271,21 +265,6 @@ fn vec_compat_views(options: &ReportOptions, views: ViewSet) -> AggregatedViews 
     engine.finish()
 }
 
-fn json_value<T: serde::Serialize>(value: &T) -> serde_json::Value {
-    serde_json::to_value(value).unwrap()
-}
-
-fn normalized_graph_value(mut graph: GraphResult) -> serde_json::Value {
-    graph.meta.generated_at.clear();
-    graph.meta.processing_time_ms = 0;
-    json_value(&graph)
-}
-
-fn normalized_time_metrics_value(mut report: TimeMetricsReport) -> serde_json::Value {
-    report.processing_time_ms = 0;
-    json_value(&report)
-}
-
 #[test]
 fn cache_only_pricing_diagnostics_append_missing_cache_in_order() {
     let mut diagnostics = vec![
@@ -306,189 +285,6 @@ fn cache_only_pricing_diagnostics_append_missing_cache_in_order() {
                 pricing::DIAGNOSTIC_PRICING_UNAVAILABLE
             ),
         ]
-    );
-}
-
-#[test]
-#[serial_test::serial]
-fn test_batched_model_monthly_hourly_views_match_single_view_runs() {
-    let cache_home = tempfile::TempDir::new().unwrap();
-    let input_home = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(cache_home.path());
-
-    write_streaming_fold_fixture(input_home.path());
-    let options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
-
-    let batched = streaming_views(
-        &options,
-        ViewSet::MODEL | ViewSet::MONTHLY | ViewSet::HOURLY,
-    );
-    let model = streaming_views(&options, ViewSet::MODEL)
-        .model_report
-        .unwrap();
-    let monthly = streaming_views(&options, ViewSet::MONTHLY)
-        .monthly_report
-        .unwrap();
-    let hourly = streaming_views(&options, ViewSet::HOURLY)
-        .hourly_report
-        .unwrap();
-
-    assert_eq!(
-        json_value(&batched.model_report.unwrap()),
-        json_value(&model)
-    );
-    assert_eq!(
-        json_value(&batched.monthly_report.unwrap()),
-        json_value(&monthly)
-    );
-    assert_eq!(
-        json_value(&batched.hourly_report.unwrap()),
-        json_value(&hourly)
-    );
-}
-
-#[test]
-#[serial_test::serial]
-fn test_batched_graph_and_time_metrics_views_match_single_view_runs() {
-    let cache_home = tempfile::TempDir::new().unwrap();
-    let input_home = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(cache_home.path());
-
-    write_streaming_fold_fixture(input_home.path());
-    let options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
-
-    let batched = streaming_views(&options, ViewSet::GRAPH | ViewSet::TIME_METRICS);
-    let graph = streaming_views(&options, ViewSet::GRAPH).graph.unwrap();
-    let time_metrics = streaming_views(&options, ViewSet::TIME_METRICS)
-        .time_metrics
-        .unwrap();
-
-    assert_eq!(
-        normalized_graph_value(batched.graph.unwrap()),
-        normalized_graph_value(graph)
-    );
-    assert_eq!(
-        normalized_time_metrics_value(batched.time_metrics.unwrap()),
-        normalized_time_metrics_value(time_metrics)
-    );
-}
-
-#[test]
-#[serial_test::serial]
-fn test_batched_tui_and_model_views_match_individual_outputs() {
-    let cache_home = tempfile::TempDir::new().unwrap();
-    let input_home = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(cache_home.path());
-
-    write_streaming_fold_fixture(input_home.path());
-    let report_options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
-    let local_options = LocalParseOptions {
-        home_dir: Some(input_home.path().to_string_lossy().into_owned()),
-        use_env_roots: false,
-        clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
-        since: None,
-        until: None,
-        year: None,
-        scanner_settings: scanner::ScannerSettings::default(),
-    };
-
-    let batched = streaming_views(&report_options, ViewSet::TUI | ViewSet::MODEL);
-    let mut tui = load_usage_data_with_pricing(local_options, GroupBy::ClientModel, None).unwrap();
-    let model = streaming_views(&report_options, ViewSet::MODEL)
-        .model_report
-        .unwrap();
-    let batched_health = batched.health.to_report();
-    let mut batched_tui = batched.tui_usage.unwrap();
-
-    // `AggregatedViews` carries fold health beside its internal materialized
-    // views. The public TUI loader projects that health into `UsageData` at
-    // its API boundary, so compare the projection separately from aggregate
-    // payload parity.
-    assert_eq!(batched_health, tui.health);
-    batched_tui.health = Default::default();
-    tui.health = Default::default();
-
-    assert_eq!(format!("{batched_tui:?}"), format!("{tui:?}"));
-    assert_eq!(
-        json_value(&batched.model_report.unwrap()),
-        json_value(&model)
-    );
-}
-
-#[test]
-#[serial_test::serial]
-fn test_batched_requested_client_filter_matches_single_view_run() {
-    let cache_home = tempfile::TempDir::new().unwrap();
-    let input_home = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(cache_home.path());
-
-    write_streaming_fold_fixture(input_home.path());
-    let options = streaming_report_options(input_home.path(), vec!["codex"]);
-
-    let batched = streaming_views(&options, ViewSet::MODEL | ViewSet::MONTHLY);
-    let model = streaming_views(&options, ViewSet::MODEL)
-        .model_report
-        .unwrap();
-    let batched_model = batched.model_report.unwrap();
-
-    assert_eq!(json_value(&batched_model), json_value(&model));
-    assert_eq!(batched_model.entries.len(), 1);
-    assert_eq!(batched_model.entries[0].client, "codex");
-}
-
-#[test]
-#[serial_test::serial]
-fn test_streaming_model_monthly_hourly_reports_match_vec_compat() {
-    let cache_home = tempfile::TempDir::new().unwrap();
-    let input_home = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(cache_home.path());
-
-    write_streaming_fold_fixture(input_home.path());
-    let options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
-
-    let streaming = streaming_views(
-        &options,
-        ViewSet::MODEL | ViewSet::MONTHLY | ViewSet::HOURLY,
-    );
-    let compat = vec_compat_views(
-        &options,
-        ViewSet::MODEL | ViewSet::MONTHLY | ViewSet::HOURLY,
-    );
-
-    assert_eq!(
-        json_value(&streaming.model_report.unwrap()),
-        json_value(&compat.model_report.unwrap())
-    );
-    assert_eq!(
-        json_value(&streaming.monthly_report.unwrap()),
-        json_value(&compat.monthly_report.unwrap())
-    );
-    assert_eq!(
-        json_value(&streaming.hourly_report.unwrap()),
-        json_value(&compat.hourly_report.unwrap())
-    );
-}
-
-#[test]
-#[serial_test::serial]
-fn test_streaming_graph_and_time_metrics_match_vec_compat() {
-    let cache_home = tempfile::TempDir::new().unwrap();
-    let input_home = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(cache_home.path());
-
-    write_streaming_fold_fixture(input_home.path());
-    let options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
-
-    let streaming = streaming_views(&options, ViewSet::GRAPH | ViewSet::TIME_METRICS);
-    let compat = vec_compat_views(&options, ViewSet::GRAPH | ViewSet::TIME_METRICS);
-
-    assert_eq!(
-        normalized_graph_value(streaming.graph.unwrap()),
-        normalized_graph_value(compat.graph.unwrap())
-    );
-    assert_eq!(
-        normalized_time_metrics_value(streaming.time_metrics.unwrap()),
-        normalized_time_metrics_value(compat.time_metrics.unwrap())
     );
 }
 
@@ -582,16 +378,12 @@ fn test_streaming_requested_client_filter_matches_vec_compat() {
     write_streaming_fold_fixture(input_home.path());
     let options = streaming_report_options(input_home.path(), vec!["codex"]);
 
-    let streaming = streaming_views(&options, ViewSet::MODEL);
-    let compat = vec_compat_views(&options, ViewSet::MODEL);
-    let streaming_report = streaming.model_report.unwrap();
+    let streaming = streaming_views(&options, ViewSet::TUI).tui_usage.unwrap();
+    let compat = vec_compat_views(&options, ViewSet::TUI).tui_usage.unwrap();
 
-    assert_eq!(
-        json_value(&streaming_report),
-        json_value(&compat.model_report.unwrap())
-    );
-    assert_eq!(streaming_report.entries.len(), 1);
-    assert_eq!(streaming_report.entries[0].client, "codex");
+    assert_eq!(format!("{streaming:?}"), format!("{compat:?}"));
+    assert_eq!(streaming.models.len(), 1);
+    assert_eq!(streaming.models[0].client, "codex");
 }
 
 #[test]
@@ -604,14 +396,10 @@ fn test_streaming_warm_cache_matches_cold_streaming_report() {
     write_streaming_fold_fixture(input_home.path());
     let options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
 
-    let cold = streaming_views(&options, ViewSet::MODEL)
-        .model_report
-        .unwrap();
-    let warm = streaming_views(&options, ViewSet::MODEL)
-        .model_report
-        .unwrap();
+    let cold = streaming_views(&options, ViewSet::TUI).tui_usage.unwrap();
+    let warm = streaming_views(&options, ViewSet::TUI).tui_usage.unwrap();
 
-    assert_eq!(json_value(&cold), json_value(&warm));
+    assert_eq!(format!("{cold:?}"), format!("{warm:?}"));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1197,52 +985,24 @@ fn test_group_by_from_str_valid_values() {
         GroupBy::ClientModel
     );
     assert_eq!(
-        GroupBy::from_str("client-model").unwrap(),
-        GroupBy::ClientModel
-    );
-    assert_eq!(
         GroupBy::from_str("client,provider,model").unwrap(),
-        GroupBy::ClientProviderModel
-    );
-    assert_eq!(
-        GroupBy::from_str("client-provider-model").unwrap(),
         GroupBy::ClientProviderModel
     );
     assert_eq!(
         GroupBy::from_str("workspace,model").unwrap(),
         GroupBy::WorkspaceModel
     );
-    assert_eq!(
-        GroupBy::from_str("workspace-model").unwrap(),
-        GroupBy::WorkspaceModel
-    );
-    assert_eq!(GroupBy::from_str("session").unwrap(), GroupBy::Session);
-    assert_eq!(
-        GroupBy::from_str("session,model").unwrap(),
-        GroupBy::Session
-    );
-    assert_eq!(
-        GroupBy::from_str("session-model").unwrap(),
-        GroupBy::Session
-    );
-    assert_eq!(
-        GroupBy::from_str("client,session").unwrap(),
-        GroupBy::ClientSession
-    );
-    assert_eq!(
-        GroupBy::from_str("client,session,model").unwrap(),
-        GroupBy::ClientSession
-    );
-    assert_eq!(
-        GroupBy::from_str("client-session-model").unwrap(),
-        GroupBy::ClientSession
-    );
+    assert!(GroupBy::from_str("client-model").is_err());
+    assert!(GroupBy::from_str("client-provider-model").is_err());
+    assert!(GroupBy::from_str("workspace-model").is_err());
+    assert!(GroupBy::from_str("session").is_err());
+    assert!(GroupBy::from_str("client,session,model").is_err());
     assert!(GroupBy::from_str("unknown").is_err());
 }
 
 #[test]
-fn test_group_by_default_is_client_model() {
-    assert_eq!(GroupBy::default(), GroupBy::ClientModel);
+fn test_group_by_default_is_model() {
+    assert_eq!(GroupBy::default(), GroupBy::Model);
 }
 
 #[test]
@@ -1252,8 +1012,6 @@ fn test_group_by_display_round_trips_with_from_str() {
         GroupBy::ClientModel,
         GroupBy::ClientProviderModel,
         GroupBy::WorkspaceModel,
-        GroupBy::Session,
-        GroupBy::ClientSession,
     ];
 
     for variant in variants {
@@ -1381,8 +1139,7 @@ fn test_workspace_model_grouping_merges_same_workspace_and_model() {
     assert_eq!(entries[0].workspace_key.as_deref(), Some("/repo-a"));
     assert_eq!(entries[0].workspace_label.as_deref(), Some("repo-a"));
     assert_eq!(entries[0].cost, 4.0);
-    assert_eq!(entries[0].message_count, 2);
-    assert_eq!(entries[0].merged_clients.as_deref(), Some("claude, qwen"));
+    assert_eq!(entries[0].client, "claude, qwen");
 }
 
 #[test]
@@ -1406,7 +1163,6 @@ fn test_model_grouping_cleans_fast_variant() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].model, "gpt-5.5");
     assert_eq!(entries[0].cost, 5.0);
-    assert_eq!(entries[0].message_count, 2);
 }
 
 #[test]
@@ -1430,7 +1186,6 @@ fn test_model_grouping_cleans_hyphenated_date_snapshot() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].model, "qwen3.7-max");
     assert_eq!(entries[0].cost, 4.0);
-    assert_eq!(entries[0].message_count, 2);
 }
 
 #[test]
@@ -1462,7 +1217,6 @@ fn test_model_grouping_cleans_anthropic_prefixed_claude_variant() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].model, "claude-sonnet-4.6");
     assert_eq!(entries[0].cost, 4.0);
-    assert_eq!(entries[0].message_count, 2);
 }
 
 #[test]
@@ -1495,7 +1249,6 @@ fn test_model_grouping_uses_finalized_provider_ids() {
     assert_eq!(entries[0].model, "mimo-v2.5-pro");
     assert_eq!(entries[0].provider, "xiaomi");
     assert_eq!(entries[0].cost, 3.0);
-    assert_eq!(entries[0].message_count, 2);
 }
 
 #[test]
@@ -1563,10 +1316,6 @@ fn test_model_grouping_orders_merged_clients_by_total_tokens() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(
-        entries[0].merged_clients.as_deref(),
-        Some("pi, codex, opencode")
-    );
     assert_eq!(entries[0].client, "pi, codex, opencode");
 }
 
@@ -1601,10 +1350,6 @@ fn test_model_grouping_ignores_negative_client_token_contribution() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(
-        entries[0].merged_clients.as_deref(),
-        Some("positive-client, negative-client")
-    );
     assert_eq!(entries[0].client, "positive-client, negative-client");
 }
 
@@ -1674,7 +1419,6 @@ fn test_workspace_model_grouping_uses_unknown_bucket_without_workspace_metadata(
         entries[0].workspace_label.as_deref(),
         Some(UNKNOWN_WORKSPACE_LABEL)
     );
-    assert_eq!(entries[0].message_count, 2);
     assert_eq!(entries[0].cost, 3.0);
 }
 
@@ -1754,135 +1498,6 @@ fn test_workspace_model_grouping_avoids_separator_key_collisions() {
             && entry.model == "b:c"
             && (entry.cost - 2.0).abs() < f64::EPSILON
     }));
-}
-
-#[test]
-fn test_session_grouping_merges_same_session_and_model() {
-    // Two messages with the same session_id + same model — should collapse
-    // into one row regardless of the client that produced them, because
-    // GroupBy::Session keys on (session_id, model) only.
-    let entries = aggregate_model_usage_entries(
-        vec![
-            make_workspace_message(
-                "claude",
-                "claude-sonnet-4.5",
-                "anthropic",
-                "session-shared",
-                1.25,
-                None,
-                None,
-            ),
-            make_workspace_message(
-                "amp",
-                "claude-sonnet-4.5",
-                "anthropic",
-                "session-shared",
-                2.75,
-                None,
-                None,
-            ),
-        ],
-        &GroupBy::Session,
-    );
-
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].session_id.as_deref(), Some("session-shared"));
-    assert_eq!(entries[0].model, "claude-sonnet-4.5");
-    assert!((entries[0].cost - 4.0).abs() < f64::EPSILON);
-    assert_eq!(entries[0].message_count, 2);
-    assert!(entries[0].workspace_key.is_none());
-    assert!(entries[0].workspace_label.is_none());
-    // Session grouping does not merge_clients into a comma list.
-    assert!(entries[0].merged_clients.is_none());
-}
-
-#[test]
-fn test_session_grouping_separates_different_sessions() {
-    let entries = aggregate_model_usage_entries(
-        vec![
-            make_workspace_message("codex", "gpt-5", "openai", "session-a", 1.0, None, None),
-            make_workspace_message("codex", "gpt-5", "openai", "session-b", 2.0, None, None),
-        ],
-        &GroupBy::Session,
-    );
-
-    assert_eq!(entries.len(), 2);
-    let session_ids: HashSet<_> = entries
-        .iter()
-        .map(|e| e.session_id.as_deref().unwrap())
-        .collect();
-    assert_eq!(session_ids, HashSet::from(["session-a", "session-b"]));
-}
-
-#[test]
-fn test_client_session_grouping_keeps_clients_separate() {
-    // Same session_id seen by two different clients (unusual in practice
-    // but possible if parsers collide on an id space). ClientSession
-    // must yield two rows; Session would yield one (covered above).
-    let entries = aggregate_model_usage_entries(
-        vec![
-            make_workspace_message(
-                "claude",
-                "claude-sonnet-4-5-20250929",
-                "anthropic",
-                "session-shared",
-                1.0,
-                None,
-                None,
-            ),
-            make_workspace_message(
-                "amp",
-                "claude-sonnet-4-5-20250929",
-                "anthropic",
-                "session-shared",
-                3.0,
-                None,
-                None,
-            ),
-        ],
-        &GroupBy::ClientSession,
-    );
-
-    assert_eq!(entries.len(), 2);
-    for entry in &entries {
-        assert_eq!(entry.session_id.as_deref(), Some("session-shared"));
-        assert!(entry.merged_clients.is_none());
-    }
-    let by_client: HashSet<_> = entries.iter().map(|e| e.client.as_str()).collect();
-    assert_eq!(by_client, HashSet::from(["claude", "amp"]));
-}
-
-#[test]
-fn test_non_session_grouping_does_not_populate_session_id() {
-    // Defensive: only Session/ClientSession variants should set the
-    // session_id field on ModelUsage — every other group_by must leave
-    // it None so the camelCase JSON output omits it via
-    // `skip_serializing_if = "Option::is_none"`.
-    for group_by in &[
-        GroupBy::Model,
-        GroupBy::ClientModel,
-        GroupBy::ClientProviderModel,
-        GroupBy::WorkspaceModel,
-    ] {
-        let entries = aggregate_model_usage_entries(
-            vec![make_workspace_message(
-                "codex",
-                "gpt-5",
-                "openai",
-                "session-x",
-                1.0,
-                None,
-                None,
-            )],
-            group_by,
-        );
-        assert_eq!(entries.len(), 1);
-        assert!(
-            entries[0].session_id.is_none(),
-            "session_id leaked into {:?} grouping",
-            group_by
-        );
-    }
 }
 
 #[test]
@@ -4781,8 +4396,7 @@ fn test_token_breakdown_total_rejects_overflow() {
 }
 
 #[test]
-#[should_panic(expected = "token count exceeds i64::MAX while aggregating usage")]
-fn test_model_aggregation_rejects_overflowing_bucket_fold() {
+fn test_tui_model_aggregation_uses_unsigned_token_capacity() {
     let message = || {
         UnifiedMessage::new(
             "antigravity-cli",
@@ -4801,7 +4415,10 @@ fn test_model_aggregation_rejects_overflowing_bucket_fold() {
         )
     };
 
-    let _ = aggregate_model_usage_entries(vec![message(), message()], &GroupBy::Model);
+    let entries = aggregate_model_usage_entries(vec![message(), message()], &GroupBy::Model);
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].tokens.input, (i64::MAX as u64) * 2);
 }
 
 #[test]
@@ -5785,9 +5402,8 @@ fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
     // Regression guard: local message loading must forward
     // `options.scanner_settings` into OpenCode adapter discovery. Users with
     // `scanner.opencodeDbPaths` pointing at an OPENCODE_DB outside the
-    // XDG data dir would see no rows through the clients/wrapped
-    // command paths even though model/monthly/graph reports honored
-    // the same config.
+    // XDG data dir would see no rows through the Wrapped path even though the
+    // Models report honored the same config.
     let temp_dir = tempfile::TempDir::new().unwrap();
     // Deliberately do not create ~/.local/share/opencode so nothing
     // is auto-discoverable; the only db the scanner can find must
@@ -5912,14 +5528,14 @@ fn test_missing_configured_opencode_database_is_an_explicit_error() {
 
 #[test]
 #[serial_test::serial]
-fn time_metrics_report_preserves_input_health() {
+fn usage_data_report_preserves_input_health() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(temp_dir.path());
     let missing_db = temp_dir.path().join("missing/custom-current.db");
 
     let report = tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(super::get_time_metrics_report(ReportOptions {
+        .block_on(super::get_usage_data(ReportOptions {
             home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
             use_env_roots: false,
             clients: Some(vec!["opencode".to_string()]),
@@ -5929,35 +5545,9 @@ fn time_metrics_report_preserves_input_health() {
             },
             ..ReportOptions::default()
         }))
-        .expect("a broken third-party input must not abort time-metrics");
+        .expect("a broken third-party input must not abort the usage projection");
 
-    assert_eq!(report.metrics.session_count, 0);
-    assert!(!report.health.complete);
-    assert_eq!(report.health.failed_inputs, 1);
-    assert_eq!(report.health.issues[0].client, "opencode");
-    assert_eq!(report.health.issues[0].issue, "input-unavailable");
-}
-
-#[test]
-#[serial_test::serial]
-fn local_client_counts_preserve_input_health() {
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(temp_dir.path());
-    let missing_db = temp_dir.path().join("missing/client-counts.db");
-
-    let report = super::count_local_client_messages(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
-        use_env_roots: false,
-        clients: Some(vec!["opencode".to_string()]),
-        scanner_settings: scanner::ScannerSettings {
-            opencode_db_paths: vec![missing_db.clone()],
-            ..Default::default()
-        },
-        ..LocalParseOptions::default()
-    })
-    .expect("a broken third-party input must not abort client counts");
-
-    assert_eq!(report.counts.get(ClientId::OpenCode), 0);
+    assert_eq!(report.total_tokens, 0);
     assert!(!report.health.complete);
     assert_eq!(report.health.failed_inputs, 1);
     assert_eq!(report.health.issues[0].client, "opencode");
@@ -6154,36 +5744,28 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_zed_threads_db(
 
 #[test]
 #[serial_test::serial]
-fn test_default_graph_includes_antigravity_cli_database_rows() {
+fn test_default_usage_projection_includes_antigravity_cli_database_rows() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     write_single_antigravity_cli_fixture(temp_dir.path());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let graph = rt
-        .block_on(generate_graph_with_loaded_pricing(
-            ReportOptions {
-                home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
-                use_env_roots: false,
-                clients: None,
-                since: None,
-                until: None,
-                year: None,
-                group_by: GroupBy::default(),
-                scanner_settings: scanner::ScannerSettings::default(),
-            },
-            None,
-        ))
+    let usage = rt
+        .block_on(super::get_usage_data(ReportOptions {
+            home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+            use_env_roots: false,
+            clients: None,
+            since: None,
+            until: None,
+            year: None,
+            group_by: GroupBy::default(),
+            scanner_settings: scanner::ScannerSettings::default(),
+        }))
         .unwrap();
 
-    assert_eq!(graph.summary.clients, vec!["antigravity"]);
-    assert_eq!(graph.summary.models, vec!["gemini-3.5-flash"]);
-    assert_eq!(graph.summary.total_tokens, 19);
-    assert_eq!(graph.contributions.len(), 1);
-    assert_eq!(graph.contributions[0].clients[0].client, "antigravity");
-    assert_eq!(
-        graph.contributions[0].clients[0].model_id,
-        "gemini-3.5-flash"
-    );
+    assert_eq!(usage.total_tokens, 19);
+    assert_eq!(usage.models.len(), 1);
+    assert_eq!(usage.models[0].client, "antigravity");
+    assert_eq!(usage.models[0].model, "gemini-3.5-flash");
 }
 
 #[test]

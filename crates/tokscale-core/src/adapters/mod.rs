@@ -37,15 +37,17 @@ pub(crate) use error::{
 };
 
 pub(crate) const MODEL_ID_CANONICALIZATION_REVISION: ParserRevision = 3;
-// Record-level rejection changes the cached scan outcome even when the
-// accepted messages are unchanged, so old OpenCode shards must be rebuilt.
+// Record-level rejection and parsed Agent identity changes alter the cached
+// scan outcome, so old OpenCode shards must be rebuilt.
 pub(crate) const OPENCODE_CURRENT_SQLITE_REVISION: ParserRevision =
-    MODEL_ID_CANONICALIZATION_REVISION + 5;
+    MODEL_ID_CANONICALIZATION_REVISION + 6;
 pub(crate) const EXPLICIT_TOKEN_OVERFLOW_REVISION: ParserRevision =
     MODEL_ID_CANONICALIZATION_REVISION + 1;
 pub(crate) const ZED_RECORD_FILTER_REVISION: ParserRevision = EXPLICIT_TOKEN_OVERFLOW_REVISION + 2;
+// Codex Agent roles use the shared neutral text normalizer. Keep cached
+// messages aligned when that parser-owned identity changes.
 pub(crate) const CODEX_EXEC_IDENTITY_REVISION: ParserRevision =
-    MODEL_ID_CANONICALIZATION_REVISION + 3;
+    MODEL_ID_CANONICALIZATION_REVISION + 4;
 
 pub(crate) trait LocalInputAdapter: Sync {
     fn client(&self) -> ClientId;

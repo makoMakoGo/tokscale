@@ -70,14 +70,25 @@ The parse pipeline must hold at most one owned copy of any message.
   and the session projection; a full `Vec<UnifiedMessage>` is not part of this
   path. APIs whose explicit public contract returns all messages remain
   unchanged.
-- Schema 44 stores one immutable TUI generation containing its manifest,
-  session projection, client-aware canonical aggregate, and every exposed
-  Group By usage projection in one atomic JSON bundle. The writer serializes
-  borrowed views through a buffered temporary file and publishes the complete
-  generation with one rename. The bundle carries a SHA-256 digest for the
-  canonical aggregate, which startup verifies before accepting the generation.
-  A reader pins the opened bundle inode, so a view switch cannot mix data from
-  different refreshes even while a newer generation is being published.
+- Schema 45 stores one immutable TUI generation in one atomic JSON bundle. It
+  contains the manifest, session projection, client-aware canonical aggregate,
+  one group-agnostic Common usage projection, and four Grouped projections.
+  Common stores `agents`, daily/hourly totals and Client membership, graph,
+  report totals, and streaks exactly once. Each Grouped projection stores only
+  `models` and the daily/hourly model buckets for its Group By value. The
+  canonical accumulator records token and cost totals per Client during the
+  message fold. Full-universe and proper-subset Common totals derive from those
+  buckets, never from a Grouped model projection. The
+  writer serializes borrowed views through a buffered temporary file and
+  publishes the complete generation with one rename. The bundle carries a
+  SHA-256 digest for the canonical aggregate, which startup verifies before
+  accepting the generation. Before acceptance, startup also decodes and
+  validates all four Grouped projections, including inactive ones, for required
+  fields, authoritative model identity, model Client attribution within the
+  immutable Client universe, and agreement with Common's daily/hourly shape.
+  Corruption in any projection invalidates the whole bundle. A reader pins the
+  opened bundle inode, so a view switch cannot combine Common and Grouped data
+  from different refreshes even while a newer generation is being published.
 - Startup treats that generation as one logical bundle. A fresh bundle serves
   every local-report tab, including Sessions, without scanning inputs. A stale
   bundle remains wholly visible while one background fold prepares its
@@ -87,9 +98,12 @@ The parse pipeline must hold at most one owned copy of any message.
   sessions, and every Group By projection with one generation. A failed
   refresh preserves the prior complete generation and reports an explicit
   degraded state; it never publishes a partially refreshed mix.
-- The normal full-universe TUI retains the pinned eager projections and loads
-  the persisted fine-grained `TuiAcc` lazily only when a proper client subset
-  is requested. If generation persistence fails, the TUI reports that failure
+- For the full Client universe, the TUI assembles the active `UsageData` by
+  reading Common and the selected eager Grouped projection from the same
+  pinned inode. `ProjectionStore` does not retain a second Common DTO in
+  memory. The persisted fine-grained `TuiAcc` is loaded lazily only when a
+  proper Client subset is requested, then retained for subsequent subset
+  projections. If generation persistence fails, the TUI reports that failure
   and may explicitly retain the in-memory accumulator as a degraded projection
   backend so Group By and Clients filtering remain usable.
 - On Linux/glibc the TUI bounds the allocator to one arena before it starts
@@ -200,15 +214,20 @@ that final output.
 - A corrupt generic shard produces one visible warning and a same-run input
   reparse instead of silently suppressing usage. Normal exact hits still read
   no input bytes and do not eagerly materialize adapter-wide cache bodies.
-- The TUI accepts only schema 44 generation bundles. Any other schema or a
+- The TUI accepts only schema 45 generation bundles. Any other schema or a
   bundle missing its inventory signature, canonical client-aware aggregate, or
-  canonical digest is an explicit miss and rebuilds once. An accepted bundle
-  supports Clients and Group By projection without a background scan.
-- The full-universe TUI normally reads one projection from the pinned
-  generation while steady-state memory holds only the active view and session
-  snapshot. Selecting a client subset lazily loads canonical aggregate state
-  and retains it for later local projections. Refresh failure leaves the
-  previous cross-tab snapshot coherent and visible.
+  canonical digest is an explicit miss and rebuilds once. Missing Common,
+  missing any of the four Grouped projections, or incompatible Common/Grouped
+  daily or hourly shapes is also an explicit miss. Startup validates all four
+  Grouped projections, including inactive ones, and requires every top-level
+  model row's Client attribution to belong to the immutable Client universe.
+  An accepted bundle supports Clients and Group By projection without a
+  background scan.
+- The full-universe TUI reads Common plus the selected Grouped projection from
+  the pinned generation while steady-state memory holds only the active
+  assembled view and session snapshot. Selecting a proper Client subset lazily
+  loads canonical aggregate state and retains it for later local projections.
+  Refresh failure leaves the previous cross-tab snapshot coherent and visible.
 - Code touching `UnifiedMessage.date` or `dedup_key` as `String` must go
   through the new accessors; new parsers must intern identity fields.
 - High-cardinality scans no longer leave the interner strongly retaining every

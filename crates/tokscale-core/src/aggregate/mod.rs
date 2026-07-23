@@ -1,10 +1,8 @@
 //! The aggregation engine: one module owning the rules that turn
 //! `UnifiedMessage`s into report and view models for the TUI and CLI.
 
-mod accumulators;
 mod config;
 mod engine;
-mod graph_result;
 pub(crate) mod keys;
 pub(crate) mod tui;
 mod tui_sessions;
@@ -12,8 +10,6 @@ mod views;
 
 pub use config::{AggregationConfig, DateRange, ViewSet};
 pub(crate) use engine::AggregationEngine;
-pub(crate) use graph_result::finish_graph_result;
-pub use graph_result::{calculate_summary, calculate_years};
 pub use keys::UNKNOWN_WORKSPACE_LABEL;
 pub use tui::{
     aggregate_by_period, build_contribution_graph, build_contribution_graph_for_today,
@@ -21,7 +17,4 @@ pub use tui::{
     PeriodBucket, TuiAcc,
 };
 pub use tui_sessions::{TuiSessionEntry, TuiSessionTokens};
-pub use views::{AgentUsage, AggregatedViews};
-
-#[cfg(test)]
-mod parity_tests;
+pub use views::AggregatedViews;

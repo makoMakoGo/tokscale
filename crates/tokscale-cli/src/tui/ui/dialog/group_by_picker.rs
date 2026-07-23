@@ -359,18 +359,18 @@ mod tests {
     fn group_by_picker_exposes_only_report_dimensions() {
         let dialog = make_dialog(GroupBy::ClientModel);
 
-        assert_eq!(dialog.options.len(), 4);
-        assert!(dialog
-            .options
-            .iter()
-            .all(|option| !matches!(option.value, GroupBy::Session | GroupBy::ClientSession)));
-    }
-
-    #[test]
-    fn legacy_session_selection_falls_back_to_default_cursor() {
-        let dialog = make_dialog(GroupBy::Session);
-
-        assert_eq!(dialog.cursor, 0);
-        assert_eq!(dialog.options[dialog.cursor].value, GroupBy::Model);
+        assert_eq!(
+            dialog
+                .options
+                .iter()
+                .map(|option| option.value.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                GroupBy::Model,
+                GroupBy::ClientModel,
+                GroupBy::ClientProviderModel,
+                GroupBy::WorkspaceModel,
+            ]
+        );
     }
 }
