@@ -89,7 +89,6 @@ pub(crate) trait LocalInputAdapter: Sync {
 
 pub(crate) struct AdapterScanContext<'a> {
     pub home_dir: &'a str,
-    pub use_env_roots: bool,
     pub scanner_settings: &'a scanner::ScannerSettings,
 }
 
@@ -1538,7 +1537,6 @@ mod tests {
 
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].client(), ClientId::Antigravity);
-        assert!(selected_adapters(&["antigravity-cli".to_string()]).is_err());
     }
 
     #[test]
@@ -1547,6 +1545,5 @@ mod tests {
 
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].client(), ClientId::Kilo);
-        assert!(selected_adapters(&["kilocode".to_string()]).is_err());
     }
 }

@@ -53,89 +53,11 @@ pub fn try_get_cache_dir() -> Result<PathBuf, ConfigDirUnavailable> {
     try_get_config_dir().map(|directory| directory.join("cache"))
 }
 
-/// Resolve the tokscale config dir, honoring `TOKSCALE_CONFIG_DIR` first.
-///
-/// Resolution order:
-/// 1. `TOKSCALE_CONFIG_DIR` trimmed and used when set to a non-blank value.
-///    Absolute paths are recommended; relative paths are accepted and
-///    resolved against the process CWD. Empty and whitespace-only strings are treated as
-///    unset so the user gets the platform default instead of a surprise
-///    `./` write — keeps the resolver consistent with
-///    [`is_config_dir_overridden`], which also rejects blank strings.
-/// 2. macOS: `$HOME/.config/tokscale` (overrides `dirs::config_dir()`,
-///    which would return `~/Library/Application Support/` and split state
-///    across two roots — see module docs).
-/// 3. Linux: `dirs::config_dir().join("tokscale")` so XDG_CONFIG_HOME is
-///    honored. Falls through to `$HOME/.config/tokscale` when neither
-///    `XDG_CONFIG_HOME` nor `HOME` resolve.
-/// 4. Windows (and any other platform): `dirs::config_dir().join("tokscale")`.
-/// 5. Last-ditch fallback: `./.tokscale` so a missing HOME never panics.
-pub fn get_config_dir() -> PathBuf {
-    try_get_config_dir().unwrap_or_else(|_| PathBuf::from(".tokscale"))
-}
-
-/// Resolve the tokscale cache dir as `<config_dir>/cache`.
-///
-/// Caches (TUI display data, input-message bincode, pricing JSON, and
-/// Wrapped fonts/images) all live under this
-/// single subdirectory so an isolated profile (`TOKSCALE_CONFIG_DIR=...`)
-/// covers everything in one shot, and so `rm -rf <cache_dir>` is always
-/// safe — no durable state mixed in.
-pub fn get_cache_dir() -> PathBuf {
-    get_config_dir().join("cache")
-}
-
-/// Whether `TOKSCALE_CONFIG_DIR` is explicitly set in the environment.
-///
-/// Callers that want to read a legacy on-disk location during a path
-/// transition MUST gate that fallback on this returning `false`. When the
-/// override is set (CI sandbox, tests, isolated profile), the user has
-/// asked for an explicit, hermetic root — silently ingesting files from
-/// the historic `~/.cache/tokscale/` or `~/Library/Caches/tokscale/`
-/// locations defeats that contract.
-pub fn is_config_dir_overridden() -> bool {
-    configured_path_env("TOKSCALE_CONFIG_DIR").is_some()
-}
-
-/// Pre-#470 cache directory at `dirs::cache_dir()/tokscale`.
-///
-/// On macOS this resolves to `~/Library/Caches/tokscale/` (where the
-/// input-message-cache and pricing caches historically lived). On Linux this
-/// resolves to `$XDG_CACHE_HOME/tokscale`
-/// or `~/.cache/tokscale/`.
-///
-/// Returns `None` when `TOKSCALE_CONFIG_DIR` is set so the override stays
-/// hermetic (no legacy-data leak into isolated profiles).
-pub fn legacy_dirs_cache_dir() -> Option<PathBuf> {
-    if is_config_dir_overridden() {
-        return None;
-    }
-    dirs::cache_dir().map(|d| d.join("tokscale"))
-}
-
-/// Pre-#470 cache directory at `~/.cache/tokscale`.
-///
-/// This is where the TUI display cache (`tui-data-cache.json`) and the
-/// Wrapped image / font caches lived before #470 consolidated everything
-/// under `<config_dir>/cache`. On Linux this typically equals
-/// [`legacy_dirs_cache_dir`]; on macOS it does NOT (Library/Caches vs
-/// `.cache`), so both legacy probes need to run during migration.
-///
-/// Returns `None` when `TOKSCALE_CONFIG_DIR` is set or HOME cannot be
-/// resolved.
-pub fn legacy_dot_cache_tokscale_dir() -> Option<PathBuf> {
-    if is_config_dir_overridden() {
-        return None;
-    }
-    dirs::home_dir().map(|h| h.join(".cache").join("tokscale"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
     use std::env;
-    use std::path::Path;
 
     fn save_env() -> (
         Option<std::ffi::OsString>,
@@ -179,7 +101,10 @@ mod tests {
         unsafe {
             env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/tokscale-custom");
         }
-        assert_eq!(get_config_dir(), PathBuf::from("/tmp/tokscale-custom"));
+        assert_eq!(
+            try_get_config_dir().unwrap(),
+            PathBuf::from("/tmp/tokscale-custom")
+        );
         restore_env(prev);
     }
 
@@ -190,7 +115,10 @@ mod tests {
         unsafe {
             env::set_var("TOKSCALE_CONFIG_DIR", "  /tmp/tokscale-custom  ");
         }
-        assert_eq!(get_config_dir(), PathBuf::from("/tmp/tokscale-custom"));
+        assert_eq!(
+            try_get_config_dir().unwrap(),
+            PathBuf::from("/tmp/tokscale-custom")
+        );
         restore_env(prev);
     }
 
@@ -205,7 +133,7 @@ mod tests {
             env::set_var("HOME", "/tmp/tokscale-core-paths-home");
         }
         assert_eq!(
-            get_config_dir(),
+            try_get_config_dir().unwrap(),
             PathBuf::from("/tmp/tokscale-core-paths-home/.config/tokscale"),
         );
         restore_env(prev);
@@ -221,7 +149,7 @@ mod tests {
             env::set_var("XDG_CONFIG_HOME", "/tmp/tokscale-core-paths-xdg");
         }
         assert_eq!(
-            get_config_dir(),
+            try_get_config_dir().unwrap(),
             PathBuf::from("/tmp/tokscale-core-paths-xdg/tokscale"),
         );
         restore_env(prev);
@@ -235,7 +163,7 @@ mod tests {
             env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/tokscale-cache-test");
         }
         assert_eq!(
-            get_cache_dir(),
+            try_get_cache_dir().unwrap(),
             PathBuf::from("/tmp/tokscale-cache-test/cache")
         );
         restore_env(prev);
@@ -243,66 +171,22 @@ mod tests {
 
     #[test]
     #[serial]
-    fn legacy_helpers_return_none_when_overridden() {
-        let prev = save_env();
-        unsafe {
-            env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/tokscale-override");
-        }
-        assert!(legacy_dirs_cache_dir().is_none());
-        assert!(legacy_dot_cache_tokscale_dir().is_none());
-        restore_env(prev);
-    }
-
-    #[test]
-    #[serial]
-    fn legacy_helpers_return_some_when_not_overridden() {
-        let prev = save_env();
-        unsafe {
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-        }
-        assert!(
-            legacy_dirs_cache_dir().is_some(),
-            "dirs::cache_dir always resolves on test platforms"
-        );
-        assert!(
-            legacy_dot_cache_tokscale_dir().is_some(),
-            "HOME is set in test environments"
-        );
-        restore_env(prev);
-    }
-
-    #[test]
-    #[serial]
-    fn get_config_dir_treats_empty_override_as_unset() {
-        // Empty TOKSCALE_CONFIG_DIR previously slipped through and
-        // produced PathBuf::from(""), which silently relocated cache
-        // writes to ./cache and ./.tokscale. The resolver must agree
-        // with `is_config_dir_overridden`: empty == unset.
+    fn config_dir_treats_empty_override_as_unset() {
+        // Empty TOKSCALE_CONFIG_DIR must resolve through the platform path.
         let prev = save_env();
         unsafe {
             env::set_var("TOKSCALE_CONFIG_DIR", "");
         }
-        let resolved = get_config_dir();
+        let resolved = try_get_config_dir().unwrap();
         assert_ne!(
             resolved,
             PathBuf::from(""),
             "empty override must not resolve to the empty path"
         );
         assert!(
-            resolved.is_absolute() || resolved == Path::new(".tokscale"),
+            resolved.is_absolute(),
             "empty override must fall through to platform default, got {resolved:?}"
         );
-        restore_env(prev);
-    }
-
-    #[test]
-    #[serial]
-    fn is_config_dir_overridden_treats_empty_string_as_unset() {
-        let prev = save_env();
-        unsafe {
-            env::set_var("TOKSCALE_CONFIG_DIR", "");
-        }
-        assert!(!is_config_dir_overridden());
         restore_env(prev);
     }
 
@@ -313,8 +197,7 @@ mod tests {
         unsafe {
             env::set_var("TOKSCALE_CONFIG_DIR", "   ");
         }
-        assert_ne!(get_config_dir(), PathBuf::from("   "));
-        assert!(!is_config_dir_overridden());
+        assert_ne!(try_get_config_dir().unwrap(), PathBuf::from("   "));
         restore_env(prev);
     }
 }

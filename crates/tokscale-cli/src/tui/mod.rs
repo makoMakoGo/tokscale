@@ -11,6 +11,7 @@ mod model_family;
 mod presentation;
 mod session_data;
 pub mod settings;
+pub(crate) mod subscription_usage;
 mod themes;
 mod ui;
 mod view_state;
@@ -982,7 +983,8 @@ mod tests {
         let mut app = app_on(Tab::Agents);
         app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
         app.data.models.push(crate::tui::data::ModelUsage {
-            model: "gpt-5".to_string(),
+            model_id: "gpt-5".to_string(),
+            display_name: "gpt-5".to_string(),
             provider: "openai".to_string(),
             client: "codex".to_string(),
             workspace_key: None,
@@ -1083,7 +1085,6 @@ mod tests {
     fn cache_scope(home: &std::path::Path) -> CacheReportScope {
         CacheReportScope {
             resolved_home_dir: home.to_string_lossy().into_owned(),
-            use_env_roots: false,
             since: None,
             until: None,
             year: None,
@@ -1295,7 +1296,7 @@ mod tests {
         .unwrap();
         let mut app = app_on(Tab::Models);
         apply_background_result(&mut app, Ok(old));
-        assert_eq!(app.data.models[0].model, "old-model");
+        assert_eq!(app.data.models[0].model_id, "old-model");
 
         write_amp_model_input(home.path(), "new-model", 100);
         *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientProviderModel;
@@ -1313,7 +1314,7 @@ mod tests {
             app.data_group_by,
             tokscale_core::GroupBy::ClientProviderModel
         );
-        assert_eq!(app.data.models[0].model, "new-model");
+        assert_eq!(app.data.models[0].model_id, "new-model");
         assert_eq!(app.data.models[0].client, "amp");
         let selected_clients = app.selected_clients.borrow().clone();
         let model_projection = app
@@ -1322,7 +1323,7 @@ mod tests {
             .expect("loaded snapshot must install a projection backend")
             .project(&tokscale_core::GroupBy::Model, &selected_clients)
             .unwrap();
-        assert_eq!(model_projection.models[0].model, "new-model");
+        assert_eq!(model_projection.models[0].model_id, "new-model");
         assert_eq!(
             app.session_projection_status,
             session_data::SessionProjectionStatus::Ready
@@ -1513,7 +1514,7 @@ mod tests {
         apply_background_result(&mut app, Err(anyhow::anyhow!("load failed")));
 
         assert_eq!(app.data.total_tokens, old_tokens);
-        assert_eq!(app.data.models[0].model, "retained-model");
+        assert_eq!(app.data.models[0].model_id, "retained-model");
         assert_eq!(app.session_snapshot.sessions(), old_sessions);
         assert_eq!(client_space_for(&app, "amp"), old_client_space);
         assert!(app.projection_backend.is_some());

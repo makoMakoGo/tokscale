@@ -2,24 +2,27 @@ use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use serde::Deserialize;
 
-use super::{UsageAccount, UsageMetric, UsageOutput};
+use super::{UsageMetric, UsageOutput};
 
 const TOKEN_PLAN_PATH: &str = "/v1/token_plan/remains";
 
 struct Site {
     label: &'static str,
+    display_name: &'static str,
     base_url: &'static str,
     key_env: &'static str,
 }
 
 const CN_SITE: Site = Site {
     label: "CN",
+    display_name: "MiniMax Token Plan CN",
     base_url: "https://www.minimaxi.com",
     key_env: "TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY",
 };
 
 const GLOBAL_SITE: Site = Site {
     label: "Global",
+    display_name: "MiniMax Token Plan Global",
     base_url: "https://www.minimax.io",
     key_env: "TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY",
 };
@@ -47,7 +50,7 @@ struct ModelRemains {
 }
 
 fn read_key(site: &Site) -> Option<String> {
-    super::helpers::read_first_env(&[site.key_env])
+    super::helpers::read_env(site.key_env)
 }
 
 pub fn has_cn_credentials() -> bool {
@@ -169,12 +172,8 @@ fn output_from_response(site: &Site, resp: ApiResponse) -> Result<UsageOutput> {
     }
 
     Ok(UsageOutput {
-        provider: "MiniMax Token Plan".into(),
-        account: Some(UsageAccount {
-            id: site.label.to_string(),
-            label: Some(site.label.to_string()),
-            is_active: true,
-        }),
+        provider: site.display_name.into(),
+        account: None,
         plan: None,
         email: None,
         metrics,
@@ -223,6 +222,18 @@ mod tests {
         assert_eq!(metrics[2].label, "video");
         assert_eq!(metrics[2].remaining_percent, 100.0);
         assert_eq!(metrics[3].label, "video-wk");
+    }
+
+    #[test]
+    fn sites_use_distinct_provider_identities_without_accounts() {
+        let cn = output_from_response(&CN_SITE, serde_json::from_str(SAMPLE).unwrap()).unwrap();
+        let global =
+            output_from_response(&GLOBAL_SITE, serde_json::from_str(SAMPLE).unwrap()).unwrap();
+
+        assert_eq!(cn.provider, "MiniMax Token Plan CN");
+        assert!(cn.account.is_none());
+        assert_eq!(global.provider, "MiniMax Token Plan Global");
+        assert!(global.account.is_none());
     }
 
     #[test]
@@ -287,20 +298,16 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn token_plan_credentials_require_tokscale_envs() {
+    fn token_plan_credentials_use_distinct_region_envs() {
         let vars = [
             "TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY",
             "TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY",
-            "MINIMAX_TOKEN_PLAN_CN_KEY",
-            "MINIMAX_TOKEN_PLAN_GLOBAL_KEY",
         ];
         let saved = vars.map(|key| (key, std::env::var_os(key)));
         unsafe {
             for (key, _) in &saved {
                 std::env::remove_var(*key);
             }
-            std::env::set_var("MINIMAX_TOKEN_PLAN_CN_KEY", "legacy");
-            std::env::set_var("MINIMAX_TOKEN_PLAN_GLOBAL_KEY", "legacy");
         }
 
         assert!(!has_cn_credentials());

@@ -127,19 +127,6 @@ fn vscode_workspace_storage_roots(home: &Path) -> Vec<PathBuf> {
         );
     }
 
-    if std::env::var_os("WSL_DISTRO_NAME").is_some() {
-        if let Some(user_name) = home.file_name() {
-            let windows_home = Path::new("/mnt/c/Users").join(user_name);
-            for product in ["Code", "Code - Insiders"] {
-                roots.push(
-                    windows_home
-                        .join("AppData/Roaming")
-                        .join(product)
-                        .join("User/workspaceStorage"),
-                );
-            }
-        }
-    }
     roots
 }
 

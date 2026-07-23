@@ -4,7 +4,7 @@ Last verified: 2026-07-18
 
 This document records observed Factory Droid storage and runtime semantics, not
 Tokscale policy. The corresponding ingestion decision lives in
-[ADR 0020](../adr/0020-input-ingestion-and-integrity-contract.md).
+[ADR 0001](../adr/0001-no-silent-fallback.md).
 Verification used the locally installed Droid `0.174.0` Linux executable and a
 read-only snapshot of the local `~/.factory` corpus. No credentials, prompts,
 message content, or tool payloads were inspected or copied.

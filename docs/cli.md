@@ -15,14 +15,12 @@ with an installed fork package. Pass `--no-spinner` in automation.
 | `tokscale` | Exact shortcut for `tokscale tui`. |
 | `tokscale tui` | Launch the complete interactive interface. |
 | `tokscale models` | Print the TUI Models projection as a table or JSON. |
-| `tokscale usage` | Query remote subscription quota; independent of local reports. |
 | `tokscale pricing ...` | Query pricing catalogs or custom overrides. |
 | `tokscale wrapped` | Generate the year-in-review image from local usage. |
 | `tokscale cache ...` | Explicitly maintain Tokscale's local caches. |
 
-There are no root `monthly`, `weekly`, `daily`, `hourly`, `stats`, `agents`,
-`sessions`, `time-metrics`, `graph`, `clients`, `doctor`, or `warp` commands.
-Unknown commands fail as invalid CLI usage; they are not compatibility aliases.
+The table is the complete accepted root grammar. Every other command name is
+invalid CLI usage.
 
 ## Interactive TUI
 
@@ -39,8 +37,8 @@ tokscale tui --no-refresh
 
 `--tab` launches the same complete TUI and sets its initial focus. It does not
 run a hidden one-tab application. Every real TUI tab is accepted:
-`overview`, `models`, `monthly`, `weekly`, `daily`, `hourly`, `stats`,
-`agents`, `usage`, and `sessions`.
+`overview`, `usage`, `models`, `monthly`, `weekly`, `daily`, `hourly`,
+`stats`, `agents`, and `sessions`.
 
 Requesting a tab disabled by settings is an error rather than a silent jump to
 Overview. The TUI requires interactive stdin and stdout; for example,
@@ -49,6 +47,9 @@ Overview. The TUI requires interactive stdin and stdout; for example,
 Monthly, Weekly, Daily, Hourly, Stats, Agents, and Sessions are intentionally
 TUI-only. Their richer interactions and cross-tab state are not duplicated in
 parallel CLI report implementations.
+
+The Usage tab is the interactive subscription-plan and quota surface. Open it
+with `tokscale tui --tab usage`.
 
 CLI options override settings for the current TUI process and do not rewrite
 `settings.json`. The TUI captures normal mouse input; use the terminal's
@@ -77,7 +78,9 @@ Total  Cost  Cost/1M  ms/1K
 `Workspace` appears only for `workspace,model`. `Output` is the TUI's displayed
 output total, which includes reasoning tokens when the source format reports
 reasoning as a component of output. JSON also preserves `output`,
-`reasoning`, and `displayedOutput` separately.
+`reasoning`, and `displayedOutput` separately. Each JSON model row exposes the
+canonical identity as `modelId` and its presentation label as `displayName`;
+grouping and pricing use `modelId`.
 
 The four supported grouping strategies exactly match the TUI Group By picker:
 
@@ -88,9 +91,8 @@ The four supported grouping strategies exactly match the TUI Group By picker:
 | `client,provider,model` | One row per Client, Provider, and model. |
 | `workspace,model` | One row per workspace and model. |
 
-Session-based grouping values are invalid. Sessions are their own TUI tab, not
-a hidden Models grouping. Hyphenated compatibility spellings are also rejected;
-the comma-separated values above are the complete public set.
+The comma-separated values above are the complete public set. Sessions is an
+independent TUI view rather than a Models grouping dimension.
 
 All local Models JSON uses this top-level envelope:
 
@@ -138,8 +140,8 @@ tokscale tui --client codex --home /tmp/test-home
 Repeated Client ids are deduplicated. An explicit `--client` list wins,
 otherwise `defaultClients` applies, and without either Tokscale uses every
 accepted local Client. Unknown Clients are errors. `--home` must be an existing
-directory and is authoritative; discovery does not fall back to the process
-home or Client-specific environment roots.
+directory and is authoritative for every built-in input root. Configured
+`scanner.extraScanPaths` inputs remain additional roots.
 
 The TUI resolves its Client universe once. Its Clients picker applies a
 session-local projection of the installed generation without rescanning,
@@ -165,20 +167,17 @@ with `--since`/`--until`, or specifying `since > until` is invalid usage.
 ## Subscription Usage
 
 ```bash
-tokscale usage
-tokscale usage --json
+tokscale tui --tab usage
 ```
 
 Subscription Usage is account-level remote quota and plan state, not locally
-parsed token history. The CLI command is explicit consent to query configured
-providers under ADR 0014. `--json` exists for scripts and status integrations;
-it serializes the same provider/account/plan domain model as the TUI Usage tab.
+parsed token history. Entering the enabled Usage tab or pressing `u` follows
+the explicit provider-fetch lifecycle in ADR 0014. Local report refreshes do
+not contact subscription services.
 
-Tokscale consumes provider-owned credentials. It does not provide login,
-logout, account switching, credential copying, or provider-specific sync
-namespaces. In particular, the removed remote `tokscale warp ...` integration
-has no replacement. Warp remains a normal local Client whose `warp.sqlite`
-usage is scanned by Models and the TUI.
+Tokscale consumes provider-owned credentials. Login, logout, account switching,
+credential copying, and provider-specific synchronization are outside its
+command grammar.
 
 ## Wrapped
 

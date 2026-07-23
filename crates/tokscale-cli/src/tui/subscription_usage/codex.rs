@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 use super::helpers::capitalize;
-use super::{UsageMetric, UsageOutput};
+use super::{UsageAccount, UsageMetric, UsageOutput};
 
 #[derive(Debug, Clone, Deserialize)]
 struct Auth {
@@ -39,22 +39,15 @@ struct Window {
     reset_at: Option<i64>,
 }
 
-fn current_auth_paths_for_home(home: &Path, codex_home: Option<&str>) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-
-    if let Some(codex_home) = codex_home.map(str::trim).filter(|value| !value.is_empty()) {
-        paths.push(PathBuf::from(codex_home).join("auth.json"));
-    }
-
-    paths.push(home.join(".config").join("codex").join("auth.json"));
-    paths.push(home.join(".codex").join("auth.json"));
-    paths
+fn auth_path_for_home(home: Option<&Path>) -> Result<PathBuf> {
+    let home = home.ok_or_else(|| {
+        anyhow::anyhow!("Cannot locate the home directory for Codex credentials.")
+    })?;
+    Ok(home.join(".codex").join("auth.json"))
 }
 
-fn current_auth_paths() -> Vec<PathBuf> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let codex_home = std::env::var("CODEX_HOME").ok();
-    current_auth_paths_for_home(&home, codex_home.as_deref())
+fn current_auth_path() -> Result<PathBuf> {
+    auth_path_for_home(dirs::home_dir().as_deref())
 }
 
 fn parse_auth_file(path: &Path) -> Result<Option<Auth>> {
@@ -71,28 +64,19 @@ fn parse_auth_file(path: &Path) -> Result<Option<Auth>> {
 }
 
 fn read_current_credentials() -> Result<Auth> {
-    for path in current_auth_paths() {
-        if path.exists() {
-            if let Some(auth) = parse_auth_file(&path)? {
-                return Ok(auth);
-            }
-        }
+    let path = current_auth_path()?;
+    if !path.exists() {
+        anyhow::bail!(
+            "No Codex credentials found at {}. Run `codex login` to authenticate.",
+            path.display()
+        );
     }
-
-    if let Ok(raw) = super::helpers::read_keychain("Codex Auth") {
-        if let Ok(auth) = serde_json::from_str::<Auth>(&raw) {
-            if auth
-                .tokens
-                .as_ref()
-                .and_then(|tokens| tokens.access_token.as_deref())
-                .is_some_and(|token| !token.trim().is_empty())
-            {
-                return Ok(auth);
-            }
-        }
-    }
-
-    anyhow::bail!("No Codex credentials found. Run `codex login` to authenticate.")
+    parse_auth_file(&path)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No usable Codex access token found at {}. Run `codex login` to authenticate.",
+            path.display()
+        )
+    })
 }
 
 pub fn has_credentials() -> bool {
@@ -150,6 +134,17 @@ fn metric_from_window(label: &str, window: &Window) -> UsageMetric {
     }
 }
 
+fn account_from_id(account_id: Option<&str>) -> Option<UsageAccount> {
+    account_id
+        .map(str::trim)
+        .filter(|account_id| !account_id.is_empty())
+        .map(|id| UsageAccount {
+            id: id.to_string(),
+            label: None,
+            is_active: true,
+        })
+}
+
 async fn fetch_async(auth: Auth) -> Result<UsageOutput> {
     let tokens = auth
         .tokens
@@ -160,11 +155,12 @@ async fn fetch_async(auth: Auth) -> Result<UsageOutput> {
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .ok_or_else(|| anyhow::anyhow!("No Codex access token."))?;
+    let account = account_from_id(tokens.account_id.as_deref());
 
     let response = fetch_usage(
         &reqwest::Client::new(),
         access_token,
-        tokens.account_id.as_deref(),
+        account.as_ref().map(|account| account.id.as_str()),
     )
     .await?;
 
@@ -180,7 +176,7 @@ async fn fetch_async(auth: Auth) -> Result<UsageOutput> {
 
     Ok(UsageOutput {
         provider: "Codex".into(),
-        account: None,
+        account,
         plan: response.plan_type.as_deref().map(capitalize),
         email: response.email,
         metrics,
@@ -200,28 +196,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn credential_paths_only_reference_provider_owned_auth() {
-        let home = Path::new("/home/tester");
-        let paths = current_auth_paths_for_home(home, Some("/tmp/codex-home"));
-
-        assert_eq!(paths[0], PathBuf::from("/tmp/codex-home/auth.json"));
-        assert_eq!(
-            paths[1],
-            PathBuf::from("/home/tester/.config/codex/auth.json")
-        );
-        assert_eq!(paths[2], PathBuf::from("/home/tester/.codex/auth.json"));
-        assert!(paths
-            .iter()
-            .all(|path| !path.ends_with("tokscale/codex-credentials.json")));
+    fn credential_path_is_fixed_under_the_home_directory() {
+        let path = auth_path_for_home(Some(Path::new("/home/tester"))).expect("path");
+        assert_eq!(path, PathBuf::from("/home/tester/.codex/auth.json"));
     }
 
     #[test]
-    fn blank_codex_home_is_not_a_credential_root() {
-        let paths = current_auth_paths_for_home(Path::new("/home/tester"), Some("  "));
-        assert_eq!(paths.len(), 2);
+    fn missing_home_is_an_explicit_error() {
+        let error = auth_path_for_home(None).unwrap_err();
         assert_eq!(
-            paths[0],
-            PathBuf::from("/home/tester/.config/codex/auth.json")
+            error.to_string(),
+            "Cannot locate the home directory for Codex credentials."
         );
     }
 
@@ -254,5 +239,15 @@ mod tests {
         let path = temp.path().join("auth.json");
         std::fs::write(&path, r#"{"tokens":{"access_token":"  "}}"#).unwrap();
         assert!(parse_auth_file(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn normalized_output_account_uses_the_provider_account_id() {
+        let account = account_from_id(Some(" account-123 ")).expect("account");
+
+        assert_eq!(account.id, "account-123");
+        assert!(account.is_active);
+        assert!(account.label.is_none());
+        assert!(account_from_id(Some("  ")).is_none());
     }
 }

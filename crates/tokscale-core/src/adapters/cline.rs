@@ -27,10 +27,7 @@ impl LocalInputAdapter for ClineAdapter {
         let def = ClientId::Cline
             .local_def()
             .expect("Cline adapter must have local scan policy");
-        let mut roots = vec![local_clients::cline_session_data_dir_with_env_strategy(
-            ctx.home_dir,
-            ctx.use_env_roots,
-        )];
+        let mut roots = vec![local_clients::cline_session_data_dir(ctx.home_dir)];
         roots.extend(adapter_discover::extra_roots_for_client(
             ClientId::Cline,
             ctx,
@@ -98,7 +95,6 @@ mod tests {
     ) -> AdapterScanContext<'a> {
         AdapterScanContext {
             home_dir: home_dir.to_str().unwrap(),
-            use_env_roots: false,
             scanner_settings: settings,
         }
     }
@@ -109,11 +105,7 @@ mod tests {
         let current = home
             .path()
             .join(".cline/data/sessions/session-a/session-a.messages.json");
-        let legacy = home.path().join(
-            ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/task-a/ui_messages.json",
-        );
         write_file(&current, "{}");
-        write_file(&legacy, "[]");
 
         let settings = crate::scanner::ScannerSettings::default();
         let units = CLINE_ADAPTER

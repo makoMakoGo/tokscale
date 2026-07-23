@@ -18,14 +18,10 @@ fn prime_pricing_cache(home: &Path) {
         .as_secs();
     let payload = format!(r#"{{"timestamp":{},"data":{{}}}}"#, now);
 
-    for dir in [
-        home.join(".cache/tokscale"),
-        home.join(".config/tokscale/cache"),
-    ] {
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("pricing-litellm.json"), &payload).unwrap();
-        fs::write(dir.join("pricing-openrouter.json"), &payload).unwrap();
-    }
+    let dir = home.join(".config/tokscale/cache");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("pricing-litellm.json"), &payload).unwrap();
+    fs::write(dir.join("pricing-openrouter.json"), &payload).unwrap();
 }
 
 fn write_large_copilot_fixture(home: &Path) {
@@ -175,12 +171,9 @@ fn run_copilot_report(home: &Path) -> (Vec<u8>, u64) {
         ])
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("XDG_DATA_HOME", home.join(".local/share"))
         .env("XDG_CACHE_HOME", home.join(".cache"))
         .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
         .env_remove("TOKSCALE_CONFIG_DIR")
-        .env_remove("TOKSCALE_EXTRA_DIRS")
-        .env_remove("COPILOT_OTEL_FILE_EXPORTER_PATH")
         .output()
         .unwrap();
 

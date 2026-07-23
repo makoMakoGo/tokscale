@@ -32,7 +32,7 @@ impl LocalInputAdapter for HermesAdapter {
 
         adapter_discover::push_existing_file(
             ClientId::Hermes,
-            def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
+            def.resolve_path(ctx.home_dir),
             &mut paths,
         )?;
         paths.extend(adapter_discover::scan_roots(
@@ -168,7 +168,6 @@ mod tests {
         };
         let ctx = AdapterScanContext {
             home_dir: home.path().to_str().unwrap(),
-            use_env_roots: false,
             scanner_settings: &settings,
         };
 

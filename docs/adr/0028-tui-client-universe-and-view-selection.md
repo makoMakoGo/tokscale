@@ -15,6 +15,16 @@ This ADR defines the complete contract for those responsibilities.
 
 ## Decision
 
+### Product boundary
+
+Bare `tokscale` and `tokscale tui` launch the complete interactive product.
+`--tab` changes only initial focus among Overview, Usage, Models, Monthly,
+Weekly, Daily, Hourly, Stats, Agents, and Sessions. Every tab participates in
+the same process, navigation, and action system. The local-report tabs share
+one generation and Client scope; Subscription Usage follows ADR 0014's
+independent remote lifecycle. ADR 0022 defines the independent headless Models
+projection and the complete command grammar.
+
 ### Client scope
 
 Each TUI process resolves one immutable `ClientUniverse` at startup. An
@@ -35,13 +45,14 @@ an outside click discards it. The picker has no per-client hotkeys.
 
 ### Generation and acquisition
 
-One local generation contains the input manifest, data-health result, session
-snapshot, client-aware canonical accumulator, one Common usage projection, and
-all four exposed Grouped projections. Common contains Agents, daily/hourly
-totals and Client membership, graph, report totals, and streaks exactly once.
-Each Grouped projection contains only Models and daily/hourly model buckets.
-The generation is published and installed atomically. Local usage projections,
-Sessions, and the other local report tabs therefore cannot mix generations.
+One local generation contains Data Health, Client-space accounting, report
+scope, Client universe, inventory signature, session snapshot, client-aware
+canonical accumulator, one Common usage projection, and all four Grouped
+projections. Common contains Agents, daily/hourly totals and Client membership,
+contribution graph, report totals, and streaks exactly once. Each Grouped
+projection contains only Models and daily/hourly model buckets. The generation
+is published and installed atomically, so local report tabs cannot mix
+generations.
 
 Only these events may scan inputs:
 
@@ -49,31 +60,37 @@ Only these events may scan inputs:
 2. automatic refresh;
 3. explicit local refresh.
 
+Built-in discovery resolves only the fixed platform paths for the current home
+directory. `scanner.extraScanPaths` is the sole authority for additional
+recursive client roots, while OpenCode uses the file-specific
+`scanner.opencodeDbPaths`.
+
 Acquisition stays in the background. Before the first generation exists, the
 local TUI is either loading or has an explicit cold failure; it cannot claim a
 successful empty report. A warm refresh leaves the installed generation
 visible. If that refresh fails, the same generation remains installed and the
 failure is exposed as a degraded diagnostic.
 
-The remote Subscription Usage tab has its own lifecycle and is not classified
-from the local generation.
+The remote Subscription Usage tab has the separate ADR 0014 lifecycle and is
+not classified from the local generation.
 
 ### Projection
 
-Clients and Group By are projections of the installed generation. They never
+Clients and Group By are projections of the installed generation under the
+ADR 0010 report contract. They never
 scan inputs, write the generation cache, persist picker state, or reset the
 refresh clock. Projection controls are unavailable until a generation exists
 and remain usable during a warm background refresh.
 
 A usage projection is installed atomically with its `data_clients`, grouping,
-and usage data. For the full Client universe, that usage data is assembled from
-Common and the selected Grouped projection read from the same pinned bundle
-inode. A proper Client subset is derived from canonical state, loaded lazily on
-first use. Sessions filters the fixed generation snapshot through that same
-committed Client scope. Failure restores the complete prior usage projection
-and reports an explicit diagnostic. Detail selections are reconciled by
-semantic identity after a projection; a detail that no longer exists closes
-explicitly instead of becoming an empty detail page.
+and usage data. For the full Client universe, it is assembled from Common and
+the selected Grouped projection read from the same pinned bundle inode. A
+proper Client subset is derived from canonical state, loaded lazily on first
+use. Sessions filters the fixed generation snapshot through that same committed
+Client scope. Failure restores the complete prior usage projection and reports
+an explicit diagnostic. Detail selections are reconciled by semantic identity
+after a projection; an absent detail closes explicitly instead of becoming an
+empty detail page.
 
 Data Health and scanned input bytes describe the immutable generation-wide
 client universe. Usage rows, charts, agents, and Sessions follow the selected
@@ -125,23 +142,25 @@ graph cells remain owned by their renderers; `ActionSet` is a capability set,
 not a command bus.
 
 An empty view advertises only recovery and navigation actions. Valid global
-operations remain accepted without being promoted as recovery; in particular,
-export still writes the complete current report when the Agents breakdown or
-another displayed collection is empty. Row sorting, details, copying a row,
-and row hit areas are absent when there is no row to operate on.
+operations remain accepted without being promoted as recovery. TUI export
+writes `groupBy`, `models`, `totals`, `agents`, `daily`, and `health` from the
+installed projection even when the displayed collection is empty. It does not
+claim to export hourly rows, graph cells, Sessions, or processing metadata.
+Row sorting, details, copying a row, and row hit areas are absent when there is
+no row to operate on.
 
 ### Data and cache shape
 
 `UsageData.graph` is a total value. A valid empty graph is
 `UsageGraphData { weeks: [] }`; `Option<UsageGraphData>` is not part of the
-domain. Schema 45 stores the graph once in Common. A missing or `null` graph,
-a missing Common or Grouped part, or incompatible Common/Grouped daily or
-hourly shapes is an invalid current-schema generation and becomes an ordinary
-cache miss.
+domain. Schema 46 stores the graph once in Common. A missing or `null` graph,
+a missing Common or Grouped part, a model Client outside the immutable
+universe, or disagreeing Common/Grouped daily or hourly shapes makes the
+complete generation a cache miss.
 
-The TUI accepts only the current schema 45 generation bundle. It has no
-compatibility decoder, migration branch, or synthesized defaults for older or
-partial bundle shapes.
+The TUI accepts only schema 47 and validates all four Grouped projections,
+including inactive ones, before installing the generation. No omitted field,
+partial projection, synthesized default, or alternative schema is accepted.
 
 ## Consequences
 

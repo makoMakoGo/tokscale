@@ -1,25 +1,17 @@
 use anyhow::Result;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 use super::helpers::capitalize;
 use super::{UsageMetric, UsageOutput};
 
-const API_KEY_ENVS: &[&str] = &["TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY"];
-const CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
+const API_KEY_ENV: &str = "TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY";
+const KEY_PROVIDER: &str = "Kimi Coding Plan (key)";
+const CREDENTIAL_PROVIDER: &str = "Kimi Coding Plan (credential)";
 
 #[derive(Debug, Deserialize)]
 struct Credentials {
     access_token: Option<String>,
-    refresh_token: Option<String>,
     expires_at: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RefreshResponse {
-    access_token: Option<String>,
-    refresh_token: Option<String>,
-    expires_in: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,113 +86,34 @@ struct Membership {
     level: Option<String>,
 }
 
-fn kimi_code_home() -> std::path::PathBuf {
-    if let Some(home) = std::env::var_os("KIMI_CODE_HOME") {
-        if !home.is_empty() {
-            return std::path::PathBuf::from(home);
-        }
-    }
-
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".kimi-code")
+fn credentials_path_for_home(home: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    home.map(|home| {
+        home.join(".kimi-code")
+            .join("credentials")
+            .join("kimi-code.json")
+    })
 }
 
-fn credentials_path() -> std::path::PathBuf {
-    kimi_code_home().join("credentials").join("kimi-code.json")
+fn credentials_path() -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir();
+    credentials_path_for_home(home.as_deref())
 }
 
 fn read_credentials() -> Result<Credentials> {
-    let path = credentials_path();
+    let path = credentials_path().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Cannot locate Kimi Coding Plan credential because the home directory is unavailable"
+        )
+    })?;
     if !path.exists() {
-        anyhow::bail!(
-            "No Kimi Code credential found. Configure TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY or run 'kimi' to log in."
-        );
+        anyhow::bail!("No Kimi Coding Plan credential found at {}", path.display());
     }
     let content = std::fs::read_to_string(&path)?;
     Ok(serde_json::from_str(&content)?)
 }
 
 fn read_api_key() -> Option<String> {
-    super::helpers::read_first_env(API_KEY_ENVS)
-}
-
-fn save_credentials(access_token: &str, refresh_token: &str, expires_in: i64) {
-    let path = credentials_path();
-    let expires_at = chrono::Utc::now().timestamp() as f64 + expires_in as f64;
-    let json = serde_json::json!({
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "expires_at": expires_at,
-        "scope": "kimi-code",
-        "token_type": "Bearer"
-    });
-    let content = match serde_json::to_string_pretty(&json) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("warning: failed to serialize Kimi credentials: {e}");
-            return;
-        }
-    };
-    if let Err(e) = super::helpers::atomic_write_secret(&path, content.as_bytes()) {
-        eprintln!("warning: failed to save Kimi credentials: {e}");
-    }
-}
-
-fn kimi_oauth_device_headers() -> Vec<(&'static str, String)> {
-    let device_name = hostname::get()
-        .ok()
-        .and_then(|name| name.into_string().ok())
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
-    let device_model = std::env::consts::ARCH.to_string();
-    let os_version = std::env::consts::OS.to_string();
-    let mut hasher = Sha256::new();
-    hasher.update(device_name.as_bytes());
-    hasher.update(b":");
-    hasher.update(device_model.as_bytes());
-    hasher.update(b":");
-    hasher.update(os_version.as_bytes());
-    hasher.update(b":");
-    hasher.update(kimi_code_home().to_string_lossy().as_bytes());
-    let device_id = format!("{:x}", hasher.finalize());
-
-    vec![
-        ("X-Msh-Platform", "kimi_code_cli".to_string()),
-        ("X-Msh-Version", env!("CARGO_PKG_VERSION").to_string()),
-        ("X-Msh-Device-Name", device_name),
-        ("X-Msh-Device-Model", device_model),
-        ("X-Msh-Os-Version", os_version),
-        ("X-Msh-Device-Id", device_id),
-    ]
-}
-
-fn needs_refresh(expires_at: Option<f64>) -> bool {
-    if let Some(expires_at) = expires_at {
-        let now = chrono::Utc::now().timestamp() as f64;
-        now + 300.0 > expires_at // 5 min buffer
-    } else {
-        false
-    }
-}
-
-async fn refresh_token(client: &reqwest::Client, rt: &str) -> Result<RefreshResponse> {
-    let mut request = client.post("https://auth.kimi.com/api/oauth/token");
-    for (name, value) in kimi_oauth_device_headers() {
-        request = request.header(name, value);
-    }
-    let resp = request
-        .form(&[
-            ("client_id", CLIENT_ID),
-            ("grant_type", "refresh_token"),
-            ("refresh_token", rt),
-        ])
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("Kimi token refresh failed (HTTP {})", resp.status());
-    }
-    Ok(resp.json().await?)
+    super::helpers::read_env(API_KEY_ENV)
 }
 
 async fn fetch_usage_result(
@@ -223,10 +136,14 @@ async fn fetch_usage_result(
     Ok(Ok(resp.json().await?))
 }
 
-async fn fetch_usage(client: &reqwest::Client, token: &str) -> Result<UsageResponse> {
+async fn fetch_usage(
+    client: &reqwest::Client,
+    token: &str,
+    provider: &str,
+) -> Result<UsageResponse> {
     match fetch_usage_result(client, token).await? {
         Ok(resp) => Ok(resp),
-        Err(status) => anyhow::bail!("Kimi Code credential rejected (HTTP {status})"),
+        Err(status) => anyhow::bail!("{provider} authentication rejected (HTTP {status})"),
     }
 }
 
@@ -252,22 +169,6 @@ fn parse_quota_detail(label: &str, detail: &QuotaDetail) -> Option<UsageMetric> 
         remaining_label: None,
         resets_at: detail.reset_at.clone(),
     })
-}
-
-fn persist_refreshed_credentials(
-    access_token: &str,
-    refreshed: &RefreshResponse,
-    stored_refresh_token: &mut Option<String>,
-) {
-    if let Some(new_refresh_token) = refreshed.refresh_token.clone() {
-        *stored_refresh_token = Some(new_refresh_token);
-    }
-
-    if let (Some(refresh_token), Some(expires_in)) =
-        (stored_refresh_token.as_deref(), refreshed.expires_in)
-    {
-        save_credentials(access_token, refresh_token, expires_in);
-    }
 }
 
 fn non_empty(value: Option<&String>) -> Option<&str> {
@@ -348,11 +249,15 @@ fn metric_dedup_key(label: &str, metric: &UsageMetric) -> String {
     )
 }
 
-pub fn has_credentials() -> bool {
-    read_api_key().is_some() || credentials_path().exists()
+pub fn has_key_credentials() -> bool {
+    read_api_key().is_some()
 }
 
-fn usage_output_from_response(resp: UsageResponse) -> UsageOutput {
+pub fn has_credential_credentials() -> bool {
+    credentials_path().is_some_and(|path| path.exists())
+}
+
+fn usage_output_from_response(resp: UsageResponse, provider: &str) -> UsageOutput {
     let plan = resp
         .user
         .as_ref()
@@ -363,7 +268,7 @@ fn usage_output_from_response(resp: UsageResponse) -> UsageOutput {
     let mut metrics = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    // Parse limits[] using the same detail/window shape as current Kimi Code.
+    // Parse limits[] using the current Kimi Coding Plan detail/window shape.
     if let Some(ref limits) = resp.limits {
         for (index, entry) in limits.iter().enumerate() {
             let label = limit_label(entry, index);
@@ -388,7 +293,7 @@ fn usage_output_from_response(resp: UsageResponse) -> UsageOutput {
     }
 
     UsageOutput {
-        provider: "Kimi Code".into(),
+        provider: provider.into(),
         plan,
         email: None,
         account: None,
@@ -396,60 +301,49 @@ fn usage_output_from_response(resp: UsageResponse) -> UsageOutput {
     }
 }
 
-async fn fetch_with_oauth(client: &reqwest::Client) -> Result<UsageResponse> {
+async fn fetch_with_credential(client: &reqwest::Client) -> Result<UsageResponse> {
     let creds = read_credentials()?;
-    let mut access_token = creds
+    let access_token = creds
         .access_token
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("No Kimi Code access token."))?;
-    let mut stored_refresh_token = creds.refresh_token.clone();
-    let expires_at = creds.expires_at;
-
-    // Proactive refresh if token is about to expire.
-    if needs_refresh(expires_at) {
-        if let Some(ref rt_str) = stored_refresh_token {
-            if let Ok(refreshed) = refresh_token(client, rt_str).await {
-                if let Some(new_token) = refreshed.access_token.clone() {
-                    access_token = new_token;
-                    persist_refreshed_credentials(
-                        &access_token,
-                        &refreshed,
-                        &mut stored_refresh_token,
-                    );
-                }
-            }
-        }
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("No Kimi Coding Plan access token."))?;
+    if creds
+        .expires_at
+        .is_some_and(|expires_at| chrono::Utc::now().timestamp() as f64 >= expires_at)
+    {
+        anyhow::bail!(
+            "Kimi Coding Plan credential has expired. Run `kimi` to refresh the provider-owned authentication."
+        );
     }
-
-    match fetch_usage_result(client, &access_token).await? {
-        Ok(resp) => Ok(resp),
-        Err(_) => {
-            let rt_str = stored_refresh_token
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("No Kimi Code refresh token."))?;
-            let refreshed = refresh_token(client, rt_str).await?;
-            let new = refreshed
-                .access_token
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("Refresh returned no token."))?;
-            persist_refreshed_credentials(&new, &refreshed, &mut stored_refresh_token);
-            fetch_usage(client, &new).await
-        }
-    }
+    fetch_usage(client, access_token, CREDENTIAL_PROVIDER).await
 }
 
-pub fn fetch() -> Result<UsageOutput> {
+fn fetch_with_token(token: &str, provider: &str) -> Result<UsageOutput> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
         let client = reqwest::Client::new();
-        let resp = if let Some(api_key) = read_api_key() {
-            fetch_usage(&client, &api_key).await?
-        } else {
-            fetch_with_oauth(&client).await?
-        };
-        Ok(usage_output_from_response(resp))
+        let resp = fetch_usage(&client, token, provider).await?;
+        Ok(usage_output_from_response(resp, provider))
+    })
+}
+
+pub fn fetch_key() -> Result<UsageOutput> {
+    let api_key = read_api_key()
+        .ok_or_else(|| anyhow::anyhow!("{API_KEY_ENV} is required for {KEY_PROVIDER}"))?;
+    fetch_with_token(&api_key, KEY_PROVIDER)
+}
+
+pub fn fetch_credential() -> Result<UsageOutput> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let response = fetch_with_credential(&reqwest::Client::new()).await?;
+        Ok(usage_output_from_response(response, CREDENTIAL_PROVIDER))
     })
 }
 
@@ -522,23 +416,26 @@ mod tests {
     }
 
     #[test]
-    fn usage_output_labels_provider_as_kimi_code() {
-        let output = usage_output_from_response(UsageResponse {
-            usage: Some(QuotaDetail {
-                limit: Some(IntLike::String("100".to_string())),
-                remaining: Some(IntLike::String("80".to_string())),
-                reset_at: Some("2026-06-26T00:00:00Z".to_string()),
-                ..QuotaDetail::default()
-            }),
-            limits: None,
-            user: Some(UserInfo {
-                membership: Some(Membership {
-                    level: Some("LEVEL_ALLEGRETTO".to_string()),
+    fn usage_output_uses_the_selected_kimi_provider_identity() {
+        let output = usage_output_from_response(
+            UsageResponse {
+                usage: Some(QuotaDetail {
+                    limit: Some(IntLike::String("100".to_string())),
+                    remaining: Some(IntLike::String("80".to_string())),
+                    reset_at: Some("2026-06-26T00:00:00Z".to_string()),
+                    ..QuotaDetail::default()
                 }),
-            }),
-        });
+                limits: None,
+                user: Some(UserInfo {
+                    membership: Some(Membership {
+                        level: Some("LEVEL_ALLEGRETTO".to_string()),
+                    }),
+                }),
+            },
+            KEY_PROVIDER,
+        );
 
-        assert_eq!(output.provider, "Kimi Code");
+        assert_eq!(output.provider, KEY_PROVIDER);
         assert_eq!(output.plan.as_deref(), Some("ALLEGRETTO"));
         assert_eq!(output.metrics.len(), 1);
         assert_eq!(output.metrics[0].label, "Weekly");
@@ -569,7 +466,7 @@ mod tests {
             }"#,
         )?;
 
-        let output = usage_output_from_response(resp);
+        let output = usage_output_from_response(resp, KEY_PROVIDER);
 
         assert_eq!(output.metrics.len(), 2);
         assert_eq!(output.metrics[0].label, "5 Hour");
@@ -602,7 +499,7 @@ mod tests {
             }"#,
         )?;
 
-        let output = usage_output_from_response(resp);
+        let output = usage_output_from_response(resp, CREDENTIAL_PROVIDER);
 
         assert_eq!(output.plan.as_deref(), Some("ADVANCED"));
         assert_eq!(output.metrics.len(), 2);
@@ -636,7 +533,7 @@ mod tests {
             }"#,
         )?;
 
-        let output = usage_output_from_response(resp);
+        let output = usage_output_from_response(resp, KEY_PROVIDER);
 
         assert_eq!(output.metrics.len(), 1);
         assert_eq!(output.metrics[0].label, "24 Hour");
@@ -657,7 +554,7 @@ mod tests {
             }"#,
         )?;
 
-        let output = usage_output_from_response(resp);
+        let output = usage_output_from_response(resp, CREDENTIAL_PROVIDER);
 
         assert_eq!(output.metrics.len(), 1);
         assert_eq!(output.metrics[0].label, "Weekly cap");
@@ -667,82 +564,32 @@ mod tests {
     }
 
     #[test]
-    fn kimi_oauth_refresh_uses_device_headers() {
-        let headers = kimi_oauth_device_headers();
-        let keys = headers.iter().map(|(key, _)| *key).collect::<Vec<_>>();
-
+    fn credential_path_is_fixed_under_the_current_home_location() {
         assert_eq!(
-            headers
-                .iter()
-                .find(|(key, _)| *key == "X-Msh-Platform")
-                .map(|(_, value)| value.as_str()),
-            Some("kimi_code_cli")
-        );
-        for key in [
-            "X-Msh-Version",
-            "X-Msh-Device-Name",
-            "X-Msh-Device-Model",
-            "X-Msh-Os-Version",
-            "X-Msh-Device-Id",
-        ] {
-            assert!(keys.contains(&key), "missing {key}");
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn refreshed_credentials_keep_existing_refresh_token_when_missing() {
-        let _guard = EnvGuard::new(&["KIMI_CODE_HOME"]);
-        let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("KIMI_CODE_HOME", temp.path());
-        let refreshed = RefreshResponse {
-            access_token: Some("new-access-token".to_string()),
-            refresh_token: None,
-            expires_in: Some(3600),
-        };
-        let mut stored_refresh_token = Some("old-refresh-token".to_string());
-
-        persist_refreshed_credentials("new-access-token", &refreshed, &mut stored_refresh_token);
-
-        let saved: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(credentials_path()).unwrap()).unwrap();
-        assert_eq!(stored_refresh_token.as_deref(), Some("old-refresh-token"));
-        assert_eq!(saved["access_token"], "new-access-token");
-        assert_eq!(saved["refresh_token"], "old-refresh-token");
-    }
-
-    #[test]
-    #[serial]
-    fn credentials_path_uses_kimi_code_home() {
-        let _guard = EnvGuard::new(&["KIMI_CODE_HOME"]);
-        let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("KIMI_CODE_HOME", temp.path());
-
-        assert_eq!(
-            credentials_path(),
-            temp.path().join("credentials").join("kimi-code.json")
+            credentials_path_for_home(Some(std::path::Path::new("/home/tester"))),
+            Some(std::path::PathBuf::from(
+                "/home/tester/.kimi-code/credentials/kimi-code.json"
+            ))
         );
     }
 
     #[test]
-    #[serial]
-    fn api_key_credentials_require_tokscale_specific_env() {
-        let _guard = EnvGuard::new(&[
-            "KIMI_CODE_HOME",
-            "KIMI_API_KEY",
-            "TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY",
-        ]);
-        let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("KIMI_CODE_HOME", temp.path());
-        std::env::remove_var("TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY");
-        std::env::set_var("KIMI_API_KEY", "generic-key");
+    fn missing_home_does_not_create_a_relative_credentials_path() {
+        assert_eq!(credentials_path_for_home(None), None);
+    }
 
-        assert!(!has_credentials());
+    #[test]
+    #[serial]
+    fn key_provider_uses_only_the_coding_plan_env() {
+        let _guard = EnvGuard::new(&[API_KEY_ENV]);
+        std::env::remove_var(API_KEY_ENV);
+
+        assert!(!has_key_credentials());
         assert!(read_api_key().is_none());
 
-        std::env::set_var("TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY", "coding-plan-key");
+        std::env::set_var(API_KEY_ENV, "coding-plan-key");
 
-        assert!(has_credentials());
+        assert!(has_key_credentials());
         assert_eq!(read_api_key().as_deref(), Some("coding-plan-key"));
     }
 }

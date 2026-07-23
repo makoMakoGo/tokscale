@@ -9,9 +9,11 @@ the `personal/local-clients` branch.
 
 This fork focuses on local AI coding-client usage accounting:
 
-- read local transcript, database, cache, or explicit sync artifacts;
+- read provider-owned local transcripts, databases, and current-format
+  artifacts;
 - keep stable client ids and display facts in one catalog;
-- aggregate local token buckets consistently across CLI and TUI reports;
+- expose the TUI as the complete local-report product and Models as its shared
+  headless projection;
 - derive local report cost from token pricing, not from vendor invoice fields;
 - keep parser, scanner, pricing, and aggregation failures visible.
 
@@ -32,7 +34,7 @@ The most important behavioral differences are:
 - Client identity is catalog-based instead of being repeated through scattered
   switch statements.
 - Total-only clients with accepted local attribution, such as Grok and
-  local Warp SQLite usage, use the fixed bucket allocation from ADR 0017.
+  local Warp SQLite usage, use the fixed bucket allocation from ADR 0010.
 - Subscription quota data is a separate explicit surface, not part of local
   token reports.
 
@@ -74,7 +76,7 @@ Fork npm releases use the `@juya-ai` organization:
   binaries.
 - The installed command remains `tokscale`.
 
-See [ADR 0016](adr/0016-juya-ai-npm-release-identity.md) for the release
+See [ADR 0009](adr/0009-ahead-only-upstream-policy.md) for the release
 identity decision and [the fork release process](releases.md) for version PR,
 direct maintainer release, and recovery procedures.
 
@@ -92,7 +94,5 @@ small while avoiding runtime dependencies on upstream `tokscale.ai` branding.
 This fork does not aim to:
 
 - mirror every upstream client idea;
-- keep compatibility shims for rejected local concepts;
 - hide bad local state to keep the UI quiet;
-- make hosted social workflows the first documentation path;
-- preserve stale multilingual README copies that nobody maintains.
+- make hosted social workflows the first documentation path.

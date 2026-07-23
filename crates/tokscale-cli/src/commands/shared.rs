@@ -98,11 +98,6 @@ pub(crate) fn parse_default_client_filters(defaults: &[String]) -> Result<Vec<Cl
 
 pub(crate) fn parse_persisted_default_client_id(raw: &str) -> Option<ClientId> {
     let normalized = raw.trim().to_ascii_lowercase();
-    // ADR 0007 retains this exact former ClientId only for persisted
-    // `defaultClients`. It is not a catalog, CLI, or scanner-key alias.
-    if normalized == "antigravity-cli" {
-        return Some(ClientId::Antigravity);
-    }
     ClientId::from_str(&normalized)
 }
 
@@ -111,10 +106,6 @@ pub(crate) fn parse_client_id_set(clients: &[String]) -> std::collections::HashS
         .iter()
         .filter_map(|client| ClientId::from_str(&client.to_ascii_lowercase()))
         .collect()
-}
-
-pub(crate) fn use_env_roots(home_dir: &Option<String>) -> bool {
-    home_dir.is_none()
 }
 
 pub(crate) fn resolve_effective_home_dir(home_dir: &Option<String>) -> Option<PathBuf> {

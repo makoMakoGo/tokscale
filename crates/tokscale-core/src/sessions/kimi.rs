@@ -52,13 +52,6 @@ struct WireLine {
     profile_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct KimiSessionIndexLine {
-    session_id: String,
-    work_dir: String,
-}
-
 #[derive(Debug, Clone)]
 struct ModelIdentity {
     provider: String,
@@ -269,10 +262,9 @@ fn resolve_model(
     )
 }
 
-/// Older Kimi wires persist only a wire-local alias. The current config can
-/// enrich aliases that still exist, but it is neither historical nor required
-/// evidence. If it is unavailable or malformed, the raw wire label remains
-/// the authoritative model observation.
+/// Model identity resolves from preceding wire request evidence first. Exact
+/// current-config aliases provide optional enrichment; otherwise the raw wire
+/// label remains the authoritative model observation.
 fn read_model_aliases(home: &Path) -> HashMap<String, ModelIdentity> {
     let config_path = home.join("config.toml");
     let Ok(content) = std::fs::read_to_string(&config_path) else {
@@ -376,14 +368,9 @@ pub(crate) fn kimi_config_dependency_path(path: &Path) -> Option<PathBuf> {
         .map(|wire_path| wire_path.home.join("config.toml"))
 }
 
-/// Current Kimi records place `cwd` in the initial config snapshot. Older
-/// sessions omit it from wire.jsonl but retain the exact path in the session
-/// index, so the index is used only when the wire itself has no workspace.
+/// Current Kimi records place `cwd` in the initial config snapshot.
 pub(crate) fn kimi_workspace_metadata(path: &Path) -> Option<WorkspaceMetadata> {
-    workspace_from_initial_wire_config(path).or_else(|| {
-        let wire_path = parse_wire_path(path).ok()?;
-        workspace_from_session_index(&wire_path.home, &wire_path.session_id)
-    })
+    workspace_from_initial_wire_config(path)
 }
 
 fn workspace_from_initial_wire_config(path: &Path) -> Option<WorkspaceMetadata> {
@@ -402,22 +389,6 @@ fn workspace_from_initial_wire_config(path: &Path) -> Option<WorkspaceMetadata> 
         }
         if wire_line.line_type.as_deref() == Some("usage.record") {
             break;
-        }
-    }
-    None
-}
-
-fn workspace_from_session_index(home: &Path, session_id: &str) -> Option<WorkspaceMetadata> {
-    let index = std::fs::File::open(home.join("session_index.jsonl")).ok()?;
-    for line in BufReader::new(index).lines().map_while(Result::ok) {
-        if !line.contains(session_id) {
-            continue;
-        }
-        let Ok(entry) = serde_json::from_str::<KimiSessionIndexLine>(&line) else {
-            continue;
-        };
-        if entry.session_id == session_id {
-            return workspace_metadata_from_key(&entry.work_dir);
         }
     }
     None
@@ -1002,26 +973,5 @@ max_context_size = 128000
 
         assert_eq!(workspace.key, "/home/travis/01-workspace/kimi-code");
         assert_eq!(workspace.label, "kimi-code");
-    }
-
-    #[test]
-    fn resolves_legacy_workspace_from_session_index() {
-        let dir = TempDir::new().unwrap();
-        let wire = write_wire(
-            dir.path(),
-            r#"{"type":"metadata","protocol_version":"1.5"}
-{"type":"usage.record","time":1780942009099,"model":"openai-pro/gpt-5.5","usage":{"inputOther":1}}"#,
-        );
-        std::fs::write(
-            dir.path().join("session_index.jsonl"),
-            r#"{"sessionId":"session_123","sessionDir":"/tmp/session_123","workDir":"/home/travis/personal-workspace/fish-claude"}
-"#,
-        )
-        .unwrap();
-
-        let workspace = kimi_workspace_metadata(&wire).unwrap();
-
-        assert_eq!(workspace.key, "/home/travis/personal-workspace/fish-claude");
-        assert_eq!(workspace.label, "fish-claude");
     }
 }

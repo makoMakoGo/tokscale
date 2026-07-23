@@ -19,11 +19,10 @@ bin/kilo serve --port 0
 ```
 
 The extension does not maintain a separate conversation store. Its backend and
-the command-line frontend use the same Kilo database namespace and schema when
-they run as the same OS user with the same XDG environment and database
-override.
+the command-line frontend use the same default Kilo database and schema when
+they run as the same OS user.
 
-Kilo's data root is `<xdgData>/kilo`. The default Linux and WSL database is:
+Tokscale reads the fixed Linux and WSL default database:
 
 ```text
 ~/.local/share/kilo/kilo.db
@@ -36,10 +35,9 @@ SQLite can maintain active sidecars beside it:
 ~/.local/share/kilo/kilo.db-shm
 ```
 
-`KILO_DB` can replace the default database path. An absolute value is used
-directly; a relative value is resolved below the Kilo data root. Released CLI
-builds select `kilo.db` when no override is present. The VS Code backend sets
-`KILO_DISABLE_CHANNEL_DB=true`, which also selects `kilo.db`.
+Additional Kilo databases are discovered only from
+`scanner.extraScanPaths.kilo`; each configured root is searched recursively
+for `kilo.db`.
 
 Consumers must open the main database through SQLite in read-only mode so
 SQLite, rather than a file copier, coordinates committed WAL content.
@@ -132,9 +130,10 @@ Consequently, a shared `kilo.db` does not contain reliable evidence that an
 individual session originated in VS Code or the command-line frontend. The
 durable local identity is Kilo at the storage boundary.
 
-Remote extension hosts, containers, and other environments can have their own
-XDG roots or `KILO_DB` overrides. Sharing a schema does not imply that separate
-hosts share one physical file.
+Remote extension hosts, containers, and other environments can have independent
+database files. Sharing a schema does not imply that separate hosts share one
+physical file; their roots must be added explicitly through
+`scanner.extraScanPaths.kilo`.
 
 ## Non-usage model state
 
@@ -150,7 +149,7 @@ This is UI and configuration state, not historical usage authority.
 
 - `packages/kilo-vscode/src/services/cli-backend/server-manager.ts` -- bundled
   backend spawn and frontend environment;
-- `packages/core/src/global.ts` -- XDG Kilo roots;
+- `packages/core/src/global.ts` -- Kilo storage roots;
 - `packages/core/src/database/database.ts` -- database path selection;
 - `packages/core/src/session/sql.ts` -- SQLite session, message, and part
   schema;

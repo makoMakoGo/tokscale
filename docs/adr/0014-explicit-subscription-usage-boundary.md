@@ -1,59 +1,145 @@
-# ADR 0014: Explicit Subscription Usage Boundary
+# ADR 0014: Subscription Usage and credential boundary
 
-## Status
-
-Accepted.
+Status: Accepted
 
 ## Context
 
-Tokscale local reports read local transcripts and caches. Subscription usage lookups are different: they contact provider APIs with credentials and can reveal account-level plan state. Treating discovered auth files or general provider API keys as implicit permission to make remote quota requests makes the TUI lifecycle too surprising.
-
-The provider products also have different credential boundaries. Z.ai usage here means GLM Coding Plan quota, not general Z.ai API balance. Kimi usage means Kimi Code membership quota, through Kimi Code OAuth or a Kimi Code Console API key, not the Kimi Open Platform pay-as-you-go API. MiniMax Token Plan is split between CN and Global subscription keys, and those keys are not interchangeable.
+Local reports account for provider-owned transcripts and databases.
+Subscription Usage is a separate remote product surface for account plans,
+allowances, reset windows, and remaining quota. A local report refresh is not
+consent to contact an account service, and Tokscale is an analytics client
+rather than an authentication authority.
 
 ## Decision
 
-The TUI may fetch remote subscription usage only when all of these are true:
+### Product and identity model
 
-- `usageTabEnabled` is true.
-- `usageProviders` is non-empty.
-- The selected provider has the credential for that subscription/coding-plan surface.
+Subscription Usage is owned by the optional TUI Usage tab. It consists of
+provider-specific quota adapters, a normalized short-lived cache, and one
+provider/account/plan/metric model consumed by that tab.
 
-An empty `usageProviders` list means cache-display mode: the Usage tab may render cached subscription data, but it must not send remote quota requests.
+Local reports and Subscription Usage have independent acquisition lifecycles.
+Subscription data never enters local token totals, Group By, Sessions, or local
+Data Health.
 
-The TUI fetch model is explicit and bounded:
+Each normalized output contains:
 
-- Entering the Usage tab may start at most one automatic subscription fetch per TUI session.
-- Pressing `u` in the Usage tab explicitly refreshes subscription usage.
-- Pressing `r` refreshes local reports only.
-- Pressing `R` toggles local-report auto-refresh only.
-- The TUI does not poll subscription usage in the background.
+- provider display identity;
+- optional stable account id, account label, and active-account flag;
+- optional plan and account email; and
+- zero or more metrics with a label, used and remaining percentages, optional
+  remaining label, and optional reset time.
 
-The `tokscale usage` CLI command is the exception. Running that command is explicit user intent, so it may auto-detect all providers with usable subscription credentials.
+The renderer uses that identity directly. Provider and account failures are
+isolated, so healthy outputs remain visible alongside explicit errors.
 
-## Credential Policy
+The complete `usageProviders` id set is:
 
-Tokscale accepts purpose-specific subscription credentials for plan quota lookups:
+```text
+claude
+codex
+zai
+grok
+kimi-coding-plan-key
+kimi-coding-plan-credential
+minimax-token-plan-cn
+minimax-token-plan-global
+```
 
-- Z.ai/Zhipu GLM Coding Plan: `TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY`.
-- Kimi Code: `TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY` or Kimi Code OAuth credentials.
-- MiniMax CN Token Plan: `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY`.
-- MiniMax Global Token Plan: `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY`.
+Settings accept these exact ids. Unknown ids are ignored, and duplicates
+collapse in first-seen order.
 
-General provider API keys are intentionally ignored for these quota lookups. Examples include `ZAI_API_KEY`, `GLM_API_KEY`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, and `MINIMAX_API_TOKEN`.
+### Remote-request consent
 
-Credential ownership and persistence follow ADR 0023. The broader Usage
-subsystem boundary, including removal of Cursor and Trae, follows ADR 0024.
-ADR 0033 removes Warp remote subscription access while retaining Warp as a
-local Client.
+The TUI may contact a provider only when `usageTabEnabled` is true,
+`usageProviders` contains that provider, and its exact subscription surface has
+usable credentials. An empty provider list is cache-display mode: the tab may
+show a fresh normalized cache but sends no remote request.
 
-## Configuration Policy
+The TUI lifecycle is:
 
-Canonical TUI provider IDs are:
+- entering Usage starts at most one automatic fetch in a TUI session;
+- `u` explicitly starts a Subscription Usage fetch;
+- `r` refreshes local reports only;
+- `R` controls local-report automatic refresh only; and
+- Subscription Usage is never polled in the background.
 
-`claude`, `codex`, `zai`, `amp`, `copilot`, `grok`, `kimi`, `minimax-token-plan-cn`, `minimax-token-plan-global`.
+An explicitly configured TUI provider without usable credentials produces a
+provider error rather than ordinary empty data.
 
-Unknown provider IDs are ignored while parsing settings. Explicitly selected providers without credentials produce provider errors instead of silently collapsing into "no data".
+### Credential authority
+
+The provider application, provider CLI, OS credential store, or a
+purpose-specific environment variable owns authentication. Tokscale's
+credential authority is limited to reading the fields required for an explicit
+quota request. It does not own login, logout, account switching, OAuth refresh,
+or credential persistence.
+
+Codex quota lookup reads exactly `~/.codex/auth.json`. Only the access token
+and account id required by the request are consumed.
+
+Grok Build quota lookup reads exactly `~/.grok/auth.json`. The file must contain
+exactly one usable `https://auth.x.ai::*` account entry; absence and ambiguity
+are explicit provider errors. Tokscale reads only the access key and the
+provider-owned principal, user-facing name, and email fields required to issue
+the quota request and identify its result. It queries the Grok Build
+subscription backend directly and never invokes the Grok executable. The
+provider-owned principal is the account id.
+
+Purpose-specific subscription credentials are:
+
+- Z.ai/Zhipu GLM Coding Plan:
+  `TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY`;
+- Kimi Coding Plan (key):
+  `TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY`;
+- Kimi Coding Plan (credential):
+  exactly `~/.kimi-code/credentials/kimi-code.json`;
+- MiniMax CN Token Plan:
+  `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY`; and
+- MiniMax Global Token Plan:
+  `TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY`.
+
+General provider API keys are not subscription-plan credentials. Claude, Grok,
+Kimi Coding Plan (credential), and Codex adapters read only their
+provider-owned current authentication artifacts. The Kimi key and credential
+providers are independent and never substitute for one another. Missing,
+ambiguous, expired, or rejected authentication is an explicit provider error
+repaired with provider tooling.
+
+MiniMax Token Plan CN and MiniMax Token Plan Global are separate subscription
+surfaces with the display identities `MiniMax Token Plan CN` and
+`MiniMax Token Plan Global`. Their region is not an account identity. Unless
+the provider returns a real account id, both outputs carry no `UsageAccount`.
+
+### Normalized cache
+
+`subscription-usage-cache.json` is credential-free derived state with this
+closed envelope:
+
+- schema id `tokscale.subscription-usage`;
+- version `1`;
+- a Unix-seconds storage timestamp; and
+- normalized `UsageOutput` data.
+
+The envelope and nested normalized types reject unknown fields. Wrong schema or
+version, malformed data, and cache I/O failures are explicit Usage-tab cache
+errors. Entries older than 300 seconds are ordinary misses.
+
+Cache-display mode never converts a miss into a remote request. A fetch with
+one or more healthy outputs atomically replaces the complete installed
+in-memory snapshot, even when other providers failed; those failures remain
+visible beside the new snapshot. An empty or wholly failed fetch keeps the
+installed snapshot and disk cache while exposing the new errors.
+
+The in-memory installation and disk publication are separate atomic
+boundaries. Disk publication uses a temporary file and rename. A disk write
+failure retains the newly installed in-memory snapshot and adds an explicit
+cache diagnostic. Cache state contains no access token, refresh token, cookie,
+API key, raw authentication response, or raw provider response.
 
 ## Consequences
 
-Users who want remote subscription usage in the TUI must configure `usageProviders` and the matching subscription credential. Existing cached Usage data can still be displayed without remote requests. The default behavior is more conservative, and local report refreshes cannot unexpectedly send remote quota requests.
+Local refresh cannot unexpectedly contact a remote account. The provider
+adapters and TUI renderer share one provider/account/plan identity, partial
+failures remain visible, and cached quota output carries no authentication
+material. Every authentication mutation stays under provider authority.

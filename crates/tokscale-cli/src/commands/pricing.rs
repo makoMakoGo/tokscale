@@ -171,7 +171,7 @@ pub(crate) fn run_pricing_list_overrides(json: bool) -> Result<()> {
         }
     }
 
-    let path = CustomPricing::default_path();
+    let path = CustomPricing::default_path()?;
     let overrides = CustomPricing::load_from_path(&path);
     let mut entries: Vec<OverrideEntry> = overrides
         .entries()

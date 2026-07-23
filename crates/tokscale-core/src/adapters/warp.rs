@@ -30,7 +30,7 @@ impl LocalInputAdapter for WarpAdapter {
 
         let mut paths = adapter_discover::scan_roots(
             ClientId::Warp,
-            local_clients::warp_sqlite_roots_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
+            local_clients::warp_sqlite_roots(ctx.home_dir),
             def.pattern,
         )?;
         paths.extend(adapter_discover::scan_roots(
@@ -105,7 +105,6 @@ mod tests {
         };
         let ctx = AdapterScanContext {
             home_dir: home.path().to_str().unwrap(),
-            use_env_roots: false,
             scanner_settings: &settings,
         };
 

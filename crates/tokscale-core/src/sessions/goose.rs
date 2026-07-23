@@ -3,7 +3,8 @@
 //! Parses session rows from Goose's SQLite sessions database:
 //! - Primary: `~/.local/share/goose/sessions/sessions.db`
 //! - macOS: `~/Library/Application Support/goose/sessions/sessions.db`
-//! - Custom: `$GOOSE_PATH_ROOT/data/sessions/sessions.db`
+//! - Additional roots: recursively discovered through
+//!   `scanner.extraScanPaths.goose`
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;

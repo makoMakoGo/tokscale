@@ -38,17 +38,15 @@ Build the release binary, then use the repository measurement script:
 cargo build -p tokscale-cli --release
 
 HOME=/tmp/tokscale-bench \
-  XDG_DATA_HOME=/tmp/tokscale-bench/.local/share \
   TOKSCALE_CONFIG_DIR=/tmp/tokscale-bench-config \
   scripts/measure-scan-performance.sh \
   "$PWD/target/release/tokscale" synthetic opencode,claude,codex,gemini 3
 ```
 
-For generated data, set `HOME` to the output root or pass the equivalent
-client-specific environment roots. The script performs one unmeasured warm-up,
-then records CLI processing time, wall/user/system time, and GNU `time` maximum
-RSS for each fresh process. Keep the input and cache snapshots fixed when
-comparing binaries.
+For generated data, set `HOME` to the output root. The script performs one
+unmeasured warm-up, then records CLI processing time, wall/user/system time,
+and GNU `time` maximum RSS for each fresh process. Keep the input and cache
+snapshots fixed when comparing binaries.
 
 ## Measure aggregation
 

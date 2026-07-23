@@ -9,15 +9,8 @@ use crate::sessions::error::SessionParseError;
 
 type BoxInputError = Box<dyn Error + Send + Sync + 'static>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InputDiscoveryErrorKind {
-    Configuration,
-    Input,
-}
-
 #[derive(Debug)]
 pub(crate) struct InputDiscoveryError {
-    pub(crate) kind: InputDiscoveryErrorKind,
     pub(crate) client: ClientId,
     pub(crate) path: PathBuf,
     pub(crate) operation: &'static str,
@@ -32,22 +25,6 @@ impl InputDiscoveryError {
         source: impl Error + Send + Sync + 'static,
     ) -> Self {
         Self {
-            kind: InputDiscoveryErrorKind::Input,
-            client,
-            path: path.into(),
-            operation,
-            source: Box::new(source),
-        }
-    }
-
-    pub(crate) fn configuration(
-        client: ClientId,
-        path: impl Into<PathBuf>,
-        operation: &'static str,
-        source: impl Error + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            kind: InputDiscoveryErrorKind::Configuration,
             client,
             path: path.into(),
             operation,
@@ -58,15 +35,10 @@ impl InputDiscoveryError {
 
 impl fmt::Display for InputDiscoveryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let category = match self.kind {
-            InputDiscoveryErrorKind::Configuration => "configuration",
-            InputDiscoveryErrorKind::Input => "input discovery",
-        };
         write!(
             formatter,
-            "{} {} failed to {} `{}`: {}",
+            "{} input discovery failed to {} `{}`: {}",
             self.client.as_str(),
-            category,
             self.operation,
             self.path.display(),
             self.source

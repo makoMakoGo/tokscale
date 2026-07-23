@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregates_sessions_with_legacy_workspace_and_counter_semantics() {
+    fn aggregates_sessions_with_incomplete_workspace_and_counter_values() {
         let mut first = message("codex", "session-a", 1_700_000_000_000);
         first.is_main_session = false;
         first.workspace_key = Some(Arc::from(""));

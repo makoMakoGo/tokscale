@@ -1,81 +1,111 @@
-# ADR 0007: Client identity catalog
+# ADR 0007: Client identity catalog and local input authority
 
 Status: Accepted
 
-Superseded in part by ADR 0015: the hosted frontend registry and
-`submitDefault` policy no longer exist in this fork.
+## Context
 
-Narrowed by ADR 0012: excluded clients do not retain catalog-only identities
-in this local-only fork.
+Tokscale needs a stable client identity for filters, reports, caches, and TUI
+projections. It also needs a precise local-input contract for discovering and
+parsing provider artifacts. Identity, acquisition, usage attribution, and
+diagnostics are separate concerns:
 
-Narrowed by ADR 0024's Subscription Usage boundary: every remaining catalog
-identity participates in ordinary local reports; the former `parse_local`
-capability split has been removed.
+- a **Client** identifies the application that produced a usage record;
+- an **Input** is one filesystem or database unit acquired by an adapter;
+- a **Provider** is optional model-usage attribution;
+- **Data Health** describes input availability and record rejection; and
+- a **Pricing Source** identifies pricing provenance.
+
+Conflating these concepts makes presentation labels, filesystem paths, or model
+providers behave like additional client identities.
 
 ## Decision
 
-Use `crates/tokscale-core/client-catalog.json` as the canonical registry for
-client identity and presentation facts:
+### Identity authority
 
-- Rust enum variant name.
-- Stable payload/filter/cache id.
-- Display and short labels.
-- Logo URL, color, and optional text color.
+`crates/tokscale-core/client-catalog.json` is the sole client identity catalog.
+Each entry defines the Rust variant, public ID, display labels, and presentation
+metadata. Generated `ClientId` data is the only client identity used by Rust
+code.
 
-Rust `ClientId` and identity static data are generated at build time.
-Per-client keyboard shortcuts are not identity facts: the catalog and generated
-Rust API do not allocate or expose hotkeys.
+The catalog IDs are the complete accepted namespace for:
 
-Local scanning and parsing facts stay outside this catalog. Roots, relative
-paths, filename patterns, parser choice, pricing behavior, aggregation, and
-grouping rules remain in local adapters or their owning modules.
+- `--client`;
+- `defaultClients`;
+- report and cache payloads;
+- TUI client selection; and
+- keys in scanner settings that accept client IDs.
 
-Every catalog client in this fork represents an accepted local integration and
-must have exactly one local scan definition and exactly one local input
-adapter. The catalog, local scan definitions, and adapter registry must cover
-the same `ClientId` set without duplicates. Identity-only, remote-only, and
-display-placeholder catalog entries require a new explicit decision rather
-than a capability branch in callers.
+An unrecognized ID is an error. IDs are not inferred from paths, process names,
+model names, providers, or display labels.
 
-`ClientId` is the only Rust client identity type. Do not add a second enum,
-hand-written base-client list, or hidden per-client CLI flag set.
+### Local-input authority
 
-## Public terminology
+Every catalog entry has exactly one registered local-input adapter and one scan
+definition. These three sets must have exact parity and no duplicate entries.
 
-`Client` is the only public usage-identity term. Models, Daily, Sessions,
-Group By selectors, filters, and client counts use it consistently. The
-`claude` catalog display name is `Claude`; `Claude Code` remains appropriate
-only when naming the upstream product, its files, parser, or credentials.
+The scan definition and the adapter's discovery implementation are the sole
+authority for fixed default roots beneath the selected home, filename
+selection, companion files, database sidecars, and custom-root support.
+Additional roots come only from `scanner.extraScanPaths`; OpenCode database
+files come only from `scanner.opencodeDbPaths`. The adapter's session
+schema/parser is the sole authority for accepted envelopes, database schemas,
+required fields, record semantics, deduplication, and token interpretation.
 
-Filesystem paths and databases acquired by a client are `Input` or `Scan
-Input`. Their diagnostics live under `Data Health`. Provider attribution is
-`Provider`, and pricing provenance must use the qualified term `Pricing
-Source`. These names apply to UI labels, CLI arguments, serialized report
-fields, cache metadata, configuration, and maintained internal APIs. Retired
-names are never mapped to current names: strict configuration surfaces reject
-them, report serializers do not emit them, and old cache schemas are explicit
-misses. The Overview fact label is `Inputs Healthy`. Additional scan-path
-provenance is an internal Input fact rather than a second public identity.
+`docs/clients.md` is the user-facing discovery map generated from that contract.
+It does not create a second path or schema authority.
 
-## Persisted client ID migrations
+### Input semantics
 
-The persisted `settings.json.defaultClients` reader performs one explicit,
-one-way identity migration:
+Adapters acquire current provider-written local artifacts directly. Acquisition
+does not invoke provider CLIs, inspect provider processes, call private remote
+interfaces, or manufacture usage records.
 
-- `antigravity-cli` -> `antigravity`
+An absent automatically discovered root means that the client has no input at
+that location. Once a root or configured input exists, discovery, open, query,
+snapshot, and parse failures remain visible through Data Health. Record-level
+schema failures reject the affected records and preserve valid records from the
+same input when the parser can continue. A failure for one client does not abort
+unrelated clients.
 
-This applies only to persisted defaults written before the Antigravity identity
-unification. It is not a catalog ID, CLI alias, scanner key, adapter identity,
-TUI client, cache identity, or general alias mechanism.
+Accepted usage records preserve their observed token values and canonical model
+identity. Provider attribution may be inferred centrally from a valid model ID;
+when it cannot be inferred, the provider is `unknown`. Provider attribution by
+itself never determines record eligibility.
 
-Additional persisted identity migrations must be explicitly enumerated here.
+SQLite adapters that declare WAL-aware acquisition fingerprint and read the
+database with its committed WAL state. Derived message shards and aggregate
+caches are reproducible acceleration artifacts, not local usage authorities.
 
-## Client Additions
+### Public diagnostics
 
-Adding a base client requires:
+`docs/clients.md` is the complete public discovery map. Executing `models`
+reports Data Health in its JSON envelope and on stderr; the TUI exposes the
+same input availability and rejection domain in Data Health. There is no
+separate command that rediscovers paths or parses another copy of client rules.
 
-1. Add identity and presentation facts to `client-catalog.json`.
-2. Add exactly one local scan definition and exactly one local input adapter.
-3. Add parser and adapter tests for the local behavior.
-4. Keep the catalog/scan-definition/adapter parity tests passing.
-5. Run the Rust checks that compile the generated client identity data.
+Reports and the TUI use **Data Health** for unavailable, partial, and
+record-rejection diagnostics. The Overview health fact is **Inputs Healthy**.
+
+### Extension rules
+
+Adding a client requires one atomic contract change containing:
+
+1. one catalog identity;
+2. one scan definition;
+3. one registered local-input adapter;
+4. one current session schema/parser;
+5. focused discovery, parser, and health tests;
+6. catalog/scan/adapter parity checks; and
+7. a current discovery row in `docs/clients.md`.
+
+Changing a root, filename rule, companion dependency, database schema, or record
+envelope requires an adapter/schema change with focused tests and a matching
+documentation update. A parser behavior change that affects cached output also
+requires a parser revision change.
+
+## Consequences
+
+Each accepted local integration has one public identity and one executable
+input contract. Reports, filters, scanner configuration, caches, and TUI views
+therefore share the same client namespace, while path and format evolution stays
+owned by the adapter and schema that can validate it.

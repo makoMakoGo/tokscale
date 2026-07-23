@@ -21,8 +21,7 @@ impl LocalInputAdapter for OpenCodeAdapter {
         &self,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
-        let data_dir =
-            scanner::opencode_data_dir_with_env_strategy(ctx.home_dir, ctx.use_env_roots);
+        let data_dir = scanner::opencode_data_dir(ctx.home_dir);
         let mut db_paths = scanner::discover_opencode_dbs(&data_dir).map_err(|source| {
             InputDiscoveryError::new(
                 ClientId::OpenCode,
@@ -190,11 +189,8 @@ mod tests {
         let home = tempfile::TempDir::new().unwrap();
         let default_db = home.path().join(".local/share/opencode/opencode.db");
         let external_db = home.path().join("external/opencode-stable.db");
-        let legacy_json = home
-            .path()
-            .join(".local/share/opencode/storage/message/project-1/msg_001.json");
-        let extra_json = home.path().join("imports/opencode/msg_002.json");
-        for path in [&default_db, &external_db, &legacy_json, &extra_json] {
+        let ignored_json = home.path().join("imports/opencode/msg_002.json");
+        for path in [&default_db, &external_db, &ignored_json] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, "").unwrap();
         }
@@ -202,13 +198,12 @@ mod tests {
             opencode_db_paths: vec![external_db.clone()],
             extra_scan_paths: [(
                 "opencode".to_string(),
-                vec![extra_json.parent().unwrap().to_path_buf()],
+                vec![ignored_json.parent().unwrap().to_path_buf()],
             )]
             .into(),
         };
         let ctx = AdapterScanContext {
             home_dir: home.path().to_str().unwrap(),
-            use_env_roots: false,
             scanner_settings: &settings,
         };
 

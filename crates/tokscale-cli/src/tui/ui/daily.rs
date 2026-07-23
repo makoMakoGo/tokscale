@@ -394,7 +394,7 @@ fn top_daily_model(day: &DailyUsage) -> Option<TopDailyModel> {
     for client in day.client_breakdown.values() {
         for model in client.models.values() {
             let tokens = model.tokens.total();
-            // Rank by the bare canonical id (ADR 0026): grouping must not
+            // Rank by the bare canonical id (ADR 0010): grouping must not
             // split one model into several candidates, and the storage map
             // key is never a user-visible identity.
             if tokens == 0 || model.model_id.is_empty() {
@@ -1225,7 +1225,7 @@ mod tests {
     fn top_daily_model_ranking_is_grouping_invariant() {
         // The same messages projected by each GroupBy: the winner must be the
         // canonical merge with the bare model label in every projection
-        // (ADR 0026). With per-bucket keys, kimi-k2.5 (200) would beat each
+        // (ADR 0010). With per-bucket keys, kimi-k2.5 (200) would beat each
         // gpt-5 fragment; canonically gpt-5 wins with 210.
         let mut model_projection = day("2026-06-09", 0.0);
         model_projection.client_breakdown.insert(

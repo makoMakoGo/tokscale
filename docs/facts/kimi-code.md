@@ -4,7 +4,7 @@ Last verified: 2026-07-18
 
 This document records observed upstream storage facts, not Tokscale policy. The
 corresponding ingestion decision lives in
-[ADR 0020](../adr/0020-input-ingestion-and-integrity-contract.md). Verification
+[ADR 0001](../adr/0001-no-silent-fallback.md). Verification
 used `MoonshotAI/kimi-code` at commit
 `3086e4703992fbbe7a41379405ee243713ad9ced` and a read-only snapshot of a real
 local `~/.kimi-code` corpus. No credentials, prompts, message content, or tool

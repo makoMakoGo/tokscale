@@ -27,12 +27,7 @@ impl LocalInputAdapter for OpenClawAdapter {
         let def = ClientId::OpenClaw
             .local_def()
             .expect("OpenClaw adapter must have local scan policy");
-        let mut roots = vec![
-            def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
-            std::path::PathBuf::from(format!("{}/.clawdbot/agents", ctx.home_dir)),
-            std::path::PathBuf::from(format!("{}/.moltbot/agents", ctx.home_dir)),
-            std::path::PathBuf::from(format!("{}/.moldbot/agents", ctx.home_dir)),
-        ];
+        let mut roots = vec![def.resolve_path(ctx.home_dir)];
         roots.extend(adapter_discover::extra_roots_for_client(
             ClientId::OpenClaw,
             ctx,
@@ -94,29 +89,14 @@ mod tests {
     }
 
     #[test]
-    fn openclaw_adapter_discovers_default_legacy_and_extra_roots() {
+    fn openclaw_adapter_discovers_current_and_extra_roots() {
         let home = tempfile::TempDir::new().unwrap();
         let default_path = home
             .path()
             .join(".openclaw/agents/agent/sessions/default.jsonl");
-        let clawdbot_path = home
-            .path()
-            .join(".clawdbot/agents/agent/sessions/clawdbot.jsonl");
-        let moltbot_path = home
-            .path()
-            .join(".moltbot/agents/agent/sessions/moltbot.jsonl");
-        let moldbot_path = home
-            .path()
-            .join(".moldbot/agents/agent/sessions/moldbot.jsonl");
         let extra_root = home.path().join("extra-openclaw");
         let extra_path = extra_root.join("agent/sessions/extra.jsonl");
-        for path in [
-            &default_path,
-            &clawdbot_path,
-            &moltbot_path,
-            &moldbot_path,
-            &extra_path,
-        ] {
+        for path in [&default_path, &extra_path] {
             write_file(path);
         }
 
@@ -128,19 +108,12 @@ mod tests {
         };
         let ctx = AdapterScanContext {
             home_dir: home.path().to_str().unwrap(),
-            use_env_roots: false,
             scanner_settings: &settings,
         };
 
         let units = OPENCLAW_ADAPTER.discover_checked(&ctx).unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
-        let mut expected = vec![
-            default_path,
-            clawdbot_path,
-            moltbot_path,
-            moldbot_path,
-            extra_path,
-        ];
+        let mut expected = vec![default_path, extra_path];
         expected.sort_unstable();
 
         assert_eq!(paths, expected);

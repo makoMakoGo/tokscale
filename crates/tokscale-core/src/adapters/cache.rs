@@ -820,14 +820,14 @@ mod tests {
     }
 
     #[test]
-    fn previous_format_lookup_downgrades_to_miss_without_mutating_the_shard() {
+    fn unsupported_format_lookup_becomes_a_miss_without_mutating_the_shard() {
         let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let input_path = input_dir.path().join("session.jsonl");
         std::fs::write(&input_path, PI_INPUT).unwrap();
         let unit = pi_unit(&input_path);
-        seed_disk_cache(cache_dir.path(), &unit, "previous-format-session");
-        let shard_path = message_cache::mark_current_key_shard_as_previous_format_for_test(
+        seed_disk_cache(cache_dir.path(), &unit, "unsupported-format-session");
+        let shard_path = message_cache::mark_current_key_shard_as_unsupported_format_for_test(
             cache_dir.path(),
             &input_path,
             unit.parser_version,
@@ -836,13 +836,13 @@ mod tests {
         let cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let miss = expect_cache_miss(
             plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache),
-            "a previous-format shard must plan a reparse miss instead of failing the input",
+            "an unsupported shard must plan a reparse miss instead of failing the input",
         );
         assert_eq!(miss.path, input_path);
         assert_eq!(
             std::fs::read(shard_path).unwrap(),
             before,
-            "planning must not mutate a previous-format shard"
+            "planning must not mutate an unsupported shard"
         );
     }
 

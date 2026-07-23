@@ -14,7 +14,7 @@ use crate::input_health::ScannedInput;
 use crate::message_cache::{ParserId, ParserVersion, RelatedInputFailurePolicy};
 use crate::sessions::error::SessionParseResult;
 use crate::sessions::WorkspaceMetadata;
-use crate::{scanner, sessions, UnifiedMessage};
+use crate::{sessions, UnifiedMessage};
 
 const GROK_TOTAL_ONLY_IMPUTATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const MUX_STABLE_DEDUP_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
@@ -231,7 +231,7 @@ impl LocalInputAdapter for CopilotAdapter {
         let def = ClientId::Copilot
             .local_def()
             .expect("Copilot adapter must have local scan policy");
-        let default_root = def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots);
+        let default_root = def.resolve_path(ctx.home_dir);
 
         let mut paths =
             adapter_discover::scan_roots(ClientId::Copilot, [default_root], def.pattern)?;
@@ -240,12 +240,6 @@ impl LocalInputAdapter for CopilotAdapter {
             adapter_discover::extra_roots_for_client(ClientId::Copilot, ctx)?,
             def.pattern,
         )?);
-
-        if let Some(exporter_path) =
-            scanner::copilot_exporter_path_with_env_strategy(ctx.use_env_roots)
-        {
-            adapter_discover::push_existing_file(ClientId::Copilot, exporter_path, &mut paths)?;
-        }
 
         Ok(adapter_discover::input_units_from_paths(
             ClientId::Copilot,
@@ -386,7 +380,6 @@ not-json
     ) -> AdapterScanContext<'a> {
         AdapterScanContext {
             home_dir: home_dir.to_str().unwrap(),
-            use_env_roots: false,
             scanner_settings: settings,
         }
     }
@@ -1164,20 +1157,32 @@ model = "claude-sonnet-4"
     }
 
     #[test]
-    fn copilot_discovery_uses_current_revision() {
+    fn copilot_discovery_uses_default_and_configured_roots() {
         let home = tempfile::TempDir::new().unwrap();
-        let path = home.path().join(".copilot/otel/copilot.jsonl");
-        write_file(&path, "");
-        let settings = crate::scanner::ScannerSettings::default();
+        let default_path = home.path().join(".copilot/otel/default.jsonl");
+        let extra_root = home.path().join("copilot-import");
+        let extra_path = extra_root.join("nested/extra.jsonl");
+        write_file(&default_path, "");
+        write_file(&extra_path, "");
+
+        let mut extra_scan_paths = BTreeMap::new();
+        extra_scan_paths.insert("copilot".to_string(), vec![extra_root]);
+        let settings = crate::scanner::ScannerSettings {
+            extra_scan_paths,
+            ..Default::default()
+        };
         let ctx = scan_context(home.path(), &settings);
 
         let units = COPILOT_ADAPTER.discover_checked(&ctx).unwrap();
-        let unit = units.iter().find(|unit| unit.path == path).unwrap();
-
         assert_eq!(
-            unit.parser_version,
-            ParserVersion::new(ParserId::Copilot, COPILOT_AGENT_IDENTITY_REVISION)
+            units
+                .iter()
+                .map(|unit| unit.path.clone())
+                .collect::<Vec<_>>(),
+            vec![default_path, extra_path]
         );
+        assert!(units.iter().all(|unit| unit.parser_version
+            == ParserVersion::new(ParserId::Copilot, COPILOT_AGENT_IDENTITY_REVISION)));
     }
 
     #[test]

@@ -91,7 +91,6 @@ mod tests {
     ) -> AdapterScanContext<'a> {
         AdapterScanContext {
             home_dir: home_dir.to_str().unwrap(),
-            use_env_roots: false,
             scanner_settings: settings,
         }
     }

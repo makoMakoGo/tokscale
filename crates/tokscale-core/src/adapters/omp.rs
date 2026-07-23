@@ -575,7 +575,6 @@ mod tests {
     ) -> AdapterScanContext<'a> {
         AdapterScanContext {
             home_dir: home_dir.to_str().unwrap(),
-            use_env_roots: false,
             scanner_settings: settings,
         }
     }
@@ -1170,20 +1169,21 @@ mod tests {
             representative_child_path: child_path.clone(),
         };
 
-        let previous_cache_dir = tempfile::TempDir::new().unwrap();
+        let unsupported_cache_dir = tempfile::TempDir::new().unwrap();
         seed_omp_disk_cache(
-            previous_cache_dir.path(),
+            unsupported_cache_dir.path(),
             &parent_unit,
-            "previous-parent-health",
+            "unsupported-parent-health",
         );
-        message_cache::mark_current_key_shard_as_previous_format_for_test(
-            previous_cache_dir.path(),
+        message_cache::mark_current_key_shard_as_unsupported_format_for_test(
+            unsupported_cache_dir.path(),
             &parent_path,
             parent_unit.parser_version,
         );
-        let previous_cache =
-            message_cache::InputMessageCache::with_cache_dir(previous_cache_dir.path());
-        let (hits, misses) = plan_parent_health_cache(vec![candidate()], &previous_cache).unwrap();
+        let unsupported_cache =
+            message_cache::InputMessageCache::with_cache_dir(unsupported_cache_dir.path());
+        let (hits, misses) =
+            plan_parent_health_cache(vec![candidate()], &unsupported_cache).unwrap();
         assert!(hits.is_empty());
         assert_eq!(misses.len(), 1);
 
@@ -1374,7 +1374,7 @@ mod tests {
                 .unwrap()
                 .fingerprint,
             old_fingerprint,
-            "an unavailable current scan must preserve the previous parent-health shard"
+            "an unavailable current scan must preserve the installed parent-health shard"
         );
         assert!(matches!(
             adapter_cache::plan_cache_hit(

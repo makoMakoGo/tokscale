@@ -36,8 +36,8 @@ The active maintained branch is `personal/local-clients`.
   or fake success paths.
 - **Stable client identity.** Client ids, display facts, and generated Rust
   identity data come from `crates/tokscale-core/client-catalog.json`.
-- **Shared aggregation semantics.** CLI and TUI reports should describe the
-  same local usage, not separate interpretations of the same transcript set.
+- **One local-report model.** The complete TUI and its headless Models
+  projection consume the same canonical usage data.
 - **Lower memory overhead.** The message pipeline avoids unnecessary clones and
   skips full reloads when input files have not changed.
 - **Curated upstream adoption.** Upstream fixes are reviewed and ported
@@ -103,12 +103,9 @@ tokscale models --since 2026-01-01 --until 2026-01-31
 tokscale models --group-by client,provider,model --json
 
 # TUI-only reports; --tab opens the full TUI focused on that tab
+tokscale tui --tab usage
 tokscale tui --tab monthly
 tokscale tui --tab sessions
-
-# Remote subscription quota (separate from local reports)
-tokscale usage
-tokscale usage --json
 
 # Pricing catalog lookup
 tokscale pricing lookup claude-sonnet-4-5 --no-spinner
@@ -133,11 +130,11 @@ ZCode, Kiro, Junie, Warp, Cline, Command Code, and Grok Build.
 Some catalog entries have explicit boundaries:
 
 - `grok` and local `warp.sqlite` expose token totals without bucket splits, so
-  Tokscale applies the fixed total-only bucket allocation from ADR 0017.
+  Tokscale applies the fixed total-only bucket allocation from ADR 0010.
 - `commandcode` is transcript-estimated usage, not authoritative vendor token
   accounting.
-- `antigravity` reads current AGY CLI SQLite/WAL data directly; the retired
-  IDE/2.0 private-RPC bridge is intentionally unsupported (ADR 0025).
+- `antigravity` reads current AGY CLI SQLite/WAL data directly through its
+  registered adapter (ADR 0007).
 
 ## Data and pricing semantics
 
@@ -151,10 +148,9 @@ release, date, free-channel, and route decorations that this fork does not
 preserve as model identity.
 
 Exact custom overrides from `custom-pricing.json` are checked first. Otherwise,
-Tokscale searches LiteLLM, OpenRouter, and models.dev using provider-aware exact
-and deterministic normalized matching. Those public catalogs do not have a
-simple global precedence order, and normalization is a matching strategy rather
-than a separate Pricing Source.
+Tokscale searches LiteLLM, OpenRouter, and models.dev using exact canonical
+model ids or exact provider-scoped model ids. Pricing never guesses by prefix,
+substring, or fuzzy matching.
 
 If a model cannot be priced, its derived cost remains `$0.00` instead of using
 a private guessed price. Details: [pricing semantics](docs/pricing.md).
@@ -181,9 +177,9 @@ project provenance. The `personal/local-clients` branch is maintained as a
 content-ahead variant: upstream changes are reviewed and selectively ported
 rather than merged wholesale.
 
-Behavioral compatibility with upstream is not guaranteed. Refer to the
-upstream repository for official upstream packages, hosted services, community
-links, and documentation.
+Fork behavior follows this repository's ADRs and may differ from upstream.
+Refer to the upstream repository for official upstream packages, hosted
+services, community links, and documentation.
 
 ## License and attribution
 

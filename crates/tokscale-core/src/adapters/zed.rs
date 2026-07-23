@@ -1,4 +1,3 @@
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::path::PathBuf;
 
 use crate::adapters::cache as adapter_cache;
@@ -31,32 +30,9 @@ impl LocalInputAdapter for ZedAdapter {
 
         adapter_discover::push_existing_file(
             ClientId::Zed,
-            def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots),
+            zed_default_db_path(ctx.home_dir),
             &mut paths,
         )?;
-
-        #[cfg(target_os = "macos")]
-        if paths.is_empty() {
-            adapter_discover::push_existing_file(
-                ClientId::Zed,
-                PathBuf::from(format!(
-                    "{}/Library/Application Support/Zed/threads/threads.db",
-                    ctx.home_dir
-                )),
-                &mut paths,
-            )?;
-        }
-
-        #[cfg(target_os = "windows")]
-        if paths.is_empty() {
-            if let Some(local_app_data) = dirs::data_local_dir() {
-                adapter_discover::push_existing_file(
-                    ClientId::Zed,
-                    local_app_data.join("Zed/threads/threads.db"),
-                    &mut paths,
-                )?;
-            }
-        }
 
         paths.extend(adapter_discover::scan_roots(
             ClientId::Zed,
@@ -111,6 +87,23 @@ impl LocalInputAdapter for ZedAdapter {
     }
 }
 
+fn zed_default_db_path(home_dir: &str) -> PathBuf {
+    let home = PathBuf::from(home_dir);
+
+    #[cfg(target_os = "macos")]
+    {
+        return home.join("Library/Application Support/Zed/threads/threads.db");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return home.join("AppData/Local/Zed/threads/threads.db");
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    home.join(".local/share/zed/threads/threads.db")
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -130,7 +123,6 @@ mod tests {
     ) -> AdapterScanContext<'a> {
         AdapterScanContext {
             home_dir: home_dir.to_str().unwrap(),
-            use_env_roots: false,
             scanner_settings: settings,
         }
     }

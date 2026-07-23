@@ -4,7 +4,7 @@ use serde::Deserialize;
 use super::helpers::capitalize;
 use super::{UsageMetric, UsageOutput};
 
-const API_KEY_ENVS: &[&str] = &["TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY"];
+const API_KEY_ENV: &str = "TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY";
 
 #[derive(Debug, Deserialize)]
 struct QuotaResp {
@@ -90,8 +90,7 @@ fn usage_output_from_parts(quota: QuotaResp, sub: Option<SubResp>) -> UsageOutpu
                         resets_at: reset_time_rfc3339(limit.next_reset_time),
                     };
                     match (limit.unit, limit.number) {
-                        // Rolling window of `hours` hours (5 on current plans;
-                        // the only token limit on old plans).
+                        // Rolling window of `hours` hours.
                         (Some(3), Some(hours)) => {
                             session_metric = Some(UsageMetric {
                                 label: format!("{hours} Hour"),
@@ -174,11 +173,11 @@ async fn fetch_sub(client: &reqwest::Client, key: &str) -> Result<SubResp> {
 }
 
 pub fn has_credentials() -> bool {
-    super::helpers::read_first_env(API_KEY_ENVS).is_some()
+    super::helpers::read_env(API_KEY_ENV).is_some()
 }
 
 pub fn fetch() -> Result<UsageOutput> {
-    let api_key = super::helpers::read_first_env(API_KEY_ENVS).ok_or_else(|| {
+    let api_key = super::helpers::read_env(API_KEY_ENV).ok_or_else(|| {
         anyhow::anyhow!(
             "No Z.ai coding plan API key set. Configure TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY."
         )
@@ -231,7 +230,6 @@ mod tests {
 
     #[test]
     fn usage_output_without_weekly_entry_shows_only_hour_limit() {
-        // Old-style plans carry no weekly TOKENS_LIMIT entry.
         let quota: QuotaResp = serde_json::from_str(
             r#"{"data":{"limits":[
                 {"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":10,"nextResetTime":1784241382278}
@@ -270,38 +268,23 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn credentials_require_tokscale_coding_plan_env() {
-        let vars = [
-            "TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY",
-            "TOKSCALE_USAGE_ZAI_API_KEY",
-            "TOKSCALE_USAGE_GLM_API_KEY",
-            "ZAI_API_KEY",
-            "GLM_API_KEY",
-        ];
-        let saved = vars.map(|key| (key, std::env::var_os(key)));
+    fn credentials_use_the_coding_plan_env() {
+        let key = "TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY";
+        let saved = std::env::var_os(key);
         unsafe {
-            for (key, _) in &saved {
-                std::env::remove_var(*key);
-            }
-            std::env::set_var("ZAI_API_KEY", "legacy");
-            std::env::set_var("GLM_API_KEY", "legacy");
-            std::env::set_var("TOKSCALE_USAGE_ZAI_API_KEY", "ambiguous");
-            std::env::set_var("TOKSCALE_USAGE_GLM_API_KEY", "ambiguous");
+            std::env::remove_var(key);
         }
-
         assert!(!has_credentials());
 
         unsafe {
-            std::env::set_var("TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY", "explicit");
+            std::env::set_var(key, "explicit");
         }
         assert!(has_credentials());
 
         unsafe {
-            for (key, value) in saved {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
+            match saved {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
             }
         }
     }

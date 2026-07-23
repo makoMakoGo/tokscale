@@ -2,8 +2,8 @@ use super::{
     apply_token_pricing, finalize_token_priced_messages, load_aggregated_views_with_pricing,
     load_cache_only_pricing_with_diagnostics, load_usage_data_with_pricing, message_cache,
     normalize_model_for_grouping, parse_all_messages_with_health,
-    parse_all_messages_with_health_with_env_strategy, parse_all_messages_with_pricing,
-    parse_all_messages_with_pricing_with_env_strategy, positive_token_total, pricing,
+    parse_all_messages_with_health_with_settings, parse_all_messages_with_pricing,
+    parse_all_messages_with_pricing_with_settings, positive_token_total, pricing,
     retain_for_requested_clients, scanner, select_local_parse_pricing, AggregatedViews,
     AggregationConfig, ClientId, DateRange, GroupBy, LocalParseOptions, ReportOptions,
     TokenBreakdown, UnifiedMessage, ViewSet, UNKNOWN_WORKSPACE_LABEL,
@@ -64,6 +64,28 @@ fn load_local_messages_for_test(
     })
 }
 
+fn input_cache_for_test_home(home: &Path) -> message_cache::InputMessageCache {
+    message_cache::InputMessageCache::with_cache_dir(&super::input_cache_dir_for_test_home(
+        home.to_str().unwrap(),
+    ))
+}
+
+fn parse_all_messages_with_pricing_in_cache(
+    home_dir: &str,
+    clients: &[String],
+    cache_dir: &Path,
+) -> Result<Vec<UnifiedMessage>, super::LocalReportError> {
+    let mut prepared = super::prepare_local_inputs(LocalParseOptions {
+        home_dir: Some(home_dir.to_string()),
+        clients: Some(clients.to_vec()),
+        ..LocalParseOptions::default()
+    })?;
+    prepared.input_cache_dir = cache_dir.to_path_buf();
+    let mut messages = Vec::new();
+    super::fold_prepared_local_inputs_with_pricing(prepared, None, &mut messages)?;
+    Ok(messages)
+}
+
 struct HomeEnvGuard(Option<OsString>);
 
 impl HomeEnvGuard {
@@ -81,13 +103,6 @@ struct TestEnvGuard {
 
 impl TestEnvGuard {
     fn set(key: &'static str, value: &str) -> Self {
-        let original = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, original }
-    }
-
-    #[cfg(unix)]
-    fn set_os(key: &'static str, value: &OsString) -> Self {
         let original = std::env::var_os(key);
         std::env::set_var(key, value);
         Self { key, original }
@@ -229,7 +244,6 @@ fn write_streaming_fold_fixture(home: &Path) {
 fn streaming_report_options(home: &Path, clients: Vec<&str>) -> ReportOptions {
     ReportOptions {
         home_dir: Some(home.to_string_lossy().into_owned()),
-        use_env_roots: false,
         clients: Some(clients.into_iter().map(str::to_string).collect()),
         since: None,
         until: None,
@@ -243,14 +257,13 @@ fn streaming_views(options: &ReportOptions, views: ViewSet) -> AggregatedViews {
     load_aggregated_views_with_pricing(options, views, None).unwrap()
 }
 
-fn vec_compat_views(options: &ReportOptions, views: ViewSet) -> AggregatedViews {
+fn reference_views(options: &ReportOptions, views: ViewSet) -> AggregatedViews {
     let home_dir = options.home_dir.as_deref().unwrap();
     let clients = options.clients.clone().unwrap();
-    let messages = parse_all_messages_with_pricing_with_env_strategy(
+    let messages = parse_all_messages_with_pricing_with_settings(
         home_dir,
         &clients,
         None,
-        options.use_env_roots,
         &options.scanner_settings,
     )
     .unwrap();
@@ -290,7 +303,7 @@ fn cache_only_pricing_diagnostics_append_missing_cache_in_order() {
 
 #[test]
 #[serial_test::serial]
-fn test_streaming_tui_usage_matches_vec_compat() {
+fn test_streaming_tui_usage_matches_reference_aggregation() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
@@ -298,7 +311,6 @@ fn test_streaming_tui_usage_matches_vec_compat() {
     write_streaming_fold_fixture(input_home.path());
     let options = LocalParseOptions {
         home_dir: Some(input_home.path().to_string_lossy().into_owned()),
-        use_env_roots: false,
         clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
         since: None,
         until: None,
@@ -308,18 +320,18 @@ fn test_streaming_tui_usage_matches_vec_compat() {
     let report_options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
 
     let mut streaming = load_usage_data_with_pricing(options, GroupBy::ClientModel, None).unwrap();
-    let mut compat = vec_compat_views(&report_options, ViewSet::TUI)
+    let mut reference = reference_views(&report_options, ViewSet::TUI)
         .tui_usage
         .unwrap();
 
-    // The vec-compat harness exercises aggregation from a bare message list,
+    // The reference harness exercises aggregation from a bare message list,
     // which intentionally has no data-health envelope. Health propagation
     // is covered by the local loader; normalize it out for payload parity.
     assert!(streaming.health.complete);
     streaming.health = Default::default();
-    compat.health = Default::default();
+    reference.health = Default::default();
 
-    assert_eq!(format!("{streaming:?}"), format!("{compat:?}"));
+    assert_eq!(format!("{streaming:?}"), format!("{reference:?}"));
 }
 
 #[test]
@@ -334,7 +346,6 @@ fn test_streaming_tui_usage_applies_date_range() {
     let included = load_usage_data_with_pricing(
         LocalParseOptions {
             home_dir: Some(input_home.path().to_string_lossy().into_owned()),
-            use_env_roots: false,
             clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
             since: Some("2024-12-01".to_string()),
             until: Some("2024-12-01".to_string()),
@@ -348,7 +359,6 @@ fn test_streaming_tui_usage_applies_date_range() {
     let excluded = load_usage_data_with_pricing(
         LocalParseOptions {
             home_dir: Some(input_home.path().to_string_lossy().into_owned()),
-            use_env_roots: false,
             clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
             since: Some("2024-12-02".to_string()),
             until: None,
@@ -370,7 +380,7 @@ fn test_streaming_tui_usage_applies_date_range() {
 
 #[test]
 #[serial_test::serial]
-fn test_streaming_requested_client_filter_matches_vec_compat() {
+fn test_streaming_requested_client_filter_matches_reference_aggregation() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
@@ -379,9 +389,9 @@ fn test_streaming_requested_client_filter_matches_vec_compat() {
     let options = streaming_report_options(input_home.path(), vec!["codex"]);
 
     let streaming = streaming_views(&options, ViewSet::TUI).tui_usage.unwrap();
-    let compat = vec_compat_views(&options, ViewSet::TUI).tui_usage.unwrap();
+    let reference = reference_views(&options, ViewSet::TUI).tui_usage.unwrap();
 
-    assert_eq!(format!("{streaming:?}"), format!("{compat:?}"));
+    assert_eq!(format!("{streaming:?}"), format!("{reference:?}"));
     assert_eq!(streaming.models.len(), 1);
     assert_eq!(streaming.models[0].client, "codex");
 }
@@ -507,7 +517,7 @@ fn encode_proto_len_field(field: u64, payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
-fn write_single_antigravity_cli_fixture(home: &Path) {
+fn write_single_antigravity_fixture(home: &Path) {
     let db_path = home.join(".gemini/antigravity-cli/conversations/session.db");
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
     let conn = rusqlite::Connection::open(db_path).unwrap();
@@ -1135,7 +1145,7 @@ fn test_workspace_model_grouping_merges_same_workspace_and_model() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].model, "claude-sonnet-4.5");
+    assert_eq!(entries[0].model_id, "claude-sonnet-4.5");
     assert_eq!(entries[0].workspace_key.as_deref(), Some("/repo-a"));
     assert_eq!(entries[0].workspace_label.as_deref(), Some("repo-a"));
     assert_eq!(entries[0].cost, 4.0);
@@ -1161,7 +1171,7 @@ fn test_model_grouping_cleans_fast_variant() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].model, "gpt-5.5");
+    assert_eq!(entries[0].model_id, "gpt-5.5");
     assert_eq!(entries[0].cost, 5.0);
 }
 
@@ -1184,7 +1194,7 @@ fn test_model_grouping_cleans_hyphenated_date_snapshot() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].model, "qwen3.7-max");
+    assert_eq!(entries[0].model_id, "qwen3.7-max");
     assert_eq!(entries[0].cost, 4.0);
 }
 
@@ -1215,7 +1225,7 @@ fn test_model_grouping_cleans_anthropic_prefixed_claude_variant() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].model, "claude-sonnet-4.6");
+    assert_eq!(entries[0].model_id, "claude-sonnet-4.6");
     assert_eq!(entries[0].cost, 4.0);
 }
 
@@ -1246,7 +1256,7 @@ fn test_model_grouping_uses_finalized_provider_ids() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].model, "mimo-v2.5-pro");
+    assert_eq!(entries[0].model_id, "mimo-v2.5-pro");
     assert_eq!(entries[0].provider, "xiaomi");
     assert_eq!(entries[0].cost, 3.0);
 }
@@ -1280,7 +1290,7 @@ fn test_client_provider_model_grouping_uses_finalized_provider_ids() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].client, "opencode");
     assert_eq!(entries[0].provider, "xiaomi");
-    assert_eq!(entries[0].model, "mimo-v2.5-pro");
+    assert_eq!(entries[0].model_id, "mimo-v2.5-pro");
     assert_eq!(entries[0].cost, 3.0);
 }
 
@@ -1490,12 +1500,12 @@ fn test_workspace_model_grouping_avoids_separator_key_collisions() {
     assert_eq!(entries.len(), 2);
     assert!(entries.iter().any(|entry| {
         entry.workspace_key.as_deref() == Some("a:b")
-            && entry.model == "c"
+            && entry.model_id == "c"
             && (entry.cost - 1.0).abs() < f64::EPSILON
     }));
     assert!(entries.iter().any(|entry| {
         entry.workspace_key.as_deref() == Some("a")
-            && entry.model == "b:c"
+            && entry.model_id == "b:c"
             && (entry.cost - 2.0).abs() < f64::EPSILON
     }));
 }
@@ -1588,7 +1598,6 @@ fn test_local_message_loader_kimi_code_usage_records() {
 
         let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(input_home.path().to_str().unwrap().to_string()),
-            use_env_roots: false,
             clients: Some(vec!["kimi".to_string()]),
             since: None,
             until: None,
@@ -1628,9 +1637,7 @@ fn test_local_message_loader_kimi_code_usage_records() {
 #[test]
 #[serial_test::serial]
 fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_pipeline() {
-    let cache_home = tempfile::TempDir::new().unwrap();
     let input_home = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(cache_home.path());
     write_kimi_code_usage_fixture(input_home.path());
 
     let options = inventory_options(input_home.path(), &["kimi"]);
@@ -1646,8 +1653,7 @@ fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_p
             .health;
     assert_eq!(cold_messages.len(), 2);
     assert_eq!(cold_health.issue_count(), 0);
-    assert!(message_cache::InputMessageCache::load()
-        .unwrap()
+    assert!(input_cache_for_test_home(input_home.path())
         .get_meta(&wire_path, parser_version)
         .unwrap()
         .is_some());
@@ -1695,8 +1701,7 @@ fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_p
     );
     assert_eq!(health.partial_inputs(), 1);
     assert_eq!(health.failed_inputs(), 0);
-    assert!(message_cache::InputMessageCache::load()
-        .unwrap()
+    assert!(input_cache_for_test_home(input_home.path())
         .get_meta(&wire_path, parser_version)
         .unwrap()
         .is_none());
@@ -1705,10 +1710,7 @@ fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_p
 #[test]
 #[serial_test::serial]
 fn test_input_cache_refreshes_stale_provider_on_cache_hit() {
-    let cache_home = tempfile::TempDir::new().unwrap();
     let input_home = tempfile::TempDir::new().unwrap();
-    let original_home = std::env::var("HOME").ok();
-    std::env::set_var("HOME", cache_home.path());
 
     {
         let path = input_home.path().join(".local/share/opencode/opencode.db");
@@ -1745,7 +1747,7 @@ fn test_input_cache_refreshes_stale_provider_on_cache_hit() {
             0.0,
         );
 
-        let mut cache = message_cache::InputMessageCache::load().unwrap();
+        let mut cache = input_cache_for_test_home(input_home.path());
         cache.insert(message_cache::CachedInputEntry::new_with_version(
             &path,
             unit.parser_version,
@@ -1769,91 +1771,15 @@ fn test_input_cache_refreshes_stale_provider_on_cache_hit() {
             "cache hits must refresh derived provider identity"
         );
     }
-
-    match original_home {
-        Some(home) => std::env::set_var("HOME", home),
-        None => std::env::remove_var("HOME"),
-    }
 }
 
 fn inventory_options(home: &Path, clients: &[&str]) -> LocalParseOptions {
     LocalParseOptions {
         home_dir: Some(home.to_string_lossy().into_owned()),
-        use_env_roots: false,
         clients: Some(clients.iter().map(|client| (*client).to_string()).collect()),
         scanner_settings: scanner::ScannerSettings::default(),
         ..LocalParseOptions::default()
     }
-}
-
-#[test]
-#[serial_test::serial]
-fn prepare_local_inputs_rejects_invalid_extra_dirs_configuration() {
-    let home = tempfile::TempDir::new().unwrap();
-    let _extra_dirs_guard = TestEnvGuard::set("TOKSCALE_EXTRA_DIRS", "missing-separator");
-    let mut options = inventory_options(home.path(), &["amp"]);
-    options.use_env_roots = true;
-
-    let error = super::prepare_local_inputs(options)
-        .err()
-        .expect("invalid extra-dir syntax must fail input preparation");
-
-    assert_eq!(
-        error.kind(),
-        super::LocalReportErrorKind::InvalidEnvironment
-    );
-    let message = error.to_string();
-    assert!(message.contains("TOKSCALE_EXTRA_DIRS"));
-    assert!(message.contains("parse environment variable"));
-}
-
-#[cfg(unix)]
-#[test]
-#[serial_test::serial]
-fn prepare_local_inputs_rejects_non_utf8_extra_dirs_configuration() {
-    use std::os::unix::ffi::OsStringExt;
-
-    let home = tempfile::TempDir::new().unwrap();
-    let value = OsString::from_vec(b"amp:/tmp/non-utf8-\xff".to_vec());
-    let _extra_dirs_guard = TestEnvGuard::set_os("TOKSCALE_EXTRA_DIRS", &value);
-    let mut options = inventory_options(home.path(), &["amp"]);
-    options.use_env_roots = true;
-
-    let error = super::prepare_local_inputs(options)
-        .err()
-        .expect("non-UTF-8 extra-dir configuration must fail input preparation");
-
-    assert_eq!(
-        error.kind(),
-        super::LocalReportErrorKind::InvalidEnvironment
-    );
-    let message = error.to_string();
-    assert!(message.contains("TOKSCALE_EXTRA_DIRS"));
-    assert!(message.contains("read environment variable"));
-}
-
-#[test]
-#[serial_test::serial]
-fn prepare_local_inputs_isolates_ordinary_discovery_input_failure() {
-    let home = tempfile::TempDir::new().unwrap();
-    let goose_root = home.path().join("configured-goose-root");
-    let invalid_db_candidate = goose_root.join("data/sessions/sessions.db");
-    std::fs::create_dir_all(&invalid_db_candidate).unwrap();
-    let _goose_root_guard = TestEnvGuard::set("GOOSE_PATH_ROOT", goose_root.to_str().unwrap());
-    let mut options = inventory_options(home.path(), &["goose"]);
-    options.use_env_roots = true;
-
-    let prepared = super::prepare_local_inputs(options)
-        .expect("an input discovery failure must remain isolated as health");
-
-    assert_eq!(prepared.health.failed_inputs(), 1);
-    let failure = &prepared.health.inputs()[0];
-    assert_eq!(failure.client, ClientId::Goose);
-    assert_eq!(failure.path, invalid_db_candidate);
-    assert!(matches!(
-        failure.status,
-        crate::input_health::InputStatus::Unavailable { .. }
-    ));
 }
 
 fn signature_for_test_units(
@@ -2499,7 +2425,8 @@ fn prepared_aggregation_reclaims_dead_interner_indices_after_materialization() {
     let usage =
         super::load_prepared_usage_data_with_pricing(prepared, GroupBy::Model, None).unwrap();
 
-    assert_eq!(usage.models[0].model, model);
+    assert_eq!(usage.models[0].model_id, model);
+    assert_eq!(usage.models[0].display_name, model);
     assert_eq!(crate::sessions::intern::prune_count(), prune_before + 1);
     assert_eq!(crate::sessions::intern::indexed_live_count(model), 0);
     assert_eq!(
@@ -2515,10 +2442,7 @@ fn prepared_aggregation_reclaims_dead_interner_indices_after_materialization() {
 #[test]
 #[serial_test::serial]
 fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
-    let cache_home = tempfile::TempDir::new().unwrap();
     let input_home = tempfile::TempDir::new().unwrap();
-    let original_home = std::env::var("HOME").ok();
-    std::env::set_var("HOME", cache_home.path());
 
     {
         let path = input_home.path().join(".local/share/opencode/opencode.db");
@@ -2548,7 +2472,7 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
         assert_eq!(cold, warm_first);
         assert_eq!(warm_first, warm_second);
 
-        let mut cache = message_cache::InputMessageCache::load().unwrap();
+        let mut cache = input_cache_for_test_home(input_home.path());
         let fingerprint = unit.input_policy().fingerprint().unwrap();
         assert_eq!(
             cache
@@ -2574,11 +2498,6 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
             })
         ));
     }
-
-    match original_home {
-        Some(home) => std::env::set_var("HOME", home),
-        None => std::env::remove_var("HOME"),
-    }
 }
 
 #[test]
@@ -2599,11 +2518,10 @@ fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
             ..scanner::ScannerSettings::default()
         };
 
-        let (first_messages, first_health) = parse_all_messages_with_health_with_env_strategy(
+        let (first_messages, first_health) = parse_all_messages_with_health_with_settings(
             input_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
-            false,
             &scanner_settings,
         )
         .unwrap();
@@ -2644,11 +2562,10 @@ fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
         );
         drop(conn);
 
-        let second_messages = parse_all_messages_with_pricing_with_env_strategy(
+        let second_messages = parse_all_messages_with_pricing_with_settings(
             input_home.path().to_str().unwrap(),
             &["opencode".to_string()],
             None,
-            false,
             &scanner_settings,
         )
         .unwrap();
@@ -3053,7 +2970,6 @@ fn test_local_message_loader_opencode_sqlite_counts_deduplicated_forked_history(
 
         let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(input_home.path().to_str().unwrap().to_string()),
-            use_env_roots: false,
             clients: Some(vec!["opencode".to_string()]),
             since: None,
             until: None,
@@ -3355,7 +3271,6 @@ fn test_local_message_loader_codex_counts_deduplicated_forked_history() {
 
         let parsed = load_local_messages_for_test(LocalParseOptions {
             home_dir: Some(input_home.path().to_str().unwrap().to_string()),
-            use_env_roots: false,
             clients: Some(vec!["codex".to_string()]),
             since: None,
             until: None,
@@ -3401,11 +3316,8 @@ fn test_local_message_loader_codex_counts_deduplicated_forked_history() {
 #[test]
 #[serial_test::serial]
 fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
-    let cache_home = tempfile::TempDir::new().unwrap();
     let fresh_cache_home = tempfile::TempDir::new().unwrap();
     let input_home = tempfile::TempDir::new().unwrap();
-    let original_home = std::env::var("HOME").ok();
-    std::env::set_var("HOME", cache_home.path());
 
     {
         let codex_dir = input_home.path().join(".codex/sessions");
@@ -3430,8 +3342,7 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
         .unwrap();
         assert_eq!(initial_messages.len(), 1);
         assert_eq!(initial_messages[0].model_id.as_ref(), "gpt-5.4");
-        assert!(message_cache::InputMessageCache::load()
-            .unwrap()
+        assert!(input_cache_for_test_home(input_home.path())
             .get_meta(
                 &path,
                 message_cache::ParserVersion::new(
@@ -3462,11 +3373,10 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
             None,
         )
         .unwrap();
-        std::env::set_var("HOME", fresh_cache_home.path());
-        let fresh_messages = parse_all_messages_with_pricing(
+        let fresh_messages = parse_all_messages_with_pricing_in_cache(
             input_home.path().to_str().unwrap(),
             &["codex".to_string()],
-            None,
+            fresh_cache_home.path(),
         )
         .unwrap();
 
@@ -3475,11 +3385,6 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
         assert!(warm_messages
             .iter()
             .all(|message| message.model_id.as_ref() == "gpt-5.5"));
-    }
-
-    match original_home {
-        Some(home) => std::env::set_var("HOME", home),
-        None => std::env::remove_var("HOME"),
     }
 }
 
@@ -3691,11 +3596,8 @@ fn test_codex_invalid_utf8_suffix_keeps_prefix_without_cache_shard() {
 #[test]
 #[serial_test::serial]
 fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
-    let cache_home = tempfile::TempDir::new().unwrap();
     let fresh_cache_home = tempfile::TempDir::new().unwrap();
     let input_home = tempfile::TempDir::new().unwrap();
-    let original_home = std::env::var("HOME").ok();
-    std::env::set_var("HOME", cache_home.path());
 
     {
         let session_dir = input_home.path().join(".codex/sessions");
@@ -3738,8 +3640,7 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
             failure.message.contains("model was never identified"),
             "{failure:?}"
         );
-        assert!(message_cache::InputMessageCache::load()
-            .unwrap()
+        assert!(input_cache_for_test_home(input_home.path())
             .get_meta(
                 &path,
                 message_cache::ParserVersion::new(
@@ -3771,11 +3672,10 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
         )
         .unwrap();
 
-        std::env::set_var("HOME", fresh_cache_home.path());
-        let fresh_messages = parse_all_messages_with_pricing(
+        let fresh_messages = parse_all_messages_with_pricing_in_cache(
             input_home.path().to_str().unwrap(),
             &["codex".to_string()],
-            None,
+            fresh_cache_home.path(),
         )
         .unwrap();
 
@@ -3783,9 +3683,7 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
         assert_eq!(resumed_messages.len(), 1);
         assert_eq!(resumed_messages[0].model_id.as_ref(), "gpt-5.5");
 
-        std::env::set_var("HOME", cache_home.path());
-        assert!(message_cache::InputMessageCache::load()
-            .unwrap()
+        assert!(input_cache_for_test_home(input_home.path())
             .get_meta(
                 &path,
                 message_cache::ParserVersion::new(
@@ -3795,11 +3693,6 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
             )
             .unwrap()
             .is_some());
-    }
-
-    match original_home {
-        Some(home) => std::env::set_var("HOME", home),
-        None => std::env::remove_var("HOME"),
     }
 }
 
@@ -4399,7 +4292,7 @@ fn test_token_breakdown_total_rejects_overflow() {
 fn test_tui_model_aggregation_uses_unsigned_token_capacity() {
     let message = || {
         UnifiedMessage::new(
-            "antigravity-cli",
+            "antigravity",
             "gemini-3-pro",
             "google",
             "overflow-session",
@@ -4493,7 +4386,7 @@ fn test_apply_token_pricing_resolves_canonical_longcat_model() {
 fn test_apply_token_pricing_uses_same_price_for_zed_and_other_clients() {
     let mut litellm = HashMap::new();
     litellm.insert(
-        "claude-sonnet-4-5".into(),
+        "claude-sonnet-4.5".into(),
         pricing::ModelPricing {
             input_cost_per_token: Some(0.001),
             output_cost_per_token: Some(0.002),
@@ -4539,7 +4432,7 @@ fn test_apply_token_pricing_uses_same_price_for_zed_and_other_clients() {
 fn test_apply_token_pricing_custom_zed_price_is_final_price() {
     let mut custom = HashMap::new();
     custom.insert(
-        "claude-sonnet-4-5".into(),
+        "claude-sonnet-4.5".into(),
         pricing::ModelPricing {
             input_cost_per_token: Some(0.003),
             output_cost_per_token: Some(0.004),
@@ -4577,7 +4470,7 @@ fn test_apply_token_pricing_custom_zed_price_is_final_price() {
 fn test_apply_token_pricing_uses_upstream_provider_for_zed_byok() {
     let mut litellm = HashMap::new();
     litellm.insert(
-        "claude-sonnet-4-5".into(),
+        "claude-sonnet-4.5".into(),
         pricing::ModelPricing {
             input_cost_per_token: Some(0.001),
             output_cost_per_token: Some(0.002),
@@ -4809,7 +4702,7 @@ fn test_finalize_token_pricing_cleans_repeated_date_variant_before_lookup() {
 fn test_apply_token_pricing_prefers_provider_aware_match() {
     let mut litellm = HashMap::new();
     litellm.insert(
-        "xai/grok-code-fast-1-0825".into(),
+        "xai/grok-code".into(),
         pricing::ModelPricing {
             input_cost_per_token: Some(0.001),
             output_cost_per_token: Some(0.002),
@@ -4817,7 +4710,7 @@ fn test_apply_token_pricing_prefers_provider_aware_match() {
         },
     );
     litellm.insert(
-        "azure_ai/grok-code-fast-1".into(),
+        "azure_ai/grok-code".into(),
         pricing::ModelPricing {
             input_cost_per_token: Some(0.01),
             output_cost_per_token: Some(0.02),
@@ -4984,7 +4877,7 @@ fn test_apply_token_pricing_prefers_provider_specific_exact_match_over_plain_exa
 fn test_apply_token_pricing_normalizes_openai_codex_provider() {
     let mut litellm = HashMap::new();
     litellm.insert(
-        "openai/gpt-5.2-preview".into(),
+        "openai/gpt-5.2".into(),
         pricing::ModelPricing {
             input_cost_per_token: Some(0.01),
             output_cost_per_token: Some(0.02),
@@ -4992,7 +4885,7 @@ fn test_apply_token_pricing_normalizes_openai_codex_provider() {
         },
     );
     litellm.insert(
-        "google/gpt-5.2-preview-max".into(),
+        "google/gpt-5.2".into(),
         pricing::ModelPricing {
             input_cost_per_token: Some(0.1),
             output_cost_per_token: Some(0.2),
@@ -5026,7 +4919,7 @@ fn test_apply_token_pricing_normalizes_openai_codex_provider() {
 fn test_apply_token_pricing_normalizes_openai_pro_provider() {
     let mut litellm = HashMap::new();
     litellm.insert(
-        "openai/gpt-5.2-preview".into(),
+        "openai/gpt-5.2".into(),
         pricing::ModelPricing {
             input_cost_per_token: Some(0.01),
             output_cost_per_token: Some(0.02),
@@ -5057,10 +4950,10 @@ fn test_apply_token_pricing_normalizes_openai_pro_provider() {
 }
 
 #[test]
-fn test_apply_token_pricing_prices_owl_gpt_as_openai() {
+fn test_apply_token_pricing_honors_observed_owl_scope_for_gpt() {
     let mut litellm = HashMap::new();
     litellm.insert(
-        "openai/gpt-5.2-preview".into(),
+        "owl/gpt-5.2".into(),
         pricing::ModelPricing {
             input_cost_per_token: Some(0.01),
             output_cost_per_token: Some(0.02),
@@ -5072,7 +4965,7 @@ fn test_apply_token_pricing_prices_owl_gpt_as_openai() {
     let mut msg = UnifiedMessage::new(
         "opencode",
         "gpt-5.2",
-        "openai-owl",
+        "owl",
         "session-1",
         1_733_011_200_000,
         TokenBreakdown {
@@ -5091,10 +4984,10 @@ fn test_apply_token_pricing_prices_owl_gpt_as_openai() {
 }
 
 #[test]
-fn test_apply_token_pricing_prices_owl_claude_as_anthropic() {
+fn test_apply_token_pricing_honors_observed_owl_scope_for_claude() {
     let mut litellm = HashMap::new();
     litellm.insert(
-        "anthropic/claude-sonnet-4-5".into(),
+        "owl/claude-sonnet-4.5".into(),
         pricing::ModelPricing {
             input_cost_per_token: Some(0.01),
             output_cost_per_token: Some(0.02),
@@ -5106,7 +4999,7 @@ fn test_apply_token_pricing_prices_owl_claude_as_anthropic() {
     let mut msg = UnifiedMessage::new(
         "opencode",
         "claude-sonnet-4-5",
-        "openai-owlc",
+        "owl",
         "session-1",
         1_733_011_200_000,
         TokenBreakdown {
@@ -5125,10 +5018,10 @@ fn test_apply_token_pricing_prices_owl_claude_as_anthropic() {
 }
 
 #[test]
-fn test_apply_token_pricing_prices_owl_minimax_as_minimax() {
+fn test_apply_token_pricing_honors_observed_owl_scope_for_minimax() {
     let mut litellm = HashMap::new();
     litellm.insert(
-        "minimax/minimax-m2.1".into(),
+        "owl/minimax-m2.1".into(),
         pricing::ModelPricing {
             input_cost_per_token: Some(0.01),
             output_cost_per_token: Some(0.02),
@@ -5140,7 +5033,7 @@ fn test_apply_token_pricing_prices_owl_minimax_as_minimax() {
     let mut msg = UnifiedMessage::new(
         "opencode",
         "MiniMax-M2.1",
-        "friend.owl",
+        "owl",
         "session-1",
         1_733_011_200_000,
         TokenBreakdown {
@@ -5380,7 +5273,6 @@ fn test_local_message_loader_preserves_gateway_message_client_counts() {
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["opencode".to_string()]),
         since: None,
         until: None,
@@ -5400,10 +5292,9 @@ fn test_local_message_loader_preserves_gateway_message_client_counts() {
 #[serial_test::serial]
 fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
     // Regression guard: local message loading must forward
-    // `options.scanner_settings` into OpenCode adapter discovery. Users with
-    // `scanner.opencodeDbPaths` pointing at an OPENCODE_DB outside the
-    // XDG data dir would see no rows through the Wrapped path even though the
-    // Models report honored the same config.
+    // `options.scanner_settings` into OpenCode adapter discovery. A configured
+    // database outside the fixed default directory must reach the Wrapped path
+    // exactly as it reaches the Models report.
     let temp_dir = tempfile::TempDir::new().unwrap();
     // Deliberately do not create ~/.local/share/opencode so nothing
     // is auto-discoverable; the only db the scanner can find must
@@ -5443,7 +5334,6 @@ fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
     // Without scanner_settings: no rows (nothing auto-discoverable).
     let parsed_default = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["opencode".to_string()]),
         since: None,
         until: None,
@@ -5458,7 +5348,6 @@ fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
     // row must show up.
     let parsed_with_settings = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["opencode".to_string()]),
         since: None,
         until: None,
@@ -5491,7 +5380,6 @@ fn test_missing_configured_opencode_database_is_an_explicit_error() {
 
     let loaded = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
-        use_env_roots: false,
         clients: Some(vec!["opencode".to_string()]),
         scanner_settings: scanner::ScannerSettings {
             opencode_db_paths: vec![missing_db.clone()],
@@ -5537,7 +5425,6 @@ fn usage_data_report_preserves_input_health() {
         .unwrap()
         .block_on(super::get_usage_data(ReportOptions {
             home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
-            use_env_roots: false,
             clients: Some(vec!["opencode".to_string()]),
             scanner_settings: scanner::ScannerSettings {
                 opencode_db_paths: vec![missing_db.clone()],
@@ -5566,7 +5453,6 @@ fn public_raw_message_report_preserves_input_health_and_metadata() {
         .block_on(super::parse_local_unified_messages_with_pricing(
             LocalParseOptions {
                 home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
-                use_env_roots: false,
                 clients: Some(vec!["opencode".to_string()]),
                 scanner_settings: scanner::ScannerSettings {
                     opencode_db_paths: vec![missing_db.clone()],
@@ -5599,7 +5485,6 @@ fn test_opencode_auto_discovery_error_reaches_public_loader() {
 
     let loaded = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
-        use_env_roots: false,
         clients: Some(vec!["opencode".to_string()]),
         ..LocalParseOptions::default()
     })
@@ -5641,7 +5526,6 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_hermes_profile_
 
     let parsed_default = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["hermes".to_string()]),
         since: None,
         until: None,
@@ -5656,7 +5540,6 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_hermes_profile_
     extra_scan_paths.insert("hermes".to_string(), vec![profile_dir]);
     let parsed_with_settings = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["hermes".to_string()]),
         since: None,
         until: None,
@@ -5700,7 +5583,6 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_zed_threads_db(
 
     let parsed_default = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["zed".to_string()]),
         since: None,
         until: None,
@@ -5715,7 +5597,6 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_zed_threads_db(
     extra_scan_paths.insert("zed".to_string(), vec![windows_threads_dir]);
     let parsed_with_settings = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["zed".to_string()]),
         since: None,
         until: None,
@@ -5744,15 +5625,14 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_zed_threads_db(
 
 #[test]
 #[serial_test::serial]
-fn test_default_usage_projection_includes_antigravity_cli_database_rows() {
+fn test_default_usage_projection_includes_antigravity_database_rows() {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    write_single_antigravity_cli_fixture(temp_dir.path());
+    write_single_antigravity_fixture(temp_dir.path());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let usage = rt
         .block_on(super::get_usage_data(ReportOptions {
             home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
-            use_env_roots: false,
             clients: None,
             since: None,
             until: None,
@@ -5765,7 +5645,8 @@ fn test_default_usage_projection_includes_antigravity_cli_database_rows() {
     assert_eq!(usage.total_tokens, 19);
     assert_eq!(usage.models.len(), 1);
     assert_eq!(usage.models[0].client, "antigravity");
-    assert_eq!(usage.models[0].model, "gemini-3.5-flash");
+    assert_eq!(usage.models[0].model_id, "gemini-3.5-flash");
+    assert_eq!(usage.models[0].display_name, "gemini-3.5-flash");
 }
 
 #[test]
@@ -5788,7 +5669,6 @@ fn test_local_message_loader_dedups_zed_threads_across_default_and_extra_dbs() {
     extra_scan_paths.insert("zed".to_string(), vec![default_threads_dir.clone()]);
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["zed".to_string()]),
         since: None,
         until: None,
@@ -5818,7 +5698,6 @@ fn test_local_message_loader_zed_extra_scan_paths_nonexistent_dir_is_silent() {
     );
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["zed".to_string()]),
         since: None,
         until: None,
@@ -5850,7 +5729,6 @@ fn test_driver_uses_zed_adapter_when_only_zed_requested() {
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["zed".to_string()]),
         since: None,
         until: None,
@@ -5902,7 +5780,6 @@ fn test_driver_uses_simple_file_adapter_when_only_amp_requested() {
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["amp".to_string()]),
         since: None,
         until: None,
@@ -5952,7 +5829,6 @@ fn test_driver_uses_custom_file_adapter_when_only_codebuff_requested() {
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["codebuff".to_string()]),
         since: None,
         until: None,
@@ -5989,7 +5865,6 @@ fn test_driver_uses_pi_and_omp_adapters_when_requested() {
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["pi".to_string(), "omp".to_string()]),
         since: None,
         until: None,
@@ -6028,7 +5903,6 @@ fn test_driver_all_clients_includes_each_adapter_without_duplicate() {
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(Vec::new()),
         since: None,
         until: None,
@@ -6088,7 +5962,6 @@ fn test_local_message_loader_dedups_hermes_sessions_across_default_and_extra_dbs
     extra_scan_paths.insert("hermes".to_string(), vec![profile_db]);
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["hermes".to_string()]),
         since: None,
         until: None,
@@ -6170,7 +6043,6 @@ fn test_local_message_loader_claude_filter_ignores_scanner_settings_opencode_db_
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["claude".to_string()]),
         since: None,
         until: None,
@@ -6229,7 +6101,6 @@ fn test_local_message_loader_claude_transcripts_count_only_usage_metadata() {
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["claude".to_string()]),
         since: None,
         until: None,
@@ -6281,7 +6152,6 @@ fn test_local_message_loader_amp_reads_current_thread_files() {
 
     let parsed = load_local_messages_for_test(LocalParseOptions {
         home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        use_env_roots: false,
         clients: Some(vec!["amp".to_string()]),
         since: None,
         until: None,

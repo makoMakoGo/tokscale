@@ -32,7 +32,7 @@ impl LocalInputAdapter for RooCodeAdapter {
         let def = ClientId::RooCode
             .local_def()
             .expect("Roo Code adapter must have local scan policy");
-        let mut roots = vec![def.resolve_path_with_env_strategy(ctx.home_dir, ctx.use_env_roots)];
+        let mut roots = vec![def.resolve_path(ctx.home_dir)];
         roots.extend(roocode_additional_roots(ctx.home_dir));
         roots.extend(adapter_discover::extra_roots_for_client(
             ClientId::RooCode,
@@ -106,7 +106,6 @@ mod tests {
     ) -> AdapterScanContext<'a> {
         AdapterScanContext {
             home_dir: home_dir.to_str().unwrap(),
-            use_env_roots: false,
             scanner_settings: settings,
         }
     }

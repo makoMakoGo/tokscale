@@ -23,21 +23,26 @@ credits-only records are dropped instead of being converted into local token
 cost.
 
 Total-only usage records with accepted client attribution use the fixed bucket
-allocation from [ADR 0017](adr/0017-fixed-token-bucket-imputation.md). Their
+allocation from [ADR 0010](adr/0010-period-views-derive-from-daily.md). Their
 derived cost is approximate because the recorded total is projected into buckets
 before pricing.
 
-See [ADR 0013](adr/0013-pricing-source-authority.md).
+See [ADR 0010](adr/0010-period-views-derive-from-daily.md).
 
 ## Pricing Source authority
 
 Exact custom overrides from `custom-pricing.json` are checked first. Otherwise,
-Tokscale searches LiteLLM, OpenRouter, and models.dev using provider-aware exact
-and deterministic normalized matching.
+Tokscale searches LiteLLM, OpenRouter, and models.dev in that order. A forced
+`--pricing-source` limits lookup to one catalog. Public lookup receives the
+canonical model component without a provider or route prefix and considers only
+catalog rows with that exact component.
 
-The public catalogs do not have a simple fixed global order. The resolver can
-choose among them based on provider-scoped paths, full keys, model-part matches,
-provider hints, version normalization, and tiered pricing support.
+A non-empty observed provider, or otherwise shared deterministic model-family
+inference, defines provider scope. Exact rows for a known provider are selected
+before exact unscoped rows across all catalogs; catalog order breaks ties inside
+each class. With unknown provider scope, only an exact unscoped row is eligible.
+Prefix, substring, fuzzy/edit-distance, arbitrary separator, and private alias
+matching are not pricing strategies.
 
 Global private aliases are not a substitute for input parsing. Client-specific
 model decoding may happen in the parser, but local report finalization,
@@ -58,7 +63,7 @@ and public catalog rows.
 If no pricing match exists, derived cost stays `$0.00`. The unresolved model id
 should remain visible so the missing catalog entry can be fixed explicitly.
 
-See [ADR 0013](adr/0013-pricing-source-authority.md).
+See [ADR 0010](adr/0010-period-views-derive-from-daily.md).
 
 ## Custom pricing overrides
 
@@ -87,11 +92,8 @@ Overrides are exact-only and case-insensitive:
 
 - Local reports match the canonical model id after model canonicalization, not
   necessarily the raw observed label emitted by a client or parser.
-- For local report overrides, key the entry by that final canonical id unless a
-  parser intentionally preserves the full route.
+- Key each local report override by that final canonical id.
 - `tokscale pricing lookup <model>` matches the command argument as a catalog query.
-- Full gateway paths are only needed when you intentionally query or override
-  that exact route as a catalog key.
 
 Restart the command after editing the file because overrides are loaded at
 startup.
@@ -117,10 +119,9 @@ tokscale pricing overrides --json
 
 Standalone lookup does not infer arbitrary observed-model prefixes, route
 prefixes, private aliases, or reasoning-tier suffixes. It is a pricing catalog
-query, not a parser repair path.
+query over the exact canonical model component, not a parser repair path.
 
 ## Subscription usage is separate
 
-Subscription quota commands call provider-specific quota endpoints and show what
-the provider reports. Those numbers are not mixed into normal local token
-reports.
+The TUI Usage tab calls provider-specific quota endpoints and shows what the
+provider reports. Those numbers are not mixed into normal local token reports.

@@ -160,7 +160,6 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     let mut aggregated = load_aggregated_views_with_pricing(
         &ReportOptions {
             home_dir: options.home_dir.clone(),
-            use_env_roots: crate::commands::shared::use_env_roots(&options.home_dir),
             clients: Some(clients),
             since: Some(since),
             until: Some(until),
@@ -217,9 +216,9 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
         .models
         .iter()
         .map(|model| WrappedRankedEntry {
-            name: format_model_name(&model.model),
+            name: format_model_name(&model.display_name),
             client_id: None,
-            provider: get_provider_from_model(&model.model),
+            provider: get_provider_from_model(&model.model_id),
             cost: model.cost,
             tokens: model
                 .tokens
@@ -852,26 +851,22 @@ async fn ensure_fonts_loaded(client: &reqwest::Client) -> Result<FontSet> {
     let regular_path = cache_dir.join(FIGTREE_REGULAR_FILE);
     let bold_path = cache_dir.join(FIGTREE_BOLD_FILE);
 
-    let regular_asset_path =
-        resolve_wrapped_cache_path("fonts", FIGTREE_REGULAR_FILE, &regular_path);
-    let bold_asset_path = resolve_wrapped_cache_path("fonts", FIGTREE_BOLD_FILE, &bold_path);
-
-    if regular_asset_path == regular_path && !regular_path.exists() {
+    if !regular_path.exists() {
         let _ = fetch_to_file(client, FIGTREE_REGULAR_URL, &regular_path).await;
     }
-    if bold_asset_path == bold_path && !bold_path.exists() {
+    if !bold_path.exists() {
         let _ = fetch_to_file(client, FIGTREE_BOLD_URL, &bold_path).await;
     }
 
-    let regular_font = if regular_asset_path.exists() {
-        fs::read(&regular_asset_path)
+    let regular_font = if regular_path.exists() {
+        fs::read(&regular_path)
             .ok()
             .and_then(|bytes| FontArc::try_from_vec(bytes).ok())
     } else {
         None
     };
-    let bold_font = if bold_asset_path.exists() {
-        fs::read(&bold_asset_path)
+    let bold_font = if bold_path.exists() {
+        fs::read(&bold_path)
             .ok()
             .and_then(|bytes| FontArc::try_from_vec(bytes).ok())
     } else {
@@ -904,12 +899,7 @@ async fn fetch_and_cache_image(
     if cached_path.exists() {
         return Ok(cached_path);
     }
-    if let Some(legacy_path) = first_existing_legacy_wrapped_cache_file("images", filename) {
-        return Ok(legacy_path);
-    }
-    if !cached_path.exists() {
-        fetch_to_file(client, url, &cached_path).await?;
-    }
+    fetch_to_file(client, url, &cached_path).await?;
 
     Ok(cached_path)
 }
@@ -949,34 +939,11 @@ fn load_rgba_image(path: &Path) -> Result<RgbaImage> {
 }
 
 fn get_image_cache_dir() -> Result<PathBuf> {
-    Ok(crate::paths::get_cache_dir().join("images"))
+    Ok(crate::paths::try_get_cache_dir()?.join("images"))
 }
 
 fn get_font_cache_dir() -> Result<PathBuf> {
-    Ok(crate::paths::get_cache_dir().join("fonts"))
-}
-
-fn resolve_wrapped_cache_path(subdir: &str, filename: &str, canonical_path: &Path) -> PathBuf {
-    if canonical_path.exists() {
-        canonical_path.to_path_buf()
-    } else {
-        first_existing_legacy_wrapped_cache_file(subdir, filename)
-            .unwrap_or_else(|| canonical_path.to_path_buf())
-    }
-}
-
-fn first_existing_legacy_wrapped_cache_file(subdir: &str, filename: &str) -> Option<PathBuf> {
-    if crate::paths::is_config_dir_overridden() {
-        return None;
-    }
-
-    [
-        crate::paths::legacy_dirs_cache_dir().map(|dir| dir.join(subdir).join(filename)),
-        crate::paths::legacy_dot_cache_tokscale_dir().map(|dir| dir.join(subdir).join(filename)),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|path| path.exists())
+    Ok(crate::paths::try_get_cache_dir()?.join("fonts"))
 }
 
 fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1407,20 +1374,8 @@ fn default_clients() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use std::collections::BTreeMap;
-    use std::env;
-    use tempfile::TempDir;
     use tokscale_core::usage_views::{DailyUsage, UsageTokenBreakdown};
-
-    fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
-        unsafe {
-            match value {
-                Some(value) => env::set_var(key, value),
-                None => env::remove_var(key),
-            }
-        }
-    }
 
     #[test]
     fn wrapped_active_days_exclude_zero_usage_buckets() {
@@ -1631,38 +1586,6 @@ mod tests {
             split_quality_suffix("gpt-4"),
             ("gpt-4".to_string(), String::new())
         );
-    }
-
-    #[test]
-    #[serial]
-    fn font_cache_reads_legacy_path_when_canonical_missing() {
-        let temp_home = TempDir::new().unwrap();
-        let previous_home = env::var_os("HOME");
-        let previous_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        let previous_xdg_config = env::var_os("XDG_CONFIG_HOME");
-        unsafe {
-            env::set_var("HOME", temp_home.path());
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-            env::remove_var("XDG_CONFIG_HOME");
-        }
-
-        let legacy_path = temp_home
-            .path()
-            .join(".cache/tokscale/fonts")
-            .join(FIGTREE_REGULAR_FILE);
-        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-        fs::write(&legacy_path, b"legacy-font-bytes").unwrap();
-
-        let canonical_path = get_font_cache_dir().unwrap().join(FIGTREE_REGULAR_FILE);
-        let resolved = resolve_wrapped_cache_path("fonts", FIGTREE_REGULAR_FILE, &canonical_path);
-
-        assert_eq!(resolved, legacy_path);
-        assert!(!canonical_path.exists());
-        assert_eq!(fs::read(&resolved).unwrap(), b"legacy-font-bytes");
-
-        restore_env_var("HOME", previous_home);
-        restore_env_var("TOKSCALE_CONFIG_DIR", previous_override);
-        restore_env_var("XDG_CONFIG_HOME", previous_xdg_config);
     }
 
     // ========== format_model_name tests ==========

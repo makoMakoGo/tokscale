@@ -456,7 +456,7 @@ fn top_period_model(period: &PeriodUsage) -> Option<TopPeriodModel> {
     for client in period.client_breakdown.values() {
         for model in client.models.values() {
             let tokens = model.tokens.total();
-            // Rank by the bare canonical id (ADR 0026): grouping must not
+            // Rank by the bare canonical id (ADR 0010): grouping must not
             // split one model into several candidates, and the storage map
             // key is never a user-visible identity.
             if tokens == 0 || model.model_id.is_empty() {
@@ -1150,7 +1150,7 @@ mod tests {
     fn top_period_model_ranking_is_grouping_invariant() {
         // Same messages projected by each GroupBy: the winner must be the
         // canonical merge with the bare model label in every projection
-        // (ADR 0026). Per-bucket, kimi-k2.5 (200) beats each gpt-5 fragment;
+        // (ADR 0010). Per-bucket, kimi-k2.5 (200) beats each gpt-5 fragment;
         // canonically gpt-5 wins with 210.
         let model_projection = period_with_models(vec![
             ("gpt-5", daily_model("openai", "gpt-5", 210, 2.0)),
