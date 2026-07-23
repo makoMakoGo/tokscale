@@ -288,6 +288,57 @@ pub struct UsageData {
 }
 
 impl UsageData {
+    /// Validate that a Group By-independent projection and one Group By
+    /// projection describe the same daily and hourly row shape.
+    ///
+    /// Cache loading uses this borrowed form to validate every persisted
+    /// Group By projection without retaining all four model projections in
+    /// memory at once.
+    pub fn validate_projection_parts(
+        common: &UsageCommonData,
+        grouped: &UsageGroupedData,
+    ) -> Result<(), UsageProjectionShapeError> {
+        if common.daily.len() != grouped.daily.len() {
+            return Err(UsageProjectionShapeError::new(format!(
+                "daily Common/Grouped row count differs: {} != {}",
+                common.daily.len(),
+                grouped.daily.len()
+            )));
+        }
+        for (common, grouped) in common.daily.iter().zip(&grouped.daily) {
+            if common.date != grouped.date {
+                return Err(UsageProjectionShapeError::new(format!(
+                    "daily Common/Grouped date differs: {} != {}",
+                    common.date, grouped.date
+                )));
+            }
+            if common.clients.keys().ne(grouped.client_models.keys()) {
+                return Err(UsageProjectionShapeError::new(format!(
+                    "daily Common/Grouped Clients differ for {}",
+                    common.date
+                )));
+            }
+        }
+
+        if common.hourly.len() != grouped.hourly.len() {
+            return Err(UsageProjectionShapeError::new(format!(
+                "hourly Common/Grouped row count differs: {} != {}",
+                common.hourly.len(),
+                grouped.hourly.len()
+            )));
+        }
+        for (common, grouped) in common.hourly.iter().zip(&grouped.hourly) {
+            if common.datetime != grouped.datetime {
+                return Err(UsageProjectionShapeError::new(format!(
+                    "hourly Common/Grouped datetime differs: {} != {}",
+                    common.datetime, grouped.datetime
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Assemble the presentation DTO from one group-agnostic projection and
     /// one Group By projection. Shape mismatches are explicit corruption or
     /// programming errors; they are never reconciled with invented empty
@@ -296,6 +347,8 @@ impl UsageData {
         common: UsageCommonData,
         grouped: UsageGroupedData,
     ) -> Result<Self, UsageProjectionShapeError> {
+        Self::validate_projection_parts(&common, &grouped)?;
+
         let UsageCommonData {
             agents,
             daily: common_daily,
@@ -312,27 +365,8 @@ impl UsageData {
             hourly: grouped_hourly,
         } = grouped;
 
-        if common_daily.len() != grouped_daily.len() {
-            return Err(UsageProjectionShapeError::new(format!(
-                "daily Common/Grouped row count differs: {} != {}",
-                common_daily.len(),
-                grouped_daily.len()
-            )));
-        }
         let mut daily = Vec::with_capacity(common_daily.len());
         for (common, grouped) in common_daily.into_iter().zip(grouped_daily) {
-            if common.date != grouped.date {
-                return Err(UsageProjectionShapeError::new(format!(
-                    "daily Common/Grouped date differs: {} != {}",
-                    common.date, grouped.date
-                )));
-            }
-            if common.clients.keys().ne(grouped.client_models.keys()) {
-                return Err(UsageProjectionShapeError::new(format!(
-                    "daily Common/Grouped Clients differ for {}",
-                    common.date
-                )));
-            }
             let client_breakdown = common
                 .clients
                 .into_iter()
@@ -359,21 +393,8 @@ impl UsageData {
             });
         }
 
-        if common_hourly.len() != grouped_hourly.len() {
-            return Err(UsageProjectionShapeError::new(format!(
-                "hourly Common/Grouped row count differs: {} != {}",
-                common_hourly.len(),
-                grouped_hourly.len()
-            )));
-        }
         let mut hourly = Vec::with_capacity(common_hourly.len());
         for (common, grouped) in common_hourly.into_iter().zip(grouped_hourly) {
-            if common.datetime != grouped.datetime {
-                return Err(UsageProjectionShapeError::new(format!(
-                    "hourly Common/Grouped datetime differs: {} != {}",
-                    common.datetime, grouped.datetime
-                )));
-            }
             hourly.push(HourlyUsage {
                 datetime: common.datetime,
                 tokens: common.tokens,

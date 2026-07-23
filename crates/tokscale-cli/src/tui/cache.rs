@@ -548,6 +548,78 @@ mod bundle_tests {
 
     #[test]
     #[serial]
+    fn schema_45_rejects_corrupt_inactive_projections_during_default_load() {
+        type Mutation = fn(&mut serde_json::Value);
+
+        fn mismatch_client_model_date(value: &mut serde_json::Value) {
+            value["projections"]["clientModel"]["daily"][0]["date"] =
+                serde_json::Value::from("2026-05-28");
+        }
+
+        fn remove_client_provider_model_performance(value: &mut serde_json::Value) {
+            value["projections"]["clientProviderModel"]["models"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("performance");
+        }
+
+        fn remove_workspace_daily_model_id(value: &mut serde_json::Value) {
+            value["projections"]["workspaceModel"]["daily"][0]["clientModels"][0][1][0][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("modelId");
+        }
+
+        let (temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
+        let accumulator = nonempty_accumulator(temp.path());
+        let clients = HashSet::from([ClientId::Claude, ClientId::OpenCode]);
+        let client_space =
+            BTreeMap::from([("claude".to_string(), 8192), ("opencode".to_string(), 4096)]);
+        let path = cache_file().unwrap();
+
+        for (boundary, mutate) in [
+            (
+                "inactive daily shape",
+                mismatch_client_model_date as Mutation,
+            ),
+            (
+                "inactive required model field",
+                remove_client_provider_model_performance as Mutation,
+            ),
+            (
+                "inactive authoritative model identity",
+                remove_workspace_daily_model_id as Mutation,
+            ),
+        ] {
+            save_tui_bundle_cache(
+                &accumulator,
+                &[],
+                &client_space,
+                &Default::default(),
+                &clients,
+                &scope,
+                signature(),
+            )
+            .unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+            mutate(&mut value);
+            tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+                .unwrap();
+
+            assert!(
+                matches!(
+                    load_cache(&clients, &GroupBy::Model, &scope),
+                    CacheResult::Miss
+                ),
+                "{boundary} corruption must invalidate the schema-45 bundle at startup"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
     fn schema_45_rejects_missing_required_projection_fields() {
         type Mutation = fn(&mut serde_json::Value);
 
@@ -768,6 +840,34 @@ mod bundle_tests {
                 CacheResult::Miss
             ));
         }
+
+        save_tui_bundle_cache(
+            &TuiAcc::new(),
+            &sessions,
+            &client_space,
+            &Default::default(),
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        value["canonical"]
+            .as_object_mut()
+            .unwrap()
+            .remove("usage_totals_by_client");
+        refresh_canonical_digest(&mut value);
+        tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+            .unwrap();
+
+        assert!(
+            matches!(
+                load_cache(&clients, &GroupBy::Model, &scope),
+                CacheResult::Miss
+            ),
+            "missing canonical Client totals must invalidate the schema-45 bundle"
+        );
 
         save_tui_bundle_cache(
             &TuiAcc::new(),
@@ -1929,6 +2029,19 @@ fn cached_models_missing_identity(data: &UsageData) -> bool {
             .any(|model| model.model_id.is_empty())
 }
 
+fn grouped_models_missing_identity(data: &UsageGroupedData) -> bool {
+    data.daily
+        .iter()
+        .flat_map(|day| day.client_models.values())
+        .flat_map(|models| models.values())
+        .any(|model| model.model_id.is_empty())
+        || data
+            .hourly
+            .iter()
+            .flat_map(|hour| hour.models.values())
+            .any(|model| model.model_id.is_empty())
+}
+
 /// Determine whether the cached client key exactly matches the current TUI request.
 fn cache_clients_match_exact(
     client_universe: &HashSet<ClientId>,
@@ -2216,28 +2329,38 @@ fn projection_field(group_by: &GroupBy) -> anyhow::Result<&'static str> {
     }
 }
 
-struct ProjectionSetSeed<'a> {
+fn projection_descriptor(field: &str) -> Option<(&'static str, u8)> {
+    match field {
+        "model" => Some(("model", 1)),
+        "clientModel" => Some(("clientModel", 2)),
+        "clientProviderModel" => Some(("clientProviderModel", 4)),
+        "workspaceModel" => Some(("workspaceModel", 8)),
+        _ => None,
+    }
+}
+
+struct SelectedProjectionSetSeed<'a> {
     group_by: &'a GroupBy,
 }
 
-impl<'de> DeserializeSeed<'de> for ProjectionSetSeed<'_> {
+impl<'de> DeserializeSeed<'de> for SelectedProjectionSetSeed<'_> {
     type Value = CachedUsageGroupedData;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_map(ProjectionSetVisitor {
+        deserializer.deserialize_map(SelectedProjectionSetVisitor {
             selected_field: projection_field(self.group_by).map_err(serde::de::Error::custom)?,
         })
     }
 }
 
-struct ProjectionSetVisitor {
+struct SelectedProjectionSetVisitor {
     selected_field: &'static str,
 }
 
-impl<'de> Visitor<'de> for ProjectionSetVisitor {
+impl<'de> Visitor<'de> for SelectedProjectionSetVisitor {
     type Value = CachedUsageGroupedData;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2252,15 +2375,9 @@ impl<'de> Visitor<'de> for ProjectionSetVisitor {
         let mut present = 0_u8;
 
         while let Some(field) = map.next_key::<String>()? {
-            let bit = match field.as_str() {
-                "model" => 1,
-                "clientModel" => 2,
-                "clientProviderModel" => 4,
-                "workspaceModel" => 8,
-                _ => {
-                    map.next_value::<IgnoredAny>()?;
-                    continue;
-                }
+            let Some((field, bit)) = projection_descriptor(&field) else {
+                map.next_value::<IgnoredAny>()?;
+                continue;
             };
             if present & bit != 0 {
                 return Err(serde::de::Error::custom(format!(
@@ -2290,6 +2407,118 @@ impl<'de> Visitor<'de> for ProjectionSetVisitor {
     }
 }
 
+/// Retain only the fields inspected by `UsageData::validate_projection_parts`.
+/// This lets startup validate all four projections without retaining four
+/// complete model payloads at once.
+fn grouped_projection_shape_skeleton(data: &UsageGroupedData) -> UsageGroupedData {
+    UsageGroupedData {
+        models: Vec::new(),
+        daily: data
+            .daily
+            .iter()
+            .map(|day| DailyModelProjection {
+                date: day.date,
+                client_models: day
+                    .client_models
+                    .keys()
+                    .map(|client| (client.clone(), BTreeMap::new()))
+                    .collect(),
+            })
+            .collect(),
+        hourly: data
+            .hourly
+            .iter()
+            .map(|hour| HourlyModelProjection {
+                datetime: hour.datetime,
+                models: BTreeMap::new(),
+            })
+            .collect(),
+    }
+}
+
+struct ValidatedProjectionSet {
+    selected: UsageGroupedData,
+    shape_skeletons: Vec<(&'static str, UsageGroupedData)>,
+}
+
+struct ValidatedProjectionSetSeed<'a> {
+    group_by: &'a GroupBy,
+}
+
+impl<'de> DeserializeSeed<'de> for ValidatedProjectionSetSeed<'_> {
+    type Value = ValidatedProjectionSet;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ValidatedProjectionSetVisitor {
+            selected_field: projection_field(self.group_by).map_err(serde::de::Error::custom)?,
+        })
+    }
+}
+
+struct ValidatedProjectionSetVisitor {
+    selected_field: &'static str,
+}
+
+impl<'de> Visitor<'de> for ValidatedProjectionSetVisitor {
+    type Value = ValidatedProjectionSet;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the four valid public TUI usage projections")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut selected = None;
+        let mut shape_skeletons = Vec::with_capacity(4);
+        let mut present = 0_u8;
+
+        while let Some(field) = map.next_key::<String>()? {
+            let Some((field, bit)) = projection_descriptor(&field) else {
+                map.next_value::<IgnoredAny>()?;
+                continue;
+            };
+            if present & bit != 0 {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate TUI projection `{field}`"
+                )));
+            }
+            present |= bit;
+
+            let cached: CachedUsageGroupedData = map.next_value()?;
+            let grouped: UsageGroupedData = cached.try_into().map_err(serde::de::Error::custom)?;
+            if grouped_models_missing_identity(&grouped) {
+                return Err(serde::de::Error::custom(format!(
+                    "cached TUI projection `{field}` is missing authoritative model identity"
+                )));
+            }
+            shape_skeletons.push((field, grouped_projection_shape_skeleton(&grouped)));
+            if field == self.selected_field {
+                selected = Some(grouped);
+            }
+        }
+
+        if present != 0b1111 {
+            return Err(serde::de::Error::custom(
+                "cached TUI bundle is missing one or more public projections",
+            ));
+        }
+        Ok(ValidatedProjectionSet {
+            selected: selected.ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "cached TUI bundle is missing projection `{}`",
+                    self.selected_field
+                ))
+            })?,
+            shape_skeletons,
+        })
+    }
+}
+
 struct ParsedTuiBundle {
     schema_version: u32,
     timestamp: u64,
@@ -2299,8 +2528,8 @@ struct ParsedTuiBundle {
     health: tokscale_core::input_health::HealthReport,
     sessions: Vec<TuiSessionEntry>,
     client_space: BTreeMap<String, u64>,
-    common: CachedUsageCommonData,
-    grouped: CachedUsageGroupedData,
+    common: UsageCommonData,
+    grouped: UsageGroupedData,
 }
 
 struct FullBundleSeed<'a> {
@@ -2353,11 +2582,12 @@ impl<'de> Visitor<'de> for CanonicalShapeVisitor {
         let mut present = 0_u8;
         while let Some(field) = map.next_key::<String>()? {
             let bit = match field.as_str() {
-                "model_map" => 1,
-                "agent_map" => 2,
-                "daily_map" => 4,
-                "hourly_map" => 8,
-                "next_sequence" => 16,
+                "usage_totals_by_client" => 1,
+                "model_map" => 2,
+                "agent_map" => 4,
+                "daily_map" => 8,
+                "hourly_map" => 16,
+                "next_sequence" => 32,
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                     continue;
@@ -2372,7 +2602,7 @@ impl<'de> Visitor<'de> for CanonicalShapeVisitor {
             map.next_value::<IgnoredAny>()?;
         }
 
-        if present != 0b1_1111 {
+        if present != 0b11_1111 {
             return Err(serde::de::Error::custom(
                 "cached TUI bundle has incomplete canonical projection state",
             ));
@@ -2413,8 +2643,8 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
         let mut client_space = None;
         let mut expected_canonical_digest: Option<String> = None;
         let mut actual_canonical_digest: Option<String> = None;
-        let mut common = None;
-        let mut grouped = None;
+        let mut common: Option<CachedUsageCommonData> = None;
+        let mut grouped: Option<ValidatedProjectionSet> = None;
 
         while let Some(field) = map.next_key::<String>()? {
             match field.as_str() {
@@ -2452,7 +2682,7 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
                     if grouped.is_some() {
                         return Err(serde::de::Error::duplicate_field("projections"));
                     }
-                    grouped = Some(map.next_value_seed(ProjectionSetSeed {
+                    grouped = Some(map.next_value_seed(ValidatedProjectionSetSeed {
                         group_by: self.group_by,
                     })?);
                 }
@@ -2469,6 +2699,17 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
                 "cached TUI canonical projection digest does not match its contents",
             ));
         }
+        let common: UsageCommonData = required(common, "common")?
+            .try_into()
+            .map_err(serde::de::Error::custom)?;
+        let grouped = required(grouped, "projections")?;
+        for (field, shape) in &grouped.shape_skeletons {
+            UsageData::validate_projection_parts(&common, shape).map_err(|error| {
+                serde::de::Error::custom(format!(
+                    "cached TUI projection `{field}` does not match Common: {error}"
+                ))
+            })?;
+        }
         Ok(ParsedTuiBundle {
             schema_version: required(schema_version, "schemaVersion")?,
             timestamp: required(timestamp, "timestamp")?,
@@ -2481,8 +2722,8 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
             health: required(health, "health")?,
             sessions: required(sessions, "sessions")?,
             client_space: required(client_space, "clientSpace")?,
-            common: required(common, "common")?,
-            grouped: required(grouped, "projections")?,
+            common,
+            grouped: grouped.selected,
         })
     }
 }
@@ -2554,7 +2795,7 @@ impl<'de> Visitor<'de> for ProjectionBundleVisitor<'_> {
                     if grouped.is_some() {
                         return Err(serde::de::Error::duplicate_field("projections"));
                     }
-                    grouped = Some(map.next_value_seed(ProjectionSetSeed {
+                    grouped = Some(map.next_value_seed(SelectedProjectionSetSeed {
                         group_by: self.group_by,
                     })?);
                 }
@@ -2663,7 +2904,7 @@ fn load_bundle_from_file(
         anyhow::bail!("cached TUI Sessions contain a client outside the client universe");
     }
 
-    let mut data = usage_data_from_cached(parsed.common, parsed.grouped)?;
+    let mut data = UsageData::from_projection_parts(parsed.common, parsed.grouped)?;
     data.health = parsed.health.clone();
     if !cache_usage_clients_are_enabled(client_universe, &data) {
         anyhow::bail!("cached TUI usage contains a Client outside the client universe");

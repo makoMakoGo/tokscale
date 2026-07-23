@@ -226,10 +226,13 @@ pub fn build_contribution_graph_for_today(
     )
 }
 
-fn build_common_contribution_graph(daily: &[DailyUsageCommon]) -> UsageGraphData {
+fn build_common_contribution_graph_for_today(
+    daily: &[DailyUsageCommon],
+    today: NaiveDate,
+) -> UsageGraphData {
     build_contribution_graph_for_today_by(
         daily,
-        Local::now().date_naive(),
+        today,
         |usage| usage.date,
         |usage| usage.tokens.total(),
         |usage| usage.cost,
@@ -299,8 +302,8 @@ pub fn calculate_streaks_for_today(daily: &[DailyUsage], today: NaiveDate) -> (u
     calculate_streaks_for_today_by(daily, today, |usage| usage.date)
 }
 
-fn calculate_common_streaks(daily: &[DailyUsageCommon]) -> (u32, u32) {
-    calculate_streaks_for_today_by(daily, Local::now().date_naive(), |usage| usage.date)
+fn calculate_common_streaks_for_today(daily: &[DailyUsageCommon], today: NaiveDate) -> (u32, u32) {
+    calculate_streaks_for_today_by(daily, today, |usage| usage.date)
 }
 
 fn calculate_streaks_for_today_by<T>(
@@ -419,6 +422,8 @@ pub fn find_peak_hour(hourly: &[HourlyUsage]) -> Option<(u32, u64, f64)> {
 #[derive(Default, Serialize, Deserialize)]
 pub struct TuiAcc {
     #[serde(with = "map_as_vec")]
+    usage_totals_by_client: HashMap<Arc<str>, UsageTotalsBucket>,
+    #[serde(with = "map_as_vec")]
     model_map: HashMap<FineModelKey, FineModelBucket>,
     #[serde(with = "map_as_vec")]
     agent_map: HashMap<AgentKey, AgentBucket>,
@@ -427,6 +432,19 @@ pub struct TuiAcc {
     #[serde(with = "map_as_vec")]
     hourly_map: HashMap<NaiveDateTime, HourlyBucket>,
     next_sequence: usize,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct UsageTotalsBucket {
+    tokens: UsageTokenBreakdown,
+    cost: f64,
+}
+
+impl UsageTotalsBucket {
+    fn push(&mut self, msg: &UnifiedMessage, msg_cost: f64) {
+        add_unified_tokens(&mut self.tokens, &msg.tokens);
+        self.cost += msg_cost;
+    }
 }
 
 mod map_as_vec {
@@ -970,6 +988,11 @@ impl TuiAcc {
 
         let msg_cost = sane_cost(msg.cost);
 
+        self.usage_totals_by_client
+            .entry(Arc::clone(&msg.client))
+            .or_default()
+            .push(msg, msg_cost);
+
         let model_entry = self
             .model_map
             .entry(FineModelKey::from_message(msg))
@@ -1269,21 +1292,27 @@ impl TuiAcc {
             .collect();
         hourly.sort_by_key(|usage| std::cmp::Reverse(usage.datetime));
 
-        let mut selected_models: Vec<_> = self
-            .model_map
+        // The Client universe is intentionally tiny compared with the
+        // canonical model map. Stable-folding only Client totals keeps full
+        // and selected projections on the same deterministic cost semantics
+        // without duplicating a second global source of truth.
+        let mut client_totals: Vec<_> = self
+            .usage_totals_by_client
             .iter()
-            .filter(|(key, _)| client_is_selected(&key.client, selected))
+            .filter(|(client, _)| client_is_selected(client, selected))
             .collect();
-        selected_models.sort_by_key(|(_, bucket)| bucket.first_seen);
+        client_totals.sort_by_key(|(client, _)| *client);
+
         let mut total_token_breakdown = UsageTokenBreakdown::default();
         let mut total_cost = 0.0;
-        for (_, bucket) in selected_models {
-            add_tokens(&mut total_token_breakdown, &bucket.tokens);
-            total_cost += bucket.cost;
+        for (_, totals) in client_totals {
+            add_tokens(&mut total_token_breakdown, &totals.tokens);
+            total_cost += totals.cost;
         }
 
-        let graph = build_common_contribution_graph(&daily);
-        let (current_streak, longest_streak) = calculate_common_streaks(&daily);
+        let today = Local::now().date_naive();
+        let graph = build_common_contribution_graph_for_today(&daily, today);
+        let (current_streak, longest_streak) = calculate_common_streaks_for_today(&daily, today);
 
         UsageCommonData {
             agents,
@@ -2866,6 +2895,55 @@ mod tests {
                 .iter()
                 .all(|agent| agent.client == "claude"));
         }
+    }
+
+    #[test]
+    fn common_totals_use_canonical_full_and_client_scoped_folds() {
+        let acc = reprojection_accumulator();
+
+        let full = acc.project_common();
+        assert_eq!(full.total_tokens, 1_850);
+        assert_eq!(full.total_cost.to_bits(), 1.5_f64.to_bits());
+
+        let all_selected = acc.project_common_for_clients(&HashSet::from([
+            ClientId::Claude,
+            ClientId::Codex,
+            ClientId::Qwen,
+        ]));
+        assert_eq!(all_selected.total_tokens, full.total_tokens);
+        assert_eq!(all_selected.total_cost.to_bits(), full.total_cost.to_bits());
+
+        let claude_and_codex =
+            acc.project_common_for_clients(&HashSet::from([ClientId::Claude, ClientId::Codex]));
+        assert_eq!(claude_and_codex.total_tokens, 1_260);
+        assert_eq!(claude_and_codex.total_cost.to_bits(), 1.0_f64.to_bits());
+
+        let qwen = acc.project_common_for_clients(&HashSet::from([ClientId::Qwen]));
+        assert_eq!(qwen.total_tokens, 590);
+        assert_eq!(qwen.total_cost.to_bits(), 0.5_f64.to_bits());
+    }
+
+    #[test]
+    fn canonical_accumulator_round_trip_preserves_full_and_subset_totals() {
+        let acc = reprojection_accumulator();
+        let encoded = serde_json::to_vec(&acc).expect("serialize canonical TUI accumulator");
+        let restored: TuiAcc =
+            serde_json::from_slice(&encoded).expect("deserialize canonical TUI accumulator");
+
+        for group_by in [
+            GroupBy::Model,
+            GroupBy::ClientModel,
+            GroupBy::ClientProviderModel,
+            GroupBy::WorkspaceModel,
+        ] {
+            assert_usage_data_eq(&acc.project(&group_by), &restored.project(&group_by));
+        }
+
+        let selected = HashSet::from([ClientId::Claude, ClientId::Codex]);
+        assert_usage_data_eq(
+            &acc.project_for_clients(&GroupBy::Model, &selected),
+            &restored.project_for_clients(&GroupBy::Model, &selected),
+        );
     }
 
     #[test]

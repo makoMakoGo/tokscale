@@ -76,12 +76,19 @@ The parse pipeline must hold at most one owned copy of any message.
   Common stores `agents`, daily/hourly totals and Client membership, graph,
   report totals, and streaks exactly once. Each Grouped projection stores only
   `models` and the daily/hourly model buckets for its Group By value. The
+  canonical accumulator records token and cost totals per Client during the
+  message fold. Full-universe and proper-subset Common totals derive from those
+  buckets, never from a Grouped model projection. The
   writer serializes borrowed views through a buffered temporary file and
   publishes the complete generation with one rename. The bundle carries a
   SHA-256 digest for the canonical aggregate, which startup verifies before
-  accepting the generation. A reader pins the opened bundle inode, so a view
-  switch cannot combine Common and Grouped data from different refreshes even
-  while a newer generation is being published.
+  accepting the generation. Before acceptance, startup also decodes and
+  validates all four Grouped projections, including inactive ones, for required
+  fields, authoritative model identity, and agreement with Common's
+  daily/hourly shape. Corruption in any projection invalidates the whole
+  bundle. A reader pins the opened bundle inode, so a view switch cannot combine
+  Common and Grouped data from different refreshes even while a newer
+  generation is being published.
 - Startup treats that generation as one logical bundle. A fresh bundle serves
   every local-report tab, including Sessions, without scanning inputs. A stale
   bundle remains wholly visible while one background fold prepares its
