@@ -24,6 +24,7 @@ pub use cache::{
 };
 pub use data::{DataLoader, UsageData};
 pub use event::{Event, EventHandler};
+pub(crate) use export::build_models_export_value;
 use presentation::Presentation;
 pub(crate) use themes::ThemeName;
 
@@ -34,7 +35,9 @@ use std::sync::mpsc::TryRecvError;
 use std::thread;
 use std::time::Duration;
 pub(crate) use ui::widgets::{
-    get_client_display_name, get_provider_display_name, truncate_model_display_name,
+    format_cache_hit_rate, format_cost_per_million, format_ms_per_1k,
+    format_tokens_with_commas as format_usage_tokens_with_commas, get_client_display_name,
+    get_provider_display_name, truncate_model_display_name,
 };
 
 #[cfg(unix)]

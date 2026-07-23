@@ -4,11 +4,9 @@ use tokscale_core::GroupBy;
 
 use super::data::UsageData;
 
-/// Serializes `UsageData` into the pretty-printed JSON payload used by the
-/// `e` export hotkey. Pure: callers are responsible for file I/O and any
-/// user-facing status messages.
-pub fn build_export_json(data: &UsageData, group_by: &GroupBy) -> Result<String> {
-    let export_data = json!({
+/// Canonical headless representation of the TUI Models projection.
+pub(crate) fn build_models_export_value(data: &UsageData, group_by: &GroupBy) -> serde_json::Value {
+    json!({
         "groupBy": group_by.to_string(),
         "models": data.models.iter().map(|m| {
             let mut entry = json!({
@@ -18,6 +16,8 @@ pub fn build_export_json(data: &UsageData, group_by: &GroupBy) -> Result<String>
                 "tokens": {
                     "input": m.tokens.input,
                     "output": m.tokens.output,
+                    "reasoning": m.tokens.reasoning,
+                    "displayedOutput": m.tokens.displayed_output(),
                     "cacheRead": m.tokens.cache_read,
                     "cacheWrite": m.tokens.cache_write,
                     "total": m.tokens.total()
@@ -26,8 +26,6 @@ pub fn build_export_json(data: &UsageData, group_by: &GroupBy) -> Result<String>
                 "performance": m.performance,
                 "sessionCount": m.session_count
             });
-            // Workspace dimension rides in structured fields (ADR 0026),
-            // mirroring the `models` CLI JSON shape.
             if *group_by == GroupBy::WorkspaceModel {
                 entry["workspaceKey"] = m
                     .workspace_key
@@ -40,39 +38,63 @@ pub fn build_export_json(data: &UsageData, group_by: &GroupBy) -> Result<String>
             }
             entry
         }).collect::<Vec<_>>(),
-        "agents": data.agents.iter().map(|a| json!({
-            "agent": a.agent,
-            "clients": a.clients,
-            "tokens": {
-                "input": a.tokens.input,
-                "output": a.tokens.output,
-                "cacheRead": a.tokens.cache_read,
-                "cacheWrite": a.tokens.cache_write,
-                "total": a.tokens.total()
-            },
-            "cost": a.cost,
-            "messageCount": a.message_count,
-            "instanceCount": a.instance_count
-        })).collect::<Vec<_>>(),
-        "daily": data.daily.iter().map(|d| json!({
-            "date": d.date.to_string(),
-            "tokens": {
-                "input": d.tokens.input,
-                "output": d.tokens.output,
-                "cacheRead": d.tokens.cache_read,
-                "cacheWrite": d.tokens.cache_write,
-                "total": d.tokens.total()
-            },
-            "messageCount": d.message_count,
-            "turnCount": d.turn_count,
-            "cost": d.cost
-        })).collect::<Vec<_>>(),
         "totals": {
             "tokens": data.total_tokens,
             "cost": data.total_cost
-        },
-        "health": data.health
-    });
+        }
+    })
+}
+
+/// Serializes `UsageData` into the pretty-printed JSON payload used by the
+/// `e` export hotkey. Pure: callers are responsible for file I/O and any
+/// user-facing status messages.
+pub fn build_export_json(data: &UsageData, group_by: &GroupBy) -> Result<String> {
+    let mut export_data = build_models_export_value(data, group_by);
+    let export = export_data
+        .as_object_mut()
+        .expect("models export is a JSON object");
+    export.insert(
+        "agents".to_string(),
+        json!(data
+            .agents
+            .iter()
+            .map(|a| json!({
+                "agent": a.agent,
+                "clients": a.clients,
+                "tokens": {
+                    "input": a.tokens.input,
+                    "output": a.tokens.output,
+                    "cacheRead": a.tokens.cache_read,
+                    "cacheWrite": a.tokens.cache_write,
+                    "total": a.tokens.total()
+                },
+                "cost": a.cost,
+                "messageCount": a.message_count,
+                "instanceCount": a.instance_count
+            }))
+            .collect::<Vec<_>>()),
+    );
+    export.insert(
+        "daily".to_string(),
+        json!(data
+            .daily
+            .iter()
+            .map(|d| json!({
+                "date": d.date.to_string(),
+                "tokens": {
+                    "input": d.tokens.input,
+                    "output": d.tokens.output,
+                    "cacheRead": d.tokens.cache_read,
+                    "cacheWrite": d.tokens.cache_write,
+                    "total": d.tokens.total()
+                },
+                "messageCount": d.message_count,
+                "turnCount": d.turn_count,
+                "cost": d.cost
+            }))
+            .collect::<Vec<_>>()),
+    );
+    export.insert("health".to_string(), json!(data.health));
 
     Ok(serde_json::to_string_pretty(&export_data)?)
 }

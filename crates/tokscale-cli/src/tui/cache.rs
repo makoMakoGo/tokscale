@@ -397,7 +397,6 @@ mod bundle_tests {
                 .iter()
                 .all(|model| !model.client.contains("opencode")));
         }
-        assert!(store.project(&GroupBy::Session, &clients).is_err());
     }
 
     #[test]
@@ -1690,9 +1689,6 @@ fn projection_field(group_by: &GroupBy) -> anyhow::Result<&'static str> {
         GroupBy::ClientModel => Ok("clientModel"),
         GroupBy::ClientProviderModel => Ok("clientProviderModel"),
         GroupBy::WorkspaceModel => Ok("workspaceModel"),
-        GroupBy::Session | GroupBy::ClientSession => {
-            anyhow::bail!("session groupings are not public TUI usage projections")
-        }
     }
 }
 

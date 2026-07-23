@@ -37,10 +37,6 @@ impl<T> IdentitySet<T>
 where
     T: Eq + Hash,
 {
-    pub(crate) fn one(value: T) -> Self {
-        Self::One(value)
-    }
-
     pub(crate) fn insert(&mut self, value: T) -> bool {
         match self {
             Self::Empty => {
@@ -156,19 +152,11 @@ pub(crate) enum GroupedModelKey {
         workspace: WorkspaceKey,
         model: Arc<str>,
     },
-    SessionModel {
-        session: Arc<str>,
-        model: Arc<str>,
-    },
-    ClientSessionModel {
-        client: Arc<str>,
-        session: Arc<str>,
-        model: Arc<str>,
-    },
 }
 
 impl GroupedModelKey {
     /// Match the grouping mode before touching unrelated identity fields.
+    #[cfg(test)]
     pub(crate) fn from_message(group_by: &GroupBy, msg: &UnifiedMessage) -> Self {
         match group_by {
             GroupBy::Model => Self::Model(Arc::clone(&msg.model_id)),
@@ -183,15 +171,6 @@ impl GroupedModelKey {
             },
             GroupBy::WorkspaceModel => Self::WorkspaceModel {
                 workspace: WorkspaceKey::from_message(msg),
-                model: Arc::clone(&msg.model_id),
-            },
-            GroupBy::Session => Self::SessionModel {
-                session: Arc::clone(&msg.session_id),
-                model: Arc::clone(&msg.model_id),
-            },
-            GroupBy::ClientSession => Self::ClientSessionModel {
-                client: Arc::clone(&msg.client),
-                session: Arc::clone(&msg.session_id),
                 model: Arc::clone(&msg.model_id),
             },
         }
@@ -237,21 +216,6 @@ impl GroupedModelKey {
                 }
                 push_len_prefixed(&mut output, model);
             }
-            Self::SessionModel { session, model } => {
-                output.push_str("sm|");
-                push_len_prefixed(&mut output, session);
-                push_len_prefixed(&mut output, model);
-            }
-            Self::ClientSessionModel {
-                client,
-                session,
-                model,
-            } => {
-                output.push_str("csm|");
-                push_len_prefixed(&mut output, client);
-                push_len_prefixed(&mut output, session);
-                push_len_prefixed(&mut output, model);
-            }
         }
         output
     }
@@ -281,10 +245,10 @@ impl HourlyModelKey {
     }
 }
 
-/// Finest-granularity model identity: every dimension a `GroupBy` projection
-/// can re-fold from (`client, provider, workspace, session, model`). The TUI
-/// accumulator keys its canonical buckets with this so switching groupings is
-/// an in-memory re-fold instead of a rescan (issue #161).
+/// Finest-granularity model identity for every public `GroupBy` dimension,
+/// plus session identity so projections retain an exact distinct-session
+/// count. The TUI accumulator keys its canonical buckets with this so
+/// switching groupings is an in-memory re-fold instead of a rescan.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FineModelKey {
     pub(crate) client: Arc<str>,
@@ -320,15 +284,6 @@ impl FineModelKey {
             },
             GroupBy::WorkspaceModel => GroupedModelKey::WorkspaceModel {
                 workspace: self.workspace.clone(),
-                model: Arc::clone(&self.model),
-            },
-            GroupBy::Session => GroupedModelKey::SessionModel {
-                session: Arc::clone(&self.session),
-                model: Arc::clone(&self.model),
-            },
-            GroupBy::ClientSession => GroupedModelKey::ClientSessionModel {
-                client: Arc::clone(&self.client),
-                session: Arc::clone(&self.session),
                 model: Arc::clone(&self.model),
             },
         }
@@ -426,14 +381,6 @@ mod tests {
             GroupedModelKey::from_message(&GroupBy::WorkspaceModel, &msg),
             GroupedModelKey::WorkspaceModel { .. }
         ));
-        assert!(matches!(
-            GroupedModelKey::from_message(&GroupBy::Session, &msg),
-            GroupedModelKey::SessionModel { .. }
-        ));
-        assert!(matches!(
-            GroupedModelKey::from_message(&GroupBy::ClientSession, &msg),
-            GroupedModelKey::ClientSessionModel { .. }
-        ));
     }
 
     #[test]
@@ -495,8 +442,6 @@ mod tests {
             (GroupBy::ClientModel, "v1|cm|"),
             (GroupBy::ClientProviderModel, "v1|cpm|"),
             (GroupBy::WorkspaceModel, "v1|wmk|"),
-            (GroupBy::Session, "v1|sm|"),
-            (GroupBy::ClientSession, "v1|csm|"),
         ];
         for (group_by, prefix) in cases {
             assert!(GroupedModelKey::from_message(&group_by, &msg)

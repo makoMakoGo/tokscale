@@ -24,10 +24,6 @@ const CLAUDE_DESKTOP_MESSAGE: &str =
 
 const CLAUDE_DESKTOP_HELP: &str = "Claude Desktop chat storage and Claude data exports do not expose a documented per-message token ledger. Use `tokscale usage` for Claude subscription quota bars; organization/API billing requires Anthropic Admin Usage/Cost API outside local scanning.";
 
-pub fn diagnostics_for_clients_row(home_dir: &Path) -> Vec<ClientDiagnostic> {
-    claude_diagnostics(home_dir, true)
-}
-
 pub fn diagnostics_for_empty_explicit_report(
     home_dir: &Path,
     clients: &Option<Vec<String>>,
@@ -37,7 +33,7 @@ pub fn diagnostics_for_empty_explicit_report(
         return Vec::new();
     }
 
-    claude_diagnostics(home_dir, false)
+    claude_diagnostics(home_dir)
 }
 
 fn explicitly_requests_claude(clients: &Option<Vec<String>>) -> bool {
@@ -46,7 +42,7 @@ fn explicitly_requests_claude(clients: &Option<Vec<String>>) -> bool {
         .is_some_and(|ids| ids.iter().any(|id| id == "claude"))
 }
 
-fn claude_diagnostics(home_dir: &Path, include_info: bool) -> Vec<ClientDiagnostic> {
+fn claude_diagnostics(home_dir: &Path) -> Vec<ClientDiagnostic> {
     let mut diagnostics = Vec::new();
 
     let desktop_paths: Vec<PathBuf> = claude_desktop_storage_paths(home_dir)
@@ -61,21 +57,6 @@ fn claude_diagnostics(home_dir: &Path, include_info: bool) -> Vec<ClientDiagnost
             message: CLAUDE_DESKTOP_MESSAGE,
             help: CLAUDE_DESKTOP_HELP,
             paths: diagnostic_paths(home_dir, desktop_paths),
-        });
-    }
-
-    let stats_cache = home_dir.join(".claude").join("stats-cache.json");
-    if include_info && stats_cache.exists() {
-        diagnostics.push(ClientDiagnostic {
-            code: "claude_stats_cache_not_imported",
-            severity: "info",
-            message: "Claude Code stats-cache.json was detected, but Tokscale does not import aggregate cache totals as session usage.",
-            help: "stats-cache.json contains aggregate /usage data without stable per-message/session attribution, so importing it would risk double counting or fabricated model/session totals.",
-            paths: vec![DiagnosticPath {
-                label: "statsCache",
-                path: stats_cache.to_string_lossy().to_string(),
-                exists: true,
-            }],
         });
     }
 

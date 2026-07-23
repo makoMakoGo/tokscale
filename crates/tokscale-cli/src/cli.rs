@@ -134,18 +134,6 @@ pub(crate) fn legacy_invocation_hint(arguments: &[String]) -> Option<String> {
 fn explicit_command_migration_hint(command: &Command, arguments: Vec<String>) -> Option<String> {
     let current = arguments.first()?.as_str();
 
-    // Graph already emits JSON, so its removed --json flag is redundant. A
-    // migration hint must preserve the graph product rather than redirecting
-    // the user to a syntactically valid but unrelated report command.
-    if current == "graph" && arguments.iter().any(|argument| argument == "--json") {
-        let replacement = arguments
-            .iter()
-            .filter(|argument| argument.as_str() != "--json")
-            .cloned()
-            .collect::<Vec<_>>();
-        return valid_replacement_hint(replacement);
-    }
-
     // Cross-command migration is an explicit product decision, not something
     // Clap ownership can prove. The only intentional explicit-command move is
     // from the interactive TUI to the canonical Models report.
@@ -315,16 +303,6 @@ pub(crate) enum Commands {
     Tui(TuiArgs),
     #[command(about = "Show model usage report")]
     Models(ModelsArgs),
-    #[command(about = "Show monthly usage report")]
-    Monthly(ReportArgs),
-    #[command(about = "Show hourly usage report")]
-    Hourly(ReportArgs),
-    #[command(about = "Show session time metrics")]
-    TimeMetrics(ReportArgs),
-    #[command(about = "Show local scan locations and session counts")]
-    Clients(ClientsArgs),
-    #[command(about = "Export contribution graph data as JSON")]
-    Graph(GraphArgs),
     #[command(about = "Query model pricing")]
     Pricing {
         #[command(subcommand)]
@@ -342,17 +320,12 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         subcommand: CacheSubcommand,
     },
-    #[command(about = "Warp/Oz aggregate usage integration commands")]
-    Warp {
-        #[command(subcommand)]
-        subcommand: WarpSubcommand,
-    },
 }
 
 #[derive(Args, Debug, Default)]
 pub(crate) struct TuiArgs {
     #[arg(long, value_enum, help = "Open a specific tab")]
-    pub(crate) tab: Option<TuiTab>,
+    pub(crate) tab: Option<Tab>,
     #[arg(short, long, value_parser = parse_theme_arg)]
     pub(crate) theme: Option<String>,
     #[arg(
@@ -380,8 +353,8 @@ pub(crate) struct ModelsArgs {
     #[arg(
         long,
         value_name = "STRATEGY",
-        default_value = "client,model",
-        help = "Grouping strategy: model, client,model, client,provider,model, workspace,model, session,model, client,session,model"
+        default_value = "model",
+        help = "Use the same grouping as the TUI Models view: model, client,model, client,provider,model, or workspace,model"
     )]
     pub(crate) group_by: GroupBy,
 }
@@ -390,28 +363,6 @@ pub(crate) struct ModelsArgs {
 pub(crate) struct ReportArgs {
     #[arg(long, help = "Output as JSON")]
     pub(crate) json: bool,
-    #[command(flatten)]
-    pub(crate) input: InputScopeArgs,
-    #[command(flatten)]
-    pub(crate) date: DateRangeFlags,
-    #[arg(long, help = "Write processing time to stderr")]
-    pub(crate) benchmark: bool,
-    #[arg(long, help = "Disable progress animation")]
-    pub(crate) no_spinner: bool,
-}
-
-#[derive(Args, Debug)]
-pub(crate) struct ClientsArgs {
-    #[arg(long, help = "Output as JSON")]
-    pub(crate) json: bool,
-    #[command(flatten)]
-    pub(crate) input: InputScopeArgs,
-}
-
-#[derive(Args, Debug)]
-pub(crate) struct GraphArgs {
-    #[arg(long, value_name = "PATH", help = "Write JSON to a file")]
-    pub(crate) output: Option<PathBuf>,
     #[command(flatten)]
     pub(crate) input: InputScopeArgs,
     #[command(flatten)]
@@ -567,63 +518,6 @@ pub(crate) enum CacheSubcommand {
     Prune,
 }
 
-#[derive(Subcommand, Debug)]
-pub(crate) enum WarpSubcommand {
-    #[command(about = "Save Warp GraphQL authentication")]
-    Login {
-        #[arg(long, help = "Warp bearer token or cookie header value")]
-        token: Option<String>,
-        #[arg(long, help = "Treat token as a Cookie header")]
-        cookie: bool,
-    },
-    #[command(about = "Remove cached Warp credentials")]
-    Logout {
-        #[arg(long, help = "Also delete cached Warp aggregate usage")]
-        purge_cache: bool,
-    },
-    #[command(about = "Show Warp aggregate sync status")]
-    Status {
-        #[arg(long, help = "Output as JSON")]
-        json: bool,
-    },
-    #[command(about = "Sync Warp aggregate usage into local cache")]
-    Sync {
-        #[arg(long, help = "Output as JSON")]
-        json: bool,
-    },
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TuiTab {
-    Overview,
-    Models,
-    Monthly,
-    Weekly,
-    Daily,
-    Hourly,
-    Stats,
-    Agents,
-    Sessions,
-    Usage,
-}
-
-impl From<TuiTab> for Tab {
-    fn from(value: TuiTab) -> Self {
-        match value {
-            TuiTab::Overview => Tab::Overview,
-            TuiTab::Models => Tab::Models,
-            TuiTab::Monthly => Tab::Monthly,
-            TuiTab::Weekly => Tab::Weekly,
-            TuiTab::Daily => Tab::Daily,
-            TuiTab::Hourly => Tab::Hourly,
-            TuiTab::Stats => Tab::Stats,
-            TuiTab::Agents => Tab::Agents,
-            TuiTab::Sessions => Tab::Sessions,
-            TuiTab::Usage => Tab::Usage,
-        }
-    }
-}
-
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PricingSource {
     Custom,
@@ -706,21 +600,6 @@ pub(crate) struct TuiPlan {
 }
 
 #[derive(Debug)]
-pub(crate) struct ClientsPlan {
-    pub(crate) json: bool,
-    pub(crate) input: ResolvedInputScope,
-}
-
-#[derive(Debug)]
-pub(crate) struct GraphPlan {
-    pub(crate) output: Option<PathBuf>,
-    pub(crate) input: ResolvedInputScope,
-    pub(crate) date: ResolvedDateRange,
-    pub(crate) benchmark: bool,
-    pub(crate) no_spinner: bool,
-}
-
-#[derive(Debug)]
 pub(crate) struct WrappedPlan {
     pub(crate) output: Option<String>,
     pub(crate) year: Option<String>,
@@ -735,17 +614,11 @@ pub(crate) struct WrappedPlan {
 pub(crate) enum ExecutionPlan {
     Tui(TuiPlan),
     Models(ModelsPlan),
-    Monthly(LocalReportPlan),
-    Hourly(LocalReportPlan),
-    TimeMetrics(LocalReportPlan),
-    Clients(ClientsPlan),
-    Graph(GraphPlan),
     Pricing(PricingSubcommand),
     Usage { json: bool },
     Wrapped(WrappedPlan),
     CachePrune,
     CacheWarm(ResolvedInputScope),
-    Warp(WarpSubcommand),
 }
 
 impl ExecutionPlan {
@@ -756,20 +629,6 @@ impl ExecutionPlan {
                 report: resolve_report(args.report)?,
                 group_by: args.group_by,
             })),
-            Commands::Monthly(args) => resolve_report(args).map(Self::Monthly),
-            Commands::Hourly(args) => resolve_report(args).map(Self::Hourly),
-            Commands::TimeMetrics(args) => resolve_report(args).map(Self::TimeMetrics),
-            Commands::Clients(args) => Ok(Self::Clients(ClientsPlan {
-                json: args.json,
-                input: resolve_input(args.input)?,
-            })),
-            Commands::Graph(args) => Ok(Self::Graph(GraphPlan {
-                output: args.output,
-                input: resolve_input(args.input)?,
-                date: resolve_date(args.date)?,
-                benchmark: args.benchmark,
-                no_spinner: args.no_spinner,
-            })),
             Commands::Pricing { subcommand } => Ok(Self::Pricing(subcommand)),
             Commands::Usage { json } => Ok(Self::Usage { json }),
             Commands::Wrapped(args) => resolve_wrapped(args).map(Self::Wrapped),
@@ -777,7 +636,6 @@ impl ExecutionPlan {
                 CacheSubcommand::Prune => Ok(Self::CachePrune),
                 CacheSubcommand::Warm { input } => resolve_input(input).map(Self::CacheWarm),
             },
-            Commands::Warp { subcommand } => Ok(Self::Warp(subcommand)),
         }
     }
 }
@@ -827,7 +685,7 @@ fn resolve_tui(args: TuiArgs, terminal: TerminalState) -> Result<TuiPlan, CliFai
     }
 
     let input = resolve_input(args.input)?;
-    let initial_tab = args.tab.map(Tab::from);
+    let initial_tab = args.tab;
     if initial_tab == Some(Tab::Usage) {
         let settings = tui::settings::Settings::load_for_home_override(
             input.home.as_deref().map(std::path::Path::new),

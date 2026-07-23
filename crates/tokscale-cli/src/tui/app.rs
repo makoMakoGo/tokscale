@@ -97,7 +97,7 @@ impl ProjectionBackend {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
 pub enum Tab {
     Overview,
     Usage,

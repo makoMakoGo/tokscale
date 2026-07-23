@@ -1,12 +1,10 @@
 //! TUI-facing usage view types and the aggregation that produces them.
 //!
 //! These types (`UsageData`, `UsageModelEntry`, `AgentEntry`, `DailyUsage`,
-//! `HourlyUsage`, …) are the TUI's view models. They live in core so the
-//! core's aggregation engine can produce them directly (#37: one aggregation
-//! site), but they stay distinct from the report types in
-//! [`crate`] (e.g. core `TokenBreakdown` is the parsed `i64` form; the
-//! [`UsageTokenBreakdown`] here is the sanitized `u64` form the TUI
-//! renders).
+//! `HourlyUsage`, …) are the canonical presentation models shared by the TUI
+//! and headless renderers. The parsed [`crate::TokenBreakdown`] remains the
+//! signed input form; [`UsageTokenBreakdown`] is the sanitized unsigned form
+//! presented to users.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -97,8 +95,7 @@ pub struct DailyModelInfo {
     pub provider: String,
     /// Bare canonical model ID: the authoritative model identity (ADR 0026).
     pub model_id: String,
-    /// Pure display label; never carries the workspace dimension. Session
-    /// groupings still prefix the session id ("session / model").
+    /// Pure display label; never carries another grouping dimension.
     pub display_name: String,
     /// Workspace dimension, populated only under `GroupBy::WorkspaceModel`.
     pub workspace_key: Option<String>,

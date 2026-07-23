@@ -236,39 +236,6 @@ fn push_and_finish(messages: &[UnifiedMessage], views: ViewSet, group_by: GroupB
                 + graph_days
         })
         .unwrap_or(0);
-    rows += views
-        .model_report
-        .as_ref()
-        .map(|report| report.entries.len())
-        .unwrap_or(0);
-    rows += views
-        .monthly_report
-        .as_ref()
-        .map(|report| report.entries.len())
-        .unwrap_or(0);
-    rows += views
-        .hourly_report
-        .as_ref()
-        .map(|report| report.entries.len())
-        .unwrap_or(0);
-    rows += views
-        .graph
-        .as_ref()
-        .map(|graph| graph.contributions.len())
-        .unwrap_or(0);
-    rows += views
-        .session_contributions
-        .as_ref()
-        .map(|sessions| sessions.len())
-        .unwrap_or(0);
-    rows += views
-        .agent_usage
-        .as_ref()
-        .map(|agents| agents.len())
-        .unwrap_or(0);
-    if views.time_metrics.is_some() {
-        rows += 1;
-    }
     rows
 }
 
@@ -291,63 +258,20 @@ fn bench_aggregation_engine(c: &mut Criterion) {
             Cardinality::Low,
         ),
         (
-            "model_only",
-            ViewSet::MODEL,
-            GroupBy::ClientProviderModel,
-            Cardinality::Low,
-        ),
-        (
-            "workspace_model",
-            ViewSet::MODEL,
-            GroupBy::WorkspaceModel,
-            Cardinality::Low,
-        ),
-        (
-            "monthly_hourly",
-            ViewSet::MONTHLY | ViewSet::HOURLY,
-            GroupBy::ClientModel,
-            Cardinality::Low,
-        ),
-        (
-            "graph_sessions_time",
-            ViewSet::GRAPH | ViewSet::SESSIONS | ViewSet::TIME_METRICS,
-            GroupBy::ClientModel,
-            Cardinality::Low,
-        ),
-        (
-            "all_views",
-            ViewSet::TUI
-                | ViewSet::MODEL
-                | ViewSet::MONTHLY
-                | ViewSet::HOURLY
-                | ViewSet::GRAPH
-                | ViewSet::SESSIONS
-                | ViewSet::TIME_METRICS
-                | ViewSet::AGENTS,
-            GroupBy::ClientProviderModel,
-            Cardinality::Low,
-        ),
-        (
-            "tui_session_high_cardinality",
+            "tui_client_provider_model",
             ViewSet::TUI,
-            GroupBy::Session,
+            GroupBy::ClientProviderModel,
+            Cardinality::Low,
+        ),
+        (
+            "tui_model_high_session_cardinality",
+            ViewSet::TUI,
+            GroupBy::Model,
             Cardinality::High,
         ),
         (
             "tui_workspace_high_cardinality",
             ViewSet::TUI,
-            GroupBy::WorkspaceModel,
-            Cardinality::High,
-        ),
-        (
-            "model_session_high_cardinality",
-            ViewSet::MODEL,
-            GroupBy::Session,
-            Cardinality::High,
-        ),
-        (
-            "model_workspace_high_cardinality",
-            ViewSet::MODEL,
             GroupBy::WorkspaceModel,
             Cardinality::High,
         ),
@@ -413,7 +337,7 @@ fn bench_tui_accumulator_project(c: &mut Criterion) {
             low_messages,
             GroupBy::ClientProviderModel,
         ),
-        ("high_session", high_messages, GroupBy::Session),
+        ("high_model", high_messages, GroupBy::Model),
         (
             "high_workspace_model",
             high_messages,
@@ -486,11 +410,10 @@ fn bench_tui_accumulator_lifecycle(c: &mut Criterion) {
     let no_switches: [GroupBy; 0] = [];
     let one_switch = [GroupBy::WorkspaceModel];
     let two_switches = [GroupBy::WorkspaceModel, GroupBy::ClientProviderModel];
-    let four_switches = [
+    let three_switches = [
+        GroupBy::ClientModel,
         GroupBy::WorkspaceModel,
         GroupBy::ClientProviderModel,
-        GroupBy::Session,
-        GroupBy::ClientSession,
     ];
     let cases: [(&str, &[GroupBy]); 4] = [
         ("build_plus_initial_model_projection", &no_switches),
@@ -503,8 +426,8 @@ fn bench_tui_accumulator_lifecycle(c: &mut Criterion) {
             &two_switches,
         ),
         (
-            "build_plus_initial_model_plus_4_switches_to_workspace_client_provider_session_client_session",
-            &four_switches,
+            "build_plus_initial_model_plus_3_public_grouping_switches",
+            &three_switches,
         ),
     ];
     let messages = production_shaped_messages();

@@ -164,52 +164,6 @@ fn create_empty_fixture_dir() -> TempDir {
     tmp
 }
 
-fn create_timezone_boundary_fixture_dir() -> TempDir {
-    let tmp = TempDir::new().expect("failed to create temp dir");
-    let base = tmp.path();
-    prime_pricing_cache(base);
-
-    let conn = create_opencode_sqlite_at(&base.join(".local/share/opencode/opencode.db"));
-
-    // 2026-03-02 18:00:00 UTC = 2026-03-02 10:00:00 in America/Los_Angeles
-    let msg_a = r#"{
-        "id": "msg_a",
-        "sessionID": "session1",
-        "role": "assistant",
-        "modelID": "claude-sonnet-4-20250514",
-        "providerID": "anthropic",
-        "cost": 0.05,
-        "tokens": {
-            "input": 1000,
-            "output": 500,
-            "reasoning": 0,
-            "cache": { "read": 200, "write": 50 }
-        },
-        "time": { "created": 1772474400000.0 }
-    }"#;
-    insert_opencode_message(&conn, "msg_a", "session1", "", msg_a);
-
-    // 2026-03-03 04:30:00 UTC = 2026-03-02 20:30:00 in America/Los_Angeles
-    let msg_b = r#"{
-        "id": "msg_b",
-        "sessionID": "session1",
-        "role": "assistant",
-        "modelID": "claude-sonnet-4-20250514",
-        "providerID": "anthropic",
-        "cost": 0.03,
-        "tokens": {
-            "input": 800,
-            "output": 300,
-            "reasoning": 0,
-            "cache": { "read": 150, "write": 30 }
-        },
-        "time": { "created": 1772512200000.0 }
-    }"#;
-    insert_opencode_message(&conn, "msg_b", "session1", "", msg_b);
-
-    tmp
-}
-
 fn create_qwen_workspace_fixture_dir() -> TempDir {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let base = tmp.path();
@@ -556,6 +510,23 @@ fn offline_cmd_with_home(tmp: &Path) -> Command {
     cmd
 }
 
+fn model_rows(document: &serde_json::Value) -> &[serde_json::Value] {
+    document["data"]["models"]
+        .as_array()
+        .expect("models JSON must contain data.models")
+}
+
+fn model_token_sum(document: &serde_json::Value, field: &str) -> u64 {
+    model_rows(document)
+        .iter()
+        .map(|model| {
+            model["tokens"][field].as_u64().unwrap_or_else(|| {
+                panic!("model token field `{field}` must be an unsigned integer")
+            })
+        })
+        .sum()
+}
+
 fn write_pricing_cache(base: &Path, timestamp: u64) {
     let litellm = format!(
         r#"{{"timestamp":{},"data":{{"gpt-4o":{{"input_cost_per_token":0.0000025,"output_cost_per_token":0.00001}},"claude-sonnet-4-20250514":{{"input_cost_per_token":0.000003,"output_cost_per_token":0.000015}}}}}}"#,
@@ -652,43 +623,6 @@ fn settings_json_path(base: &Path) -> std::path::PathBuf {
     }
 }
 
-fn write_codex_token_session(dir: &Path, name: &str, model: &str, input: i64, output: i64) {
-    fs::create_dir_all(dir).unwrap();
-    let turn_context = serde_json::json!({
-        "timestamp": "2026-01-01T00:00:00Z",
-        "type": "turn_context",
-        "payload": {
-            "model": model
-        }
-    });
-    let token_count = serde_json::json!({
-        "timestamp": "2026-01-01T00:00:01Z",
-        "type": "event_msg",
-        "payload": {
-            "type": "token_count",
-            "info": {
-                "total_token_usage": {
-                    "input_tokens": input,
-                    "cached_input_tokens": 0,
-                    "output_tokens": output,
-                    "total_tokens": input + output
-                },
-                "last_token_usage": {
-                    "input_tokens": input,
-                    "cached_input_tokens": 0,
-                    "output_tokens": output,
-                    "total_tokens": input + output
-                }
-            }
-        }
-    });
-    fs::write(
-        dir.join(name),
-        format!("{}\n{}\n", turn_context, token_count),
-    )
-    .unwrap();
-}
-
 // ── Existing tests ─────────────────────────────────────────────────────────
 
 #[test]
@@ -728,17 +662,11 @@ fn test_models_command_help() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Show model usage report"));
-}
-
-#[test]
-fn test_monthly_command_help() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("monthly")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Show monthly usage report"));
+        .stdout(predicate::str::contains("Show model usage report"))
+        .stdout(predicate::str::contains("--group-by <STRATEGY>"))
+        .stdout(predicate::str::contains("default: model"))
+        .stdout(predicate::str::contains("client,provider,model"))
+        .stdout(predicate::str::contains("workspace,model"));
 }
 
 #[test]
@@ -751,16 +679,6 @@ fn test_pricing_command_help() {
         .stdout(predicate::str::contains("Query model pricing"))
         .stdout(predicate::str::contains("lookup"))
         .stdout(predicate::str::contains("overrides"));
-}
-
-#[test]
-fn test_clients_command_help() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("clients")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Show local scan locations"));
 }
 
 #[test]
@@ -796,7 +714,7 @@ fn test_cache_prune_surfaces_unknown_shard_magic() {
 
 #[test]
 fn test_removed_integration_namespaces_are_not_registered() {
-    for command in ["codex", "cursor", "trae"] {
+    for command in ["codex", "cursor", "trae", "warp"] {
         cargo_bin_cmd!("tokscale")
             .args([command, "--help"])
             .assert()
@@ -805,13 +723,25 @@ fn test_removed_integration_namespaces_are_not_registered() {
 }
 
 #[test]
-fn test_graph_command_help() {
-    let mut cmd = cargo_bin_cmd!("tokscale");
-    cmd.arg("graph")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Export contribution graph data"));
+fn removed_duplicate_report_commands_are_not_registered() {
+    for command in [
+        "monthly",
+        "hourly",
+        "time-metrics",
+        "graph",
+        "clients",
+        "doctor",
+        "daily",
+        "weekly",
+        "stats",
+        "agents",
+        "sessions",
+    ] {
+        cargo_bin_cmd!("tokscale")
+            .args([command, "--help"])
+            .assert()
+            .code(2);
+    }
 }
 
 #[test]
@@ -886,13 +816,6 @@ fn test_help_exposes_only_leaf_owned_options() {
         .stdout(predicate::str::contains("--json"))
         .stdout(predicate::str::contains("--client"))
         .stdout(predicate::str::contains("--group-by"));
-
-    cargo_bin_cmd!("tokscale")
-        .args(["monthly", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--json"))
-        .stdout(predicate::str::contains("--group-by").not());
 
     cargo_bin_cmd!("tokscale")
         .args(["tui", "--help"])
@@ -1179,17 +1102,6 @@ fn test_models_with_year_filter() {
 }
 
 #[test]
-fn test_monthly_with_date_filters() {
-    let tmp = create_temp_fixture_dir();
-    cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
-        .args(["--since", "2025-01-01", "--until", "2025-12-31"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("2025-01"));
-}
-
-#[test]
 fn test_models_home_override_ignores_conflicting_xdg_env() {
     let real_home = create_temp_fixture_dir();
     let conflicting_home = create_conflicting_opencode_fixture_dir();
@@ -1214,70 +1126,8 @@ fn test_models_home_override_ignores_conflicting_xdg_env() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["data"]["totalMessages"].as_i64().unwrap(), 3);
-    assert_eq!(json["data"]["totalInput"].as_i64().unwrap(), 2400);
-    assert_eq!(json["data"]["totalOutput"].as_i64().unwrap(), 1000);
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("gemini-2.5-pro"));
-}
-
-#[test]
-fn test_monthly_home_override_ignores_conflicting_xdg_env() {
-    let real_home = create_temp_fixture_dir();
-    let conflicting_home = create_conflicting_opencode_fixture_dir();
-
-    let output = cmd_with_conflicting_env(conflicting_home.path())
-        .args([
-            "monthly",
-            "--json",
-            "--client",
-            "opencode",
-            "--no-spinner",
-            "--home",
-            real_home.path().to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["data"]["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 2);
-    assert!(entries.iter().any(|entry| entry["month"] == "2024-06"));
-    assert!(entries.iter().any(|entry| entry["month"] == "2025-01"));
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("gemini-2.5-pro"));
-}
-
-#[test]
-fn test_graph_home_override_ignores_conflicting_xdg_env() {
-    let real_home = create_temp_fixture_dir();
-    let conflicting_home = create_conflicting_opencode_fixture_dir();
-
-    let output = cmd_with_conflicting_env(conflicting_home.path())
-        .args([
-            "graph",
-            "--client",
-            "opencode",
-            "--no-spinner",
-            "--home",
-            real_home.path().to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let contributions = json["data"]["contributions"].as_array().unwrap();
-    assert_eq!(contributions.len(), 2);
+    assert_eq!(model_token_sum(&json, "input"), 2400);
+    assert_eq!(model_token_sum(&json, "output"), 1000);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("gemini-2.5-pro"));
 }
 
@@ -1307,10 +1157,9 @@ fn test_models_home_override_ignores_conflicting_codex_home_env() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["data"]["totalMessages"].as_i64().unwrap(), 1);
-    assert_eq!(json["data"]["totalInput"].as_i64().unwrap(), 100);
-    assert_eq!(json["data"]["totalOutput"].as_i64().unwrap(), 30);
-    assert_eq!(json["data"]["totalCacheRead"].as_i64().unwrap(), 20);
+    assert_eq!(model_token_sum(&json, "input"), 100);
+    assert_eq!(model_token_sum(&json, "output"), 30);
+    assert_eq!(model_token_sum(&json, "cacheRead"), 20);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("\"gpt-5\""));
 }
 
@@ -1325,86 +1174,6 @@ fn test_tui_accepts_home_but_requires_an_interactive_terminal() {
         .stderr(predicate::str::contains(
             "TUI requires an interactive terminal",
         ));
-}
-
-#[test]
-fn test_clients_home_override_uses_explicit_home_for_json() {
-    let real_home = create_codex_fixture_dir();
-    let conflicting_home = create_conflicting_codex_fixture_dir();
-    write_codex_token_session(
-        &real_home.path().join(".codex/sessions"),
-        "session-2.jsonl",
-        "gpt-4o-mini",
-        80,
-        20,
-    );
-
-    let output = cmd_with_conflicting_env(conflicting_home.path())
-        .env("CODEX_HOME", conflicting_home.path().join(".codex"))
-        .args([
-            "clients",
-            "--home",
-            real_home.path().to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let codex = json["data"]["clients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["client"] == "codex")
-        .unwrap();
-    assert_eq!(
-        codex["sessionsPath"],
-        serde_json::json!(real_home.path().join(".codex/sessions"))
-    );
-    assert_eq!(codex["messageCount"].as_i64().unwrap(), 2);
-}
-
-#[test]
-fn test_clients_home_override_ignores_copilot_exporter_env() {
-    let real_home = create_empty_fixture_dir();
-    let conflicting_home = create_empty_fixture_dir();
-    let exporter_file = conflicting_home.path().join("copilot-host.jsonl");
-    fs::write(&exporter_file, "{}").unwrap();
-
-    let output = cmd_with_conflicting_env(conflicting_home.path())
-        .env("COPILOT_OTEL_FILE_EXPORTER_PATH", &exporter_file)
-        .args([
-            "clients",
-            "--home",
-            real_home.path().to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let copilot = json["data"]["clients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["client"] == "copilot")
-        .unwrap();
-    assert!(
-        copilot.get("exporterStatus").is_none(),
-        "explicit --home diagnostics must not report host COPILOT_OTEL_FILE_EXPORTER_PATH: {copilot:#?}"
-    );
 }
 
 #[test]
@@ -1441,59 +1210,10 @@ fn test_models_with_no_matching_date() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["data"]["entries"].as_array().unwrap();
     assert!(
-        entries.is_empty(),
-        "No entries expected for future date range"
+        model_rows(&json).is_empty(),
+        "No models expected for future date range"
     );
-}
-
-#[test]
-fn test_graph_single_day_filter_uses_local_timezone_boundaries() {
-    let tmp = create_timezone_boundary_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .env("TZ", "America/Los_Angeles")
-        .args(["graph", "--client", "opencode", "--no-spinner"])
-        .args(["--since", "2026-03-02", "--until", "2026-03-02"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let contributions = json["data"]["contributions"].as_array().unwrap();
-    assert_eq!(
-        contributions.len(),
-        1,
-        "expected a single local-day bucket, got {:?}",
-        contributions
-    );
-    assert_eq!(contributions[0]["date"].as_str().unwrap(), "2026-03-02");
-    assert_eq!(contributions[0]["totals"]["messages"].as_i64().unwrap(), 2);
-}
-
-#[test]
-fn test_graph_with_year_filter() {
-    let tmp = create_temp_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["graph", "--client", "opencode", "--no-spinner"])
-        .args(["--year", "2024"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let contributions = json["data"]["contributions"].as_array().unwrap();
-    for c in contributions {
-        let date = c["date"].as_str().unwrap();
-        assert!(
-            date.starts_with("2024-"),
-            "Expected 2024 dates, got {}",
-            date
-        );
-    }
 }
 
 // ── Client filtering tests ─────────────────────────────────────────────────
@@ -1507,9 +1227,8 @@ fn test_models_with_client_filter_opencode() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["data"]["entries"].as_array().unwrap();
-    for entry in entries {
-        assert_eq!(entry["client"].as_str().unwrap(), "opencode");
+    for model in model_rows(&json) {
+        assert_eq!(model["client"].as_str().unwrap(), "opencode");
     }
 }
 
@@ -1543,68 +1262,6 @@ fn test_reports_reject_removed_client_ids() {
         assert!(stderr.contains("invalid value"), "stderr: {stderr}");
         assert!(stderr.contains(client), "stderr: {stderr}");
     }
-}
-
-#[test]
-fn test_time_metrics_reports_degraded_input_health_without_failing() {
-    let tmp = create_empty_fixture_dir();
-    let missing_db = tmp.path().join("missing/opencode.db");
-    write_settings_json(
-        tmp.path(),
-        &format!(
-            r#"{{"scanner":{{"opencodeDbPaths":[{}]}}}}"#,
-            serde_json::to_string(missing_db.to_str().unwrap()).unwrap()
-        ),
-    );
-
-    let output = cmd_with_home(tmp.path())
-        .args([
-            "time-metrics",
-            "--json",
-            "--client",
-            "opencode",
-            "--no-spinner",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["health"]["complete"], false);
-    assert_eq!(json["health"]["degradedInputs"], 0);
-    assert_eq!(json["health"]["failedInputs"], 1);
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("Data health: 0 degraded input(s), 0 rejected record(s), 0 partial input(s), 1 failed input(s)"),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-fn test_time_metrics_text_reports_degraded_input_health_without_failing() {
-    let tmp = create_empty_fixture_dir();
-    let missing_db = tmp.path().join("missing/opencode.db");
-    write_settings_json(
-        tmp.path(),
-        &format!(
-            r#"{{"scanner":{{"opencodeDbPaths":[{}]}}}}"#,
-            serde_json::to_string(missing_db.to_str().unwrap()).unwrap()
-        ),
-    );
-
-    cmd_with_home(tmp.path())
-        .args(["time-metrics", "--client", "opencode", "--no-spinner"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Session Time Metrics"))
-        .stderr(predicate::str::contains(
-            "Data health: 0 degraded input(s), 0 rejected record(s), 0 partial input(s), 1 failed input(s)",
-        ));
 }
 
 #[test]
@@ -1660,63 +1317,41 @@ fn test_models_json_output() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
+    assert_eq!(json["data"]["groupBy"], "model");
+    assert!(json["data"].get("models").is_some(), "Missing models field");
     assert!(
-        json["data"].get("groupBy").is_some(),
-        "Missing groupBy field"
+        json["data"]["totals"].get("tokens").is_some(),
+        "Missing totals.tokens"
     );
     assert!(
-        json["data"].get("entries").is_some(),
-        "Missing entries field"
+        json["data"]["totals"].get("cost").is_some(),
+        "Missing totals.cost"
     );
-    assert!(
-        json["data"].get("totalInput").is_some(),
-        "Missing totalInput"
-    );
-    assert!(
-        json["data"].get("totalOutput").is_some(),
-        "Missing totalOutput"
-    );
-    assert!(
-        json["data"].get("totalCacheRead").is_some(),
-        "Missing totalCacheRead"
-    );
-    assert!(
-        json["data"].get("totalCacheWrite").is_some(),
-        "Missing totalCacheWrite"
-    );
-    assert!(
-        json["data"].get("totalReasoning").is_none(),
-        "JSON report must fold reasoning into totalOutput"
-    );
-    assert!(
-        json["data"].get("totalTokens").is_some(),
-        "Missing totalTokens"
-    );
-    assert!(
-        json["data"].get("totalMessages").is_some(),
-        "Missing totalMessages"
-    );
-    assert!(json["data"].get("totalCost").is_some(), "Missing totalCost");
     assert!(
         json["metadata"].get("processingTimeMs").is_some(),
         "Missing processingTimeMs"
     );
 
-    let entries = json["data"]["entries"].as_array().unwrap();
-    assert!(!entries.is_empty(), "Should have entries from fixture data");
-    let first = &entries[0];
+    let models = model_rows(&json);
+    assert!(!models.is_empty(), "Should have models from fixture data");
+    let first = &models[0];
     assert!(first.get("client").is_some());
     assert!(first.get("model").is_some());
     assert!(first.get("provider").is_some());
-    assert!(first.get("input").is_some());
-    assert!(first.get("output").is_some());
-    assert!(first.get("cacheRead").is_some());
-    assert!(first.get("cacheWrite").is_some());
-    assert!(
-        first.get("reasoning").is_none(),
-        "JSON report must fold reasoning into output"
-    );
+    let tokens = first["tokens"].as_object().expect("tokens object");
+    for field in [
+        "input",
+        "output",
+        "reasoning",
+        "displayedOutput",
+        "cacheRead",
+        "cacheWrite",
+        "total",
+    ] {
+        assert!(tokens.contains_key(field), "Missing tokens.{field}");
+    }
     assert!(first.get("cost").is_some());
+    assert!(first.get("sessionCount").is_some());
     let performance = first
         .get("performance")
         .expect("Missing performance")
@@ -1733,20 +1368,7 @@ fn test_models_json_output() {
 #[test]
 fn test_every_local_json_command_uses_the_common_envelope() {
     let tmp = create_empty_fixture_dir();
-    let invocations: &[&[&str]] = &[
-        &["models", "--json", "--client", "opencode", "--no-spinner"],
-        &["monthly", "--json", "--client", "opencode", "--no-spinner"],
-        &["hourly", "--json", "--client", "opencode", "--no-spinner"],
-        &[
-            "time-metrics",
-            "--json",
-            "--client",
-            "opencode",
-            "--no-spinner",
-        ],
-        &["graph", "--client", "opencode", "--no-spinner"],
-        &["clients", "--json", "--client", "opencode"],
-    ];
+    let invocations: &[&[&str]] = &[&["models", "--json", "--client", "opencode", "--no-spinner"]];
 
     for invocation in invocations {
         let output = cmd_with_home(tmp.path())
@@ -1794,137 +1416,23 @@ fn test_models_json_offline_without_pricing_cache_still_succeeds() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["data"]["totalInput"].as_i64().unwrap(), 2400);
-    assert_eq!(json["data"]["totalOutput"].as_i64().unwrap(), 1000);
-    assert_eq!(json["data"]["totalMessages"].as_i64().unwrap(), 3);
-    assert_eq!(json["data"]["entries"].as_array().unwrap().len(), 2);
-    let total_cost = json["data"]["totalCost"].as_f64().unwrap();
+    assert_eq!(model_token_sum(&json, "input"), 2400);
+    assert_eq!(model_token_sum(&json, "output"), 1000);
+    assert_eq!(model_rows(&json).len(), 2);
+    let total_cost = json["data"]["totals"]["cost"].as_f64().unwrap();
     assert_eq!(total_cost, 0.0);
 }
 
 #[test]
-fn test_monthly_json_offline_without_pricing_cache_still_succeeds() {
-    let tmp = create_temp_fixture_dir_without_pricing_cache();
-    let output = offline_cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["data"]["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0]["month"].as_str().unwrap(), "2024-06");
-    assert_eq!(entries[1]["month"].as_str().unwrap(), "2025-01");
-    let total_cost = json["data"]["totalCost"].as_f64().unwrap();
-    assert_eq!(total_cost, 0.0);
-}
-
-#[test]
-fn test_graph_offline_without_pricing_cache_still_succeeds() {
-    let tmp = create_temp_fixture_dir_without_pricing_cache();
-    let output = offline_cmd_with_home(tmp.path())
-        .args(["graph", "--client", "opencode", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        json["data"]["summary"]["totalTokens"].as_i64().unwrap(),
-        3950
-    );
-    assert_eq!(json["data"]["summary"]["activeDays"].as_i64().unwrap(), 2);
-    assert_eq!(json["data"]["contributions"].as_array().unwrap().len(), 2);
-    let total_cost = json["data"]["summary"]["totalCost"].as_f64().unwrap();
-    assert_eq!(total_cost, 0.0);
-    assert_eq!(json["data"]["meta"]["pricingStatus"], "unavailable");
-    assert!(json["data"]["meta"]["pricingDiagnostics"]
-        .as_array()
-        .is_some_and(|diagnostics| !diagnostics.is_empty()));
-}
-
-#[test]
-fn test_hourly_json_offline_without_pricing_cache_still_succeeds() {
-    let tmp = create_temp_fixture_dir_without_pricing_cache();
-    let output = offline_cmd_with_home(tmp.path())
-        .args(["hourly", "--json", "--client", "opencode", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["data"]["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 3);
-    for entry in entries {
-        let hour = entry["hour"].as_str().unwrap();
-        assert_eq!(hour.len(), "MM-DD HH:00".len());
-        assert_eq!(hour.as_bytes()[2], b'-');
-        assert_eq!(hour.as_bytes()[5], b' ');
-        assert_eq!(hour.as_bytes()[8], b':');
-        assert!(
-            !hour.contains("2024-") && !hour.contains("2025-") && !hour.contains("2026-"),
-            "hour should omit the year: {hour}"
-        );
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let forbidden_camel = ["cost", "Per", "Million"].concat();
-    let forbidden_snake = ["cost", "_per", "_million"].concat();
-    assert!(!stdout.contains(&forbidden_camel));
-    assert!(!stdout.contains(&forbidden_snake));
-    assert_eq!(
-        entries
-            .iter()
-            .map(|entry| entry["input"].as_i64().unwrap())
-            .sum::<i64>(),
-        2400
-    );
-    assert_eq!(
-        entries
-            .iter()
-            .map(|entry| entry["output"].as_i64().unwrap())
-            .sum::<i64>(),
-        1000
-    );
-    let total_cost = json["data"]["totalCost"].as_f64().unwrap();
-    assert_eq!(total_cost, 0.0);
-}
-
-#[test]
-fn test_usage_text_reports_do_not_show_efficiency_column() {
+fn test_models_table_uses_tui_metric_columns() {
     let tmp = create_temp_fixture_dir();
-    let forbidden_header = ["Cost", "/1M"].concat();
-
-    for args in [
-        &["models", "--client", "opencode", "--no-spinner"][..],
-        &["monthly", "--client", "opencode", "--no-spinner"][..],
-        &["hourly", "--client", "opencode", "--no-spinner"][..],
-    ] {
-        let output = cmd_with_home(tmp.path()).args(args).output().unwrap();
-        assert!(
-            output.status.success(),
-            "command {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            !stdout.contains(&forbidden_header),
-            "command {args:?} still showed forbidden usage efficiency header:\n{stdout}"
-        );
-    }
+    cmd_with_home(tmp.path())
+        .args(["models", "--client", "opencode", "--no-spinner"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Cache×"))
+        .stdout(predicate::str::contains("Cost/1M"))
+        .stdout(predicate::str::contains("ms/1K"));
 }
 
 #[test]
@@ -1944,105 +1452,7 @@ fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let total_cost = json["data"]["totalCost"].as_f64().unwrap();
-    assert!(
-        (total_cost - 0.0209).abs() < 1e-9,
-        "unexpected totalCost: {total_cost}"
-    );
-    assert_eq!(json["health"]["complete"], true);
-}
-
-#[test]
-fn test_monthly_json_offline_uses_stale_pricing_cache_when_available() {
-    let tmp = create_temp_fixture_dir_without_pricing_cache();
-    write_pricing_cache(tmp.path(), 1);
-
-    let output = offline_cmd_with_home(tmp.path())
-        .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
-        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let total_cost = json["data"]["totalCost"].as_f64().unwrap();
-    assert!(
-        (total_cost - 0.0209).abs() < 1e-9,
-        "unexpected totalCost: {total_cost}"
-    );
-    assert_eq!(json["health"]["complete"], true);
-}
-
-#[test]
-fn test_graph_offline_uses_stale_pricing_cache_when_available() {
-    let tmp = create_temp_fixture_dir_without_pricing_cache();
-    write_pricing_cache(tmp.path(), 1);
-
-    let output = offline_cmd_with_home(tmp.path())
-        .args(["graph", "--client", "opencode", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let total_cost = json["data"]["summary"]["totalCost"].as_f64().unwrap();
-    assert!(
-        (total_cost - 0.0209).abs() < 1e-9,
-        "unexpected totalCost: {total_cost}"
-    );
-    assert_eq!(json["health"]["complete"], true);
-    assert_eq!(json["data"]["meta"]["pricingStatus"], "cachedFallback");
-    assert!(json["data"]["meta"]["pricingDiagnostics"]
-        .as_array()
-        .is_some_and(|diagnostics| diagnostics.iter().any(|diagnostic| {
-            diagnostic
-                .as_str()
-                .is_some_and(|line| line.contains("using cached pricing"))
-        })));
-}
-
-#[test]
-fn test_hourly_json_offline_uses_stale_pricing_cache_when_available() {
-    let tmp = create_temp_fixture_dir_without_pricing_cache();
-    write_pricing_cache(tmp.path(), 1);
-
-    let output = offline_cmd_with_home(tmp.path())
-        .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
-        .args(["hourly", "--json", "--client", "opencode", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["data"]["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 3);
-    assert_eq!(
-        entries
-            .iter()
-            .map(|entry| entry["input"].as_i64().unwrap())
-            .sum::<i64>(),
-        2400
-    );
-    assert_eq!(
-        entries
-            .iter()
-            .map(|entry| entry["output"].as_i64().unwrap())
-            .sum::<i64>(),
-        1000
-    );
-    let total_cost = json["data"]["totalCost"].as_f64().unwrap();
+    let total_cost = json["data"]["totals"]["cost"].as_f64().unwrap();
     assert!(
         (total_cost - 0.0209).abs() < 1e-9,
         "unexpected totalCost: {total_cost}"
@@ -2060,236 +1470,15 @@ fn test_models_json_total_consistency() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    let entries = json["data"]["entries"].as_array().unwrap();
-    let sum_input: i64 = entries.iter().map(|e| e["input"].as_i64().unwrap()).sum();
-    let sum_output: i64 = entries.iter().map(|e| e["output"].as_i64().unwrap()).sum();
-    let total_input = json["data"]["totalInput"].as_i64().unwrap();
-    let total_output = json["data"]["totalOutput"].as_i64().unwrap();
+    let sum_tokens: u64 = model_rows(&json)
+        .iter()
+        .map(|model| model["tokens"]["total"].as_u64().unwrap())
+        .sum();
+    let total_tokens = json["data"]["totals"]["tokens"].as_u64().unwrap();
 
     assert_eq!(json["health"]["complete"], true);
 
-    assert_eq!(
-        sum_input, total_input,
-        "Sum of entry inputs must match totalInput"
-    );
-    assert_eq!(
-        sum_output, total_output,
-        "Sum of entry outputs must match totalOutput"
-    );
-}
-
-#[test]
-fn test_monthly_json_output() {
-    let tmp = create_temp_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-
-    assert!(
-        json["data"].get("entries").is_some(),
-        "Missing entries field"
-    );
-    assert!(
-        json["data"].get("totalCost").is_some(),
-        "Missing totalCost field"
-    );
-    assert_eq!(json["health"]["complete"], true);
-    assert!(
-        json["metadata"].get("processingTimeMs").is_some(),
-        "Missing processingTimeMs"
-    );
-
-    let entries = json["data"]["entries"].as_array().unwrap();
-    assert!(
-        !entries.is_empty(),
-        "Should have monthly entries from fixture data"
-    );
-    let first = &entries[0];
-    assert!(first.get("month").is_some());
-    assert!(first.get("models").is_some());
-    assert!(first.get("input").is_some());
-    assert!(first.get("output").is_some());
-    assert!(first.get("cacheRead").is_some());
-    assert!(first.get("cacheWrite").is_some());
-    assert!(
-        first.get("reasoning").is_none(),
-        "JSON report must fold reasoning into output"
-    );
-    assert!(first.get("messageCount").is_some());
-    assert!(first.get("cost").is_some());
-}
-
-#[test]
-fn test_hourly_home_override_uses_explicit_home_scanner_settings() {
-    let real_home = create_empty_fixture_dir();
-    let conflicting_home = create_conflicting_codex_fixture_dir();
-    let extra_home = TempDir::new().unwrap();
-    let extra_sessions = extra_home.path().join("portable-codex/sessions");
-    write_codex_token_session(
-        &extra_sessions,
-        "settings-session.jsonl",
-        "gpt-4o-mini",
-        210,
-        40,
-    );
-    write_settings_json(
-        real_home.path(),
-        &format!(
-            r#"{{
-                "scanner": {{
-                    "extraScanPaths": {{
-                        "codex": [{}]
-                    }}
-                }}
-            }}"#,
-            serde_json::to_string(extra_sessions.to_str().unwrap()).unwrap()
-        ),
-    );
-
-    let output = cmd_with_conflicting_env(conflicting_home.path())
-        .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
-        .env("CODEX_HOME", conflicting_home.path().join(".codex"))
-        .args([
-            "hourly",
-            "--json",
-            "--client",
-            "codex",
-            "--no-spinner",
-            "--home",
-            real_home.path().to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["data"]["entries"].as_array().unwrap().len(), 1);
-    assert_eq!(json["data"]["entries"][0]["input"].as_i64().unwrap(), 210);
-    assert_eq!(json["data"]["entries"][0]["output"].as_i64().unwrap(), 40);
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("gpt-5"));
-}
-
-#[test]
-fn test_monthly_json_with_client_filter() {
-    let tmp = create_temp_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["monthly", "--json", "--client", "opencode", "--no-spinner"])
-        .args(["--year", "2024"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["data"]["entries"].as_array().unwrap();
-    for entry in entries {
-        let month = entry["month"].as_str().unwrap();
-        assert!(
-            month.starts_with("2024-"),
-            "Expected 2024 months only, got {}",
-            month
-        );
-    }
-}
-
-#[test]
-fn test_graph_json_output() {
-    let tmp = create_temp_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["graph", "--client", "opencode", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-
-    assert!(json["data"].get("meta").is_some(), "Missing meta field");
-    assert!(
-        json["data"].get("summary").is_some(),
-        "Missing summary field"
-    );
-    assert!(json["data"].get("years").is_some(), "Missing years field");
-    assert!(
-        json["data"].get("contributions").is_some(),
-        "Missing contributions field"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn graph_output_preserves_non_utf8_path_bytes() {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-
-    let tmp = create_empty_fixture_dir();
-    let output_path = tmp
-        .path()
-        .join(OsString::from_vec(b"graph-\xff.json".to_vec()));
-
-    cmd_with_home(tmp.path())
-        .args(["graph", "--client", "opencode", "--output"])
-        .arg(&output_path)
-        .arg("--no-spinner")
-        .assert()
-        .success();
-
-    assert!(
-        output_path.is_file(),
-        "Graph must write to the exact OS path supplied by the user"
-    );
-}
-
-#[test]
-fn test_graph_json_has_meta() {
-    let tmp = create_temp_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["graph", "--client", "opencode", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let meta = &json["data"]["meta"];
-    assert!(
-        meta.get("generatedAt").is_some(),
-        "Missing meta.generatedAt"
-    );
-    assert!(meta.get("version").is_some(), "Missing meta.version");
-    assert!(meta.get("dateRange").is_some(), "Missing meta.dateRange");
-}
-
-#[test]
-fn test_graph_json_has_summary() {
-    let tmp = create_temp_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["graph", "--client", "opencode", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let summary = &json["data"]["summary"];
-    assert!(
-        summary.get("totalTokens").is_some(),
-        "Missing summary.totalTokens"
-    );
-    assert!(
-        summary.get("totalCost").is_some(),
-        "Missing summary.totalCost"
-    );
-    assert!(
-        summary.get("totalDays").is_some(),
-        "Missing summary.totalDays"
-    );
-    assert!(
-        summary.get("activeDays").is_some(),
-        "Missing summary.activeDays"
-    );
-    assert!(summary.get("clients").is_some(), "Missing summary.clients");
-    assert!(summary.get("models").is_some(), "Missing summary.models");
+    assert_eq!(sum_tokens, total_tokens);
 }
 
 // ── Group-by strategy tests ────────────────────────────────────────────────
@@ -2297,13 +1486,28 @@ fn test_graph_json_has_summary() {
 #[test]
 fn test_models_group_by_default() {
     let tmp = create_temp_fixture_dir();
-    let output = cmd_with_home(tmp.path())
+    let default_output = cmd_with_home(tmp.path())
         .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "client,model");
+    let explicit_output = cmd_with_home(tmp.path())
+        .args([
+            "models",
+            "--json",
+            "--client",
+            "opencode",
+            "--no-spinner",
+            "--group-by",
+            "model",
+        ])
+        .output()
+        .unwrap();
+    assert!(default_output.status.success());
+    assert!(explicit_output.status.success());
+    let default_json: serde_json::Value = serde_json::from_slice(&default_output.stdout).unwrap();
+    let explicit_json: serde_json::Value = serde_json::from_slice(&explicit_output.stdout).unwrap();
+    assert_eq!(default_json["data"]["groupBy"], "model");
+    assert_eq!(default_json["data"], explicit_json["data"]);
 }
 
 #[test]
@@ -2333,11 +1537,12 @@ fn test_models_reports_project_reasoning_into_output() {
         "command failed: {json_output:?}"
     );
     let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
-    assert_eq!(json["data"]["entries"][0]["output"], 50);
-    assert!(json["data"]["entries"][0].get("reasoning").is_none());
-    assert_eq!(json["data"]["totalOutput"], 50);
-    assert!(json.get("totalReasoning").is_none());
-    assert_eq!(json["data"]["totalTokens"], 165);
+    let tokens = &json["data"]["models"][0]["tokens"];
+    assert_eq!(tokens["output"], 25);
+    assert_eq!(tokens["reasoning"], 25);
+    assert_eq!(tokens["displayedOutput"], 50);
+    assert_eq!(tokens["total"], 165);
+    assert_eq!(json["data"]["totals"]["tokens"], 165);
 
     let table_output = cmd_with_home(base)
         .args(["models", "--client", "omp", "--no-spinner"])
@@ -2355,103 +1560,9 @@ fn test_models_reports_project_reasoning_into_output() {
         .expect("model row");
     assert!(model_row.contains(" 50 "), "unexpected row: {model_row}");
     assert!(
-        stdout.contains("Total: 1 messages, 165 tokens"),
+        stdout.contains("Total: 165 tokens"),
         "unexpected output: {stdout}"
     );
-}
-
-#[test]
-fn test_monthly_reports_project_reasoning_into_output() {
-    let tmp = TempDir::new().expect("failed to create temp dir");
-    let base = tmp.path();
-    prime_pricing_cache(base);
-    let sessions = base.join(".omp/agent/sessions");
-    fs::create_dir_all(&sessions).unwrap();
-    fs::write(
-        sessions.join("monthly-reasoning.jsonl"),
-        concat!(
-            r#"{"type":"session","id":"monthly-reasoning-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
-            "\n",
-            r#"{"type":"message","id":"monthly-reasoning-message","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"totalTokens":165}}}"#,
-            "\n"
-        ),
-    )
-    .unwrap();
-
-    let json_output = cmd_with_home(base)
-        .args(["monthly", "--json", "--client", "omp", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(
-        json_output.status.success(),
-        "command failed: {json_output:?}"
-    );
-    let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
-    assert_eq!(json["data"]["entries"][0]["output"], 50);
-    assert!(json["data"]["entries"][0].get("reasoning").is_none());
-
-    let table_output = cmd_with_home(base)
-        .args(["monthly", "--client", "omp", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(
-        table_output.status.success(),
-        "command failed: {table_output:?}"
-    );
-    let stdout = String::from_utf8(table_output.stdout).unwrap();
-    assert!(!stdout.contains("Reasoning"), "unexpected output: {stdout}");
-    let month_row = stdout
-        .lines()
-        .find(|line| line.contains("2026-01"))
-        .expect("monthly row");
-    assert!(month_row.contains(" 50 "), "unexpected row: {month_row}");
-    assert!(stdout.contains("165"), "unexpected output: {stdout}");
-}
-
-#[test]
-fn test_hourly_reports_project_reasoning_into_output() {
-    let tmp = TempDir::new().expect("failed to create temp dir");
-    let base = tmp.path();
-    prime_pricing_cache(base);
-    let sessions = base.join(".omp/agent/sessions");
-    fs::create_dir_all(&sessions).unwrap();
-    fs::write(
-        sessions.join("hourly-reasoning.jsonl"),
-        concat!(
-            r#"{"type":"session","id":"hourly-reasoning-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
-            "\n",
-            r#"{"type":"message","id":"hourly-reasoning-message","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoningTokens":25,"totalTokens":165}}}"#,
-            "\n"
-        ),
-    )
-    .unwrap();
-
-    let json_output = cmd_with_home(base)
-        .args(["hourly", "--json", "--client", "omp", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(
-        json_output.status.success(),
-        "command failed: {json_output:?}"
-    );
-    let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
-    assert_eq!(json["data"]["entries"][0]["output"], 50);
-    assert!(json["data"]["entries"][0].get("reasoning").is_none());
-
-    let table_output = cmd_with_home(base)
-        .args(["hourly", "--client", "omp", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(
-        table_output.status.success(),
-        "command failed: {table_output:?}"
-    );
-    let stdout = String::from_utf8(table_output.stdout).unwrap();
-    let hour_row = stdout
-        .lines()
-        .find(|line| line.contains("OMP"))
-        .expect("hourly row");
-    assert!(hour_row.contains(" 50 "), "unexpected row: {hour_row}");
 }
 
 #[test]
@@ -2479,11 +1590,12 @@ fn test_models_report_clamps_reasoning_above_output() {
     assert!(output.status.success(), "command failed: {output:?}");
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["data"]["entries"][0]["output"], 50);
-    assert!(json["data"]["entries"][0].get("reasoning").is_none());
-    assert_eq!(json["data"]["totalOutput"], 50);
-    assert!(json.get("totalReasoning").is_none());
-    assert_eq!(json["data"]["totalTokens"], 165);
+    let tokens = &json["data"]["models"][0]["tokens"];
+    assert_eq!(tokens["output"], 0);
+    assert_eq!(tokens["reasoning"], 50);
+    assert_eq!(tokens["displayedOutput"], 50);
+    assert_eq!(tokens["total"], 165);
+    assert_eq!(json["data"]["totals"]["tokens"], 165);
     assert!(json.get("warnings").is_none());
 }
 
@@ -2499,8 +1611,7 @@ fn test_models_group_by_model() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "model");
 
-    let entries = json["data"]["entries"].as_array().unwrap();
-    let models: Vec<&str> = entries
+    let models: Vec<&str> = model_rows(&json)
         .iter()
         .map(|e| e["model"].as_str().unwrap())
         .collect();
@@ -2527,11 +1638,52 @@ fn test_models_group_by_client_provider_model() {
         "client,provider,model"
     );
 
-    let entries = json["data"]["entries"].as_array().unwrap();
-    for entry in entries {
+    for entry in model_rows(&json) {
         assert!(entry.get("client").is_some(), "Entry must have client");
         assert!(entry.get("provider").is_some(), "Entry must have provider");
         assert!(entry.get("model").is_some(), "Entry must have model");
+    }
+}
+
+#[test]
+fn test_models_group_by_client_model() {
+    let tmp = create_temp_fixture_dir();
+    let output = cmd_with_home(tmp.path())
+        .args([
+            "models",
+            "--json",
+            "--client",
+            "opencode",
+            "--no-spinner",
+            "--group-by",
+            "client,model",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["data"]["groupBy"], "client,model");
+    assert!(model_rows(&json)
+        .iter()
+        .all(|model| model["client"] == "opencode"));
+}
+
+#[test]
+fn test_models_rejects_noncanonical_groupings() {
+    let tmp = create_empty_fixture_dir();
+    for group_by in [
+        "session",
+        "session,model",
+        "client,session,model",
+        "client-model",
+        "client-provider-model",
+        "workspace-model",
+    ] {
+        cmd_with_home(tmp.path())
+            .args(["models", "--no-spinner", "--group-by", group_by])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("Invalid group-by value"));
     }
 }
 
@@ -2545,12 +1697,8 @@ fn test_models_json_with_group_by_model() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["data"]["entries"].as_array().unwrap();
-    for entry in entries {
-        assert!(
-            entry.get("mergedClients").is_some(),
-            "group-by model entries should have mergedClients field"
-        );
+    for entry in model_rows(&json) {
+        assert!(entry.get("client").is_some());
         assert!(
             entry.get("workspaceKey").is_none(),
             "group-by model entries should not expose workspaceKey"
@@ -2559,77 +1707,7 @@ fn test_models_json_with_group_by_model() {
             entry.get("workspaceLabel").is_none(),
             "group-by model entries should not expose workspaceLabel"
         );
-        assert!(
-            entry.get("sessionId").is_none(),
-            "group-by model entries should not expose sessionId"
-        );
-    }
-}
-
-#[test]
-fn test_models_group_by_session_emits_session_id_per_entry() {
-    let tmp = create_temp_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
-        .args(["--group-by", "session,model"])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "command failed: {:?}", output);
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "session,model");
-
-    let entries = json["data"]["entries"].as_array().unwrap();
-    assert!(!entries.is_empty(), "expected at least one entry");
-
-    let mut session_ids: Vec<&str> = entries
-        .iter()
-        .map(|e| {
-            e.get("sessionId")
-                .and_then(|v| v.as_str())
-                .expect("session,model entries must include sessionId")
-        })
-        .collect();
-    session_ids.sort();
-    session_ids.dedup();
-    // Fixture has two sessions ("session1", "session2"); expect both to appear.
-    assert!(
-        session_ids.contains(&"session1") && session_ids.contains(&"session2"),
-        "expected both fixture sessions to appear in output, got {:?}",
-        session_ids
-    );
-
-    for entry in entries {
-        assert!(
-            entry.get("workspaceKey").is_none(),
-            "session grouping should not expose workspaceKey"
-        );
-        assert!(entry.get("model").is_some());
-        assert!(entry.get("provider").is_some());
-        assert!(entry.get("cost").is_some());
-    }
-}
-
-#[test]
-fn test_models_group_by_client_session_includes_client_and_session() {
-    let tmp = create_temp_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
-        .args(["--group-by", "client,session,model"])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "command failed: {:?}", output);
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        json["data"]["groupBy"].as_str().unwrap(),
-        "client,session,model"
-    );
-
-    let entries = json["data"]["entries"].as_array().unwrap();
-    assert!(!entries.is_empty());
-    for entry in entries {
-        assert!(entry.get("sessionId").and_then(|v| v.as_str()).is_some());
-        assert!(entry.get("client").and_then(|v| v.as_str()).is_some());
-        assert!(entry.get("model").is_some());
+        assert!(entry.get("sessionId").is_none());
     }
 }
 
@@ -2645,9 +1723,8 @@ fn test_models_group_by_workspace_model_uses_unknown_bucket_for_unsupported_clie
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "workspace,model");
 
-    let entries = json["data"]["entries"].as_array().unwrap();
-    assert!(!entries.is_empty());
-    for entry in entries {
+    assert!(!model_rows(&json).is_empty());
+    for entry in model_rows(&json) {
         assert!(
             entry.get("workspaceKey").is_some(),
             "workspace grouping entries should always expose workspaceKey"
@@ -2669,14 +1746,14 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_qwen() {
     let tmp = create_qwen_workspace_fixture_dir();
     let output = cmd_with_home(tmp.path())
         .args(["models", "--json", "--client", "qwen", "--no-spinner"])
-        .args(["--group-by", "workspace-model"])
+        .args(["--group-by", "workspace,model"])
         .output()
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "workspace,model");
 
-    let entries = json["data"]["entries"].as_array().unwrap();
+    let entries = model_rows(&json);
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0]["workspaceKey"].as_str().unwrap(),
@@ -2701,7 +1778,7 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_codex() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "workspace,model");
 
-    let entries = json["data"]["entries"].as_array().unwrap();
+    let entries = model_rows(&json);
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0]["workspaceKey"].as_str().unwrap(),
@@ -2732,7 +1809,7 @@ fn test_models_group_by_workspace_model_merges_claude_project_path_with_codex_pi
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "workspace,model");
 
-    let entries = json["data"]["entries"].as_array().unwrap();
+    let entries = model_rows(&json);
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0]["workspaceKey"].as_str().unwrap(),
@@ -2743,15 +1820,11 @@ fn test_models_group_by_workspace_model_merges_claude_project_path_with_codex_pi
         "shared-workspace"
     );
     assert_eq!(entries[0]["model"].as_str().unwrap(), "gpt-5.4");
-    assert_eq!(entries[0]["input"].as_i64().unwrap(), 60);
-    assert_eq!(entries[0]["output"].as_i64().unwrap(), 30);
-    assert_eq!(entries[0]["messageCount"].as_i64().unwrap(), 3);
+    assert_eq!(entries[0]["tokens"]["input"].as_u64().unwrap(), 60);
+    assert_eq!(entries[0]["tokens"]["output"].as_u64().unwrap(), 30);
+    assert_eq!(entries[0]["sessionCount"].as_u64().unwrap(), 3);
 
-    let mut clients: Vec<_> = entries[0]["mergedClients"]
-        .as_str()
-        .unwrap()
-        .split(", ")
-        .collect();
+    let mut clients: Vec<_> = entries[0]["client"].as_str().unwrap().split(", ").collect();
     clients.sort_unstable();
     assert_eq!(clients, vec!["claude", "codex", "pi"]);
 }
@@ -2770,11 +1843,11 @@ fn test_models_client_filter_splits_pi_and_omp_sessions() {
         pi_output
     );
     let pi_json: serde_json::Value = serde_json::from_slice(&pi_output.stdout).unwrap();
-    let pi_entries = pi_json["data"]["entries"].as_array().unwrap();
+    let pi_entries = model_rows(&pi_json);
     assert_eq!(pi_entries.len(), 1);
     assert_eq!(pi_entries[0]["client"].as_str().unwrap(), "pi");
-    assert_eq!(pi_entries[0]["input"].as_i64().unwrap(), 30);
-    assert_eq!(pi_entries[0]["output"].as_i64().unwrap(), 15);
+    assert_eq!(pi_entries[0]["tokens"]["input"].as_u64().unwrap(), 30);
+    assert_eq!(pi_entries[0]["tokens"]["output"].as_u64().unwrap(), 15);
 
     let omp_output = cmd_with_home(tmp.path())
         .args(["models", "--json", "--client", "omp", "--no-spinner"])
@@ -2786,11 +1859,11 @@ fn test_models_client_filter_splits_pi_and_omp_sessions() {
         omp_output
     );
     let omp_json: serde_json::Value = serde_json::from_slice(&omp_output.stdout).unwrap();
-    let omp_entries = omp_json["data"]["entries"].as_array().unwrap();
+    let omp_entries = model_rows(&omp_json);
     assert_eq!(omp_entries.len(), 1);
     assert_eq!(omp_entries[0]["client"].as_str().unwrap(), "omp");
-    assert_eq!(omp_entries[0]["input"].as_i64().unwrap(), 40);
-    assert_eq!(omp_entries[0]["output"].as_i64().unwrap(), 20);
+    assert_eq!(omp_entries[0]["tokens"]["input"].as_u64().unwrap(), 40);
+    assert_eq!(omp_entries[0]["tokens"]["output"].as_u64().unwrap(), 20);
 }
 
 #[test]
@@ -2805,7 +1878,7 @@ fn test_models_group_by_workspace_model_surfaces_workspace_fields_for_opencode()
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["data"]["groupBy"].as_str().unwrap(), "workspace,model");
 
-    let entries = json["data"]["entries"].as_array().unwrap();
+    let entries = model_rows(&json);
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0]["workspaceKey"].as_str().unwrap(),
@@ -2938,26 +2011,18 @@ fn test_pricing_command_does_not_fuzzy_match_provider_scoped_fireworks_model() {
     );
 }
 
-// ── Clients command tests ──────────────────────────────────────────────────
-
 #[test]
-fn test_clients_command() {
-    let tmp = create_empty_fixture_dir();
-    cmd_with_home(tmp.path())
-        .arg("clients")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("OpenCode").or(predicate::str::contains("opencode")))
-        .stdout(predicate::str::contains("Claude").or(predicate::str::contains("claude")));
-}
-
-#[test]
-fn test_clients_command_reports_malformed_settings() {
+fn test_models_command_reports_malformed_settings() {
     let tmp = create_empty_fixture_dir();
     write_settings_json(tmp.path(), r#"{"scanner":{"extraScanPaths":[]}"#);
 
     cmd_with_home(tmp.path())
-        .args(["clients", "--home", tmp.path().to_str().unwrap()])
+        .args([
+            "models",
+            "--home",
+            tmp.path().to_str().unwrap(),
+            "--no-spinner",
+        ])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("failed to parse settings JSON"))
@@ -2991,7 +2056,12 @@ fn invalid_settings_range_is_invalid_execution_environment() {
     write_settings_json(tmp.path(), r#"{"autoRefreshMs":1}"#);
 
     cmd_with_home(tmp.path())
-        .args(["clients", "--home", tmp.path().to_str().unwrap()])
+        .args([
+            "models",
+            "--home",
+            tmp.path().to_str().unwrap(),
+            "--no-spinner",
+        ])
         .assert()
         .code(2)
         .stdout(predicate::str::is_empty())
@@ -3006,7 +2076,12 @@ fn non_utf8_settings_is_invalid_execution_environment() {
     fs::write(&path, b"{\"colorPalette\":\"\xff\"}").unwrap();
 
     cmd_with_home(tmp.path())
-        .args(["clients", "--home", tmp.path().to_str().unwrap()])
+        .args([
+            "models",
+            "--home",
+            tmp.path().to_str().unwrap(),
+            "--no-spinner",
+        ])
         .assert()
         .code(2)
         .stdout(predicate::str::is_empty())
@@ -3036,321 +2111,16 @@ fn unreadable_settings_path_remains_an_operational_error() {
     fs::create_dir_all(&path).unwrap();
 
     cmd_with_home(tmp.path())
-        .args(["clients", "--home", tmp.path().to_str().unwrap()])
+        .args([
+            "models",
+            "--home",
+            tmp.path().to_str().unwrap(),
+            "--no-spinner",
+        ])
         .assert()
         .code(1)
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("failed to read settings file"));
-}
-
-#[test]
-fn test_clients_json() {
-    let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["clients", "--json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(json.is_object(), "Clients JSON should be an object");
-    assert!(
-        json["data"].get("clients").is_some(),
-        "Should have 'clients' field"
-    );
-    assert!(json["data"].get("headlessRoots").is_none());
-    assert!(json["data"].get("note").is_none());
-    assert_eq!(json["health"]["complete"], true);
-
-    let arr = json["data"]["clients"].as_array().unwrap();
-    assert!(!arr.is_empty(), "Should list at least one client");
-
-    let first = &arr[0];
-    assert!(
-        first.get("client").is_some(),
-        "Client entry should have 'client' field"
-    );
-    assert!(
-        first.get("label").is_some(),
-        "Client entry should have 'label' field"
-    );
-    assert!(
-        first.get("sessionsPath").is_some(),
-        "Client entry should have 'sessionsPath' field"
-    );
-    assert!(
-        first.get("messageCount").is_some(),
-        "Client entry should have 'messageCount' field"
-    );
-
-    let opencode = arr.iter().find(|row| row["client"] == "opencode").unwrap();
-    assert_eq!(
-        opencode["sessionsPath"],
-        serde_json::json!(tmp.path().join(".local/share/opencode"))
-    );
-    assert_eq!(opencode["sessionsPathExists"], true);
-    assert!(opencode["additionalPaths"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["path"]
-            == serde_json::json!(tmp.path().join(".local/share/opencode/opencode.db"))
-            && entry["exists"] == true));
-}
-
-#[test]
-fn test_clients_filter_does_not_discover_unselected_opencode() {
-    let tmp = create_empty_fixture_dir();
-    let opencode_data_root = tmp.path().join(".local/share/opencode");
-    fs::remove_dir_all(&opencode_data_root).unwrap();
-    fs::create_dir_all(opencode_data_root.parent().unwrap()).unwrap();
-    fs::write(&opencode_data_root, "not a directory").unwrap();
-
-    let output = cmd_with_home(tmp.path())
-        .args(["clients", "--json", "--client", "claude"])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let clients = json["data"]["clients"].as_array().unwrap();
-    assert_eq!(clients.len(), 1);
-    assert_eq!(clients[0]["client"], "claude");
-    assert_eq!(json["health"]["failedInputs"], 0);
-    assert!(!serde_json::to_string(&json["health"])
-        .unwrap()
-        .contains("opencode"));
-}
-
-#[test]
-fn test_clients_json_reports_degraded_input_health_without_losing_payload() {
-    let tmp = create_empty_fixture_dir();
-    let missing_db = tmp.path().join("missing/clients-opencode.db");
-    write_settings_json(
-        tmp.path(),
-        &format!(
-            r#"{{"scanner":{{"opencodeDbPaths":[{}]}}}}"#,
-            serde_json::to_string(missing_db.to_str().unwrap()).unwrap()
-        ),
-    );
-
-    let output = cmd_with_home(tmp.path())
-        .args(["clients", "--json"])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(json["data"]["clients"]
-        .as_array()
-        .is_some_and(|rows| !rows.is_empty()));
-    assert_eq!(json["health"]["complete"], false);
-    assert_eq!(json["health"]["degradedInputs"], 0);
-    assert_eq!(json["health"]["failedInputs"], 1);
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("Data health: 0 degraded input(s), 0 rejected record(s), 0 partial input(s), 1 failed input(s)"),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-fn test_clients_text_reports_degraded_input_health_without_failing() {
-    let tmp = create_empty_fixture_dir();
-    let missing_db = tmp.path().join("missing/clients-opencode.db");
-    write_settings_json(
-        tmp.path(),
-        &format!(
-            r#"{{"scanner":{{"opencodeDbPaths":[{}]}}}}"#,
-            serde_json::to_string(missing_db.to_str().unwrap()).unwrap()
-        ),
-    );
-
-    cmd_with_home(tmp.path())
-        .args(["clients"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Local clients & session counts"))
-        .stderr(predicate::str::contains(
-            "Data health: 0 degraded input(s), 0 rejected record(s), 0 partial input(s), 1 failed input(s)",
-        ));
-}
-
-#[cfg(unix)]
-#[test]
-fn test_clients_json_opencode_diagnostics_match_adapter_for_non_utf8_xdg() {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-
-    let tmp = TempDir::new().unwrap();
-    prime_pricing_cache(tmp.path());
-    let xdg_data_home = tmp
-        .path()
-        .join(OsString::from_vec(b"xdg-data-\xff".to_vec()));
-    let data_dir = xdg_data_home.join("opencode");
-    fs::create_dir_all(&data_dir).unwrap();
-    let conn = create_opencode_sqlite_at(&data_dir.join("opencode.db"));
-    insert_opencode_message(
-        &conn,
-        "msg-non-utf8",
-        "session-non-utf8",
-        "/workspace/non-utf8",
-        r#"{"id":"msg-non-utf8","role":"assistant","modelID":"gpt-5.5","providerID":"openai","tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1766000000000}}"#,
-    );
-    drop(conn);
-
-    let output = cmd_with_home(tmp.path())
-        .env("XDG_DATA_HOME", &xdg_data_home)
-        .args(["clients", "--json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let opencode = json["data"]["clients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["client"] == "opencode")
-        .unwrap();
-    assert_eq!(opencode["messageCount"], 1);
-    assert_eq!(
-        opencode["sessionsPath"],
-        data_dir.to_string_lossy().as_ref()
-    );
-    assert!(opencode["additionalPaths"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["path"] == data_dir.join("opencode.db").to_string_lossy().as_ref()));
-}
-
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-#[test]
-fn test_clients_json_warp_sessions_path_exists_tracks_selected_root() {
-    let tmp = create_empty_fixture_dir();
-    let preview_root = tmp.path().join(".local/state/warp-terminal-preview");
-    fs::create_dir_all(&preview_root).unwrap();
-
-    let output = cmd_with_home(tmp.path())
-        .args(["clients", "--json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let warp = json["data"]["clients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["client"] == "warp")
-        .unwrap();
-
-    assert_eq!(
-        warp["sessionsPath"],
-        serde_json::json!(tmp.path().join(".local/state/warp-terminal"))
-    );
-    assert_eq!(warp["sessionsPathExists"], false);
-
-    let additional_paths = warp["additionalPaths"].as_array().unwrap();
-    assert!(additional_paths
-        .iter()
-        .any(|path| { path["path"] == serde_json::json!(preview_root) && path["exists"] == true }));
-}
-
-#[test]
-fn test_clients_json_includes_claude_transcripts_path() {
-    let tmp = create_empty_fixture_dir();
-    fs::create_dir_all(tmp.path().join(".claude/transcripts")).unwrap();
-
-    let output = cmd_with_home(tmp.path())
-        .args(["clients", "--json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let claude = json["data"]["clients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["client"] == "claude")
-        .unwrap();
-
-    assert_eq!(
-        claude["additionalPaths"][0]["path"],
-        serde_json::json!(tmp.path().join(".claude/transcripts"))
-    );
-    assert_eq!(claude["additionalPaths"][0]["exists"], true);
-}
-
-#[test]
-fn test_clients_command_includes_claude_transcripts_text() {
-    let tmp = create_empty_fixture_dir();
-    fs::create_dir_all(tmp.path().join(".claude/transcripts")).unwrap();
-
-    cmd_with_home(tmp.path())
-        .arg("clients")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "additional: ~/.claude/transcripts ✓",
-        ));
-}
-
-#[test]
-fn test_clients_json_includes_claude_desktop_diagnostic() {
-    let tmp = create_empty_fixture_dir();
-    fs::create_dir_all(tmp.path().join("Library/Application Support/Claude")).unwrap();
-
-    let output = cmd_with_home(tmp.path())
-        .args(["clients", "--json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let claude = json["data"]["clients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["client"] == "claude")
-        .unwrap();
-    let diagnostics = claude["diagnostics"].as_array().unwrap();
-
-    assert!(diagnostics.iter().any(|item| {
-        item["code"] == "claude_desktop_not_scanned"
-            && item["severity"] == "warning"
-            && item["message"]
-                .as_str()
-                .unwrap()
-                .contains("Claude Desktop app data was detected")
-    }));
-}
-
-#[test]
-fn test_clients_command_includes_claude_desktop_diagnostic_text() {
-    let tmp = create_empty_fixture_dir();
-    fs::create_dir_all(tmp.path().join("Library/Application Support/Claude")).unwrap();
-
-    cmd_with_home(tmp.path())
-        .arg("clients")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Claude Desktop app data was detected",
-        ))
-        .stdout(predicate::str::contains(
-            "Claude Code JSONL transcripts only",
-        ));
 }
 
 #[test]
@@ -3370,160 +2140,6 @@ fn test_models_json_routes_claude_desktop_diagnostic_to_stderr() {
         .contains("Tokscale counts Claude Code JSONL transcripts"));
 }
 
-#[test]
-fn test_clients_json_includes_settings_extra_paths() {
-    let tmp = create_empty_fixture_dir();
-    write_settings_json(
-        tmp.path(),
-        r#"{
-            "scanner": {
-                "extraScanPaths": {
-                    "codex": ["/tmp/project-a/.codex/sessions"]
-                }
-            }
-        }"#,
-    );
-
-    let output = cmd_with_home(tmp.path())
-        .args(["clients", "--json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let codex = json["data"]["clients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["client"] == "codex")
-        .unwrap();
-
-    assert_eq!(
-        codex["extraPaths"][0]["path"],
-        serde_json::json!("/tmp/project-a/.codex/sessions")
-    );
-    assert_eq!(
-        codex["extraPaths"][0]["origin"],
-        serde_json::json!("settings")
-    );
-    assert!(codex["extraPaths"][0].get("source").is_none());
-}
-
-#[test]
-fn test_clients_json_includes_hermes_settings_extra_profile_path() {
-    let tmp = create_empty_fixture_dir();
-    let hermes_profile = tmp.path().join(".hermes/profiles/director_planning");
-    fs::create_dir_all(&hermes_profile).unwrap();
-    let hermes_profile_json = serde_json::to_string(&hermes_profile).unwrap();
-    write_settings_json(
-        tmp.path(),
-        &format!(
-            r#"{{
-            "scanner": {{
-                "extraScanPaths": {{
-                    "hermes": [{hermes_profile_json}]
-                }}
-            }}
-        }}"#
-        ),
-    );
-
-    let output = cmd_with_home(tmp.path())
-        .args(["clients", "--json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let hermes = json["data"]["clients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["client"] == "hermes")
-        .unwrap();
-
-    assert_eq!(
-        hermes["extraPaths"][0]["path"],
-        serde_json::json!(hermes_profile)
-    );
-    assert_eq!(
-        hermes["extraPaths"][0]["origin"],
-        serde_json::json!("settings")
-    );
-    assert_eq!(hermes["extraPaths"][0]["exists"], true);
-}
-
-#[test]
-fn test_clients_command_includes_settings_extra_paths_text() {
-    let tmp = create_empty_fixture_dir();
-    write_settings_json(
-        tmp.path(),
-        r#"{
-            "scanner": {
-                "extraScanPaths": {
-                    "codex": ["/tmp/project-a/.codex/sessions"]
-                }
-            }
-        }"#,
-    );
-
-    cmd_with_home(tmp.path())
-        .arg("clients")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "extra (settings): /tmp/project-a/.codex/sessions ✗",
-        ));
-}
-
-#[test]
-fn test_clients_command_groups_opencode_database_paths_by_origin() {
-    let tmp = create_empty_fixture_dir();
-    let configured_db = tmp.path().join("external/opencode.db");
-    drop(create_opencode_sqlite_at(&configured_db));
-    let configured_db_json = serde_json::to_string(&configured_db).unwrap();
-    write_settings_json(
-        tmp.path(),
-        &format!(
-            r#"{{
-                "scanner": {{
-                    "opencodeDbPaths": [{configured_db_json}]
-                }}
-            }}"#
-        ),
-    );
-
-    cmd_with_home(tmp.path())
-        .arg("clients")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "extra (scanner.opencodeDbPaths): ~/external/opencode.db ✓",
-        ));
-
-    let output = cmd_with_home(tmp.path())
-        .args(["clients", "--json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let opencode = json["data"]["clients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["client"] == "opencode")
-        .unwrap();
-    assert!(opencode["extraPaths"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| {
-            entry["path"] == serde_json::json!(configured_db)
-                && entry["exists"] == true
-                && entry["origin"] == "scanner.opencodeDbPaths"
-        }));
-}
-
 // ── Table report tests ─────────────────────────────────────────────────────
 
 #[test]
@@ -3535,53 +2151,6 @@ fn test_models_table_output() {
         .success()
         .stdout(predicate::str::contains("Token Usage Report by Model"))
         .stdout(predicate::str::contains("ms/1K"));
-}
-
-#[test]
-fn test_monthly_table_output() {
-    let tmp = create_temp_fixture_dir();
-    cmd_with_home(tmp.path())
-        .args(["monthly", "--client", "opencode", "--no-spinner"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Monthly Token Usage Report"));
-}
-
-#[test]
-fn test_hourly_table_output() {
-    let tmp = create_temp_fixture_dir();
-    cmd_with_home(tmp.path())
-        .args(["hourly", "--client", "opencode", "--no-spinner"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Hourly Usage"));
-}
-
-#[test]
-fn test_time_metrics_table_output() {
-    let tmp = create_temp_fixture_dir();
-    cmd_with_home(tmp.path())
-        .args(["time-metrics", "--client", "opencode", "--no-spinner"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Session Time Metrics"));
-}
-
-#[test]
-fn test_time_metrics_benchmark_flag() {
-    let tmp = create_temp_fixture_dir();
-    cmd_with_home(tmp.path())
-        .args([
-            "time-metrics",
-            "--client",
-            "opencode",
-            "--no-spinner",
-            "--benchmark",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Processing time").not())
-        .stderr(predicate::str::contains("Processing time"));
 }
 
 #[test]
@@ -3614,23 +2183,6 @@ fn test_models_benchmark_flag() {
         .stderr(predicate::str::contains("Processing time"));
 }
 
-#[test]
-fn test_monthly_benchmark_flag() {
-    let tmp = create_temp_fixture_dir();
-    cmd_with_home(tmp.path())
-        .args([
-            "monthly",
-            "--client",
-            "opencode",
-            "--no-spinner",
-            "--benchmark",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Processing time").not())
-        .stderr(predicate::str::contains("Processing time"));
-}
-
 // ── Empty fixture tests ────────────────────────────────────────────────────
 
 #[test]
@@ -3642,29 +2194,13 @@ fn test_models_empty_fixture() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let entries = json["data"]["entries"].as_array().unwrap();
+    let entries = model_rows(&json);
     assert!(
         entries.is_empty(),
         "Empty fixture should produce no entries"
     );
-    assert_eq!(json["data"]["totalInput"].as_i64().unwrap(), 0);
-    assert_eq!(json["data"]["totalOutput"].as_i64().unwrap(), 0);
-}
-
-#[test]
-fn test_graph_empty_contributions() {
-    let tmp = create_empty_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["graph", "--client", "opencode", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let contributions = json["data"]["contributions"].as_array().unwrap();
-    assert!(
-        contributions.is_empty(),
-        "Empty fixture should produce no contributions"
-    );
+    assert_eq!(json["data"]["totals"]["tokens"].as_u64().unwrap(), 0);
+    assert_eq!(json["data"]["totals"]["cost"].as_f64().unwrap(), 0.0);
 }
 
 // ── No-spinner flag tests ──────────────────────────────────────────────────
@@ -3676,66 +2212,6 @@ fn test_models_no_spinner_flag() {
         .args(["models", "--client", "opencode", "--no-spinner"])
         .assert()
         .success();
-}
-
-#[test]
-fn test_graph_no_spinner_flag() {
-    let tmp = create_temp_fixture_dir();
-    cmd_with_home(tmp.path())
-        .args(["graph", "--client", "opencode", "--no-spinner"])
-        .assert()
-        .success();
-}
-
-// ── Graph with client filter tests ─────────────────────────────────────────
-
-#[test]
-fn test_graph_with_client_filter() {
-    let tmp = create_temp_fixture_dir();
-    let output = cmd_with_home(tmp.path())
-        .args(["graph", "--client", "opencode", "--no-spinner"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let contributions = json["data"]["contributions"].as_array().unwrap();
-    for c in contributions {
-        let clients = c["clients"].as_array().unwrap();
-        for cl in clients {
-            assert_eq!(
-                cl["client"].as_str().unwrap(),
-                "opencode",
-                "All contributions should be from opencode"
-            );
-        }
-    }
-}
-
-// ── Graph output file test ─────────────────────────────────────────────────
-
-#[test]
-fn test_graph_output_to_file() {
-    let tmp = create_temp_fixture_dir();
-    let output_file = tmp.path().join("graph-output.json");
-    let output = cmd_with_home(tmp.path())
-        .args(["graph", "--client", "opencode", "--no-spinner"])
-        .args(["--output", output_file.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        format!("{}\n", output_file.display())
-    );
-    assert!(output_file.exists(), "Output file should be created");
-    let content = fs::read_to_string(&output_file).unwrap();
-    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
-    assert!(json["data"].get("meta").is_some());
-    assert!(json["data"].get("contributions").is_some());
 }
 
 // ── Root command ownership tests ───────────────────────────────────────────

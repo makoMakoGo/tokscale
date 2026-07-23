@@ -6,7 +6,6 @@ mod grok;
 pub mod helpers;
 mod kimi;
 mod minimax_tokenplan;
-mod warp;
 mod zai;
 
 use anyhow::{anyhow, Result};
@@ -73,7 +72,6 @@ pub enum UsageProviderId {
     Kimi,
     MiniMaxTokenPlanCn,
     MiniMaxTokenPlanGlobal,
-    Warp,
 }
 
 impl UsageProviderId {
@@ -91,7 +89,6 @@ impl UsageProviderId {
             "minimax-token-plan-global" | "minimax-global-token-plan" => {
                 Some(Self::MiniMaxTokenPlanGlobal)
             }
-            "warp" | "oz" | "warp-oz" => Some(Self::Warp),
             _ => None,
         }
     }
@@ -315,14 +312,6 @@ fn all_providers() -> Vec<UsageProvider> {
             is_available: minimax_tokenplan::has_global_credentials,
             unavailable_message: "enabled in usageProviders but TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY is not set",
             fetch: Fetch::Single(minimax_tokenplan::fetch_global),
-        },
-        UsageProvider {
-            id: UsageProviderId::Warp,
-            label: "Warp/Oz",
-            is_available: warp::has_usage_cache,
-            unavailable_message:
-                "enabled in usageProviders but no Warp/Oz usage cache was found; run `tokscale warp sync` first",
-            fetch: Fetch::Single(warp::fetch),
         },
     ]
 }

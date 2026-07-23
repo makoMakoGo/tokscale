@@ -4,37 +4,6 @@ pub use crate::local_clients::{
     PathRoot, LOCAL_CLIENTS,
 };
 
-#[derive(Debug)]
-pub struct ClientCounts {
-    counts: [i32; ClientId::COUNT],
-}
-
-impl ClientCounts {
-    pub fn new() -> Self {
-        Self {
-            counts: [0; ClientId::COUNT],
-        }
-    }
-
-    pub fn get(&self, client: ClientId) -> i32 {
-        self.counts[client as usize]
-    }
-
-    pub fn set(&mut self, client: ClientId, value: i32) {
-        self.counts[client as usize] = value;
-    }
-
-    pub fn add(&mut self, client: ClientId, value: i32) {
-        self.counts[client as usize] += value;
-    }
-}
-
-impl Default for ClientCounts {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,16 +67,5 @@ mod tests {
     fn hermes_uses_the_short_brand_name_for_display() {
         assert_eq!(ClientId::Hermes.display_name(), "Hermes");
         assert_eq!(ClientId::Hermes.short_name(), "Hermes");
-    }
-
-    #[test]
-    fn client_counts_get_set_add_work() {
-        let mut counts = ClientCounts::new();
-
-        assert_eq!(counts.get(ClientId::Claude), 0);
-        counts.set(ClientId::Claude, 3);
-        assert_eq!(counts.get(ClientId::Claude), 3);
-        counts.add(ClientId::Claude, 2);
-        assert_eq!(counts.get(ClientId::Claude), 5);
     }
 }

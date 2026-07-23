@@ -121,17 +121,6 @@ pub(crate) fn resolve_effective_home_dir(home_dir: &Option<String>) -> Option<Pa
     home_dir.as_ref().map(PathBuf::from).or_else(dirs::home_dir)
 }
 
-pub(crate) fn model_usage_includes_client(entry: &tokscale_core::ModelUsage, client: &str) -> bool {
-    if entry.client == client {
-        return true;
-    }
-
-    entry
-        .merged_clients
-        .as_deref()
-        .is_some_and(|clients| clients.split(", ").any(|id| id == client))
-}
-
 pub(crate) fn emit_client_diagnostics(diagnostics: &[claude_diagnostics::ClientDiagnostic]) {
     if diagnostics.is_empty() {
         return;

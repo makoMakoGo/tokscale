@@ -222,15 +222,10 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     let since = format!("{}-01-01", year);
     let until = format!("{}-12-31", year);
 
-    let mut views = ViewSet::GRAPH | ViewSet::TIME_METRICS;
-    if include_agent_view {
-        views |= ViewSet::AGENTS;
-    }
-
     let pricing = tokscale_core::pricing::PricingService::get_or_init()
         .await
         .map_err(anyhow::Error::msg)?;
-    let aggregated = load_aggregated_views_with_pricing(
+    let mut aggregated = load_aggregated_views_with_pricing(
         &ReportOptions {
             home_dir: options.home_dir.clone(),
             use_env_roots: crate::commands::shared::use_env_roots(&options.home_dir),
@@ -243,26 +238,64 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                 &options.home_dir,
             )?,
         },
-        views,
+        ViewSet::TUI,
         Some(pricing.as_ref()),
     )
     .map_err(anyhow::Error::new)?;
-    let health = wrapped_health_report(&aggregated);
-    let graph = aggregated.graph.expect("graph view requested");
+    let health = aggregated.health.to_report();
+    let mut data = aggregated.tui_usage.take().expect("tui view requested");
+    data.health = health.clone();
 
-    let mut model_map: HashMap<String, WrappedRankedEntry> = HashMap::new();
     let mut client_map: HashMap<String, WrappedRankedEntry> = HashMap::new();
     let mut total_messages = 0i32;
 
-    for day in &graph.contributions {
-        total_messages += day.totals.messages;
-
-        for client_contrib in &day.clients {
-            accumulate_wrapped_contribution(&mut model_map, &mut client_map, client_contrib);
+    for day in &data.daily {
+        total_messages = total_messages.saturating_add(
+            day.message_count
+                .try_into()
+                .expect("wrapped daily message count exceeds i32::MAX"),
+        );
+        for (client, client_usage) in &day.client_breakdown {
+            let client_name = client_display_name(client).unwrap_or(client).to_string();
+            let client_entry =
+                client_map
+                    .entry(client.clone())
+                    .or_insert_with(|| WrappedRankedEntry {
+                        name: client_name,
+                        client_id: Some(client.clone()),
+                        provider: None,
+                        cost: 0.0,
+                        tokens: 0,
+                    });
+            client_entry.cost += client_usage.cost;
+            client_entry.tokens = client_entry
+                .tokens
+                .checked_add(
+                    client_usage
+                        .tokens
+                        .total()
+                        .try_into()
+                        .expect("wrapped client token total exceeds i64::MAX"),
+                )
+                .expect("wrapped client token total exceeds i64::MAX");
         }
     }
 
-    let mut top_models: Vec<WrappedRankedEntry> = model_map.into_values().collect();
+    let mut top_models: Vec<WrappedRankedEntry> = data
+        .models
+        .iter()
+        .map(|model| WrappedRankedEntry {
+            name: format_model_name(&model.model),
+            client_id: None,
+            provider: get_provider_from_model(&model.model),
+            cost: model.cost,
+            tokens: model
+                .tokens
+                .total()
+                .try_into()
+                .expect("wrapped model token total exceeds i64::MAX"),
+        })
+        .collect();
     top_models.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(Ordering::Equal));
     top_models.truncate(3);
 
@@ -271,49 +304,38 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     top_clients.truncate(3);
 
     let top_agents = if include_agent_view {
-        aggregated
-            .agent_usage
-            .as_ref()
-            .map(|agents| build_top_agents(agents))
-            .filter(|agents| !agents.is_empty())
+        Some(build_top_agents(&data.agents)).filter(|agents| !agents.is_empty())
     } else {
         None
     };
 
-    let max_cost = graph
-        .contributions
+    let max_cost = data.daily.iter().map(|day| day.cost).fold(1.0, f64::max);
+    let contributions: Vec<WrappedContribution> = data
+        .daily
         .iter()
-        .map(|c| c.totals.cost)
-        .fold(1.0, f64::max);
-    let contributions: Vec<WrappedContribution> = graph
-        .contributions
-        .iter()
-        .map(|c| WrappedContribution {
-            date: c.date.clone(),
-            level: calculate_intensity(c.totals.cost, max_cost),
+        .map(|day| WrappedContribution {
+            date: day.date.to_string(),
+            level: calculate_intensity(day.cost, max_cost),
         })
         .collect();
-
-    let mut sorted_dates: Vec<String> = contributions
-        .iter()
-        .map(|c| c.date.clone())
-        .filter(|date| date.starts_with(&year))
-        .collect();
-    sorted_dates.sort();
-
-    let (_current_streak, longest_streak) = calculate_streaks(&sorted_dates);
-    let _first_day = sorted_dates
-        .first()
-        .cloned()
-        .unwrap_or_else(|| format!("{}-01-01", year));
 
     Ok(WrappedData {
         health,
         year,
-        active_days: graph.summary.active_days,
-        total_tokens: graph.summary.total_tokens,
-        total_cost: graph.summary.total_cost,
-        longest_streak,
+        active_days: data
+            .daily
+            .len()
+            .try_into()
+            .expect("wrapped active day count exceeds i32::MAX"),
+        total_tokens: data
+            .total_tokens
+            .try_into()
+            .expect("wrapped token total exceeds i64::MAX"),
+        total_cost: data.total_cost,
+        longest_streak: data
+            .longest_streak
+            .try_into()
+            .expect("wrapped longest streak exceeds i32::MAX"),
         top_models,
         top_clients,
         top_agents,
@@ -322,44 +344,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     })
 }
 
-fn wrapped_health_report(
-    aggregated: &tokscale_core::AggregatedViews,
-) -> tokscale_core::input_health::HealthReport {
-    aggregated.health.to_report()
-}
-
-fn accumulate_wrapped_contribution(
-    model_map: &mut HashMap<String, WrappedRankedEntry>,
-    client_map: &mut HashMap<String, WrappedRankedEntry>,
-    contribution: &tokscale_core::ClientContribution,
-) {
-    let contribution_tokens = contribution.tokens.total();
-    accumulate_wrapped_model(
-        model_map,
-        &contribution.model_id,
-        contribution.cost,
-        contribution_tokens,
-    );
-
-    let client_name = client_display_name(&contribution.client)
-        .unwrap_or(contribution.client.as_str())
-        .to_string();
-    let client_entry = client_map
-        .entry(contribution.client.clone())
-        .or_insert_with(|| WrappedRankedEntry {
-            name: client_name,
-            client_id: Some(contribution.client.clone()),
-            provider: None,
-            cost: 0.0,
-            tokens: 0,
-        });
-    client_entry.cost += contribution.cost;
-    client_entry.tokens = client_entry
-        .tokens
-        .checked_add(contribution_tokens)
-        .expect("wrapped client token total exceeds i64::MAX");
-}
-
+#[cfg(test)]
 fn accumulate_wrapped_model(
     model_map: &mut HashMap<String, WrappedRankedEntry>,
     model_id: &str,
@@ -382,15 +367,25 @@ fn accumulate_wrapped_model(
         .expect("wrapped model token total exceeds i64::MAX");
 }
 
-fn build_top_agents(agent_usage: &[tokscale_core::AgentUsage]) -> Vec<WrappedAgentEntry> {
+fn build_top_agents(
+    agent_usage: &[tokscale_core::usage_views::AgentEntry],
+) -> Vec<WrappedAgentEntry> {
     let mut agent_map: HashMap<String, WrappedAgentEntry> = HashMap::new();
 
     for agent in agent_usage {
-        if agent.client != ClientId::OpenCode.as_str() {
+        if !agent
+            .clients
+            .split(", ")
+            .any(|client| client == ClientId::OpenCode.as_str())
+        {
             continue;
         }
 
-        let tokens = agent.tokens.total();
+        let tokens = agent
+            .tokens
+            .total()
+            .try_into()
+            .expect("wrapped agent token total exceeds i64::MAX");
 
         let entry = agent_map
             .entry(agent.agent.clone())
@@ -403,7 +398,12 @@ fn build_top_agents(agent_usage: &[tokscale_core::AgentUsage]) -> Vec<WrappedAge
             .tokens
             .checked_add(tokens)
             .expect("wrapped agent token total exceeds i64::MAX");
-        entry.messages += agent.message_count;
+        entry.messages = entry.messages.saturating_add(
+            agent
+                .message_count
+                .try_into()
+                .expect("wrapped agent message count exceeds i32::MAX"),
+        );
     }
 
     let mut agents: Vec<WrappedAgentEntry> = agent_map.into_values().collect();
@@ -1250,62 +1250,6 @@ fn calculate_intensity(cost: f64, max_cost: f64) -> u8 {
     }
 }
 
-fn calculate_streaks(sorted_dates: &[String]) -> (i32, i32) {
-    let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
-    calculate_streaks_with_today(sorted_dates, &today)
-}
-
-fn calculate_streaks_with_today(sorted_dates: &[String], today: &str) -> (i32, i32) {
-    if sorted_dates.is_empty() {
-        return (0, 0);
-    }
-
-    let mut current_streak = 0;
-    let mut longest_streak = 0;
-    let mut streak = 1;
-
-    for index in (0..sorted_dates.len()).rev() {
-        if index == sorted_dates.len() - 1 {
-            let days_diff = date_diff_days(&sorted_dates[index], today);
-            if days_diff <= 1 {
-                current_streak = 1;
-            } else {
-                break;
-            }
-        } else {
-            let days_diff = date_diff_days(&sorted_dates[index], &sorted_dates[index + 1]);
-            if days_diff == 1 {
-                current_streak += 1;
-            } else {
-                break;
-            }
-        }
-    }
-
-    for index in 1..sorted_dates.len() {
-        let days_diff = date_diff_days(&sorted_dates[index - 1], &sorted_dates[index]);
-        if days_diff == 1 {
-            streak += 1;
-        } else {
-            longest_streak = longest_streak.max(streak);
-            streak = 1;
-        }
-    }
-    longest_streak = longest_streak.max(streak);
-
-    (current_streak, longest_streak)
-}
-
-fn date_diff_days(date1: &str, date2: &str) -> i64 {
-    let parsed1 = NaiveDate::parse_from_str(date1, "%Y-%m-%d");
-    let parsed2 = NaiveDate::parse_from_str(date2, "%Y-%m-%d");
-
-    match (parsed1, parsed2) {
-        (Ok(d1), Ok(d2)) => (d2 - d1).num_days().abs(),
-        _ => 0,
-    }
-}
-
 fn format_tokens_short(tokens: i64) -> String {
     if tokens >= 1_000_000_000 {
         format!("{:.2}B", tokens as f64 / 1_000_000_000.0)
@@ -1715,7 +1659,6 @@ mod tests {
     use serial_test::serial;
     use std::env;
     use tempfile::TempDir;
-    use tokscale_core::{DataHealth, InputFailure, InputHealth, InputStatus, RejectionSummary};
 
     #[test]
     fn automatic_ranking_uses_agents_only_when_agent_data_exists() {
@@ -1748,30 +1691,6 @@ mod tests {
                 None => env::remove_var(key),
             }
         }
-    }
-
-    #[test]
-    fn wrapped_health_report_preserves_failed_inputs() {
-        let mut health = DataHealth::default();
-        health.record(InputHealth {
-            client: ClientId::OpenCode,
-            path: PathBuf::from("/tmp/broken-opencode.db"),
-            status: InputStatus::Unavailable {
-                failure: InputFailure::new("open database", "invalid database"),
-            },
-            rejections: RejectionSummary::default(),
-        });
-        let aggregated = tokscale_core::AggregatedViews {
-            health,
-            ..Default::default()
-        };
-
-        let report = wrapped_health_report(&aggregated);
-
-        assert!(!report.complete);
-        assert_eq!(report.failed_inputs, 1);
-        assert_eq!(report.issues[0].client, "opencode");
-        assert_eq!(report.issues[0].issue, "input-unavailable");
     }
 
     // ========== format_tokens_short tests ==========
@@ -1807,10 +1726,10 @@ mod tests {
     #[test]
     fn build_top_agents_filters_to_opencode_usage() {
         let agents = build_top_agents(&[
-            tokscale_core::AgentUsage {
-                client: "opencode".to_string(),
+            tokscale_core::usage_views::AgentEntry {
                 agent: "Sisyphus".to_string(),
-                tokens: tokscale_core::TokenBreakdown {
+                clients: "opencode".to_string(),
+                tokens: tokscale_core::usage_views::UsageTokenBreakdown {
                     input: 10,
                     output: 20,
                     cache_read: 0,
@@ -1819,11 +1738,12 @@ mod tests {
                 },
                 cost: 0.0,
                 message_count: 2,
+                instance_count: 1,
             },
-            tokscale_core::AgentUsage {
-                client: "codex".to_string(),
+            tokscale_core::usage_views::AgentEntry {
                 agent: "Sisyphus".to_string(),
-                tokens: tokscale_core::TokenBreakdown {
+                clients: "codex".to_string(),
+                tokens: tokscale_core::usage_views::UsageTokenBreakdown {
                     input: 1000,
                     output: 0,
                     cache_read: 0,
@@ -1832,11 +1752,12 @@ mod tests {
                 },
                 cost: 0.0,
                 message_count: 50,
+                instance_count: 1,
             },
-            tokscale_core::AgentUsage {
-                client: "opencode".to_string(),
+            tokscale_core::usage_views::AgentEntry {
                 agent: "Reviewer".to_string(),
-                tokens: tokscale_core::TokenBreakdown {
+                clients: "opencode".to_string(),
+                tokens: tokscale_core::usage_views::UsageTokenBreakdown {
                     input: 5,
                     output: 5,
                     cache_read: 5,
@@ -1845,6 +1766,7 @@ mod tests {
                 },
                 cost: 0.0,
                 message_count: 3,
+                instance_count: 1,
             },
         ]);
 
@@ -2078,31 +2000,6 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_rankings_include_reasoning_tokens() {
-        let contribution = tokscale_core::ClientContribution {
-            client: "omp".to_string(),
-            model_id: "gpt-5.5".to_string(),
-            provider_id: "openai".to_string(),
-            tokens: tokscale_core::TokenBreakdown {
-                input: 100,
-                output: 25,
-                cache_read: 10,
-                cache_write: 5,
-                reasoning: 25,
-            },
-            cost: 1.0,
-            messages: 1,
-        };
-        let mut model_map = HashMap::new();
-        let mut client_map = HashMap::new();
-
-        accumulate_wrapped_contribution(&mut model_map, &mut client_map, &contribution);
-
-        assert_eq!(model_map["gpt-5.5"].tokens, 165);
-        assert_eq!(client_map["omp"].tokens, 165);
-    }
-
-    #[test]
     fn test_format_model_name_claude() {
         assert_eq!(
             format_model_name("claude-sonnet-4-20250514"),
@@ -2230,92 +2127,6 @@ mod tests {
     fn test_calculate_intensity_grade0() {
         assert_eq!(calculate_intensity(0.0, 100.0), 0);
         assert_eq!(calculate_intensity(0.0, 0.0), 0);
-    }
-
-    // ========== calculate_streaks tests ==========
-
-    #[test]
-    fn test_calculate_streaks_consecutive() {
-        let dates = vec![
-            "2024-01-01".to_string(),
-            "2024-01-02".to_string(),
-            "2024-01-03".to_string(),
-            "2024-01-04".to_string(),
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 4);
-    }
-
-    #[test]
-    fn test_calculate_streaks_with_gaps() {
-        let dates = vec![
-            "2024-01-01".to_string(),
-            "2024-01-02".to_string(),
-            "2024-01-05".to_string(),
-            "2024-01-06".to_string(),
-            "2024-01-07".to_string(),
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 3);
-    }
-
-    #[test]
-    fn test_calculate_streaks_empty() {
-        let dates: Vec<String> = vec![];
-        let (current, longest) = calculate_streaks(&dates);
-        assert_eq!(current, 0);
-        assert_eq!(longest, 0);
-    }
-
-    #[test]
-    fn test_calculate_streaks_single_day() {
-        let dates = vec!["2024-01-01".to_string()];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 1);
-    }
-
-    #[test]
-    fn test_calculate_streaks_current_uses_provided_today() {
-        let dates = vec![
-            "2026-03-01".to_string(),
-            "2026-03-02".to_string(),
-            "2026-03-03".to_string(),
-        ];
-        let (current, longest) = calculate_streaks_with_today(&dates, "2026-03-03");
-        assert_eq!(current, 3);
-        assert_eq!(longest, 3);
-    }
-
-    // ========== date_diff_days tests ==========
-
-    #[test]
-    fn test_date_diff_days_forward() {
-        assert_eq!(date_diff_days("2024-01-01", "2024-01-10"), 9);
-        assert_eq!(date_diff_days("2024-01-01", "2024-01-02"), 1);
-    }
-
-    #[test]
-    fn test_date_diff_days_backward() {
-        assert_eq!(date_diff_days("2024-01-10", "2024-01-01"), 9);
-        assert_eq!(date_diff_days("2024-01-02", "2024-01-01"), 1);
-    }
-
-    #[test]
-    fn test_date_diff_days_same_day() {
-        assert_eq!(date_diff_days("2024-01-01", "2024-01-01"), 0);
-    }
-
-    #[test]
-    fn test_date_diff_days_invalid() {
-        assert_eq!(date_diff_days("invalid", "2024-01-01"), 0);
-        assert_eq!(date_diff_days("2024-01-01", "invalid"), 0);
-        assert_eq!(date_diff_days("invalid", "invalid"), 0);
-    }
-
-    #[test]
-    fn test_date_diff_days_cross_month() {
-        assert_eq!(date_diff_days("2024-01-31", "2024-02-01"), 1);
-        assert_eq!(date_diff_days("2024-01-01", "2024-02-01"), 31);
     }
 
     // ========== client catalog tests ==========
@@ -2630,124 +2441,5 @@ mod tests {
     #[test]
     fn test_calculate_intensity_tiny_fraction() {
         assert_eq!(calculate_intensity(0.001, 100.0), 1);
-    }
-
-    // ========== date_diff_days edge case tests ==========
-
-    #[test]
-    fn test_date_diff_days_cross_year() {
-        assert_eq!(date_diff_days("2023-12-31", "2024-01-01"), 1);
-        assert_eq!(date_diff_days("2023-01-01", "2024-01-01"), 365);
-    }
-
-    #[test]
-    fn test_date_diff_days_leap_year() {
-        // 2024 is a leap year
-        assert_eq!(date_diff_days("2024-02-28", "2024-02-29"), 1);
-        assert_eq!(date_diff_days("2024-02-28", "2024-03-01"), 2);
-    }
-
-    #[test]
-    fn test_date_diff_days_large_gap() {
-        assert_eq!(date_diff_days("2020-01-01", "2025-01-01"), 1827);
-    }
-
-    #[test]
-    fn test_date_diff_days_partial_invalid() {
-        assert_eq!(date_diff_days("2024-13-01", "2024-01-01"), 0); // month 13 invalid
-        assert_eq!(date_diff_days("2024-01-01", "not-a-date"), 0);
-    }
-
-    #[test]
-    fn test_date_diff_days_empty_strings() {
-        assert_eq!(date_diff_days("", ""), 0);
-        assert_eq!(date_diff_days("", "2024-01-01"), 0);
-    }
-
-    // ========== calculate_streaks comprehensive tests ==========
-
-    #[test]
-    fn test_calculate_streaks_no_consecutive_dates() {
-        let dates = vec![
-            "2024-01-01".to_string(),
-            "2024-01-03".to_string(),
-            "2024-01-05".to_string(),
-            "2024-01-07".to_string(),
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 1); // each date is isolated
-    }
-
-    #[test]
-    fn test_calculate_streaks_multiple_separate_streaks() {
-        let dates = vec![
-            "2024-01-01".to_string(),
-            "2024-01-02".to_string(),
-            "2024-01-03".to_string(), // streak of 3
-            "2024-01-10".to_string(),
-            "2024-01-11".to_string(),
-            "2024-01-12".to_string(),
-            "2024-01-13".to_string(),
-            "2024-01-14".to_string(), // streak of 5 — longest
-            "2024-01-20".to_string(),
-            "2024-01-21".to_string(), // streak of 2
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 5);
-    }
-
-    #[test]
-    fn test_calculate_streaks_longest_at_beginning() {
-        let dates = vec![
-            "2024-01-01".to_string(),
-            "2024-01-02".to_string(),
-            "2024-01-03".to_string(),
-            "2024-01-04".to_string(), // streak of 4
-            "2024-01-10".to_string(),
-            "2024-01-11".to_string(), // streak of 2
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 4);
-    }
-
-    #[test]
-    fn test_calculate_streaks_all_consecutive() {
-        let dates = vec![
-            "2024-01-01".to_string(),
-            "2024-01-02".to_string(),
-            "2024-01-03".to_string(),
-            "2024-01-04".to_string(),
-            "2024-01-05".to_string(),
-            "2024-01-06".to_string(),
-            "2024-01-07".to_string(),
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 7);
-    }
-
-    #[test]
-    fn test_calculate_streaks_two_dates_consecutive() {
-        let dates = vec!["2024-06-15".to_string(), "2024-06-16".to_string()];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 2);
-    }
-
-    #[test]
-    fn test_calculate_streaks_two_dates_gap() {
-        let dates = vec!["2024-06-15".to_string(), "2024-06-20".to_string()];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 1);
-    }
-
-    #[test]
-    fn test_calculate_streaks_cross_month_boundary() {
-        let dates = vec![
-            "2024-01-30".to_string(),
-            "2024-01-31".to_string(),
-            "2024-02-01".to_string(),
-            "2024-02-02".to_string(),
-        ];
-        let (_current, longest) = calculate_streaks(&dates);
-        assert_eq!(longest, 4);
     }
 }

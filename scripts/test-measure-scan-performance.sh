@@ -60,25 +60,7 @@ test_prefers_gtime_and_accepts_numeric_processing_time() {
   grep -Fxq $'baseline\t1\t12.5\t0.01\t0.00\t0.00\t1234' "${output}"
   [[ "$(wc -l <"${gtime_log}")" -eq 2 ]]
   [[ "$(wc -l <"${binary_log}")" -eq 2 ]]
-  grep -Fxq 'time-metrics --json --no-spinner -c opencode' "${binary_log}"
-}
-
-test_graph_report_interface() {
-  local bin_dir="${TMP_DIR}/graph-bin"
-  local output="${TMP_DIR}/graph-output.tsv"
-  local binary_log="${TMP_DIR}/graph-binary.log"
-  local gtime_log="${TMP_DIR}/graph-gtime.log"
-  setup_fake_tools "${bin_dir}"
-
-  PATH="${bin_dir}:${PATH}" \
-    FAKE_BINARY_LOG="${binary_log}" \
-    FAKE_GTIME_LOG="${gtime_log}" \
-    FAKE_METRICS_JSON='{"data":{},"health":{},"metadata":{"processingTimeMs":9}}' \
-    bash "${SCRIPT_UNDER_TEST}" "${bin_dir}/tokscale" graph opencode 1 graph >"${output}"
-
-  grep -Fxq $'graph\t1\t9\t0.01\t0.00\t0.00\t1234' "${output}"
-  [[ "$(wc -l <"${binary_log}")" -eq 2 ]]
-  grep -Fxq 'graph --no-spinner -c opencode' "${binary_log}"
+  grep -Fxq 'models --group-by model --json --no-spinner -c opencode' "${binary_log}"
 }
 
 test_rejects_missing_or_non_numeric_processing_time() {
@@ -122,17 +104,17 @@ test_rejects_non_positive_or_malformed_run_counts() {
   done
 }
 
-test_rejects_unknown_report() {
-  local fake_binary="${TMP_DIR}/unknown-report-binary"
-  local output="${TMP_DIR}/unknown-report-output.txt"
+test_rejects_extra_arguments() {
+  local fake_binary="${TMP_DIR}/extra-argument-binary"
+  local output="${TMP_DIR}/extra-argument-output.txt"
   write_fake_binary "${fake_binary}"
 
   if FAKE_METRICS_JSON='{"metadata":{"processingTimeMs":1}}' \
-    bash "${SCRIPT_UNDER_TEST}" "${fake_binary}" baseline opencode 1 unknown >"${output}" 2>&1; then
-    echo "Expected unknown REPORT to fail" >&2
+    bash "${SCRIPT_UNDER_TEST}" "${fake_binary}" baseline opencode 1 graph >"${output}" 2>&1; then
+    echo "Expected extra arguments to fail" >&2
     return 1
   fi
-  grep -q "REPORT must be time-metrics or graph" "${output}"
+  grep -q "usage: measure-scan-performance.sh BINARY LABEL CLIENTS \[RUNS\]" "${output}"
 }
 
 test_usr_bin_time_requires_gnu_capabilities_when_gtime_is_absent() {
@@ -159,10 +141,9 @@ test_usr_bin_time_requires_gnu_capabilities_when_gtime_is_absent() {
 }
 
 test_prefers_gtime_and_accepts_numeric_processing_time
-test_graph_report_interface
 test_rejects_missing_or_non_numeric_processing_time
 test_rejects_non_positive_or_malformed_run_counts
-test_rejects_unknown_report
+test_rejects_extra_arguments
 test_usr_bin_time_requires_gnu_capabilities_when_gtime_is_absent
 
 echo "measure-scan-performance tests passed"
