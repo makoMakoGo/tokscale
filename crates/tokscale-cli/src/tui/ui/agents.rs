@@ -1,8 +1,7 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
-};
+use ratatui::widgets::{Block, Borders, Cell, Row, Scrollbar, ScrollbarOrientation, Table};
 
+use super::empty_state;
 use super::table_layout::{
     display_width, distributed_table_area, responsive_table_layout, width_for_column,
     ResponsiveColumn, DISTRIBUTED_TABLE_FLEX, TABLE_COLUMN_SPACING,
@@ -11,8 +10,9 @@ use super::widgets::{
     format_cost, get_client_display_name, total_tokens_cell, truncate_display_width,
     viewport_scrollbar_state,
 };
+use crate::tui::actions::ActionSet;
 use crate::tui::app::{App, SortDirection, SortField};
-use tokscale_core::ClientId;
+use crate::tui::presentation::EmptySubject;
 
 const RANK_WIDTH: u16 = 3;
 const AGENT_MIN_WIDTH: u16 = 16;
@@ -47,7 +47,13 @@ impl AgentsTableLayout {
     }
 }
 
-pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+pub fn render(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    empty: Option<EmptySubject>,
+    actions: &ActionSet,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
@@ -65,6 +71,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let visible_height = inner.height.saturating_sub(1) as usize;
     app.set_max_visible_items(visible_height);
+    if empty_state::render_if(frame, app, inner, empty, actions) {
+        return;
+    }
 
     let sort_field = app.sort_field;
     let sort_direction = app.sort_direction;
@@ -76,13 +85,6 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let striped_row_style = app.theme.striped_row_style();
 
     let agents = app.get_sorted_agents();
-    if agents.is_empty() {
-        let empty_msg = Paragraph::new(get_empty_message(app))
-            .style(Style::default().fg(theme_muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(empty_msg, inner);
-        return;
-    }
 
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
@@ -313,22 +315,6 @@ fn agents_table_layout(
     }
 }
 
-fn get_empty_message(app: &App) -> String {
-    let selected_clients = app.selected_clients.borrow();
-    let only_codex = !selected_clients.is_empty()
-        && selected_clients
-            .iter()
-            .all(|client| *client == ClientId::Codex);
-
-    if only_codex {
-        "No agent breakdown is available for the current clients.\nThe selected client usually does not record agent metadata for regular sessions.\nPress 's' to try a different client."
-            .to_string()
-    } else {
-        "No agent breakdown is available for the current clients.\nOnly some clients record agent metadata.\nPress 's' to change clients or 'r' to refresh."
-            .to_string()
-    }
-}
-
 fn client_labels(clients: &str) -> String {
     clients
         .split(", ")
@@ -351,58 +337,16 @@ fn client_labels_display_width(clients: &str) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        agents_table_layout, client_labels_display_width, get_empty_message, AgentColumn,
-        AGENT_MAX_WIDTH, CLIENT_MAX_WIDTH, COST_WIDTH, INSTANCES_WIDTH, MSGS_WIDTH, TOKENS_WIDTH,
+        agents_table_layout, client_labels_display_width, AgentColumn, AGENT_MAX_WIDTH,
+        CLIENT_MAX_WIDTH, COST_WIDTH, INSTANCES_WIDTH, MSGS_WIDTH, TOKENS_WIDTH,
     };
-    use crate::tui::app::{App, TuiConfig};
-    use crate::tui::data::UsageData;
     use ratatui::prelude::Constraint;
-    use tokscale_core::ClientId;
 
     fn length_at(widths: &[Constraint], index: usize) -> u16 {
         match widths[index] {
             Constraint::Length(width) => width,
             other => panic!("expected Length at index {index}, got {other:?}"),
         }
-    }
-
-    fn make_app(clients: Vec<ClientId>) -> App {
-        let app = App::new_with_cached_data(
-            TuiConfig {
-                theme: Some("blue".to_string()),
-                refresh: 0,
-                no_refresh: false,
-                home_dir: None,
-                clients: None,
-                since: None,
-                until: None,
-                year: None,
-                initial_tab: None,
-            },
-            Some(UsageData::default()),
-        )
-        .unwrap();
-
-        *app.selected_clients.borrow_mut() = clients.into_iter().collect();
-        app
-    }
-
-    #[test]
-    fn test_get_empty_message_for_codex_only() {
-        let app = make_app(vec![ClientId::Codex]);
-        let message = get_empty_message(&app);
-
-        assert!(message.contains("selected client usually does not record"));
-        assert!(message.contains("try a different client"));
-    }
-
-    #[test]
-    fn test_get_empty_message_for_mixed_clients() {
-        let app = make_app(vec![ClientId::OpenCode, ClientId::RooCode]);
-        let message = get_empty_message(&app);
-
-        assert!(message.contains("Only some clients record agent metadata"));
-        assert!(message.contains("change clients"));
     }
 
     #[test]

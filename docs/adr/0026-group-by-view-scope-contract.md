@@ -2,6 +2,10 @@
 
 Status: Accepted
 
+ADR 0028 owns the TUI generation, client projection, presentation, and action
+lifecycle. This ADR owns the shape of Group By projections and the model
+identity carried through them.
+
 ## Context
 
 The TUI `GroupBy` selector (`GroupBy::Model`, `ClientModel`,
@@ -38,13 +42,9 @@ changes the refresh clock. Canonical state is loaded lazily when a client
 subset first needs it. An explicitly reported cache-persistence failure may
 retain `TuiAcc` as a degraded in-memory projection backend.
 
-Usage and Sessions share the same snapshot boundary. A fresh startup cache
-serves both without a scan; stale startup data remains one coherent generation
-while a single background fold builds its replacement; and a cold miss uses a
-single background fold to build usage, sessions, and all grouping projections.
-A successful automatic or manual refresh replaces the whole bundle atomically.
-Failure preserves the previous bundle and exposes a degraded status instead of
-mixing old and new tab data.
+Local usage projections and Sessions share the generation boundary defined by
+ADR 0028. Group By changes only the usage projection and never reshape the
+generation's session snapshot.
 
 **Projection classification.** Every projection of `UsageData` is either:
 
@@ -52,8 +52,11 @@ mixing old and new tab data.
   table) and the per-client model sub-buckets inside `daily`/`hourly` and
   the period views derived from them; or
 - **group-agnostic** — invariant under grouping: day/hour totals, `agents`,
-  the contribution graph, streaks, subscription usage, sessions, and every
-  "Top Model" ranking.
+  the contribution graph, streaks, and every "Top Model" ranking.
+
+Sessions consume the local generation's separate session snapshot. Remote
+Subscription Usage has its own lifecycle. Neither is a member of `UsageData`
+or a Group By projection.
 
 **Canonical ranking.** Every "Top Model" ranking (Stats
 `rank_canonical_models`, Overview chart aggregation, overview snapshot,

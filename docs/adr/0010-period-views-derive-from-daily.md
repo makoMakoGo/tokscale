@@ -26,7 +26,7 @@ difference in input size.
 Time-dimension views **coarser than daily** (monthly, weekly, and any future
 period) are derived from the already-aggregated `daily` buckets via
 `build_period_usage(daily, kind)` in
-`crates/tokscale-cli/src/tui/data/mod.rs`. They are **not** re-folded
+`crates/tokscale-core/src/aggregate/tui.rs`. They are **not** re-folded
 per-message in `DataLoader`'s main loop, and no new per-message time map may
 be added for a coarse view.
 

@@ -1,3 +1,4 @@
+mod actions;
 mod app;
 mod cache;
 mod colors;
@@ -7,12 +8,14 @@ mod event;
 mod export;
 mod interaction;
 mod model_family;
+mod presentation;
 mod session_data;
 pub mod settings;
 mod themes;
 mod ui;
 mod view_state;
 
+use actions::{Action, ActionSet};
 pub use app::{App, Tab, TuiConfig, TuiExit};
 use app::{KeyEventOutcome, ProjectionBackend};
 pub use cache::{
@@ -21,6 +24,7 @@ pub use cache::{
 };
 pub use data::{DataLoader, UsageData};
 pub use event::{Event, EventHandler};
+use presentation::Presentation;
 pub(crate) use themes::ThemeName;
 
 use std::collections::HashSet;
@@ -643,6 +647,17 @@ fn dispatch_key_event(
     view_state: &mut view_state::ViewState,
     key: KeyEvent,
 ) -> KeyEventOutcome {
+    // Dialogs own their complete keyboard vocabulary. Outside dialogs, the
+    // same capability set drives both advertised shortcuts and dispatch, so
+    // an empty table cannot still accept a decorative sort/detail command.
+    if !app.dialog_stack.is_active() {
+        let presentation = Presentation::for_view(app, view_state);
+        let actions = ActionSet::for_view(app, view_state, presentation);
+        if ActionSet::action_for_key(app, &key).is_some_and(|action| !actions.contains(action)) {
+            return KeyEventOutcome::Continue;
+        }
+    }
+
     if view_state.handle_key(app, &key) {
         return KeyEventOutcome::Continue;
     }
@@ -655,6 +670,18 @@ fn dispatch_key_event(
 }
 
 fn dispatch_mouse_event(app: &mut App, view_state: &mut view_state::ViewState, event: MouseEvent) {
+    if !app.dialog_stack.is_active()
+        && matches!(
+            event.kind,
+            crossterm::event::MouseEventKind::ScrollUp
+                | crossterm::event::MouseEventKind::ScrollDown
+        )
+        && !ActionSet::for_view(app, view_state, Presentation::for_view(app, view_state))
+            .contains(Action::Scroll)
+    {
+        return;
+    }
+
     if !view_state.handle_mouse(app, &event) {
         app.handle_mouse_event(event);
         if !app.dialog_stack.is_active() {
@@ -850,6 +877,38 @@ mod tests {
     #[test]
     fn daily_profile_mouse_wheel_scrolls_without_moving_the_hidden_table() {
         let mut app = app_on(Tab::Daily);
+        app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
+        let tokens = crate::tui::data::TokenBreakdown {
+            input: 1,
+            ..Default::default()
+        };
+        app.data.daily.push(crate::tui::data::DailyUsage {
+            date: chrono::NaiveDate::from_ymd_opt(2026, 7, 22).unwrap(),
+            tokens: tokens.clone(),
+            cost: 0.0,
+            client_breakdown: std::collections::BTreeMap::from([(
+                "codex".to_string(),
+                crate::tui::data::DailyClientInfo {
+                    tokens: tokens.clone(),
+                    cost: 0.0,
+                    models: std::collections::BTreeMap::from([(
+                        "gpt-5".to_string(),
+                        crate::tui::data::DailyModelInfo {
+                            provider: "openai".to_string(),
+                            model_id: "gpt-5".to_string(),
+                            display_name: "gpt-5".to_string(),
+                            workspace_key: None,
+                            workspace_label: None,
+                            tokens,
+                            cost: 0.0,
+                            messages: 1,
+                        },
+                    )]),
+                },
+            )]),
+            message_count: 1,
+            turn_count: 1,
+        });
         let mut view_state = view_state::ViewState::default();
         assert!(view_state.handle_key(&app, &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
         assert!(view_state.daily_profile_active());
@@ -867,6 +926,126 @@ mod tests {
             app.selected_index, 7,
             "Daily Profile wheel input must not mutate the hidden Daily Table selection"
         );
+    }
+
+    #[test]
+    fn empty_view_consumes_row_commands_but_keeps_recovery_actions() {
+        let mut app = app_on(Tab::Models);
+        app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
+        let mut view_state = view_state::ViewState::default();
+        let original_sort = (app.sort_field, app.sort_direction);
+
+        for key in [
+            KeyCode::Char('d'),
+            KeyCode::Enter,
+            KeyCode::Char('g'),
+            KeyCode::Char('y'),
+        ] {
+            assert_eq!(
+                dispatch_key_event(
+                    &mut app,
+                    &mut view_state,
+                    KeyEvent::new(key, KeyModifiers::NONE),
+                ),
+                KeyEventOutcome::Continue
+            );
+        }
+
+        assert_eq!((app.sort_field, app.sort_direction), original_sort);
+        assert!(!app.is_model_detail_active());
+        assert!(!app.dialog_stack.is_active());
+        assert!(!app.needs_reload);
+
+        dispatch_key_event(
+            &mut app,
+            &mut view_state,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+        );
+        assert!(app.needs_reload);
+
+        dispatch_key_event(
+            &mut app,
+            &mut view_state,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        );
+        assert!(app.dialog_stack.is_active());
+    }
+
+    #[test]
+    #[serial]
+    fn empty_agents_does_not_block_exporting_the_installed_report() {
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set(temp.path());
+        let mut app = app_on(Tab::Agents);
+        app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
+        app.data.models.push(crate::tui::data::ModelUsage {
+            model: "gpt-5".to_string(),
+            provider: "openai".to_string(),
+            client: "codex".to_string(),
+            workspace_key: None,
+            workspace_label: None,
+            tokens: crate::tui::data::TokenBreakdown {
+                input: 1,
+                ..Default::default()
+            },
+            cost: 0.0,
+            performance: Default::default(),
+            session_count: 1,
+        });
+        let mut view_state = view_state::ViewState::default();
+
+        assert_eq!(
+            Presentation::for_view(&app, &view_state),
+            Presentation::Empty(presentation::EmptySubject::AgentBreakdown)
+        );
+        dispatch_key_event(
+            &mut app,
+            &mut view_state,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        );
+
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Exported to ")),
+            "empty Agents must not swallow whole-report export"
+        );
+    }
+
+    #[test]
+    fn zero_session_summary_cannot_open_an_empty_detail() {
+        let mut app = app_on(Tab::Sessions);
+        app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
+        app.session_snapshot = session_data::SessionSnapshot::new(
+            Vec::new(),
+            std::collections::BTreeMap::from([("junie".to_string(), 0)]),
+        );
+        let mut view_state = view_state::ViewState::default();
+
+        assert_eq!(view_state.client_count(&app), 1);
+        assert_eq!(view_state.session_count(&app), 0);
+        dispatch_key_event(
+            &mut app,
+            &mut view_state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+
+        assert!(!view_state.session_detail_active());
+    }
+
+    #[test]
+    fn session_detail_closes_when_refresh_leaves_the_client_without_sessions() {
+        let (mut app, mut view_state) = app_with_codex_session_detail();
+        app.session_snapshot = session_data::SessionSnapshot::new(
+            Vec::new(),
+            std::collections::BTreeMap::from([(ClientId::Codex.as_str().to_string(), 0)]),
+        );
+
+        view_state.reconcile_session_snapshot(&app);
+
+        assert!(!view_state.session_detail_active());
+        assert_eq!(view_state.client_count(&app), 1);
+        assert_eq!(view_state.session_count(&app), 0);
     }
 
     fn write_amp_input(home: &std::path::Path, input_tokens: u64) {
@@ -1005,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn miss_renders_empty_until_background_completes() {
+    fn miss_has_no_snapshot_and_requests_background_load() {
         let (cached_data, needs_background_load, digest) = decide_initial_data(CacheResult::Miss);
 
         assert!(cached_data.is_none());

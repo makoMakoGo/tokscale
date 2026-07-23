@@ -788,7 +788,10 @@ fn contract_tui_view_materializes_usage_data() {
         !data.hourly.is_empty(),
         "TUI hourly usage should be materialized"
     );
-    assert!(data.graph.is_some(), "TUI graph should be materialized");
+    assert!(
+        !data.graph.weeks.is_empty(),
+        "TUI graph should be materialized"
+    );
     assert_eq!(
         data.total_tokens,
         data.models

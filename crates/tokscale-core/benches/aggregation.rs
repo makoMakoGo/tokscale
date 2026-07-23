@@ -224,16 +224,11 @@ fn push_and_finish(messages: &[UnifiedMessage], views: ViewSet, group_by: GroupB
         .map(|usage| {
             let graph_days = usage
                 .graph
-                .as_ref()
-                .map(|graph| {
-                    graph
-                        .weeks
-                        .iter()
-                        .flatten()
-                        .filter(|day| day.is_some())
-                        .count()
-                })
-                .unwrap_or(0);
+                .weeks
+                .iter()
+                .flatten()
+                .filter(|day| day.is_some())
+                .count();
             usage.models.len()
                 + usage.agents.len()
                 + usage.daily.len()

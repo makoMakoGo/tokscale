@@ -4,7 +4,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use super::widgets::{format_cost, format_tokens};
+use super::widgets::{format_cost, format_tokens, truncate_display_width};
+use crate::tui::actions::{Action, ActionSet};
 use crate::tui::app::{App, ClickAction, SortField, Tab};
 use crate::tui::data::{build_period_usage, PeriodKind};
 
@@ -23,6 +24,7 @@ impl SortControl {
 pub(super) struct FooterContent {
     sort_controls: Vec<SortControl>,
     sort_column_percent: u16,
+    leading: Option<String>,
     summary: Line<'static>,
     help: Line<'static>,
 }
@@ -36,6 +38,7 @@ impl FooterContent {
         Self {
             sort_controls,
             sort_column_percent: 40,
+            leading: None,
             summary,
             help,
         }
@@ -45,27 +48,44 @@ impl FooterContent {
         self.sort_column_percent = percent.min(100);
         self
     }
-}
 
-pub(super) fn standard_content(app: &App) -> FooterContent {
-    debug_assert_ne!(app.current_tab, Tab::Sessions);
-    FooterContent::new(
-        standard_sort_controls(app),
-        summary_row_line(app),
-        help_row_line(app),
-    )
-}
-
-pub(super) fn standard_sort_controls(app: &App) -> Vec<SortControl> {
-    if matches!(app.current_tab, Tab::Overview | Tab::Stats | Tab::Usage) {
-        return Vec::new();
+    pub(super) fn with_leading(mut self, leading: String) -> Self {
+        self.leading = Some(leading);
+        self
     }
+}
 
-    vec![
+pub(super) fn standard_content(app: &App, actions: &ActionSet) -> FooterContent {
+    debug_assert_ne!(app.current_tab, Tab::Sessions);
+    let content = FooterContent::new(
+        standard_sort_controls(actions),
+        summary_row_line(app, actions),
+        help_row_line(app, actions),
+    );
+    with_empty_scope(content, app, actions)
+}
+
+pub(super) fn standard_sort_controls(actions: &ActionSet) -> Vec<SortControl> {
+    [
         SortControl::new(SortField::Date, "Date"),
         SortControl::new(SortField::Cost, "Cost"),
         SortControl::new(SortField::Tokens, "Tokens"),
     ]
+    .into_iter()
+    .filter(|control| actions.contains(Action::Sort(control.field)))
+    .collect()
+}
+
+pub(super) fn with_empty_scope(
+    content: FooterContent,
+    app: &App,
+    actions: &ActionSet,
+) -> FooterContent {
+    if !actions.is_empty_view() {
+        return content;
+    }
+
+    content.with_leading(format!("Scope: {}", super::empty_state::scope_summary(app)))
 }
 
 pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect, content: FooterContent) {
@@ -80,7 +100,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect, content: Foot
         return;
     }
 
-    // Split into 3 rows: clients+sort, help text, status
+    // Split into 3 rows: main summary, help text, status.
     let row_constraints = if inner.height >= 3 {
         vec![
             Constraint::Length(1),
@@ -101,6 +121,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect, content: Foot
     let FooterContent {
         sort_controls,
         sort_column_percent,
+        leading,
         summary,
         help,
     } = content;
@@ -110,6 +131,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect, content: Foot
         rows[0],
         &sort_controls,
         sort_column_percent,
+        leading,
         summary,
     );
 
@@ -128,11 +150,12 @@ fn render_main_row(
     area: Rect,
     sort_controls: &[SortControl],
     sort_column_percent: u16,
+    leading: Option<String>,
     summary: Line<'static>,
 ) {
     let is_very_narrow = app.is_very_narrow();
 
-    // Split into left (sort buttons) and right (totals)
+    // Split into an optional leading/sort region and the summary.
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -141,7 +164,7 @@ fn render_main_row(
         ])
         .split(area);
 
-    // Left side: sort buttons
+    // The leading region is sortable only when the current ActionSet allows it.
     if !is_very_narrow && !sort_controls.is_empty() {
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled("Sort: ", Style::default().fg(app.theme.muted)));
@@ -172,6 +195,12 @@ fn render_main_row(
         }
 
         frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
+    } else if let Some(leading) = leading {
+        frame.render_widget(
+            Paragraph::new(truncate_display_width(&leading, chunks[0].width as usize))
+                .style(Style::default().fg(app.theme.muted)),
+            chunks[0],
+        );
     }
 
     frame.render_widget(
@@ -180,7 +209,7 @@ fn render_main_row(
     );
 }
 
-pub(super) fn summary_row_line(app: &App) -> Line<'static> {
+pub(super) fn summary_row_line(app: &App, actions: &ActionSet) -> Line<'static> {
     let is_very_narrow = app.is_very_narrow();
     let mut right_spans: Vec<Span> = Vec::new();
 
@@ -190,7 +219,7 @@ pub(super) fn summary_row_line(app: &App) -> Line<'static> {
         format_tokens(total_tokens),
         Style::default().fg(Color::Cyan),
     ));
-    if !is_very_narrow {
+    if !is_very_narrow && !actions.is_empty_view() {
         right_spans.push(Span::styled(
             " tokens",
             Style::default().fg(app.theme.muted),
@@ -268,7 +297,15 @@ fn current_count_label(app: &App) -> String {
     }
 }
 
-fn help_row_line(app: &App) -> Line<'static> {
+pub(super) fn help_row_line(app: &App, actions: &ActionSet) -> Line<'static> {
+    action_help_row_line(app, actions, None)
+}
+
+pub(super) fn action_help_row_line(
+    app: &App,
+    actions: &ActionSet,
+    toggle_target: Option<&str>,
+) -> Line<'static> {
     let is_very_narrow = app.is_very_narrow();
 
     if app.current_tab == Tab::Usage {
@@ -284,19 +321,22 @@ fn help_row_line(app: &App) -> Line<'static> {
                 spans.push(Span::styled("[u]", Style::default().fg(Color::Yellow)));
                 spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
             }
-            spans.extend([
-                Span::styled("[r:local]", Style::default().fg(Color::Yellow)),
-                Span::styled("·", Style::default().fg(app.theme.muted)),
-                Span::styled(
-                    "[R:local]",
-                    Style::default().fg(if app.auto_refresh {
-                        Color::Green
-                    } else {
-                        app.theme.muted
-                    }),
-                ),
-                Span::styled("·e·q", Style::default().fg(app.theme.muted)),
-            ]);
+            if actions.contains(Action::RefreshLocal) {
+                spans.push(Span::styled(
+                    "[r:local]",
+                    Style::default().fg(Color::Yellow),
+                ));
+                spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
+            }
+            spans.push(Span::styled(
+                "[R:local]",
+                Style::default().fg(if app.auto_refresh {
+                    Color::Green
+                } else {
+                    app.theme.muted
+                }),
+            ));
+            spans.push(Span::styled("·e·q", Style::default().fg(app.theme.muted)));
             spans
         } else {
             let mut spans = Vec::new();
@@ -307,190 +347,206 @@ fn help_row_line(app: &App) -> Line<'static> {
                 ));
                 spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
             }
-            spans.extend([
-                Span::styled(
+            if actions.contains(Action::RefreshLocal) {
+                spans.push(Span::styled(
                     "[r:refresh local reports]",
                     Style::default().fg(Color::Yellow),
-                ),
-                Span::styled(" • ", Style::default().fg(app.theme.muted)),
-                Span::styled(
-                    local_auto,
-                    Style::default().fg(if app.auto_refresh {
-                        Color::Green
-                    } else {
-                        app.theme.muted
-                    }),
-                ),
-                Span::styled(" • e • q", Style::default().fg(app.theme.muted)),
-            ]);
+                ));
+                spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
+            }
+            spans.push(Span::styled(
+                local_auto,
+                Style::default().fg(if app.auto_refresh {
+                    Color::Green
+                } else {
+                    app.theme.muted
+                }),
+            ));
+            spans.push(Span::styled(
+                " • e • q",
+                Style::default().fg(app.theme.muted),
+            ));
             spans
         };
 
         return Line::from(spans);
     }
 
-    let spans = if is_very_narrow {
-        let mut spans = vec![
-            Span::styled("↑↓", Style::default().fg(app.theme.muted)),
-            Span::styled("·", Style::default().fg(app.theme.muted)),
-            Span::styled("←→", Style::default().fg(app.theme.muted)),
-            Span::styled("·", Style::default().fg(app.theme.muted)),
-            Span::styled("d/t/c", Style::default().fg(Color::Blue)),
-            Span::styled("·", Style::default().fg(app.theme.muted)),
-            Span::styled("[s]", Style::default().fg(Color::Cyan)),
-        ];
-        if app.group_by_applies_to_current_tab() {
-            spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
-            spans.push(Span::styled("[g]", Style::default().fg(Color::Cyan)));
-        }
-        spans.extend([
-            Span::styled("·", Style::default().fg(app.theme.muted)),
-            Span::styled("[p]", Style::default().fg(Color::Magenta)),
-            Span::styled("·", Style::default().fg(app.theme.muted)),
-            Span::styled("[r]", Style::default().fg(Color::Yellow)),
-            Span::styled("·", Style::default().fg(app.theme.muted)),
-            Span::styled("q", Style::default().fg(app.theme.muted)),
-        ]);
-        if app.current_tab == Tab::Daily {
-            spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
-            if app.is_daily_detail_active() {
-                spans.push(Span::styled("esc", Style::default().fg(Color::Yellow)));
-            } else {
-                spans.push(Span::styled("↵", Style::default().fg(Color::Yellow)));
-                spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
-                spans.push(Span::styled("j", Style::default().fg(Color::Yellow)));
-            }
-        }
-        if app.current_tab == Tab::Models
-            && (app.is_model_detail_active() || app.model_details_supported())
+    let separator = if is_very_narrow { "·" } else { " • " };
+    let mut spans = Vec::new();
+    let mut emitted_navigation = false;
+    let mut emitted_sort = false;
+
+    for action in actions.iter() {
+        if actions.is_empty_view()
+            && !matches!(
+                action,
+                Action::Clients | Action::RefreshLocal | Action::PreviousTab | Action::NextTab
+            )
         {
-            spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
-            spans.push(Span::styled(
-                if app.is_model_detail_active() {
-                    "esc"
+            continue;
+        }
+
+        let label = match action {
+            Action::PreviousTab | Action::NextTab => {
+                if emitted_navigation {
+                    continue;
+                }
+                emitted_navigation = true;
+                if is_very_narrow {
+                    "←→".to_string()
                 } else {
-                    "↵"
-                },
-                Style::default().fg(Color::Yellow),
-            ));
-        }
-        if matches!(app.current_tab, Tab::Monthly | Tab::Weekly) {
-            spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
-            if app.is_period_detail_active() {
-                spans.push(Span::styled("esc", Style::default().fg(Color::Yellow)));
-            } else {
-                spans.push(Span::styled("↵", Style::default().fg(Color::Yellow)));
+                    "←→/tab view".to_string()
+                }
             }
-        }
-        if app.current_tab == Tab::Hourly {
-            spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
-            spans.push(Span::styled("v", Style::default().fg(Color::Yellow)));
-        }
-        spans
-    } else {
-        let mut spans = vec![
-            Span::styled(
-                "↑↓ scroll • ←→/tab view • ",
+            Action::Sort(_) => {
+                if emitted_sort {
+                    continue;
+                }
+                emitted_sort = true;
+                if is_very_narrow {
+                    "d/t/c".to_string()
+                } else {
+                    "[d/t/c:sort]".to_string()
+                }
+            }
+            Action::Scroll => {
+                if is_very_narrow {
+                    "↑↓".to_string()
+                } else {
+                    "↑↓ scroll".to_string()
+                }
+            }
+            Action::OpenDetails => {
+                if is_very_narrow {
+                    "↵".to_string()
+                } else if app.current_tab == Tab::Sessions {
+                    "[enter:sessions]".to_string()
+                } else {
+                    "[enter:details]".to_string()
+                }
+            }
+            Action::Back => {
+                if is_very_narrow {
+                    "esc".to_string()
+                } else {
+                    "[esc:back]".to_string()
+                }
+            }
+            Action::JumpToday => {
+                if is_very_narrow {
+                    "j".to_string()
+                } else {
+                    "[j:today]".to_string()
+                }
+            }
+            Action::ToggleView => toggle_action_label(app, toggle_target, is_very_narrow),
+            Action::Clients => {
+                if is_very_narrow {
+                    "[s]".to_string()
+                } else {
+                    "[s:clients]".to_string()
+                }
+            }
+            Action::GroupBy => {
+                if is_very_narrow {
+                    "[g]".to_string()
+                } else {
+                    format!("[g:{}]", app.group_by.borrow())
+                }
+            }
+            Action::Theme => {
+                if is_very_narrow {
+                    "[p]".to_string()
+                } else {
+                    format!("[p:{}]", app.theme.name.as_str())
+                }
+            }
+            Action::ToggleAutoRefresh => {
+                if is_very_narrow {
+                    "[R]".to_string()
+                } else if app.auto_refresh {
+                    format!("[R:local auto {}s]", app.auto_refresh_interval.as_secs())
+                } else {
+                    "[R:local auto off]".to_string()
+                }
+            }
+            Action::RefreshLocal => {
+                if is_very_narrow {
+                    "[r]".to_string()
+                } else {
+                    "[r:rescan]".to_string()
+                }
+            }
+            Action::IncreaseRefreshInterval
+            | Action::DecreaseRefreshInterval
+            | Action::RefreshSubscription
+            | Action::Copy => continue,
+            Action::Export => "e".to_string(),
+            Action::Quit => "q".to_string(),
+        };
+
+        if !spans.is_empty() {
+            spans.push(Span::styled(
+                separator.to_string(),
                 Style::default().fg(app.theme.muted),
-            ),
-            Span::styled("[d/t/c:sort]", Style::default().fg(Color::Blue)),
-            Span::styled(" • ", Style::default().fg(app.theme.muted)),
-        ];
-        if app.current_tab == Tab::Daily {
-            if app.is_daily_detail_active() {
-                spans.push(Span::styled(
-                    "[esc:back]",
-                    Style::default().fg(Color::Yellow),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    "[enter:details]",
-                    Style::default().fg(Color::Yellow),
-                ));
-                spans.push(Span::styled(" ", Style::default()));
-                spans.push(Span::styled(
-                    "[j:today]",
-                    Style::default().fg(Color::Yellow),
-                ));
-            }
-            spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
-        }
-        if app.current_tab == Tab::Models
-            && (app.is_model_detail_active() || app.model_details_supported())
-        {
-            spans.push(Span::styled(
-                if app.is_model_detail_active() {
-                    "[esc:back]"
-                } else {
-                    "[enter:details]"
-                },
-                Style::default().fg(Color::Yellow),
-            ));
-            spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
-        }
-        if matches!(app.current_tab, Tab::Monthly | Tab::Weekly) {
-            if app.is_period_detail_active() {
-                spans.push(Span::styled(
-                    "[esc:back]",
-                    Style::default().fg(Color::Yellow),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    "[enter:details]",
-                    Style::default().fg(Color::Yellow),
-                ));
-            }
-            spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
-        }
-        if app.current_tab == Tab::Hourly {
-            spans.push(Span::styled(
-                "[v:profile]",
-                Style::default().fg(Color::Yellow),
-            ));
-            spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
-        }
-        spans.push(Span::styled(
-            "[s:clients]",
-            Style::default().fg(Color::Cyan),
-        ));
-        if app.group_by_applies_to_current_tab() {
-            spans.push(Span::styled(" ", Style::default()));
-            spans.push(Span::styled(
-                format!("[g:{}]", app.group_by.borrow()),
-                Style::default().fg(Color::Cyan),
             ));
         }
-        spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
-        spans.push(Span::styled(
-            format!("[p:{}]", app.theme.name.as_str()),
-            Style::default().fg(Color::Magenta),
-        ));
-        spans.push(Span::styled(" ", Style::default()));
-        spans.push(Span::styled(
-            if app.auto_refresh {
-                format!("[R:local auto {}s]", app.auto_refresh_interval.as_secs())
-            } else {
-                "[R:local auto off]".to_string()
-            },
-            Style::default().fg(if app.auto_refresh {
-                Color::Green
-            } else {
-                app.theme.muted
-            }),
-        ));
-        spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
-        spans.push(Span::styled(
-            "[r:refresh local]",
-            Style::default().fg(Color::Yellow),
-        ));
-        spans.push(Span::styled(
-            " • e • q",
-            Style::default().fg(app.theme.muted),
-        ));
-        spans
-    };
+        spans.push(Span::styled(label, action_style(app, action)));
+    }
 
     Line::from(spans)
+}
+
+fn toggle_action_label(app: &App, target: Option<&str>, narrow: bool) -> String {
+    let (key, target) = match app.current_tab {
+        Tab::Overview => (
+            'h',
+            match app.chart_granularity {
+                crate::tui::app::ChartGranularity::Daily => "hourly",
+                crate::tui::app::ChartGranularity::Hourly => "daily",
+            },
+        ),
+        Tab::Daily => ('v', target.unwrap_or("view")),
+        Tab::Hourly => (
+            'v',
+            match app.hourly_view_mode {
+                crate::tui::app::HourlyViewMode::Table => "profile",
+                crate::tui::app::HourlyViewMode::Profile => "table",
+            },
+        ),
+        _ => ('v', target.unwrap_or("view")),
+    };
+    if narrow {
+        key.to_string()
+    } else {
+        format!("[{key}:{target}]")
+    }
+}
+
+fn action_style(app: &App, action: Action) -> Style {
+    let color = match action {
+        Action::Sort(_) => Color::Blue,
+        Action::Clients | Action::GroupBy => Color::Cyan,
+        Action::Theme => Color::Magenta,
+        Action::ToggleAutoRefresh if app.auto_refresh => Color::Green,
+        Action::OpenDetails
+        | Action::Back
+        | Action::JumpToday
+        | Action::ToggleView
+        | Action::RefreshLocal => Color::Yellow,
+        Action::Scroll
+        | Action::PreviousTab
+        | Action::NextTab
+        | Action::ToggleAutoRefresh
+        | Action::IncreaseRefreshInterval
+        | Action::DecreaseRefreshInterval
+        | Action::RefreshSubscription
+        | Action::Copy
+        | Action::Export
+        | Action::Quit => app.theme.muted,
+    };
+    Style::default().fg(color)
 }
 
 pub(super) fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
@@ -636,11 +692,14 @@ fn elapsed_label(elapsed: std::time::Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::commands::usage::{UsageMetric, UsageOutput, UsageProviderId};
     use crate::tui::app::{ProjectionBackend, TuiConfig};
-    use crate::tui::data::UsageData;
+    use crate::tui::data::{DailyUsage, ModelUsage, TokenBreakdown, UsageData};
     use crate::tui::settings::Settings;
+    use chrono::NaiveDate;
 
     fn make_app_on(tab: Tab) -> App {
         let config = TuiConfig {
@@ -667,6 +726,43 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>()
+    }
+
+    fn installed_app_on(tab: Tab) -> App {
+        let mut app = make_app_on(tab);
+        app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
+        app
+    }
+
+    fn nonempty_installed_app_on(tab: Tab) -> App {
+        let mut app = installed_app_on(tab);
+        app.data.daily.push(DailyUsage {
+            date: NaiveDate::from_ymd_opt(2026, 7, 22).unwrap(),
+            tokens: TokenBreakdown::default(),
+            cost: 0.0,
+            client_breakdown: BTreeMap::new(),
+            message_count: 0,
+            turn_count: 0,
+        });
+        app.data.models.push(ModelUsage {
+            model: "test-model".to_string(),
+            provider: "test-provider".to_string(),
+            client: "codex".to_string(),
+            workspace_key: None,
+            workspace_label: None,
+            tokens: TokenBreakdown::default(),
+            cost: 0.0,
+            performance: Default::default(),
+            session_count: 1,
+        });
+        app
+    }
+
+    fn help_text(app: &App) -> String {
+        let state = crate::tui::view_state::ViewState::default();
+        let presentation = crate::tui::presentation::Presentation::for_view(app, &state);
+        let actions = ActionSet::for_view(app, &state, presentation);
+        line_text(help_row_line(app, &actions))
     }
 
     #[test]
@@ -699,7 +795,7 @@ mod tests {
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
 
-        let text = line_text(help_row_line(&app));
+        let text = help_text(&app);
 
         assert!(text.contains("[u:refresh subscription]"));
         assert!(text.contains("[r:refresh local reports]"));
@@ -714,7 +810,7 @@ mod tests {
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(Vec::new());
 
-        let text = line_text(help_row_line(&app));
+        let text = help_text(&app);
 
         assert!(!text.contains("[u:refresh subscription]"));
         assert!(text.contains("[r:refresh local reports]"));
@@ -729,7 +825,7 @@ mod tests {
         app.terminal_width = 50;
         app.set_subscription_provider_ids_for_test(Vec::new());
 
-        let text = line_text(help_row_line(&app));
+        let text = help_text(&app);
 
         assert!(!text.contains("[u]"));
         assert!(text.contains("[r:local]"));
@@ -740,7 +836,7 @@ mod tests {
     #[test]
     fn group_by_hint_only_shows_on_group_keyed_tabs() {
         for tab in [Tab::Models, Tab::Daily, Tab::Monthly, Tab::Weekly] {
-            let text = line_text(help_row_line(&make_app_on(tab)));
+            let text = help_text(&nonempty_installed_app_on(tab));
             assert!(text.contains("[g:"), "expected [g: hint on {tab:?}");
         }
         for tab in [
@@ -751,7 +847,7 @@ mod tests {
             Tab::Sessions,
             Tab::Agents,
         ] {
-            let text = line_text(help_row_line(&make_app_on(tab)));
+            let text = help_text(&nonempty_installed_app_on(tab));
             assert!(!text.contains("[g:"), "unexpected [g: hint on {tab:?}");
         }
     }
@@ -769,9 +865,9 @@ mod tests {
             (Tab::Sessions, false),
             (Tab::Agents, false),
         ] {
-            let mut app = make_app_on(tab);
+            let mut app = nonempty_installed_app_on(tab);
             app.terminal_width = 50;
-            let text = line_text(help_row_line(&app));
+            let text = help_text(&app);
             assert_eq!(text.contains("[g]"), expected, "tab {tab:?}");
         }
     }

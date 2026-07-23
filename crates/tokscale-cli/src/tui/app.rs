@@ -830,7 +830,6 @@ impl App {
     fn graph_cell_for_date(&self, date: NaiveDate) -> Option<(usize, usize)> {
         self.data
             .graph
-            .as_ref()?
             .weeks
             .iter()
             .enumerate()
@@ -844,7 +843,6 @@ impl App {
     fn graph_date_for_cell(&self, (week_idx, day_idx): (usize, usize)) -> Option<NaiveDate> {
         self.data
             .graph
-            .as_ref()?
             .weeks
             .get(week_idx)?
             .get(day_idx)?
@@ -1237,7 +1235,7 @@ impl App {
             {
                 self.close_period_detail();
             }
-            KeyCode::Esc if self.selected_graph_cell.is_some() => {
+            KeyCode::Esc | KeyCode::Backspace if self.selected_graph_cell.is_some() => {
                 self.selected_graph_cell = None;
                 self.stats_auto_select_today_pending = false;
                 self.reset_current_list_interaction();
@@ -2270,8 +2268,8 @@ impl App {
         }
     }
 
-    fn copy_selected_to_clipboard(&mut self) {
-        let text = match self.current_tab {
+    fn selected_copy_text(&self) -> Option<String> {
+        match self.current_tab {
             Tab::Overview | Tab::Models => self
                 .get_sorted_models()
                 .get(self.selected_index)
@@ -2346,7 +2344,11 @@ impl App {
                 )
             }),
             Tab::Stats | Tab::Usage | Tab::Sessions => None,
-        };
+        }
+    }
+
+    fn copy_selected_to_clipboard(&mut self) {
+        let text = self.selected_copy_text();
 
         if let Some(text) = text {
             match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
@@ -3319,7 +3321,7 @@ mod tests {
         let graph = tokscale_core::build_contribution_graph_for_today(&daily, graph_today);
         UsageData {
             daily,
-            graph: Some(graph),
+            graph,
             ..Default::default()
         }
     }

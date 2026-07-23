@@ -1,10 +1,9 @@
 use chrono::{Datelike, Local, NaiveDate};
 use ratatui::prelude::*;
-use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
-};
+use ratatui::widgets::{Block, Borders, Cell, Row, Scrollbar, ScrollbarOrientation, Table};
 use std::collections::BTreeMap;
 
+use super::empty_state;
 use super::model_usage_layout::{
     model_usage_table_layout, ModelUsageColumn as DailyDetailColumn, ModelUsageLayoutSchema,
     ModelUsageTableDensity as DailyDetailTableDensity,
@@ -21,8 +20,10 @@ use super::widgets::{
     truncate_model_display_name_to, viewport_scrollbar_state, workspace_label_or_unknown,
     MODEL_DISPLAY_MAX_WIDTH,
 };
+use crate::tui::actions::ActionSet;
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::DailyUsage;
+use crate::tui::presentation::EmptySubject;
 use tokscale_core::GroupBy;
 
 const DATE_WIDTH: u16 = 7;
@@ -430,8 +431,15 @@ fn top_daily_model(day: &DailyUsage) -> Option<TopDailyModel> {
     candidates.into_iter().next()
 }
 
-pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+pub fn render(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    empty: Option<EmptySubject>,
+    actions: &ActionSet,
+) {
     if app.is_daily_detail_active() {
+        debug_assert!(empty.is_none(), "daily detail cannot be an empty root view");
         render_detail(frame, app, area);
         return;
     }
@@ -452,15 +460,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, area);
 
     let visible_height = inner.height.saturating_sub(1) as usize;
-
-    let daily = app.get_sorted_daily();
-    if daily.is_empty() {
-        let empty_msg = Paragraph::new("No daily usage data found. Press 'r' to refresh.")
-            .style(Style::default().fg(app.theme.muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(empty_msg, inner);
+    app.set_max_visible_items(visible_height);
+    if empty_state::render_if(frame, app, inner, empty, actions) {
         return;
     }
+
+    let daily = app.get_sorted_daily();
 
     let has_turn_data = daily.iter().any(|d| d.turn_count > 0);
     let top_client_content_width = daily
@@ -712,14 +717,6 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     app.set_max_visible_items(visible_height);
 
     let rows_data = app.get_sorted_daily_detail_rows();
-    if rows_data.is_empty() {
-        let empty_msg =
-            Paragraph::new("No model details found for this day. Press Esc to go back.")
-                .style(Style::default().fg(app.theme.muted))
-                .alignment(Alignment::Center);
-        frame.render_widget(empty_msg, inner);
-        return;
-    }
 
     let sort_field = app.sort_field;
     let sort_direction = app.sort_direction;
@@ -1012,8 +1009,11 @@ mod tests {
     fn render_body(app: &mut App, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
+        let state = crate::tui::view_state::ViewState::default();
+        let presentation = crate::tui::presentation::Presentation::for_view(app, &state);
+        let actions = ActionSet::for_view(app, &state, presentation);
         terminal
-            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height)))
+            .draw(|frame| render(frame, app, Rect::new(0, 0, width, height), None, &actions))
             .unwrap();
         terminal
             .backend()

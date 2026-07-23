@@ -176,7 +176,7 @@ pub struct ContributionDay {
     pub intensity: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UsageGraphData {
     pub weeks: Vec<Vec<Option<ContributionDay>>>,
 }
@@ -190,7 +190,7 @@ pub struct UsageData {
     pub agents: Vec<AgentEntry>,
     pub daily: Vec<DailyUsage>,
     pub hourly: Vec<HourlyUsage>,
-    pub graph: Option<UsageGraphData>,
+    pub graph: UsageGraphData,
     pub total_tokens: u64,
     pub total_cost: f64,
     pub error: Option<String>,
