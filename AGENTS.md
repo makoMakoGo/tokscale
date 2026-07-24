@@ -1,6 +1,6 @@
 **Note:** This is a locally maintained fork of the upstream tokscale repository. User requirements take precedence.
 
-**Note:** When merging or porting new commits from upstream, record them in docs/upstream/yyyy-mm-dd.md to document the content, upstream commit, scope of changes, and any significant context or decisions. Keep these logs concise but informative, focusing on user-visible impact and details relevant to maintainers.
+**Note:** When recording upstream ancestry or porting upstream commits, record the action in docs/upstream/yyyy-mm-dd.md to document the upstream commit, scope, and significant context or decisions. Keep these logs concise but informative, focusing on user-visible impact and details relevant to maintainers.
 
 **Note:** When a user explicitly requests breaking changes that diverge from upstream or major disagreements arise, remind them to record the decision and its rationale in docs/adr/xxxx-title.md. Keep ADRs concise, focusing on the decision, the "why", and any important context or trade-offs.
 
@@ -77,7 +77,7 @@ matching the split documented in `docs/development.md`.
 - For fork/personal branches, the expected identity is the fork contributor identity from the active Git account/global config. Do not set repo-local `user.name` or `user.email` to an upstream maintainer identity.
 - If `.git/config` contains stale repo-local `user.name` or `user.email` values that override the expected contributor identity, remove or correct them before committing.
 - Never commit as worker/agent identities such as `worker1`, `worker2`, `worker3`, or `*@example.invalid`.
-- When merging pull requests through `gh`, use squash merge (`gh pr merge --squash ...`) unless the user explicitly requests another merge strategy.
+- When merging fork-owned work through a pull request whose base repository is this fork, use squash merge (`gh pr merge --squash ...`) unless the user explicitly requests another merge strategy. Never use PR merge to import upstream content; port it under the Upstream Policy below.
 - Before merging, verify the squash commit title is the intended conventional PR title and does not contain worker/agent/internal review jargon.
 
 ## Upstream Policy (content-ahead-only)
@@ -117,7 +117,7 @@ docs: update README with new CLI options
 
 ### Commit Message & PR Title Rules (CRITICAL)
 
-> These rules apply to **both commit messages AND pull request titles**. PR titles become the squash-merge commit message, so they must follow the same conventions.
+> These rules apply to **both commit messages AND pull request titles**. Fork pull request titles are the intended squash commit titles, so they must follow the same conventions.
 
 **DO:**
 - Describe the actual change in plain, technical terms
