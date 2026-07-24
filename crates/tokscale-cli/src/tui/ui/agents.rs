@@ -80,7 +80,7 @@ pub fn render(
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
     let theme_heading = app.theme.chrome.heading;
-    let theme_muted = app.theme.text.muted;
+    let theme_secondary = app.theme.text.secondary;
     let theme_selection_style = app.theme.selection_style();
     let striped_row_style = app.theme.striped_row_style();
 
@@ -149,9 +149,8 @@ pub fn render(
             let client_label = get_client_display_name(&agent.client);
             let cell_for_column = |column: AgentColumn| -> Cell {
                 match column {
-                    AgentColumn::Rank => {
-                        Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted))
-                    }
+                    AgentColumn::Rank => Cell::from(format!("{}", idx + 1))
+                        .style(Style::default().fg(theme_secondary)),
                     AgentColumn::Agent => Cell::from(truncate_display_width(
                         &agent.agent,
                         table_layout.width_for(AgentColumn::Agent),
@@ -165,18 +164,18 @@ pub fn render(
                         &client_label,
                         table_layout.width_for(AgentColumn::Client),
                     ))
-                    .style(Style::default().fg(theme_muted)),
+                    .style(Style::default().fg(theme_secondary)),
                     AgentColumn::Tokens => total_tokens_cell(agent.tokens.total(), &app.theme),
                     AgentColumn::Cost => Cell::from(format_cost(agent.cost))
                         .style(Style::default().fg(app.theme.metrics.cost)),
                     AgentColumn::Messages => Cell::from(agent.message_count.to_string())
-                        .style(Style::default().fg(theme_muted)),
+                        .style(Style::default().fg(theme_secondary)),
                     AgentColumn::Instances => Cell::from(if agent.instance_count > 1 {
                         agent.instance_count.to_string()
                     } else {
                         "-".to_string()
                     })
-                    .style(Style::default().fg(theme_muted)),
+                    .style(Style::default().fg(theme_secondary)),
                 }
             };
             let cells: Vec<Cell> = columns

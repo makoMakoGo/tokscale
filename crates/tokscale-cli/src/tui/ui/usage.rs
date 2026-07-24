@@ -69,7 +69,7 @@ fn render_centered_message(frame: &mut Frame, app: &App, area: Rect, message: &s
         .split(area)[1];
 
     let paragraph = Paragraph::new(message)
-        .style(Style::default().fg(app.theme.text.muted))
+        .style(Style::default().fg(app.theme.text.secondary))
         .alignment(Alignment::Center);
     frame.render_widget(paragraph, center);
 }
@@ -147,7 +147,7 @@ pub(crate) fn build_usage_lines(
                     theme.status.success
                 }),
             );
-            let reset_span = Span::styled(reset, Style::default().fg(theme.text.muted));
+            let reset_span = Span::styled(reset, Style::default().fg(theme.text.secondary));
 
             lines.push(Line::from(vec![label, value, bar_span, reset_span]));
         }
@@ -155,13 +155,13 @@ pub(crate) fn build_usage_lines(
         if let Some(ref email) = output.email {
             lines.push(Line::from(Span::styled(
                 format!(" {:<12}{email}", "Account"),
-                Style::default().fg(theme.text.muted),
+                Style::default().fg(theme.text.secondary),
             )));
         }
         if let Some(ref plan) = output.plan {
             lines.push(Line::from(Span::styled(
                 format!(" {:<12}{plan}", "Plan"),
-                Style::default().fg(theme.text.muted),
+                Style::default().fg(theme.text.secondary),
             )));
         }
     }
@@ -182,7 +182,10 @@ pub(crate) fn build_usage_lines(
                     format!(" {:<14}", error.provider),
                     Style::default().fg(theme.text.primary),
                 ),
-                Span::styled(error.message.clone(), Style::default().fg(theme.text.muted)),
+                Span::styled(
+                    error.message.clone(),
+                    Style::default().fg(theme.text.secondary),
+                ),
             ]));
         }
     }
@@ -201,7 +204,7 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
             0,
             Line::from(Span::styled(
                 notice,
-                Style::default().fg(app.theme.text.muted),
+                Style::default().fg(app.theme.text.secondary),
             )),
         );
         lines.insert(1, Line::from(""));

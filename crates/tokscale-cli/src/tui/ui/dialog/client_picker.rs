@@ -228,7 +228,7 @@ impl DialogContent for ClientPickerDialog {
         let filter_text = if self.filter.is_empty() {
             Span::styled(
                 "Type to filter...",
-                Style::default().fg(theme.text.disabled),
+                Style::default().fg(theme.text.secondary),
             )
         } else {
             Span::styled(&self.filter, Style::default().fg(theme.text.primary))
@@ -272,7 +272,7 @@ impl DialogContent for ClientPickerDialog {
             } else if is_enabled {
                 Style::default().fg(theme.text.primary)
             } else {
-                Style::default().fg(theme.text.disabled)
+                Style::default().fg(theme.text.secondary)
             };
 
             items.push(ListItem::new(Line::from(vec![
@@ -284,7 +284,7 @@ impl DialogContent for ClientPickerDialog {
         if items.is_empty() {
             items.push(ListItem::new(Line::from(Span::styled(
                 "  No results",
-                Style::default().fg(theme.text.muted),
+                Style::default().fg(theme.text.secondary),
             ))));
         }
 
@@ -296,7 +296,7 @@ impl DialogContent for ClientPickerDialog {
         let hint_style = if self.last_error.is_some() {
             Style::default().fg(theme.status.warning)
         } else {
-            Style::default().fg(theme.text.muted)
+            Style::default().fg(theme.text.secondary)
         };
         let hint = Paragraph::new(hint_text)
             .alignment(Alignment::Center)

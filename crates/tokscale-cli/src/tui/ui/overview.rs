@@ -229,7 +229,7 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
         )));
     }
 
-    // Models that did not fit collapse into a muted `+N` suffix. It follows
+    // Models that did not fit collapse into a secondary `+N` suffix. It follows
     // the last visible model — or renders alone when no model fits at all, so
     // the legend never goes blank while models exist.
     let hidden_count = total_models - visible_count;
@@ -239,7 +239,7 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
         }
         spans.push(Span::styled(
             format!("+{hidden_count}"),
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         ));
     }
 

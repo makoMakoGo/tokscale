@@ -160,7 +160,7 @@ fn ladder_line(theme: &Theme, achievement: &Achievement) -> Line<'static> {
         } else {
             spans.push(Span::styled(
                 display.to_string(),
-                Style::default().fg(theme.text.muted),
+                Style::default().fg(theme.text.secondary),
             ));
         }
         spans.push(Span::raw(" "));
@@ -250,7 +250,7 @@ mod tests {
             .contains(Modifier::BOLD));
 
         for tier_span in locked_line.spans.iter().skip(2).step_by(2) {
-            assert_eq!(tier_span.style.fg, Some(theme.text.muted));
+            assert_eq!(tier_span.style.fg, Some(theme.text.secondary));
             assert!(!tier_span.style.add_modifier.contains(Modifier::BOLD));
         }
 
@@ -266,7 +266,7 @@ mod tests {
             .add_modifier
             .contains(Modifier::BOLD));
         for tier_span in unlocked_line.spans.iter().skip(6).step_by(2) {
-            assert_eq!(tier_span.style.fg, Some(theme.text.muted));
+            assert_eq!(tier_span.style.fg, Some(theme.text.secondary));
         }
     }
 }

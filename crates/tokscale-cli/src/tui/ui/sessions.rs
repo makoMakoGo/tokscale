@@ -506,10 +506,10 @@ fn projection_status_line(
                 .fg(theme.status.warning)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(message, Style::default().fg(theme.text.muted)),
+        Span::styled(message, Style::default().fg(theme.text.secondary)),
         Span::styled(
             format!(" · {diagnostic}"),
-            Style::default().fg(theme.text.muted),
+            Style::default().fg(theme.text.secondary),
         ),
     ]))
 }
@@ -597,8 +597,8 @@ mod tests {
             "Degraded · last refresh failed; showing previous snapshot · database locked"
         );
         assert_eq!(line.spans[0].style.fg, Some(theme.status.warning));
-        assert_eq!(line.spans[1].style.fg, Some(theme.text.muted));
-        assert_eq!(line.spans[2].style.fg, Some(theme.text.muted));
+        assert_eq!(line.spans[1].style.fg, Some(theme.text.secondary));
+        assert_eq!(line.spans[2].style.fg, Some(theme.text.secondary));
     }
 
     #[test]

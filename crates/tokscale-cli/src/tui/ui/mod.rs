@@ -127,7 +127,7 @@ fn render_cold_failed(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             diagnostic.to_string(),
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         )),
     ];
     let paragraph = Paragraph::new(lines)

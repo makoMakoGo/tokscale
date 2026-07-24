@@ -122,14 +122,14 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary)
                     .fg(app.theme.metrics.tokens)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" tokens    ", Style::default().fg(app.theme.text.muted)),
+            Span::styled(" tokens    ", Style::default().fg(app.theme.text.secondary)),
             Span::styled(
                 format_cost(app.data.total_cost),
                 Style::default()
                     .fg(app.theme.metrics.cost)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" cost", Style::default().fg(app.theme.text.muted)),
+            Span::styled(" cost", Style::default().fg(app.theme.text.secondary)),
         ]),
         separator_line(app, area.width as usize),
         section_title(app, "Fact"),
@@ -196,7 +196,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
     let color = portraits::family_color(app, family);
     let favorite_label = Some(Line::from(Span::styled(
         "Favorite Model",
-        Style::default().fg(app.theme.text.muted),
+        Style::default().fg(app.theme.text.secondary),
     )));
     let portrait = portraits::lines(app, family).map(|line| center_line(line, width));
     let slogan = Some(center_line(
@@ -219,7 +219,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
                     share_percent(favorite.tokens, total),
                     format_cost(favorite.cost),
                 ),
-                Style::default().fg(app.theme.text.muted),
+                Style::default().fg(app.theme.text.secondary),
             ),
         ]),
         width,
@@ -241,7 +241,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
                         share_percent(favorite.tokens, total),
                         format_cost(favorite.cost),
                     ),
-                    Style::default().fg(app.theme.text.muted),
+                    Style::default().fg(app.theme.text.secondary),
                 ),
             ]),
             width,
@@ -254,7 +254,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
         client_block.push(Line::default());
         client_block.push(Line::from(Span::styled(
             "Favorite Client",
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         )));
         client_block.push(center_line(
             Line::from(Span::styled(
@@ -278,7 +278,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
                         share_percent(favorite.tokens, total),
                         format_cost(favorite.cost),
                     ),
-                    Style::default().fg(app.theme.text.muted),
+                    Style::default().fg(app.theme.text.secondary),
                 ),
             ]),
             width,
@@ -384,7 +384,7 @@ fn render_empty_fun_things(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(center_line(
         Line::from(Span::styled(
             "no data yet",
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         )),
         width,
     ));
@@ -470,11 +470,11 @@ fn render_fact_box(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSumm
     let lines = vec![
         Line::from(vec![
             Span::styled("▸ ", Style::default().fg(app.theme.chrome.focus)),
-            Span::styled(first, Style::default().fg(app.theme.text.muted)),
+            Span::styled(first, Style::default().fg(app.theme.text.secondary)),
         ]),
         Line::from(Span::styled(
             format!("  {second}"),
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         )),
     ];
     frame.render_widget(Paragraph::new(lines), area);
@@ -602,7 +602,7 @@ fn section_title(app: &App, title: &'static str) -> Line<'static> {
 fn separator_line(app: &App, width: usize) -> Line<'static> {
     Line::from(Span::styled(
         "-".repeat(width),
-        Style::default().fg(app.theme.text.muted),
+        Style::default().fg(app.theme.text.secondary),
     ))
 }
 
@@ -729,7 +729,7 @@ fn metric_line(app: &App, label: &str, value: String, color: Color) -> Line<'sta
     Line::from(vec![
         Span::styled(
             format!("{label:<METRIC_LABEL_WIDTH$}"),
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         ),
         Span::styled(value, Style::default().fg(color)),
     ])
@@ -752,7 +752,7 @@ fn health_percentage(app: &App) -> String {
 fn health_color(app: &App) -> Color {
     let total = total_inputs(app);
     if total == 0 {
-        app.theme.text.muted
+        app.theme.text.secondary
     } else {
         let ratio = app.data.health.clean_inputs as f64 / total as f64;
         if ratio >= 0.99 {
@@ -957,7 +957,7 @@ mod tests {
         expected.push(line_text(&center_line(
             Line::from(Span::styled(
                 "no data yet",
-                Style::default().fg(app.theme.text.muted),
+                Style::default().fg(app.theme.text.secondary),
             )),
             width as usize,
         )));

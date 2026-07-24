@@ -1,6 +1,7 @@
 use ratatui::style::Color;
 
 pub(crate) const WCAG_AA_TEXT_CONTRAST: f64 = 4.5;
+pub(crate) const WCAG_NON_TEXT_CONTRAST: f64 = 3.0;
 
 /// Returns the WCAG contrast ratio for two concrete RGB colors.
 pub(crate) fn contrast_ratio(first: Color, second: Color) -> f64 {
@@ -34,7 +35,8 @@ pub(crate) fn relative_luminance(color: Color) -> f64 {
 ///
 /// The 255 discrete blend steps make the result deterministic while retaining
 /// as much of the source color as possible. All inputs are required to be RGB,
-/// matching the semantic theme contract.
+/// matching the semantic theme contract. The target `foreground` must itself
+/// satisfy `minimum_ratio`; an unreachable request is a theme contract error.
 pub(crate) fn ensure_contrast(
     color: Color,
     background: Color,
@@ -47,9 +49,14 @@ pub(crate) fn ensure_contrast(
         Color::Rgb(foreground_red, foreground_green, foreground_blue),
     ) = (color, background, foreground)
     else {
-        panic!("semantic identity contrast requires RGB colors");
+        panic!("semantic contrast requires RGB colors");
     };
     let background = Color::Rgb(background_red, background_green, background_blue);
+    let foreground = Color::Rgb(foreground_red, foreground_green, foreground_blue);
+    assert!(
+        contrast_ratio(foreground, background) >= minimum_ratio,
+        "contrast target cannot reach requested minimum ratio"
+    );
     if contrast_ratio(color, background) >= minimum_ratio {
         return color;
     }
@@ -70,4 +77,56 @@ pub(crate) fn ensure_contrast(
     }
 
     foreground
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn black_and_white_have_expected_relative_luminance() {
+        assert_eq!(relative_luminance(Color::Rgb(0, 0, 0)), 0.0);
+        assert_eq!(relative_luminance(Color::Rgb(255, 255, 255)), 1.0);
+    }
+
+    #[test]
+    fn ensure_contrast_preserves_color_that_already_meets_ratio() {
+        let color = Color::Rgb(220, 220, 220);
+
+        assert_eq!(
+            ensure_contrast(
+                color,
+                Color::Rgb(0, 0, 0),
+                Color::Rgb(255, 255, 255),
+                WCAG_AA_TEXT_CONTRAST,
+            ),
+            color
+        );
+    }
+
+    #[test]
+    fn ensure_contrast_blends_until_the_ratio_is_met() {
+        let background = Color::Rgb(0, 0, 0);
+        let source = Color::Rgb(80, 80, 80);
+        let adjusted = ensure_contrast(
+            source,
+            background,
+            Color::Rgb(255, 255, 255),
+            WCAG_AA_TEXT_CONTRAST,
+        );
+
+        assert_ne!(adjusted, source);
+        assert!(contrast_ratio(adjusted, background) >= WCAG_AA_TEXT_CONTRAST);
+    }
+
+    #[test]
+    #[should_panic(expected = "contrast target cannot reach requested minimum ratio")]
+    fn ensure_contrast_rejects_an_unreachable_ratio() {
+        ensure_contrast(
+            Color::Rgb(32, 32, 32),
+            Color::Rgb(0, 0, 0),
+            Color::Rgb(64, 64, 64),
+            WCAG_AA_TEXT_CONTRAST,
+        );
+    }
 }

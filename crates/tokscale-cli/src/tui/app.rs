@@ -23,6 +23,7 @@ use super::data::{
 use super::interaction::{
     InteractionOutcome, ListInteraction, MoveCommand, TextViewport, WrapMode,
 };
+use super::model_family::ModelFamily;
 use super::session_data::{SessionProjectionStatus, SessionSnapshot};
 use super::settings::Settings;
 use super::themes::{Theme, ThemeName};
@@ -1053,11 +1054,18 @@ impl App {
     }
 
     pub fn model_color(&self, model_id: &str) -> Color {
-        super::colors::resolve_model_color(model_id, &self.theme)
+        self.theme
+            .model_identity_color(ModelFamily::from_model_id(model_id))
+    }
+
+    pub(crate) fn family_color(&self, family: ModelFamily) -> Color {
+        self.theme.model_identity_color(family)
     }
 
     pub fn client_color(&self, client_id: &str) -> Color {
-        super::colors::resolve_client_color(client_id, &self.theme)
+        let client_id = client_id.trim().to_ascii_lowercase();
+        self.theme
+            .client_identity_color(ClientId::from_str(&client_id))
     }
 
     pub fn set_error(&mut self, error: Option<String>) {

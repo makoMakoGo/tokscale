@@ -252,8 +252,8 @@ mod tests {
     use super::*;
     use crate::tui::app::{ProjectionBackend, SortDirection, TuiConfig};
     use crate::tui::data::{
-        ContributionDay, DailyClientInfo, DailyModelInfo, DailyUsage, GraphData, HourlyModelInfo,
-        HourlyUsage, TokenBreakdown,
+        ContributionDay, ContributionGrade, DailyClientInfo, DailyModelInfo, DailyUsage, GraphData,
+        HourlyModelInfo, HourlyUsage, TokenBreakdown,
     };
     use crate::tui::session_data::SessionSnapshot;
     use crate::tui::settings::Settings;
@@ -480,7 +480,7 @@ mod tests {
                 date: NaiveDate::from_ymd_opt(2026, 7, 22).unwrap(),
                 tokens: 0,
                 cost: 0.0,
-                intensity: 0.0,
+                grade: ContributionGrade::Empty,
             })]],
         };
         daily.current_tab = Tab::Stats;

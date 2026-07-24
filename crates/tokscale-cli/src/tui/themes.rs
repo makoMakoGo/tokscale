@@ -1,6 +1,9 @@
 use ratatui::style::{Color, Modifier, Style};
+use tokscale_core::{usage_views::ContributionGrade, ClientId};
 
-use super::contrast::contrast_ratio;
+use super::colors::IdentityPalette;
+use super::contrast::{ensure_contrast, WCAG_NON_TEXT_CONTRAST};
+use super::model_family::ModelFamily;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeName {
@@ -93,9 +96,7 @@ pub(crate) struct SurfacePalette {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TextPalette {
     pub(crate) primary: Color,
-    pub(crate) muted: Color,
-    pub(crate) disabled: Color,
-    pub(crate) inverse: Color,
+    pub(crate) secondary: Color,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,10 +138,38 @@ pub(crate) struct StatusPalette {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct VisualizationPalette {
-    pub(crate) activity: [Color; 5],
+    pub(crate) contribution: ContributionPalette,
+    pub(crate) track: Color,
     pub(crate) grid: Color,
     pub(crate) chart_highlight: Color,
     pub(crate) artwork: Color,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContributionPalette {
+    pub(crate) empty: Color,
+    pub(crate) active: [Color; 4],
+}
+
+impl ContributionPalette {
+    fn resolve(self, background: Color, blend_target: Color) -> Self {
+        let resolve =
+            |color| ensure_contrast(color, background, blend_target, WCAG_NON_TEXT_CONTRAST);
+        Self {
+            empty: resolve(self.empty),
+            active: self.active.map(resolve),
+        }
+    }
+
+    pub(crate) fn color(self, grade: ContributionGrade) -> Color {
+        match grade {
+            ContributionGrade::Empty => self.empty,
+            ContributionGrade::Low => self.active[0],
+            ContributionGrade::Medium => self.active[1],
+            ContributionGrade::High => self.active[2],
+            ContributionGrade::Peak => self.active[3],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +182,18 @@ pub struct Theme {
     pub(crate) metrics: MetricsPalette,
     pub(crate) status: StatusPalette,
     pub(crate) visualization: VisualizationPalette,
+    identities: IdentityPalette,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ThemeDefinition {
+    surface: SurfacePalette,
+    text: TextPalette,
+    chrome: ChromePalette,
+    selection: SelectionPalette,
+    metrics: MetricsPalette,
+    status: StatusPalette,
+    visualization: VisualizationPalette,
 }
 
 impl Theme {
@@ -160,15 +201,12 @@ impl Theme {
         theme_for_name(name)
     }
 
-    /// Chooses the semantic text color with the greatest contrast on `background`.
-    pub(crate) fn contrasting_foreground(&self, background: Color) -> Color {
-        let primary_contrast = contrast_ratio(self.text.primary, background);
-        let inverse_contrast = contrast_ratio(self.text.inverse, background);
-        if primary_contrast >= inverse_contrast {
-            self.text.primary
-        } else {
-            self.text.inverse
-        }
+    pub(crate) fn model_identity_color(&self, family: ModelFamily) -> Color {
+        self.identities.model(family)
+    }
+
+    pub(crate) fn client_identity_color(&self, client: Option<ClientId>) -> Color {
+        self.identities.client(client)
     }
 
     pub(crate) fn metric_input_style(&self) -> Style {
@@ -212,10 +250,6 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
-    pub(crate) fn subtle_text_style(&self) -> Style {
-        Style::default().fg(self.text.disabled)
-    }
-
     pub(crate) fn striped_row_style(&self) -> Style {
         Style::default().bg(self.surface.row_alt)
     }
@@ -226,9 +260,8 @@ impl Theme {
 }
 
 fn theme_for_name(name: ThemeName) -> Theme {
-    match name {
-        ThemeName::Green => Theme {
-            name,
+    let definition = match name {
+        ThemeName::Green => ThemeDefinition {
             surface: SurfacePalette {
                 canvas: rgb(7, 15, 10),
                 panel: rgb(12, 24, 17),
@@ -237,9 +270,7 @@ fn theme_for_name(name: ThemeName) -> Theme {
             },
             text: TextPalette {
                 primary: rgb(226, 244, 232),
-                muted: rgb(165, 195, 174),
-                disabled: rgb(105, 132, 113),
-                inverse: rgb(5, 18, 9),
+                secondary: rgb(165, 195, 174),
             },
             chrome: ChromePalette {
                 nav_active: rgb(126, 231, 135),
@@ -271,20 +302,22 @@ fn theme_for_name(name: ThemeName) -> Theme {
                 pending: rgb(191, 201, 194),
             },
             visualization: VisualizationPalette {
-                activity: [
-                    rgb(14, 29, 19),
-                    rgb(33, 110, 57),
-                    rgb(48, 161, 78),
-                    rgb(64, 196, 99),
-                    rgb(155, 233, 168),
-                ],
+                contribution: ContributionPalette {
+                    empty: rgb(105, 132, 113),
+                    active: [
+                        rgb(33, 110, 57),
+                        rgb(48, 161, 78),
+                        rgb(64, 196, 99),
+                        rgb(155, 233, 168),
+                    ],
+                },
+                track: rgb(14, 29, 19),
                 grid: rgb(40, 68, 49),
                 chart_highlight: rgb(155, 233, 168),
                 artwork: rgb(90, 205, 111),
             },
         },
-        ThemeName::Halloween => Theme {
-            name,
+        ThemeName::Halloween => ThemeDefinition {
             surface: SurfacePalette {
                 canvas: rgb(20, 10, 3),
                 panel: rgb(31, 17, 7),
@@ -293,9 +326,7 @@ fn theme_for_name(name: ThemeName) -> Theme {
             },
             text: TextPalette {
                 primary: rgb(255, 239, 211),
-                muted: rgb(218, 181, 135),
-                disabled: rgb(145, 111, 76),
-                inverse: rgb(27, 12, 2),
+                secondary: rgb(218, 181, 135),
             },
             chrome: ChromePalette {
                 nav_active: rgb(255, 177, 66),
@@ -327,20 +358,22 @@ fn theme_for_name(name: ThemeName) -> Theme {
                 pending: rgb(218, 181, 135),
             },
             visualization: VisualizationPalette {
-                activity: [
-                    rgb(38, 18, 4),
-                    rgb(99, 29, 0),
-                    rgb(254, 150, 0),
-                    rgb(255, 197, 1),
-                    rgb(255, 238, 74),
-                ],
+                contribution: ContributionPalette {
+                    empty: rgb(145, 111, 76),
+                    active: [
+                        rgb(99, 29, 0),
+                        rgb(254, 150, 0),
+                        rgb(255, 197, 1),
+                        rgb(255, 238, 74),
+                    ],
+                },
+                track: rgb(38, 18, 4),
                 grid: rgb(83, 45, 16),
                 chart_highlight: rgb(255, 210, 82),
                 artwork: rgb(255, 126, 35),
             },
         },
-        ThemeName::Teal => Theme {
-            name,
+        ThemeName::Teal => ThemeDefinition {
             surface: SurfacePalette {
                 canvas: rgb(4, 17, 18),
                 panel: rgb(7, 27, 29),
@@ -349,9 +382,7 @@ fn theme_for_name(name: ThemeName) -> Theme {
             },
             text: TextPalette {
                 primary: rgb(218, 246, 245),
-                muted: rgb(151, 198, 196),
-                disabled: rgb(91, 134, 133),
-                inverse: rgb(2, 21, 22),
+                secondary: rgb(151, 198, 196),
             },
             chrome: ChromePalette {
                 nav_active: rgb(83, 224, 217),
@@ -383,20 +414,22 @@ fn theme_for_name(name: ThemeName) -> Theme {
                 pending: rgb(174, 202, 201),
             },
             visualization: VisualizationPalette {
-                activity: [
-                    rgb(7, 34, 35),
-                    rgb(14, 109, 109),
-                    rgb(13, 158, 158),
-                    rgb(45, 197, 197),
-                    rgb(126, 229, 229),
-                ],
+                contribution: ContributionPalette {
+                    empty: rgb(91, 134, 133),
+                    active: [
+                        rgb(14, 109, 109),
+                        rgb(13, 158, 158),
+                        rgb(45, 197, 197),
+                        rgb(126, 229, 229),
+                    ],
+                },
+                track: rgb(7, 34, 35),
                 grid: rgb(28, 72, 73),
                 chart_highlight: rgb(126, 229, 229),
                 artwork: rgb(47, 205, 196),
             },
         },
-        ThemeName::Blue => Theme {
-            name,
+        ThemeName::Blue => ThemeDefinition {
             surface: SurfacePalette {
                 canvas: rgb(6, 13, 24),
                 panel: rgb(10, 22, 38),
@@ -405,9 +438,7 @@ fn theme_for_name(name: ThemeName) -> Theme {
             },
             text: TextPalette {
                 primary: rgb(224, 239, 255),
-                muted: rgb(155, 190, 225),
-                disabled: rgb(91, 126, 162),
-                inverse: rgb(4, 16, 31),
+                secondary: rgb(155, 190, 225),
             },
             chrome: ChromePalette {
                 nav_active: rgb(111, 181, 255),
@@ -439,20 +470,22 @@ fn theme_for_name(name: ThemeName) -> Theme {
                 pending: rgb(168, 195, 222),
             },
             visualization: VisualizationPalette {
-                activity: [
-                    rgb(10, 29, 53),
-                    rgb(13, 65, 157),
-                    rgb(31, 111, 235),
-                    rgb(56, 139, 253),
-                    rgb(121, 184, 255),
-                ],
+                contribution: ContributionPalette {
+                    empty: rgb(91, 126, 162),
+                    active: [
+                        rgb(13, 65, 157),
+                        rgb(31, 111, 235),
+                        rgb(56, 139, 253),
+                        rgb(121, 184, 255),
+                    ],
+                },
+                track: rgb(10, 29, 53),
                 grid: rgb(35, 66, 99),
                 chart_highlight: rgb(146, 202, 255),
                 artwork: rgb(74, 151, 255),
             },
         },
-        ThemeName::Pink => Theme {
-            name,
+        ThemeName::Pink => ThemeDefinition {
             surface: SurfacePalette {
                 canvas: rgb(22, 8, 17),
                 panel: rgb(34, 13, 27),
@@ -461,9 +494,7 @@ fn theme_for_name(name: ThemeName) -> Theme {
             },
             text: TextPalette {
                 primary: rgb(255, 231, 244),
-                muted: rgb(222, 171, 200),
-                disabled: rgb(151, 105, 132),
-                inverse: rgb(28, 7, 20),
+                secondary: rgb(222, 171, 200),
             },
             chrome: ChromePalette {
                 nav_active: rgb(248, 148, 202),
@@ -495,20 +526,22 @@ fn theme_for_name(name: ThemeName) -> Theme {
                 pending: rgb(207, 177, 194),
             },
             visualization: VisualizationPalette {
-                activity: [
-                    rgb(46, 17, 35),
-                    rgb(153, 40, 110),
-                    rgb(191, 75, 138),
-                    rgb(217, 97, 160),
-                    rgb(240, 181, 210),
-                ],
+                contribution: ContributionPalette {
+                    empty: rgb(151, 105, 132),
+                    active: [
+                        rgb(153, 40, 110),
+                        rgb(191, 75, 138),
+                        rgb(217, 97, 160),
+                        rgb(240, 181, 210),
+                    ],
+                },
+                track: rgb(46, 17, 35),
                 grid: rgb(82, 37, 63),
                 chart_highlight: rgb(255, 181, 220),
                 artwork: rgb(229, 103, 173),
             },
         },
-        ThemeName::Purple => Theme {
-            name,
+        ThemeName::Purple => ThemeDefinition {
             surface: SurfacePalette {
                 canvas: rgb(15, 9, 25),
                 panel: rgb(24, 14, 39),
@@ -517,9 +550,7 @@ fn theme_for_name(name: ThemeName) -> Theme {
             },
             text: TextPalette {
                 primary: rgb(243, 232, 255),
-                muted: rgb(195, 171, 222),
-                disabled: rgb(126, 101, 153),
-                inverse: rgb(18, 8, 31),
+                secondary: rgb(195, 171, 222),
             },
             chrome: ChromePalette {
                 nav_active: rgb(185, 142, 255),
@@ -551,20 +582,22 @@ fn theme_for_name(name: ThemeName) -> Theme {
                 pending: rgb(190, 177, 205),
             },
             visualization: VisualizationPalette {
-                activity: [
-                    rgb(32, 20, 53),
-                    rgb(110, 64, 201),
-                    rgb(137, 87, 229),
-                    rgb(163, 113, 247),
-                    rgb(205, 180, 255),
-                ],
+                contribution: ContributionPalette {
+                    empty: rgb(126, 101, 153),
+                    active: [
+                        rgb(110, 64, 201),
+                        rgb(137, 87, 229),
+                        rgb(163, 113, 247),
+                        rgb(205, 180, 255),
+                    ],
+                },
+                track: rgb(32, 20, 53),
                 grid: rgb(63, 42, 87),
                 chart_highlight: rgb(211, 181, 255),
                 artwork: rgb(168, 113, 247),
             },
         },
-        ThemeName::Orange => Theme {
-            name,
+        ThemeName::Orange => ThemeDefinition {
             surface: SurfacePalette {
                 canvas: rgb(21, 11, 5),
                 panel: rgb(34, 19, 9),
@@ -573,9 +606,7 @@ fn theme_for_name(name: ThemeName) -> Theme {
             },
             text: TextPalette {
                 primary: rgb(255, 238, 219),
-                muted: rgb(221, 181, 145),
-                disabled: rgb(149, 112, 82),
-                inverse: rgb(27, 12, 3),
+                secondary: rgb(221, 181, 145),
             },
             chrome: ChromePalette {
                 nav_active: rgb(255, 138, 91),
@@ -607,20 +638,22 @@ fn theme_for_name(name: ThemeName) -> Theme {
                 pending: rgb(215, 181, 151),
             },
             visualization: VisualizationPalette {
-                activity: [
-                    rgb(43, 23, 8),
-                    rgb(204, 85, 0),
-                    rgb(255, 140, 0),
-                    rgb(255, 179, 71),
-                    rgb(255, 214, 153),
-                ],
+                contribution: ContributionPalette {
+                    empty: rgb(149, 112, 82),
+                    active: [
+                        rgb(204, 85, 0),
+                        rgb(255, 140, 0),
+                        rgb(255, 179, 71),
+                        rgb(255, 214, 153),
+                    ],
+                },
+                track: rgb(43, 23, 8),
                 grid: rgb(84, 48, 21),
                 chart_highlight: rgb(255, 198, 128),
                 artwork: rgb(255, 138, 31),
             },
         },
-        ThemeName::Monochrome => Theme {
-            name,
+        ThemeName::Monochrome => ThemeDefinition {
             surface: SurfacePalette {
                 canvas: rgb(10, 10, 10),
                 panel: rgb(20, 20, 20),
@@ -629,9 +662,7 @@ fn theme_for_name(name: ThemeName) -> Theme {
             },
             text: TextPalette {
                 primary: rgb(238, 238, 238),
-                muted: rgb(184, 184, 184),
-                disabled: rgb(119, 119, 119),
-                inverse: rgb(12, 12, 12),
+                secondary: rgb(184, 184, 184),
             },
             chrome: ChromePalette {
                 nav_active: rgb(238, 238, 238),
@@ -663,20 +694,22 @@ fn theme_for_name(name: ThemeName) -> Theme {
                 pending: rgb(180, 180, 180),
             },
             visualization: VisualizationPalette {
-                activity: [
-                    rgb(22, 22, 22),
-                    rgb(56, 56, 56),
-                    rgb(82, 82, 82),
-                    rgb(117, 117, 117),
-                    rgb(158, 158, 158),
-                ],
+                contribution: ContributionPalette {
+                    empty: rgb(119, 119, 119),
+                    active: [
+                        rgb(56, 56, 56),
+                        rgb(82, 82, 82),
+                        rgb(117, 117, 117),
+                        rgb(158, 158, 158),
+                    ],
+                },
+                track: rgb(22, 22, 22),
                 grid: rgb(65, 65, 65),
                 chart_highlight: rgb(225, 225, 225),
                 artwork: rgb(170, 170, 170),
             },
         },
-        ThemeName::YlGnBu => Theme {
-            name,
+        ThemeName::YlGnBu => ThemeDefinition {
             surface: SurfacePalette {
                 canvas: rgb(7, 15, 24),
                 panel: rgb(11, 25, 36),
@@ -685,9 +718,7 @@ fn theme_for_name(name: ThemeName) -> Theme {
             },
             text: TextPalette {
                 primary: rgb(235, 246, 223),
-                muted: rgb(181, 205, 176),
-                disabled: rgb(111, 139, 121),
-                inverse: rgb(7, 20, 24),
+                secondary: rgb(181, 205, 176),
             },
             chrome: ChromePalette {
                 nav_active: rgb(216, 239, 116),
@@ -719,20 +750,22 @@ fn theme_for_name(name: ThemeName) -> Theme {
                 pending: rgb(183, 201, 176),
             },
             visualization: VisualizationPalette {
-                activity: [
-                    rgb(15, 32, 47),
-                    rgb(37, 52, 148),
-                    rgb(44, 127, 184),
-                    rgb(65, 182, 196),
-                    rgb(161, 218, 180),
-                ],
+                contribution: ContributionPalette {
+                    empty: rgb(111, 139, 121),
+                    active: [
+                        rgb(37, 52, 148),
+                        rgb(44, 127, 184),
+                        rgb(65, 182, 196),
+                        rgb(161, 218, 180),
+                    ],
+                },
+                track: rgb(15, 32, 47),
                 grid: rgb(38, 73, 82),
                 chart_highlight: rgb(216, 239, 116),
                 artwork: rgb(80, 197, 187),
             },
         },
-        ThemeName::Graphite => Theme {
-            name,
+        ThemeName::Graphite => ThemeDefinition {
             surface: SurfacePalette {
                 canvas: rgb(8, 10, 14),
                 panel: rgb(15, 18, 24),
@@ -741,9 +774,7 @@ fn theme_for_name(name: ThemeName) -> Theme {
             },
             text: TextPalette {
                 primary: rgb(226, 232, 240),
-                muted: rgb(166, 178, 194),
-                disabled: rgb(103, 116, 133),
-                inverse: rgb(8, 12, 17),
+                secondary: rgb(166, 178, 194),
             },
             chrome: ChromePalette {
                 nav_active: rgb(125, 211, 252),
@@ -775,20 +806,22 @@ fn theme_for_name(name: ThemeName) -> Theme {
                 pending: rgb(166, 178, 194),
             },
             visualization: VisualizationPalette {
-                activity: [
-                    rgb(24, 27, 34),
-                    rgb(14, 116, 144),
-                    rgb(148, 163, 184),
-                    rgb(56, 189, 248),
-                    rgb(125, 211, 252),
-                ],
+                contribution: ContributionPalette {
+                    empty: rgb(103, 116, 133),
+                    active: [
+                        rgb(14, 116, 144),
+                        rgb(148, 163, 184),
+                        rgb(56, 189, 248),
+                        rgb(125, 211, 252),
+                    ],
+                },
+                track: rgb(24, 27, 34),
                 grid: rgb(48, 58, 72),
                 chart_highlight: rgb(186, 230, 253),
                 artwork: rgb(56, 189, 248),
             },
         },
-        ThemeName::Lagoon => Theme {
-            name,
+        ThemeName::Lagoon => ThemeDefinition {
             surface: SurfacePalette {
                 canvas: rgb(4, 18, 21),
                 panel: rgb(7, 28, 31),
@@ -797,9 +830,7 @@ fn theme_for_name(name: ThemeName) -> Theme {
             },
             text: TextPalette {
                 primary: rgb(216, 241, 238),
-                muted: rgb(157, 198, 194),
-                disabled: rgb(93, 134, 132),
-                inverse: rgb(3, 20, 22),
+                secondary: rgb(157, 198, 194),
             },
             chrome: ChromePalette {
                 nav_active: rgb(104, 240, 186),
@@ -831,20 +862,22 @@ fn theme_for_name(name: ThemeName) -> Theme {
                 pending: rgb(170, 201, 198),
             },
             visualization: VisualizationPalette {
-                activity: [
-                    rgb(6, 32, 36),
-                    rgb(15, 118, 110),
-                    rgb(45, 212, 191),
-                    rgb(94, 234, 212),
-                    rgb(153, 246, 228),
-                ],
+                contribution: ContributionPalette {
+                    empty: rgb(93, 134, 132),
+                    active: [
+                        rgb(15, 118, 110),
+                        rgb(45, 212, 191),
+                        rgb(94, 234, 212),
+                        rgb(153, 246, 228),
+                    ],
+                },
+                track: rgb(6, 32, 36),
                 grid: rgb(29, 76, 79),
                 chart_highlight: rgb(153, 246, 228),
                 artwork: rgb(45, 212, 191),
             },
         },
-        ThemeName::Dusk => Theme {
-            name,
+        ThemeName::Dusk => ThemeDefinition {
             surface: SurfacePalette {
                 canvas: rgb(14, 12, 23),
                 panel: rgb(23, 20, 34),
@@ -853,9 +886,7 @@ fn theme_for_name(name: ThemeName) -> Theme {
             },
             text: TextPalette {
                 primary: rgb(232, 226, 238),
-                muted: rgb(186, 174, 203),
-                disabled: rgb(118, 105, 137),
-                inverse: rgb(17, 13, 27),
+                secondary: rgb(186, 174, 203),
             },
             chrome: ChromePalette {
                 nav_active: rgb(224, 180, 255),
@@ -887,18 +918,49 @@ fn theme_for_name(name: ThemeName) -> Theme {
                 pending: rgb(186, 174, 203),
             },
             visualization: VisualizationPalette {
-                activity: [
-                    rgb(27, 24, 38),
-                    rgb(109, 40, 217),
-                    rgb(139, 92, 246),
-                    rgb(167, 139, 250),
-                    rgb(196, 181, 253),
-                ],
+                contribution: ContributionPalette {
+                    empty: rgb(118, 105, 137),
+                    active: [
+                        rgb(109, 40, 217),
+                        rgb(139, 92, 246),
+                        rgb(167, 139, 250),
+                        rgb(196, 181, 253),
+                    ],
+                },
+                track: rgb(27, 24, 38),
                 grid: rgb(55, 49, 72),
                 chart_highlight: rgb(221, 214, 254),
                 artwork: rgb(167, 139, 250),
             },
         },
+    };
+    let ThemeDefinition {
+        surface,
+        text,
+        chrome,
+        selection,
+        metrics,
+        status,
+        mut visualization,
+    } = definition;
+    visualization.contribution = visualization
+        .contribution
+        .resolve(surface.panel, text.primary);
+    let identities = IdentityPalette::resolve(
+        [surface.panel, surface.row_alt, surface.row_current],
+        text.primary,
+    );
+
+    Theme {
+        name,
+        surface,
+        text,
+        chrome,
+        selection,
+        metrics,
+        status,
+        visualization,
+        identities,
     }
 }
 
@@ -909,15 +971,9 @@ fn rgb(red: u8, green: u8, blue: u8) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::contrast::{relative_luminance, WCAG_AA_TEXT_CONTRAST};
-
-    fn rgb_contrast_ratio(first: Color, second: Color) -> f64 {
-        contrast_ratio(first, second)
-    }
-
-    fn rgb_relative_luminance(color: Color) -> f64 {
-        relative_luminance(color)
-    }
+    use crate::tui::contrast::{
+        contrast_ratio, relative_luminance, WCAG_AA_TEXT_CONTRAST, WCAG_NON_TEXT_CONTRAST,
+    };
 
     #[test]
     fn theme_names_round_trip_through_settings_values() {
@@ -958,49 +1014,39 @@ mod tests {
     }
 
     #[test]
-    fn activity_grades_do_not_decrease_in_luminance() {
+    fn contribution_marks_are_visible_and_active_grades_brighten() {
+        const GRADES: [ContributionGrade; 5] = [
+            ContributionGrade::Empty,
+            ContributionGrade::Low,
+            ContributionGrade::Medium,
+            ContributionGrade::High,
+            ContributionGrade::Peak,
+        ];
+
         for &name in ThemeName::all() {
             let theme = Theme::from_name(name);
-            let activity = theme.visualization.activity;
+            let contribution = theme.visualization.contribution;
 
-            let empty = rgb_relative_luminance(activity[0]);
-            let first_activity = rgb_relative_luminance(activity[1]);
-            assert!(
-                empty < first_activity,
-                "{name:?} grade 1 luminance ({first_activity:.4}) must exceed empty grade 0 ({empty:.4})"
-            );
-
-            for grade in 1..4 {
-                let lower = rgb_relative_luminance(activity[grade]);
-                let higher = rgb_relative_luminance(activity[grade + 1]);
+            for grade in GRADES {
+                let contrast = contrast_ratio(contribution.color(grade), theme.surface.panel);
                 assert!(
-                    lower <= higher,
-                    "{name:?} grade {grade} luminance ({lower:.4}) exceeds grade {} ({higher:.4})",
-                    grade + 1
+                    contrast >= WCAG_NON_TEXT_CONTRAST,
+                    "{name:?} {grade:?} contribution contrast {contrast:.2} is below {WCAG_NON_TEXT_CONTRAST:.1}"
                 );
             }
 
+            for grades in contribution.active.windows(2) {
+                let lower = relative_luminance(grades[0]);
+                let higher = relative_luminance(grades[1]);
+                assert!(
+                    lower <= higher,
+                    "{name:?} active grade luminance decreases from {lower:.4} to {higher:.4}"
+                );
+            }
             assert!(
-                rgb_relative_luminance(activity[1]) < rgb_relative_luminance(activity[4]),
-                "{name:?} highest activity grade must be brighter than its lowest activity grade"
-            );
-        }
-    }
-
-    #[test]
-    fn monochrome_adjacent_grades_remain_visibly_distinct() {
-        const MIN_ADJACENT_CONTRAST: f64 = 1.4;
-
-        let theme = Theme::from_name(ThemeName::Monochrome);
-        for grade in 0..4 {
-            let contrast = rgb_contrast_ratio(
-                theme.visualization.activity[grade],
-                theme.visualization.activity[grade + 1],
-            );
-            assert!(
-                contrast >= MIN_ADJACENT_CONTRAST,
-                "Monochrome grades {grade} and {} have contrast {contrast:.2}, below {MIN_ADJACENT_CONTRAST:.2}",
-                grade + 1
+                relative_luminance(contribution.active[0])
+                    < relative_luminance(contribution.active[3]),
+                "{name:?} peak contribution must be brighter than low contribution"
             );
         }
     }
@@ -1009,12 +1055,10 @@ mod tests {
     fn semantic_text_roles_are_readable_on_theme_surfaces() {
         for &name in ThemeName::all() {
             let theme = Theme::from_name(name);
-            let panel = theme.surface.panel;
 
             let panel_text = [
                 ("primary", theme.text.primary),
-                ("muted", theme.text.muted),
-                ("selection foreground", theme.selection.foreground),
+                ("secondary", theme.text.secondary),
                 ("active navigation", theme.chrome.nav_active),
                 ("heading", theme.chrome.heading),
                 ("focus", theme.chrome.focus),
@@ -1036,10 +1080,53 @@ mod tests {
             ];
 
             for (role, color) in panel_text {
-                let contrast = rgb_contrast_ratio(color, panel);
+                let contrast = contrast_ratio(color, theme.surface.panel);
                 assert!(
                     contrast >= WCAG_AA_TEXT_CONTRAST,
-                    "{name:?} {role} contrast {contrast:.2} is below {WCAG_AA_TEXT_CONTRAST:.1}"
+                    "{name:?} {role} on panel has contrast {contrast:.2}, below {WCAG_AA_TEXT_CONTRAST:.1}"
+                );
+            }
+
+            let row_text = [
+                ("primary", theme.text.primary),
+                ("secondary", theme.text.secondary),
+                ("current chrome", theme.chrome.current),
+                ("tokens", theme.metrics.tokens),
+                ("cost", theme.metrics.cost),
+                ("input", theme.metrics.input),
+                ("output", theme.metrics.output),
+                ("cache read", theme.metrics.cache_read),
+                ("cache write", theme.metrics.cache_write),
+                ("rate", theme.metrics.rate),
+                ("total", theme.metrics.total),
+                ("secondary cost", theme.metrics.secondary_cost),
+                ("success", theme.status.success),
+                ("warning", theme.status.warning),
+                ("danger", theme.status.danger),
+                ("info", theme.status.info),
+                ("pending", theme.status.pending),
+            ];
+            for (surface_name, background) in [
+                ("alternate row", theme.surface.row_alt),
+                ("current row", theme.surface.row_current),
+            ] {
+                for (role, color) in row_text {
+                    let contrast = contrast_ratio(color, background);
+                    assert!(
+                        contrast >= WCAG_AA_TEXT_CONTRAST,
+                        "{name:?} {role} on {surface_name} has contrast {contrast:.2}, below {WCAG_AA_TEXT_CONTRAST:.1}"
+                    );
+                }
+            }
+
+            for (role, color) in [
+                ("primary", theme.text.primary),
+                ("secondary", theme.text.secondary),
+            ] {
+                let contrast = contrast_ratio(color, theme.surface.canvas);
+                assert!(
+                    contrast >= WCAG_AA_TEXT_CONTRAST,
+                    "{name:?} {role} on canvas has contrast {contrast:.2}, below {WCAG_AA_TEXT_CONTRAST:.1}"
                 );
             }
 
@@ -1047,7 +1134,7 @@ mod tests {
             // rely solely on SelectionPalette::foreground to remain readable.
             let selected_cell_text = [
                 ("primary", theme.text.primary),
-                ("muted", theme.text.muted),
+                ("secondary", theme.text.secondary),
                 ("current chrome", theme.chrome.current),
                 ("tokens", theme.metrics.tokens),
                 ("cost", theme.metrics.cost),
@@ -1065,7 +1152,7 @@ mod tests {
                 ("pending", theme.status.pending),
             ];
             for (role, color) in selected_cell_text {
-                let contrast = rgb_contrast_ratio(color, theme.selection.background);
+                let contrast = contrast_ratio(color, theme.selection.background);
                 assert!(
                     contrast >= WCAG_AA_TEXT_CONTRAST,
                     "{name:?} selected {role} contrast {contrast:.2} is below {WCAG_AA_TEXT_CONTRAST:.1}"
@@ -1073,7 +1160,7 @@ mod tests {
             }
 
             let selection_contrast =
-                rgb_contrast_ratio(theme.selection.foreground, theme.selection.background);
+                contrast_ratio(theme.selection.foreground, theme.selection.background);
             assert!(
                 selection_contrast >= WCAG_AA_TEXT_CONTRAST,
                 "{name:?} selection contrast {selection_contrast:.2} is below {WCAG_AA_TEXT_CONTRAST:.1}"
@@ -1103,20 +1190,35 @@ mod tests {
     }
 
     #[test]
-    fn contribution_selection_uses_the_more_contrasting_text_color() {
+    fn identity_palettes_meet_text_contrast_on_every_render_surface() {
         for &name in ThemeName::all() {
             let theme = Theme::from_name(name);
-            for color in theme.visualization.activity {
-                let selected = theme.contrasting_foreground(color);
-                let alternative = if selected == theme.text.primary {
-                    theme.text.inverse
-                } else {
-                    theme.text.primary
-                };
-                assert!(
-                    rgb_contrast_ratio(selected, color) >= rgb_contrast_ratio(alternative, color),
-                    "{name:?} selected {selected:?} instead of the more legible {alternative:?} on {color:?}"
-                );
+            let surfaces = [
+                ("panel", theme.surface.panel),
+                ("alternate row", theme.surface.row_alt),
+                ("current row", theme.surface.row_current),
+            ];
+
+            for family in ModelFamily::ALL {
+                let color = theme.model_identity_color(family);
+                for (surface_name, background) in surfaces {
+                    let contrast = contrast_ratio(color, background);
+                    assert!(
+                        contrast >= WCAG_AA_TEXT_CONTRAST,
+                        "{name:?} {family:?} model identity on {surface_name} has contrast {contrast:.2}"
+                    );
+                }
+            }
+
+            for client in ClientId::iter().map(Some).chain(std::iter::once(None)) {
+                let color = theme.client_identity_color(client);
+                for (surface_name, background) in surfaces {
+                    let contrast = contrast_ratio(color, background);
+                    assert!(
+                        contrast >= WCAG_AA_TEXT_CONTRAST,
+                        "{name:?} {client:?} client identity on {surface_name} has contrast {contrast:.2}"
+                    );
+                }
             }
         }
     }
@@ -1146,7 +1248,6 @@ mod tests {
             .selection_style()
             .add_modifier
             .contains(Modifier::BOLD));
-        assert_eq!(theme.subtle_text_style().fg, Some(theme.text.disabled));
         assert_eq!(theme.striped_row_style().bg, Some(theme.surface.row_alt));
         assert_eq!(
             theme.current_row_style().bg,

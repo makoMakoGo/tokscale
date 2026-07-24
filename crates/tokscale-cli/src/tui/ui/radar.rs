@@ -27,7 +27,7 @@ pub fn render_radar(
     area: Rect,
     axes: &[RadarAxis; 4],
     accent: Color,
-    muted: Color,
+    secondary: Color,
     fill: Color,
     background: Color,
 ) {
@@ -119,7 +119,7 @@ pub fn render_radar(
                     y1: CENTER,
                     x2: CENTER + dx * arm,
                     y2: CENTER + dy * arm,
-                    color: muted,
+                    color: secondary,
                 });
             }
 
@@ -159,7 +159,7 @@ pub fn render_radar(
     frame.render_widget(canvas, chart);
 
     // Captions: pct/name pairs hugging each axis tip (GitHub style).
-    let label_style = Style::default().fg(muted);
+    let label_style = Style::default().fg(secondary);
     let print = |frame: &mut Frame, x: u16, y: u16, text: &str| {
         if !text.is_empty() {
             frame.render_widget(

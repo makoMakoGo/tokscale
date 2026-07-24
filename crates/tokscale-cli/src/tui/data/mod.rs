@@ -21,11 +21,11 @@ pub(crate) use overview::{CacheRate, OverviewSummary};
 // historical names this crate already uses, so downstream modules keep their
 // existing imports.
 pub use tokscale_core::usage_views::{
-    AgentEntry as AgentUsage, ContributionDay, DailyClientCommon, DailyClientInfo, DailyModelInfo,
-    DailyModelProjection, DailyUsage, DailyUsageCommon, HourlyModelInfo, HourlyModelProjection,
-    HourlyUsage, HourlyUsageCommon, PeriodKind, PeriodUsage, UsageCommonData, UsageData,
-    UsageGraphData as GraphData, UsageGroupedData, UsageModelEntry as ModelUsage,
-    UsageTokenBreakdown as TokenBreakdown,
+    AgentEntry as AgentUsage, ContributionDay, ContributionGrade, DailyClientCommon,
+    DailyClientInfo, DailyModelInfo, DailyModelProjection, DailyUsage, DailyUsageCommon,
+    HourlyModelInfo, HourlyModelProjection, HourlyUsage, HourlyUsageCommon, PeriodKind,
+    PeriodUsage, UsageCommonData, UsageData, UsageGraphData as GraphData, UsageGroupedData,
+    UsageModelEntry as ModelUsage, UsageTokenBreakdown as TokenBreakdown,
 };
 pub use tokscale_core::{aggregate_by_period, build_period_usage, find_peak_hour};
 

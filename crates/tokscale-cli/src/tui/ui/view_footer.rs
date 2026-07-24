@@ -85,14 +85,14 @@ fn sessions_summary_line(app: &App, state: &ViewState, actions: &ActionSet) -> L
             format_tokens(app.data.total_tokens),
             Style::default().fg(app.theme.metrics.tokens),
         ),
-        Span::styled(" tokens | ", Style::default().fg(app.theme.text.muted)),
+        Span::styled(" tokens | ", Style::default().fg(app.theme.text.secondary)),
         Span::styled(
             format_cost(app.data.total_cost),
             Style::default()
                 .fg(app.theme.metrics.cost)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(count, Style::default().fg(app.theme.text.muted)),
+        Span::styled(count, Style::default().fg(app.theme.text.secondary)),
     ])
 }
 

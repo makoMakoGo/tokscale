@@ -33,12 +33,12 @@ pub(super) fn render(
 
     let width = area.width as usize;
     let headline = fitted_line(headline(subject), width, app.theme.text.primary);
-    let scope = fitted_line(&scope_text(app, width), width, app.theme.text.muted);
+    let scope = fitted_line(&scope_text(app, width), width, app.theme.text.secondary);
     let hint = fitted_hint(
         &recovery_hint(actions),
         width,
         app.theme.chrome.focus,
-        app.theme.text.muted,
+        app.theme.text.secondary,
     );
 
     let lines = match area.height {
@@ -120,7 +120,7 @@ fn fitted_line(text: &str, width: usize, color: Color) -> Line<'static> {
     ))
 }
 
-fn fitted_hint(text: &str, width: usize, accent: Color, muted: Color) -> Line<'static> {
+fn fitted_hint(text: &str, width: usize, accent: Color, secondary: Color) -> Line<'static> {
     let fitted = truncate_display_width(text, width);
     let mut spans = Vec::new();
     let mut remainder = fitted.as_str();
@@ -128,13 +128,16 @@ fn fitted_hint(text: &str, width: usize, accent: Color, muted: Color) -> Line<'s
     while let Some(open) = remainder.find('[') {
         let (prefix, candidate) = remainder.split_at(open);
         if !prefix.is_empty() {
-            spans.push(Span::styled(prefix.to_string(), Style::default().fg(muted)));
+            spans.push(Span::styled(
+                prefix.to_string(),
+                Style::default().fg(secondary),
+            ));
         }
 
         let Some(close) = candidate.find(']') else {
             spans.push(Span::styled(
                 candidate.to_string(),
-                Style::default().fg(muted),
+                Style::default().fg(secondary),
             ));
             remainder = "";
             break;
@@ -148,7 +151,7 @@ fn fitted_hint(text: &str, width: usize, accent: Color, muted: Color) -> Line<'s
     if !remainder.is_empty() {
         spans.push(Span::styled(
             remainder.to_string(),
-            Style::default().fg(muted),
+            Style::default().fg(secondary),
         ));
     }
 

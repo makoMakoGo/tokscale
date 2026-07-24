@@ -101,7 +101,7 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
                 row_threshold,
                 prev_threshold,
                 threshold_diff,
-                app.theme.text.muted,
+                app.theme.text.secondary,
                 app.theme.visualization.chart_highlight,
             );
 
@@ -135,7 +135,7 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
             for (i, ch) in peak_label.chars().enumerate() {
                 buf[(peak_x + i as u16, area.y)].set_char(ch).set_style(
                     Style::default()
-                        .fg(app.theme.text.muted)
+                        .fg(app.theme.text.secondary)
                         .bg(app.theme.surface.panel),
                 );
             }
@@ -197,7 +197,7 @@ fn render_date_labels(buf: &mut Buffer, app: &App, area: Rect, data: &[StackedBa
             if x < area.x + area.width {
                 buf[(x, label_y)]
                     .set_char(ch)
-                    .set_style(Style::default().fg(app.theme.text.muted));
+                    .set_style(Style::default().fg(app.theme.text.secondary));
             }
         }
     }
@@ -408,7 +408,7 @@ mod tests {
             .skip(start_x as usize)
             .collect();
         assert_eq!(row, label);
-        assert_eq!(buf[(start_x, area.y)].fg, app.theme.text.muted);
+        assert_eq!(buf[(start_x, area.y)].fg, app.theme.text.secondary);
         assert_eq!(buf[(start_x, area.y)].bg, app.theme.surface.panel);
     }
 

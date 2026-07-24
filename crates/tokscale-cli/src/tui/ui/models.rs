@@ -159,7 +159,7 @@ pub fn render(
     let selected_index = app.selected_index;
     let group_by = app.group_by.borrow().clone();
     let theme_heading = app.theme.chrome.heading;
-    let theme_muted = app.theme.text.muted;
+    let theme_secondary = app.theme.text.secondary;
     let theme_selection_style = app.theme.selection_style();
     let metric_input_style = app.theme.metric_input_style();
     let metric_output_style = app.theme.metric_output_style();
@@ -254,7 +254,7 @@ pub fn render(
                         workspace_label(model),
                         table_layout.width_for(ModelsColumn::Workspace),
                     ))
-                    .style(Style::default().fg(theme_muted)),
+                    .style(Style::default().fg(theme_secondary)),
                     ModelsColumn::Model => Cell::from(truncate_model_display_name_to(
                         display_name,
                         table_layout.model_width,
@@ -274,7 +274,7 @@ pub fn render(
                         &get_client_display_name(&model.client),
                         table_layout.width_for(ModelsColumn::Client),
                     ))
-                    .style(Style::default().fg(theme_muted)),
+                    .style(Style::default().fg(theme_secondary)),
                     ModelsColumn::Input => {
                         Cell::from(format_tokens(model.tokens.input)).style(metric_input_style)
                     }
