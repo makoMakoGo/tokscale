@@ -201,15 +201,24 @@ graph remain projections of the same TUI generation. The graph is the total
 `UsageCommonData.graph` value stored once in Common; it is not an independent
 command, JSON product, acquisition path, or pricing authority.
 
-Contribution-graph activity grades use each day's total tokens.
-For nonzero-token days in the visible graph window, let `x = ln(tokens)`,
-`center = median(x)`, and `MAD = median(abs(x - center))`. Thresholds at
-`center - MAD`, `center`, and `center + MAD` assign the discrete `Low`,
-`Medium`, `High`, and `Peak` grades directly. `Empty` is reserved for
-zero-token days. If `MAD` is zero, the median positive deviation is the scale;
-if no positive deviation exists, every active day is `Peak`. The maximum
-active day is always `Peak`. Cost and off-window history cannot change visible
-grades, while graph days retain both token and cost fields.
+Contribution-graph activity grades use the visible-window sample of days with
+positive token totals. For each sampled day, let `x = ln(tokens)`,
+`center = median(x)`, and `MAD = median(abs(x - center))`. The scale is `MAD`
+when `MAD > 0`; otherwise it is the median strictly positive deviation. If no
+positive deviation exists, every active day is `Peak`. A zero-token day is
+`Empty`.
+
+Before threshold evaluation, every active day tied for the maximum token total
+is forced to `Peak`. The remaining active days use half-open intervals:
+
+- `x < center - scale`: `Low`;
+- `center - scale <= x < center`: `Medium`;
+- `center <= x < center + scale`: `High`; and
+- `x >= center + scale`: `Peak`.
+
+The maximum-token rule overrides these thresholds. Cost and off-window history
+cannot change visible grades, while graph days retain both token and cost
+fields.
 
 The persisted TUI cache stores this symbolic grade rather than a synthetic
 floating-point intensity. Introducing the discrete representation increments
