@@ -49,7 +49,7 @@ pub(crate) fn render_with_state(frame: &mut Frame, app: &mut App, state: &mut Vi
         .constraints([
             Constraint::Length(3),
             Constraint::Min(0),
-            Constraint::Length(5),
+            Constraint::Length(footer::HEIGHT),
         ])
         .split(area);
 
@@ -303,7 +303,7 @@ mod tests {
 
         let lines = render_screen(&mut app, width, height);
         let screen = lines.join("\n");
-        let footer = &lines[height as usize - 5..];
+        let footer = &lines[height as usize - footer::HEIGHT as usize..];
 
         assert_eq!(
             screen.matches("Scanning local data...").count(),
@@ -312,20 +312,21 @@ mod tests {
         );
         assert!(screen.contains('~'), "fish pond should render: {screen}");
         assert!(screen.contains('°'), "fish pond should render: {screen}");
+        let centered_row = &footer[footer::HEIGHT as usize / 2];
         assert!(
-            footer[2].contains("~ ~")
-                && footer[2].contains("Scanning local data")
-                && footer[2].contains("0s"),
+            centered_row.contains("~ ~")
+                && centered_row.contains("Scanning local data")
+                && centered_row.contains("0s"),
             "cold scan status should occupy the centered footer row: {screen}"
         );
-        let first_wave = footer[2].find("~ ~").unwrap();
-        let last_wave = footer[2].rfind("~ ~").unwrap() + "~ ~".len();
-        let left_width = UnicodeWidthStr::width(&footer[2][..first_wave]);
-        let right_width = UnicodeWidthStr::width(&footer[2][last_wave..]);
+        let first_wave = centered_row.find("~ ~").unwrap();
+        let last_wave = centered_row.rfind("~ ~").unwrap() + "~ ~".len();
+        let left_width = UnicodeWidthStr::width(&centered_row[..first_wave]);
+        let right_width = UnicodeWidthStr::width(&centered_row[last_wave..]);
         assert!(
             left_width.abs_diff(right_width) <= 1,
             "cold scan footer status must be horizontally centered: {}",
-            footer[2]
+            centered_row
         );
         assert!(!screen.contains("No usage in the current view"));
         assert!(!screen.contains("Total Tokens"));
@@ -341,13 +342,9 @@ mod tests {
 
         let lines = render_screen(&mut app, width, height);
         let screen = lines.join("\n");
-        let footer = lines[height as usize - 5..].join("\n");
+        let footer = lines[height as usize - footer::HEIGHT as usize..].join("\n");
 
-        assert_eq!(
-            screen.matches("Scanning local data...").count(),
-            1,
-            "{screen}"
-        );
+        assert_eq!(screen.matches("Scanning local data").count(), 1, "{screen}");
         assert!(!screen.contains('°'), "pond must degrade away: {screen}");
         assert!(footer.contains("Scanning local data"), "{footer}");
         assert!(footer.contains("0s"), "{footer}");
@@ -365,7 +362,7 @@ mod tests {
 
         let lines = render_screen(&mut app, 120, 32);
         let screen = lines.join("\n");
-        let footer = lines[lines.len() - 5..].join("\n");
+        let footer = lines[lines.len() - footer::HEIGHT as usize..].join("\n");
 
         assert!(!screen.contains("Scanning local data"), "{screen}");
         assert!(screen.contains("subscription"), "{screen}");
@@ -387,17 +384,18 @@ mod tests {
 
         let lines = render_screen(&mut app, 120, 32);
         let screen = lines.join("\n");
-        let footer = &lines[lines.len() - 5..];
+        let footer = &lines[lines.len() - footer::HEIGHT as usize..];
 
         assert_eq!(
             screen.matches("Fetching subscription data...").count(),
             1,
             "{screen}"
         );
+        let centered_row = &footer[footer::HEIGHT as usize / 2];
         assert!(
-            footer[2].contains("~ ~")
-                && footer[2].contains("Fetching subscription data")
-                && footer[2].contains("0s"),
+            centered_row.contains("~ ~")
+                && centered_row.contains("Fetching subscription data")
+                && centered_row.contains("0s"),
             "subscription fetch status should occupy the centered footer row: {screen}"
         );
         assert!(!footer.join("\n").contains("local"), "{screen}");
@@ -405,44 +403,81 @@ mod tests {
 
     #[test]
     fn usage_footer_summarizes_subscription_results_only() {
+        let width = 120;
         let mut app = make_app();
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(vec![
             crate::tui::subscription_usage::UsageProviderId::Codex,
+            crate::tui::subscription_usage::UsageProviderId::Zai,
         ]);
-        app.subscription_usage = vec![crate::tui::subscription_usage::UsageOutput {
-            provider: "Codex".to_string(),
-            account: None,
-            plan: None,
-            email: None,
-            metrics: vec![
-                crate::tui::subscription_usage::UsageMetric {
-                    label: "Weekly".to_string(),
-                    used_percent: 20.0,
-                    remaining_percent: 80.0,
-                    remaining_label: None,
+        app.subscription_usage = vec![
+            crate::tui::subscription_usage::UsageOutput {
+                provider: "Codex".to_string(),
+                account: None,
+                plan: None,
+                email: None,
+                metrics: vec![
+                    crate::tui::subscription_usage::UsageMetric {
+                        label: "Weekly".to_string(),
+                        used_percent: 20.0,
+                        remaining_percent: 80.0,
+                        remaining_label: None,
+                        resets_at: None,
+                    },
+                    crate::tui::subscription_usage::UsageMetric {
+                        label: "Five hour".to_string(),
+                        used_percent: 10.0,
+                        remaining_percent: 90.0,
+                        remaining_label: None,
+                        resets_at: None,
+                    },
+                ],
+            },
+            crate::tui::subscription_usage::UsageOutput {
+                provider: "Z.ai".to_string(),
+                account: None,
+                plan: None,
+                email: None,
+                metrics: vec![crate::tui::subscription_usage::UsageMetric {
+                    label: "Web Search".to_string(),
+                    used_percent: 5.0,
+                    remaining_percent: 95.0,
+                    remaining_label: Some("3993 left".to_string()),
                     resets_at: None,
-                },
-                crate::tui::subscription_usage::UsageMetric {
-                    label: "Five hour".to_string(),
-                    used_percent: 10.0,
-                    remaining_percent: 90.0,
-                    remaining_label: None,
-                    resets_at: None,
-                },
-            ],
-        }];
+                }],
+            },
+        ];
         app.subscription_usage_errors = vec![crate::tui::subscription_usage::UsageProviderError {
             provider: "Claude".to_string(),
             message: "credential expired".to_string(),
         }];
 
-        let lines = render_screen(&mut app, 120, 32);
-        let footer = lines[lines.len() - 5..].join("\n");
+        let lines = render_screen(&mut app, width, 32);
+        let footer_rows = &lines[lines.len() - footer::HEIGHT as usize..];
+        let footer = footer_rows.join("\n");
 
-        assert!(footer.contains("1 provider"), "{footer}");
-        assert!(footer.contains("2 limits"), "{footer}");
+        let blank_padding_row = format!("│{}│", " ".repeat(width as usize - 2));
+        assert_eq!(footer_rows[1], blank_padding_row);
+        assert_eq!(footer_rows[footer::HEIGHT as usize - 2], blank_padding_row);
+        assert!(
+            footer_rows[2..footer::HEIGHT as usize - 2]
+                .iter()
+                .all(|row| row.starts_with("│ ") && row.ends_with(" │")),
+            "all footer content rows must keep horizontal padding: {footer}"
+        );
+        assert!(footer.contains("2 subscriptions"), "{footer}");
+        assert!(!footer.contains("limit"), "{footer}");
         assert!(footer.contains("1 error"), "{footer}");
+        let summary_row = footer_rows
+            .iter()
+            .find(|row| row.contains("2 subscriptions"))
+            .expect("subscription summary row");
+        assert_eq!(
+            summary_row.chars().nth(width as usize - 2),
+            Some(' '),
+            "summary must keep one cell before the right border: {summary_row}"
+        );
+        assert_eq!(summary_row.chars().nth(width as usize - 1), Some('│'));
         assert!(footer.contains("[u:refresh]"), "{footer}");
         assert!(footer.contains("[p:theme]"), "{footer}");
         assert!(!footer.contains("tokens"), "{footer}");
@@ -476,13 +511,13 @@ mod tests {
         app.start_subscription_usage_fetch_for_test(rx);
 
         let lines = render_screen(&mut app, 120, 32);
-        let content = lines[3..lines.len() - 5].join("\n");
-        let footer = lines[lines.len() - 5..].join("\n");
+        let content = lines[3..lines.len() - footer::HEIGHT as usize].join("\n");
+        let footer = lines[lines.len() - footer::HEIGHT as usize..].join("\n");
 
         assert!(content.contains("Codex"), "{content}");
         assert!(content.contains("Weekly"), "{content}");
-        assert!(footer.contains("1 provider"), "{footer}");
-        assert!(footer.contains("1 limit"), "{footer}");
+        assert!(footer.contains("1 subscription"), "{footer}");
+        assert!(!footer.contains("limit"), "{footer}");
         assert!(
             footer.contains("Refreshing subscription usage..."),
             "{footer}"
@@ -500,8 +535,8 @@ mod tests {
 
         let lines = render_screen(&mut app, 120, 32);
         let screen = lines.join("\n");
-        let content = lines[3..lines.len() - 5].join("\n");
-        let footer = lines[lines.len() - 5..].join("\n");
+        let content = lines[3..lines.len() - footer::HEIGHT as usize].join("\n");
+        let footer = lines[lines.len() - footer::HEIGHT as usize..].join("\n");
 
         assert!(screen.contains("Could not load local reports"), "{screen}");
         assert!(!content.contains("[r] Retry"), "{content}");
@@ -536,7 +571,7 @@ mod tests {
 
         let lines = render_screen(&mut app, 120, 32);
         let screen = lines.join("\n");
-        let footer = lines[lines.len() - 5..].join("\n");
+        let footer = lines[lines.len() - footer::HEIGHT as usize..].join("\n");
 
         assert!(
             !screen.contains("Could not load local reports"),
@@ -557,16 +592,16 @@ mod tests {
         app.set_error(Some("a diagnostic that must wrap safely".to_string()));
 
         let lines = render_screen(&mut app, width, height);
-        let content_rows = &lines[3..height as usize - 5];
-        let footer = lines[height as usize - 5..].join("\n");
+        let content_rows = &lines[3..height as usize - footer::HEIGHT as usize];
+        let footer = lines[height as usize - footer::HEIGHT as usize..].join("\n");
 
         assert!(content_rows[0].ends_with('┐'));
         assert!(content_rows.last().unwrap().ends_with('┘'));
         assert!(content_rows[1..content_rows.len() - 1]
             .iter()
             .all(|line| line.ends_with('│')));
-        assert!(footer.contains("retry"), "{footer}");
-        assert!(footer.contains("quit"), "{footer}");
+        assert!(footer.contains("[r]"), "{footer}");
+        assert!(footer.contains("[q]"), "{footer}");
     }
 
     #[test]
