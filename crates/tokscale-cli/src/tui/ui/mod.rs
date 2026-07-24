@@ -345,6 +345,10 @@ mod tests {
         let footer = lines[height as usize - footer::HEIGHT as usize..].join("\n");
 
         assert_eq!(screen.matches("Scanning local data").count(), 1, "{screen}");
+        assert!(
+            screen.contains('⠋'),
+            "content area must retain its spinner: {screen}"
+        );
         assert!(!screen.contains('°'), "pond must degrade away: {screen}");
         assert!(footer.contains("Scanning local data"), "{footer}");
         assert!(footer.contains("0s"), "{footer}");
@@ -456,14 +460,19 @@ mod tests {
         let footer_rows = &lines[lines.len() - footer::HEIGHT as usize..];
         let footer = footer_rows.join("\n");
 
-        let blank_padding_row = format!("│{}│", " ".repeat(width as usize - 2));
-        assert_eq!(footer_rows[1], blank_padding_row);
-        assert_eq!(footer_rows[footer::HEIGHT as usize - 2], blank_padding_row);
+        let content_rows = &footer_rows[1..footer_rows.len() - 1];
+        assert_eq!(content_rows.len(), 3);
         assert!(
-            footer_rows[2..footer::HEIGHT as usize - 2]
+            content_rows
                 .iter()
                 .all(|row| row.starts_with("│ ") && row.ends_with(" │")),
             "all footer content rows must keep horizontal padding: {footer}"
+        );
+        assert!(content_rows[0].contains("2 subscriptions"), "{footer}");
+        assert!(content_rows[1].contains("[u:refresh]"), "{footer}");
+        assert!(
+            content_rows[2].contains("Subscription usage loaded from cache"),
+            "{footer}"
         );
         assert!(footer.contains("2 subscriptions"), "{footer}");
         assert!(!footer.contains("limit"), "{footer}");

@@ -10,7 +10,7 @@ use crate::tui::app::{App, ClickAction, SortField, StatusTone, Tab};
 use crate::tui::data::{build_period_usage, PeriodKind};
 use crate::tui::presentation::SubscriptionPresentation;
 
-pub(super) const HEIGHT: u16 = 7;
+pub(super) const HEIGHT: u16 = 5;
 
 #[derive(Clone, Copy)]
 pub(super) struct SortControl {
@@ -308,7 +308,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect, content: Foot
 fn render_shell(frame: &mut Frame, app: &App, area: Rect) -> Rect {
     let block = Block::default()
         .borders(Borders::ALL)
-        .padding(Padding::uniform(1))
+        .padding(Padding::horizontal(1))
         .border_style(Style::default().fg(app.theme.chrome.border))
         .style(app.theme.panel_style());
 
