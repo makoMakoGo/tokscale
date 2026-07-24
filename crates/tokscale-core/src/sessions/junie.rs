@@ -152,15 +152,6 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedInput> {
                 agent.clone(),
             );
             message.dedup_key = Some(dedup_hash_str(&dedup_key));
-            message.duration_ms = match number_field(usage, "time") {
-                Ok(duration) => duration.filter(|duration| *duration > 0),
-                Err(_error) => {
-                    scanned
-                        .rejections
-                        .record(RecordRejectionReason::MalformedRecord);
-                    continue;
-                }
-            };
             seen.insert(dedup_key);
             if pending_turn_start && !turn_start_assigned {
                 message.is_turn_start = true;
@@ -421,11 +412,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_tokens_agent_duration_and_ignores_embedded_cost() {
+    fn parses_tokens_and_agent_and_ignores_embedded_cost() {
         let messages = parse_events(concat!(
             r#"{"kind":"UserPromptEvent","timestampMs":1781803079339}"#,
             "\n",
-            r#"{"kind":"SessionA2uxEvent","event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","agent":{"kind":"MainAgent","id":"main","name":"main"},"modelUsage":[{"model":"gpt-4.1-2025-04-14","provider":"openai","cost":0.42,"inputTokens":100,"cacheInputTokens":20,"cacheCreateTokens":5,"outputTokens":10,"reasoningTokens":3,"time":2500}]}},"timestampMs":1781803080555}"#,
+            r#"{"kind":"SessionA2uxEvent","event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","agent":{"kind":"MainAgent","id":"main","name":"main"},"modelUsage":[{"model":"gpt-4.1-2025-04-14","provider":"openai","cost":0.42,"inputTokens":100,"cacheInputTokens":20,"cacheCreateTokens":5,"outputTokens":10,"reasoningTokens":3}]}},"timestampMs":1781803080555}"#,
             "\n",
         ));
 
@@ -441,7 +432,6 @@ mod tests {
         assert_eq!(message.tokens.output, 10);
         assert_eq!(message.tokens.reasoning, 3);
         assert_eq!(message.cost, 0.0);
-        assert_eq!(message.duration_ms, Some(2500));
         assert_eq!(message.agent.as_deref(), Some("Main"));
         assert!(message.is_turn_start);
     }

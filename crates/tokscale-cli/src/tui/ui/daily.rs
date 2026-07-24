@@ -295,7 +295,6 @@ fn daily_detail_column_header(
         DailyDetailColumn::Total => "Tokens",
         DailyDetailColumn::Cost => "Cost",
         DailyDetailColumn::CostPerMillion => "Cost/1M",
-        DailyDetailColumn::Performance => "ms/1K",
     }
 }
 
@@ -868,10 +867,6 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     DailyDetailColumn::CostPerMillion => {
                         Cell::from(format_cost_per_million(row.cost, row.tokens.total()))
                             .style(Style::default().fg(Color::Rgb(150, 200, 150)))
-                    }
-                    // daily_detail_table_layout never includes Performance; panic if the layout drifts.
-                    DailyDetailColumn::Performance => {
-                        unreachable!("daily detail rows have no timing data")
                     }
                 }
             };

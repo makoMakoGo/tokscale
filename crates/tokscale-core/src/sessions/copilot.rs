@@ -319,7 +319,6 @@ struct CopilotUsageCandidate {
     provider_id: String,
     session_id: String,
     timestamp_ms: i64,
-    duration_ms: Option<i64>,
     tokens: TokenBreakdown,
     dedup_key: String,
     agent: Option<String>,
@@ -347,7 +346,6 @@ impl CopilotUsageCandidate {
             self.agent,
         );
         message.dedup_key = Some(crate::sessions::dedup_hash_str(&self.dedup_key));
-        message.duration_ms = self.duration_ms;
         if let Some(workspace) = self.workspace {
             message.set_workspace(Some(workspace.key), Some(workspace.label));
         }
@@ -619,7 +617,6 @@ fn candidate_from_attributes(
                 format!("usage record {index} is missing a valid positive timestamp"),
             )
         })?;
-    let duration_ms = duration_ms_from_record(record);
     let dedup_key = dedup_key_for_record(
         origin,
         record,
@@ -639,7 +636,6 @@ fn candidate_from_attributes(
         provider_id,
         session_id,
         timestamp_ms,
-        duration_ms,
         tokens,
         dedup_key,
         agent: first_non_empty_attr(attributes, AGENT_NAME_ATTRS)
@@ -1015,45 +1011,6 @@ fn timestamp_ms_from_record(value: &Value) -> Option<i64> {
         })
 }
 
-fn duration_ms_from_record(value: &Value) -> Option<i64> {
-    if let (Some(start_ms), Some(end_ms)) = (
-        value.get("startTime").and_then(timestamp_ms_from_value),
-        value.get("endTime").and_then(timestamp_ms_from_value),
-    ) {
-        let duration = end_ms.saturating_sub(start_ms);
-        if duration > 0 {
-            return Some(duration);
-        }
-    }
-
-    value.get("duration").and_then(duration_ms_from_value)
-}
-
-fn duration_ms_from_value(value: &Value) -> Option<i64> {
-    if let Some(parts) = value.as_array() {
-        let seconds = parts.first().and_then(value_as_i64)?;
-        let nanos = parts.get(1).and_then(value_as_i64).unwrap_or(0);
-        let duration = seconds
-            .saturating_mul(1000)
-            .saturating_add(nanos / 1_000_000);
-        return (duration > 0).then_some(duration);
-    }
-
-    let duration = value
-        .as_f64()
-        .or_else(|| value.as_str().and_then(|value| value.parse::<f64>().ok()))?;
-    if !duration.is_finite() || duration <= 0.0 {
-        return None;
-    }
-
-    let duration_ms = if duration >= 1_000_000.0 {
-        (duration / 1_000_000.0) as i64
-    } else {
-        duration as i64
-    };
-    (duration_ms > 0).then_some(duration_ms)
-}
-
 fn timestamp_ms_from_value(value: &Value) -> Option<i64> {
     let parts = value.as_array()?;
     let seconds = parts.first().and_then(value_as_i64)?;
@@ -1228,7 +1185,6 @@ mod tests {
         assert_eq!(message.tokens.cache_read, 123);
         assert_eq!(message.tokens.reasoning, 128);
         assert_eq!(message.timestamp, 1_775_934_264_967);
-        assert_eq!(message.duration_ms, Some(4834));
         assert_eq!(
             message.dedup_key,
             Some(crate::sessions::dedup_hash_str("trace-1:span-1"))

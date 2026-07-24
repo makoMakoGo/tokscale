@@ -19,7 +19,7 @@ compile_error!("input-message cache requires stable Unix or Windows file identit
 // Input-message cache shards split serialization layout from parser/input
 // semantics. Bump this only when the shard bincode layout changes; parser-only
 // fixes should bump the relevant InputUnit parser revision instead.
-const CACHE_FORMAT_VERSION: u32 = 9;
+const CACHE_FORMAT_VERSION: u32 = 10;
 #[cfg(test)]
 const UNSUPPORTED_CACHE_FORMAT_VERSION: u32 = CACHE_FORMAT_VERSION - 1;
 const SHARD_MAGIC: [u8; 8] = *b"TOKSHRD\0";

@@ -760,7 +760,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
     // Tracks whether the previous entry was a user message,
     // so the next assistant message can be marked as a turn start.
     let mut pending_turn_start = false;
-    let mut pending_request_start_timestamp_ms: Option<i64> = None;
     let mut last_model: Option<String> = None;
     let mut last_provider_hint: Option<String> = None;
     let mut suppress_unattributed_tool_results = false;
@@ -837,13 +836,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
                 .as_deref()
                 .or(entry.cwd.as_deref())
                 .and_then(workspace_parts_from_key);
-            let entry_timestamp_result = parse_claude_entry_timestamp_checked(
-                path,
-                line_index + 1,
-                entry.timestamp.as_deref(),
-            );
-            let entry_timestamp = entry_timestamp_result.as_ref().ok().copied().flatten();
-
             // Detect sidechain on the first parseable entry (any type).
             // All lines in a subagent file carry isSidechain: true.
             if !sidechain_detected {
@@ -912,10 +904,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
             }
 
             if entry.entry_type == "user" || entry.entry_type == "tool_result" {
-                if let Some(timestamp_ms) = entry_timestamp {
-                    pending_request_start_timestamp_ms = Some(timestamp_ms);
-                }
-
                 if entry.entry_type == "user" && is_human_turn(trimmed) {
                     pending_turn_start = true;
                 }
@@ -1005,7 +993,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
                         last_model = None;
                         last_provider_hint = None;
                         suppress_unattributed_tool_results = true;
-                        pending_request_start_timestamp_ms = None;
                         pending_turn_start = false;
                         continue;
                     }
@@ -1025,7 +1012,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     last_model = None;
                     last_provider_hint = None;
                     suppress_unattributed_tool_results = true;
-                    pending_request_start_timestamp_ms = None;
                     pending_turn_start = false;
                     continue;
                 }
@@ -1034,7 +1020,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     if is_claude_synthetic_placeholder_model(model) {
                         last_model = None;
                         last_provider_hint = None;
-                        pending_request_start_timestamp_ms = None;
                         suppress_unattributed_tool_results = true;
                         continue;
                     }
@@ -1052,23 +1037,14 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     None => continue,
                 };
 
-                if let Err(error) = &entry_timestamp_result {
-                    if has_positive_usage {
-                        record_claude_rejection(
-                            &mut rejections,
-                            RecordRejectionReason::MissingTimestamp,
-                            error,
-                        );
-                    }
-                    pending_request_start_timestamp_ms = None;
-                    pending_turn_start = false;
-                    continue;
-                }
-                let parsed_timestamp = match entry_timestamp {
-                    Some(timestamp) => timestamp,
-                    None => {
+                let parsed_timestamp = match parse_claude_entry_timestamp_checked(
+                    path,
+                    line_index + 1,
+                    entry.timestamp.as_deref(),
+                ) {
+                    Ok(Some(timestamp)) => timestamp,
+                    Ok(None) => {
                         if !has_positive_usage {
-                            pending_request_start_timestamp_ms = None;
                             pending_turn_start = false;
                             continue;
                         }
@@ -1088,7 +1064,17 @@ fn parse_claude_file_with_cache_home_and_resolver(
                             RecordRejectionReason::MissingTimestamp,
                             &error,
                         );
-                        pending_request_start_timestamp_ms = None;
+                        pending_turn_start = false;
+                        continue;
+                    }
+                    Err(error) => {
+                        if has_positive_usage {
+                            record_claude_rejection(
+                                &mut rejections,
+                                RecordRejectionReason::MissingTimestamp,
+                                &error,
+                            );
+                        }
                         pending_turn_start = false;
                         continue;
                     }
@@ -1117,7 +1103,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
                                 &mut messages[existing_idx],
                                 &usage,
                                 parsed_timestamp,
-                                pending_request_start_timestamp_ms,
                             );
                             if let Some(workspace) = entry_workspace.as_ref() {
                                 set_message_workspace(&mut messages[existing_idx], workspace);
@@ -1147,7 +1132,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
                                 &mut messages[existing_idx],
                                 &usage,
                                 parsed_timestamp,
-                                pending_request_start_timestamp_ms,
                             );
                             if let Some(workspace) = entry_workspace.as_ref() {
                                 set_message_workspace(&mut messages[existing_idx], workspace);
@@ -1173,7 +1157,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
                             last_model = None;
                             last_provider_hint = None;
                             suppress_unattributed_tool_results = true;
-                            pending_request_start_timestamp_ms = None;
                             pending_turn_start = false;
                             continue;
                         }
@@ -1196,7 +1179,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
                         last_model = None;
                         last_provider_hint = None;
                         suppress_unattributed_tool_results = true;
-                        pending_request_start_timestamp_ms = None;
                         pending_turn_start = false;
                         continue;
                     }
@@ -1205,9 +1187,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
                 let provider_choice =
                     claude_provider_choice_for_models(&raw_model, &model, provider_hint.as_deref());
                 let provider_confidence = provider_choice.confidence;
-
-                let duration_ms =
-                    duration_between_ms(pending_request_start_timestamp_ms, Some(parsed_timestamp));
 
                 // Insert dedup index only after all checks pass, right before push
                 let dedup_key = pending_hash.inspect(|hash| {
@@ -1225,7 +1204,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     dedup_key,
                 );
                 unified.is_main_session = is_main_session;
-                unified.duration_ms = duration_ms;
                 unified.agent = sidechain_agent
                     .as_deref()
                     .map(crate::sessions::intern::intern);
@@ -1243,13 +1221,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
                 }
                 messages.push(unified);
                 provider_confidences.push(provider_confidence);
-                // Consume the pending request-start timestamp so a back-to-back
-                // assistant message with no intervening user entry doesn't reuse
-                // it and report an inflated duration. Streaming duplicates of
-                // this same message have already been captured in the dedup map
-                // above, so they merge via merge_claude_duplicate without needing
-                // the global pending value again.
-                pending_request_start_timestamp_ms = None;
             }
         }
     }
@@ -1631,16 +1602,10 @@ fn parse_claude_entry_timestamp_checked(
     }
 }
 
-fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64> {
-    let duration = end_ms?.saturating_sub(start_ms?);
-    (duration > 0).then_some(duration)
-}
-
 fn merge_claude_duplicate(
     existing: &mut UnifiedMessage,
     usage: &ClaudeUsage,
     parsed_timestamp: i64,
-    request_start_timestamp_ms: Option<i64>,
 ) {
     // Per-field max merge: each token field is updated independently.
     let t = &mut existing.tokens;
@@ -1654,22 +1619,7 @@ fn merge_claude_duplicate(
         .max(usage.cache_creation_input_tokens.unwrap_or(0).max(0));
 
     if parsed_timestamp >= existing.timestamp {
-        // Recover the original request-start timestamp from the existing
-        // message's recorded duration. The parent loop clears
-        // `pending_request_start_timestamp_ms` after the first chunk of a
-        // message commits (so a NEW message with no preceding user doesn't
-        // inflate by reusing a stale start), which would otherwise blank
-        // out streaming duplicates' duration. Recovering from
-        // `existing.timestamp - existing.duration_ms` keeps the duration
-        // honest for late chunks of the same logical message.
-        let recovered_start = existing
-            .duration_ms
-            .map(|d| existing.timestamp - d)
-            .or(request_start_timestamp_ms);
         existing.set_timestamp(parsed_timestamp);
-        if let Some(new_duration) = duration_between_ms(recovered_start, Some(parsed_timestamp)) {
-            existing.duration_ms = Some(new_duration);
-        }
     }
 }
 
@@ -2741,7 +2691,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deduplication_uses_message_id_without_request_id_and_keeps_final_duration() {
+    fn test_deduplication_uses_message_id_without_request_id_and_keeps_final_timestamp() {
         let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
 {"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","message":{"id":"msg_stream","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":25}}}
 {"type":"assistant","timestamp":"2024-12-01T10:00:03.500Z","message":{"id":"msg_stream","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":250}}}"#;
@@ -2752,37 +2702,9 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.output, 250);
         assert_eq!(messages[0].timestamp, 1_733_047_203_500);
-        assert_eq!(messages[0].duration_ms, Some(3500));
         assert_eq!(
             messages[0].dedup_key,
             Some(crate::sessions::dedup_hash_str("message:msg_stream"))
-        );
-    }
-
-    #[test]
-    fn test_pending_request_start_is_cleared_between_assistant_messages() {
-        // Regression: previously, the user-entry timestamp was set into
-        // `pending_request_start_timestamp_ms` and never cleared after the
-        // first assistant message consumed it. A subsequent assistant message
-        // with no intervening user entry would then reuse the stale start
-        // timestamp and report a wildly inflated duration.
-        let content = r#"{"type":"user","timestamp":"2024-12-01T10:00:00.000Z","message":{"content":"Hello"}}
-{"type":"assistant","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
-{"type":"assistant","timestamp":"2024-12-01T10:01:30.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-sonnet-4.6","usage":{"input_tokens":200,"output_tokens":80}}}"#;
-
-        let file = create_test_file(content);
-        let messages = parse_claude_file(file.path()).unwrap();
-
-        assert_eq!(messages.len(), 2);
-        assert_eq!(
-            messages[0].duration_ms,
-            Some(1_000),
-            "first assistant should report duration vs the user entry (1s)"
-        );
-        assert_eq!(
-            messages[1].duration_ms, None,
-            "second assistant has no preceding user entry; duration must NOT \
-             reuse the stale pending_request_start_timestamp_ms"
         );
     }
 

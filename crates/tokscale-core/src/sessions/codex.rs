@@ -161,8 +161,6 @@ impl CodexTotals {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CodexParseState {
     pub current_model: Option<String>,
-    #[serde(default)]
-    pub current_turn_start_ms: Option<i64>,
     pub previous_totals: Option<CodexTotals>,
     pub session_is_exec: bool,
     pub session_id_from_meta: Option<String>,
@@ -205,7 +203,6 @@ struct PendingCodexMessage {
     session_id: String,
     timestamp: i64,
     tokens: TokenBreakdown,
-    duration_ms: Option<i64>,
     agent: Option<String>,
     agent_instance: Option<String>,
     is_turn_start: bool,
@@ -228,7 +225,6 @@ impl PendingCodexMessage {
             0.0,
             self.agent,
         );
-        message.duration_ms = self.duration_ms;
         message.set_agent_instance(self.agent_instance);
         message.is_turn_start = self.is_turn_start;
         message.is_main_session = self.is_main_session;
@@ -525,13 +521,6 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                 // Extract model from turn_context
                 if entry.entry_type == "turn_context" {
                     state.current_model = payload_model.clone();
-                    state.current_turn_start_ms =
-                        match parse_codex_entry_timestamp(entry.timestamp.as_deref()) {
-                            Ok(timestamp) => timestamp,
-                            Err(error) => {
-                                interrupt_on_record!(RecordRejectionReason::MalformedRecord, error)
-                            }
-                        };
                     if let Some(model) = state.current_model.clone() {
                         flush_pending_model_messages(
                             &mut pending_model_messages,
@@ -646,9 +635,6 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                         ),
                     };
 
-                    let duration_ms =
-                        duration_between_ms(state.current_turn_start_ms, Some(timestamp));
-
                     let provider = state.session_provider.as_deref().unwrap_or("openai");
 
                     // Fork/subagent children replay the same upstream
@@ -671,7 +657,6 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                         session_id: session_id.to_string(),
                         timestamp,
                         tokens,
-                        duration_ms,
                         agent: state.session_agent.clone(),
                         agent_instance: state
                             .session_agent_instance
@@ -879,11 +864,6 @@ fn parse_codex_entry_timestamp(timestamp: Option<&str>) -> SessionParseResult<Op
                 .map_err(|source| SessionParseError::new("parse Codex event timestamp", source))
         })
         .transpose()
-}
-
-fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64> {
-    let duration = end_ms?.saturating_sub(start_ms?);
-    (duration > 0).then_some(duration)
 }
 
 fn codex_token_count_dedup_key(
@@ -1787,7 +1767,6 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "o3-pro");
-        assert_eq!(messages[0].duration_ms, Some(1000));
     }
 
     #[test]
@@ -2338,7 +2317,6 @@ mod tests {
             initial.state.pending_turn_start,
             "a pending turn survives a chunk that ends before the token_count"
         );
-
         let appended = format!(
             "{}\n",
             r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#

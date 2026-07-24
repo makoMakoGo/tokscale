@@ -24,7 +24,6 @@ pub(crate) fn build_models_export_value(data: &UsageData, group_by: &GroupBy) ->
                     "total": m.tokens.total()
                 },
                 "cost": m.cost,
-                "performance": m.performance,
                 "sessionCount": m.session_count
             });
             if *group_by == GroupBy::WorkspaceModel {
@@ -148,7 +147,6 @@ mod tests {
             workspace_label: workspace_label.map(str::to_string),
             tokens: Default::default(),
             cost: 1.0,
-            performance: Default::default(),
             session_count: 1,
         }
     }

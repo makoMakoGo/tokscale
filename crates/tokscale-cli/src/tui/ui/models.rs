@@ -11,7 +11,7 @@ use super::table_layout::{
     display_width, distributed_table_area, DISTRIBUTED_TABLE_FLEX, TABLE_COLUMN_SPACING,
 };
 use super::widgets::{
-    format_cache_hit_rate, format_cost, format_cost_per_million, format_ms_per_1k, format_tokens,
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
     get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_display_width,
     truncate_model_display_name_to, viewport_scrollbar_state, workspace_label_or_unknown,
 };
@@ -100,7 +100,6 @@ fn model_column_header(
         ModelsColumn::CacheRate => "Cache×",
         ModelsColumn::Total if density == ModelsTableDensity::Full => "Total",
         ModelsColumn::Total => "Tokens",
-        ModelsColumn::Performance => "ms/1K",
         ModelsColumn::Cost => "Cost",
         ModelsColumn::CostPerMillion => "Cost/1M",
     }
@@ -290,10 +289,6 @@ pub fn render(
                     ))
                     .style(Style::default().fg(Color::Cyan)),
                     ModelsColumn::Total => total_tokens_cell(model.tokens.total(), &app.theme),
-                    ModelsColumn::Performance => {
-                        Cell::from(format_ms_per_1k(model.performance.ms_per_1k_tokens))
-                            .style(Style::default().fg(Color::Yellow))
-                    }
                     ModelsColumn::Cost => {
                         Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green))
                     }
@@ -578,7 +573,6 @@ mod tests {
                 reasoning: 0,
             },
             cost: 0.0,
-            performance: Default::default(),
             session_count: 0,
         };
         let models = vec![&model];
@@ -602,7 +596,6 @@ mod tests {
             workspace_label: None,
             tokens: crate::tui::data::TokenBreakdown::default(),
             cost: 0.0,
-            performance: Default::default(),
             session_count: 0,
         };
 
@@ -698,7 +691,6 @@ mod tests {
             workspace_label: Some(workspace.to_string()),
             tokens: crate::tui::data::TokenBreakdown::default(),
             cost,
-            performance: Default::default(),
             session_count: 1,
         }
     }

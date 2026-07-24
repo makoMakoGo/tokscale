@@ -401,7 +401,6 @@ fn period_detail_column_header(
         PeriodDetailColumn::Total => "Tokens",
         PeriodDetailColumn::Cost => "Cost",
         PeriodDetailColumn::CostPerMillion => "Cost/1M",
-        PeriodDetailColumn::Performance => "ms/1K",
     }
 }
 
@@ -681,9 +680,6 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     PeriodDetailColumn::CostPerMillion => {
                         Cell::from(format_cost_per_million(row.cost, row.tokens.total()))
                             .style(Style::default().fg(Color::Rgb(150, 200, 150)))
-                    }
-                    PeriodDetailColumn::Performance => {
-                        unreachable!("period detail rows have no timing data")
                     }
                 }
             };
