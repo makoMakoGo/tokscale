@@ -121,12 +121,6 @@ fn render_cold_failed(frame: &mut Frame, app: &App, area: Rect) {
             diagnostic.to_string(),
             Style::default().fg(app.theme.muted),
         )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("[r] Retry", Style::default().fg(Color::Yellow)),
-            Span::raw("    "),
-            Span::styled("[q] Quit", Style::default().fg(app.theme.muted)),
-        ]),
     ];
     let paragraph = Paragraph::new(lines)
         .alignment(Alignment::Center)
@@ -136,7 +130,7 @@ fn render_cold_failed(frame: &mut Frame, app: &App, area: Rect) {
     // centered column without exceeding cramped content areas.
     let content_width = inner.width.saturating_sub(4).clamp(1, 100);
     let content_height =
-        u16::try_from(wrapped_line_count(diagnostic, content_width as usize).saturating_add(4))
+        u16::try_from(wrapped_line_count(diagnostic, content_width as usize).saturating_add(2))
             .unwrap_or(u16::MAX);
     let content = Rect {
         x: inner.x + inner.width.saturating_sub(content_width) / 2,
@@ -202,7 +196,7 @@ fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    loading::render(frame, app, inner, loading::SCANNING_SESSION_DATA);
+    loading::render(frame, app, inner, loading::SCANNING_LOCAL_DATA);
 }
 
 #[cfg(test)]
@@ -293,18 +287,38 @@ mod tests {
 
     #[test]
     fn cold_start_scan_renders_loading_instead_of_empty_states() {
+        let width = 120;
+        let height = 32;
         let mut app = make_app();
+        app.last_refresh = std::time::Instant::now() - std::time::Duration::from_secs(600);
         app.set_background_loading(true);
 
-        let screen = render_screen(&mut app, 120, 32).join("\n");
+        let lines = render_screen(&mut app, width, height);
+        let screen = lines.join("\n");
+        let footer = &lines[height as usize - 5..];
 
         assert_eq!(
-            screen.matches("Scanning session data...").count(),
+            screen.matches("Scanning local data...").count(),
             1,
             "{screen}"
         );
         assert!(screen.contains('~'), "fish pond should render: {screen}");
         assert!(screen.contains('°'), "fish pond should render: {screen}");
+        assert!(
+            footer[2].contains("~ ~")
+                && footer[2].contains("Scanning local data")
+                && footer[2].contains("0s"),
+            "cold scan status should occupy the centered footer row: {screen}"
+        );
+        let first_wave = footer[2].find("~ ~").unwrap();
+        let last_wave = footer[2].rfind("~ ~").unwrap() + "~ ~".len();
+        let left_width = UnicodeWidthStr::width(&footer[2][..first_wave]);
+        let right_width = UnicodeWidthStr::width(&footer[2][last_wave..]);
+        assert!(
+            left_width.abs_diff(right_width) <= 1,
+            "cold scan footer status must be horizontally centered: {}",
+            footer[2]
+        );
         assert!(!screen.contains("No usage in the current view"));
         assert!(!screen.contains("Total Tokens"));
         assert!(!screen.contains("Scope:"), "{screen}");
@@ -312,17 +326,27 @@ mod tests {
 
     #[test]
     fn cramped_terminal_cold_start_shows_spinner_without_pond() {
+        let width = 40;
+        let height = 12;
         let mut app = make_app();
         app.set_background_loading(true);
 
-        let screen = render_screen(&mut app, 40, 12).join("\n");
+        let lines = render_screen(&mut app, width, height);
+        let screen = lines.join("\n");
+        let footer = lines[height as usize - 5..].join("\n");
 
         assert_eq!(
-            screen.matches("Scanning session data...").count(),
+            screen.matches("Scanning local data...").count(),
             1,
             "{screen}"
         );
         assert!(!screen.contains('°'), "pond must degrade away: {screen}");
+        assert!(footer.contains("Scanning local data"), "{footer}");
+        assert!(footer.contains("0s"), "{footer}");
+        assert!(
+            !footer.contains("~ ~"),
+            "footer waves must degrade away before the status text: {footer}"
+        );
     }
 
     #[test]
@@ -333,7 +357,7 @@ mod tests {
 
         let screen = render_screen(&mut app, 120, 32).join("\n");
 
-        assert!(!screen.contains("Scanning session data..."), "{screen}");
+        assert!(!screen.contains("Scanning local data"), "{screen}");
         assert!(screen.contains("subscription"), "{screen}");
     }
 
@@ -346,11 +370,15 @@ mod tests {
 
         let lines = render_screen(&mut app, 120, 32);
         let screen = lines.join("\n");
+        let content = lines[3..lines.len() - 5].join("\n");
         let footer = lines[lines.len() - 5..].join("\n");
 
         assert!(screen.contains("Could not load local reports"), "{screen}");
-        assert!(screen.contains("[r] Retry"), "{screen}");
-        assert!(screen.contains("[q] Quit"), "{screen}");
+        assert!(!content.contains("[r] Retry"), "{content}");
+        assert!(!content.contains("[q] Quit"), "{content}");
+        assert!(footer.contains("Scan failed"), "{footer}");
+        assert!(footer.contains("[r] Retry"), "{footer}");
+        assert!(footer.contains("[q] Quit"), "{footer}");
         // successful empty/zero tab states stay behind the Oops page
         assert!(!screen.contains("No usage in the current view"), "{screen}");
         assert!(!screen.contains("Total Tokens"), "{screen}");
@@ -363,7 +391,7 @@ mod tests {
             head_row.is_some() && tail_row.is_some() && head_row != tail_row,
             "diagnostic must wrap onto multiple rows: {screen}"
         );
-        // the failure is carried by the Oops page alone, never the footer
+        // Diagnostics stay in the content area while footer actions remain concise.
         assert!(!footer.contains("injected cold failure"), "{footer}");
         assert!(!footer.contains("Scope:"), "{footer}");
         assert!(!footer.contains("0 tokens"), "{footer}");
@@ -400,12 +428,15 @@ mod tests {
 
         let lines = render_screen(&mut app, width, height);
         let content_rows = &lines[3..height as usize - 5];
+        let footer = lines[height as usize - 5..].join("\n");
 
         assert!(content_rows[0].ends_with('┐'));
         assert!(content_rows.last().unwrap().ends_with('┘'));
         assert!(content_rows[1..content_rows.len() - 1]
             .iter()
             .all(|line| line.ends_with('│')));
+        assert!(footer.contains("retry"), "{footer}");
+        assert!(footer.contains("quit"), "{footer}");
     }
 
     #[test]

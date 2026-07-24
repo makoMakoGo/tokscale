@@ -89,6 +89,15 @@ pub(super) fn with_empty_scope(
 }
 
 pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect, content: FooterContent) {
+    let inner = render_shell(frame, app, area);
+    if inner.is_empty() {
+        return;
+    }
+
+    render_rows(frame, app, inner, content);
+}
+
+fn render_shell(frame: &mut Frame, app: &App, area: Rect) -> Rect {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
@@ -96,10 +105,10 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect, content: Foot
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if inner.is_empty() {
-        return;
-    }
+    inner
+}
 
+fn render_rows(frame: &mut Frame, app: &mut App, inner: Rect, content: FooterContent) {
     // Split into 3 rows: main summary, help text, status.
     let row_constraints = if inner.height >= 3 {
         vec![
@@ -142,6 +151,128 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect, content: Foot
     if let Some(area) = rows.get(2).copied() {
         render_status_row(frame, app, area);
     }
+}
+
+pub(super) fn render_cold_loading(frame: &mut Frame, app: &App, area: Rect) {
+    let inner = render_shell(frame, app, area);
+    if inner.is_empty() {
+        return;
+    }
+
+    let elapsed = app.background_load_elapsed().unwrap_or_default().as_secs();
+    render_centered_line(frame, inner, cold_loading_line(app, inner.width, elapsed));
+}
+
+pub(super) fn render_cold_failed(frame: &mut Frame, app: &App, area: Rect, actions: &ActionSet) {
+    debug_assert!(actions.contains(Action::RefreshLocal));
+    debug_assert!(actions.contains(Action::Quit));
+
+    let inner = render_shell(frame, app, area);
+    if inner.is_empty() {
+        return;
+    }
+
+    render_centered_line(frame, inner, cold_failed_line(app, inner.width));
+}
+
+fn render_centered_line(frame: &mut Frame, area: Rect, line: Line<'static>) {
+    let row = Rect {
+        y: area.y + area.height / 2,
+        height: 1,
+        ..area
+    };
+    frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), row);
+}
+
+fn cold_loading_line(app: &App, width: u16, elapsed_secs: u64) -> Line<'static> {
+    const WAVE: &str = "~ ~";
+    const MIN_WAVE_WIDTH: usize = 56;
+    const TIMER_WIDTH: usize = 4;
+
+    let elapsed = format!("{elapsed_secs}s");
+    let elapsed = format!("{elapsed:>TIMER_WIDTH$}");
+    let plain = format!("{} ·{}", super::loading::SCANNING_LOCAL_DATA, elapsed);
+    let decorated = format!("{WAVE}  {plain}  {WAVE}");
+    let available = width as usize;
+
+    if available >= MIN_WAVE_WIDTH && UnicodeWidthStr::width(decorated.as_str()) <= available {
+        return Line::from(vec![
+            Span::styled(WAVE.to_string(), Style::default().fg(app.theme.accent)),
+            Span::raw("  "),
+            Span::styled(
+                super::loading::SCANNING_LOCAL_DATA.to_string(),
+                Style::default().fg(app.theme.muted),
+            ),
+            Span::styled(" ·", Style::default().fg(app.theme.muted)),
+            Span::styled(
+                elapsed,
+                Style::default()
+                    .fg(app.theme.foreground)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(WAVE.to_string(), Style::default().fg(app.theme.accent)),
+        ]);
+    }
+
+    if UnicodeWidthStr::width(plain.as_str()) <= available {
+        return Line::from(vec![
+            Span::styled(
+                super::loading::SCANNING_LOCAL_DATA.to_string(),
+                Style::default().fg(app.theme.muted),
+            ),
+            Span::styled(" ·", Style::default().fg(app.theme.muted)),
+            Span::styled(
+                elapsed,
+                Style::default()
+                    .fg(app.theme.foreground)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+    }
+
+    let compact = format!("Scanning ·{elapsed}");
+    Line::from(Span::styled(
+        truncate_display_width(&compact, available),
+        Style::default().fg(app.theme.muted),
+    ))
+}
+
+fn cold_failed_line(app: &App, width: u16) -> Line<'static> {
+    const FULL: &str = "Scan failed · [r] Retry · [q] Quit";
+    const ACTIONS: &str = "[r] Retry · [q] Quit";
+    const COMPACT: &str = "r:retry · q:quit";
+    let available = width as usize;
+
+    if UnicodeWidthStr::width(FULL) <= available {
+        return Line::from(vec![
+            Span::styled(
+                "Scan failed",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" · ", Style::default().fg(app.theme.muted)),
+            Span::styled("[r] Retry", Style::default().fg(Color::Yellow)),
+            Span::styled(" · ", Style::default().fg(app.theme.muted)),
+            Span::styled("[q] Quit", Style::default().fg(app.theme.muted)),
+        ]);
+    }
+
+    if UnicodeWidthStr::width(ACTIONS) <= available {
+        return Line::from(vec![
+            Span::styled("[r] Retry", Style::default().fg(Color::Yellow)),
+            Span::styled(" · ", Style::default().fg(app.theme.muted)),
+            Span::styled("[q] Quit", Style::default().fg(app.theme.muted)),
+        ]);
+    }
+
+    let compact = if UnicodeWidthStr::width(COMPACT) <= available {
+        COMPACT.to_string()
+    } else if available >= 7 {
+        "[r] [q]".to_string()
+    } else {
+        truncate_display_width("r q", available)
+    };
+    Line::from(Span::styled(compact, Style::default().fg(app.theme.muted)))
 }
 
 fn render_main_row(
@@ -568,8 +699,8 @@ fn status_row_line(app: &App) -> Line<'static> {
         return usage_status_row_line(app);
     }
 
-    // Cold loading and cold failure already own the content area. Repeating
-    // their state here would duplicate the scan or paint an error as success.
+    // Cold loading and cold failure use the centered footer presentation.
+    // The standard status row stays reserved for installed generations.
     if app.is_cold_loading() || app.is_cold_failed() {
         return Line::default();
     }

@@ -504,6 +504,7 @@ pub struct App {
     pub(crate) ticker_tick: u32,
 
     pub background_loading: bool,
+    background_load_started_at: Option<Instant>,
 
     pub needs_reload: bool,
 
@@ -697,6 +698,7 @@ impl App {
             spinner_frame: 0,
             ticker_tick: 0,
             background_loading: false,
+            background_load_started_at: None,
             needs_reload: false,
             reload_force: false,
             last_input_digest: None,
@@ -717,8 +719,21 @@ impl App {
     }
 
     pub fn set_background_loading(&mut self, loading: bool) {
+        if loading && !self.background_loading {
+            self.background_load_started_at = Some(Instant::now());
+        } else if !loading {
+            self.background_load_started_at = None;
+        }
         self.background_loading = loading;
         // Keep the installed generation visible during a background refresh.
+    }
+
+    pub(crate) fn background_load_elapsed(&self) -> Option<Duration> {
+        if !self.background_loading {
+            return None;
+        }
+        self.background_load_started_at
+            .map(|started| started.elapsed())
     }
 
     pub fn has_installed_generation(&self) -> bool {
@@ -4571,6 +4586,24 @@ mod tests {
         app.handle_key_event(key(KeyCode::Char('r')));
         assert!(app.needs_reload);
         assert!(app.reload_force);
+    }
+
+    #[test]
+    fn background_loading_tracks_one_elapsed_interval_per_run() {
+        let mut app = make_app();
+        assert!(app.background_load_elapsed().is_none());
+
+        app.set_background_loading(true);
+        let started_at = app.background_load_started_at;
+        assert!(started_at.is_some());
+        assert!(app.background_load_elapsed().is_some());
+
+        app.set_background_loading(true);
+        assert_eq!(app.background_load_started_at, started_at);
+
+        app.set_background_loading(false);
+        assert!(app.background_load_started_at.is_none());
+        assert!(app.background_load_elapsed().is_none());
     }
 
     #[test]

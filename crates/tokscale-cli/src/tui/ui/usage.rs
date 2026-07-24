@@ -43,7 +43,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_fetching(frame: &mut Frame, app: &App, area: Rect) {
-    super::loading::render(frame, app, area, "Fetching subscription data...");
+    super::loading::render(frame, app, area, "Fetching subscription data");
 }
 
 fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
