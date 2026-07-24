@@ -67,12 +67,12 @@ tokscale models --group-by workspace,model --json
 
 `tokscale models` and `tokscale models --group-by model` are identical. Both
 consume the same `UsageData.models` projection as the TUI Models tab, including
-its token normalization, pricing, performance metrics, model identity, Client
-and Provider attribution, and ordering semantics. The table exposes:
+its token normalization, pricing, model identity, Client and Provider
+attribution, and ordering semantics. The table exposes:
 
 ```text
 Workspace?  Model  Client  Provider  Input  Output  Cache×  Cache R  Cache W
-Total  Cost  Cost/1M  ms/1K
+Total  Cost  Cost/1M
 ```
 
 `Workspace` appears only for `workspace,model`. `Output` is the TUI's displayed

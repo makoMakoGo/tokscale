@@ -75,7 +75,6 @@ fn synthetic_messages(cardinality: Cardinality) -> Vec<UnifiedMessage> {
                 message.set_workspace(Some(workspace.clone()), Some(workspace));
             }
         }
-        message.duration_ms = Some(500 + (index % 15_000) as i64);
         message.message_count = 1 + (index % 3) as i32;
         message.is_turn_start = index % 2 == 0;
         messages.push(message);
@@ -136,7 +135,6 @@ fn synthetic_production_shaped_messages() -> Vec<UnifiedMessage> {
             Some(AGENTS[session_index % AGENTS.len()].to_string()),
         );
         message.set_workspace(Some(workspace.to_string()), Some(workspace.to_string()));
-        message.duration_ms = Some(500 + message_index as i64 * 25);
         message.message_count = 1;
         message.is_turn_start = message_index.is_multiple_of(2);
         messages.push(message);
@@ -193,7 +191,6 @@ fn synthetic_pair_heavy_messages() -> Vec<UnifiedMessage> {
             Some(AGENTS[group_index % AGENTS.len()].to_string()),
         );
         message.set_workspace(Some(workspace.clone()), Some(workspace));
-        message.duration_ms = Some(500 + (index % 15_000) as i64);
         message.message_count = 1;
         message.is_turn_start = fine_key_index == 0;
         messages.push(message);

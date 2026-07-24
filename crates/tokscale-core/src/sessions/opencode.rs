@@ -198,7 +198,6 @@ struct OpenCodeCache {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct OpenCodeTime {
     created: Option<f64>,
     completed: Option<f64>,
@@ -327,15 +326,6 @@ fn merge_duplicate_workspace(
             message.set_workspace(None, None);
         }
         _ => {}
-    }
-}
-
-fn opencode_duration_ms(time: &OpenCodeTime) -> Option<i64> {
-    let duration = time.completed? - time.created?;
-    if duration.is_finite() && duration > 0.0 {
-        Some(duration as i64)
-    } else {
-        None
     }
 }
 
@@ -635,7 +625,6 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedInput, OpenCodeSql
             0.0,
             agent,
         );
-        unified.duration_ms = opencode_duration_ms(&time);
         unified.dedup_key = Some(crate::sessions::dedup_hash_str(&dedup_key));
         set_workspace_from_root(&mut unified, workspace_root.as_deref());
         unified.is_main_session = parent_session_id.is_none();
@@ -913,7 +902,6 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
         assert_eq!(messages[0].tokens.input, 10);
-        assert_eq!(messages[0].duration_ms, Some(123));
         assert_eq!(
             messages[0].workspace_key.as_deref(),
             Some("/Users/alice/current-project")

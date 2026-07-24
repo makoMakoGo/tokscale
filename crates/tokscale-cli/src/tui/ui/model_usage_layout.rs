@@ -22,7 +22,6 @@ pub(crate) const DETAIL_CLIENT_WIDTH: u16 = CLIENT_MIN_WIDTH;
 pub(crate) const DETAIL_MESSAGES_WIDTH: u16 = 6;
 pub(crate) const DETAIL_NUMERIC_WIDTH: u16 = 8;
 pub(crate) const DETAIL_TOTAL_WIDTH: u16 = 9;
-pub(crate) const DETAIL_PERFORMANCE_WIDTH: u16 = 10;
 pub(crate) const DETAIL_COST_WIDTH: u16 = 9;
 pub(crate) const DETAIL_COST_PER_MILLION_WIDTH: u16 = 10;
 
@@ -47,7 +46,6 @@ pub(crate) enum ModelUsageColumn {
     CacheRead,
     CacheWrite,
     Total,
-    Performance,
     Cost,
     CostPerMillion,
 }
@@ -116,7 +114,6 @@ fn column_order(column: ModelUsageColumn) -> u16 {
         ModelUsageColumn::Total => 100,
         ModelUsageColumn::Cost => 110,
         ModelUsageColumn::CostPerMillion => 120,
-        ModelUsageColumn::Performance => 130,
     }
 }
 
@@ -288,12 +285,6 @@ fn model_usage_columns(
             DETAIL_NUMERIC_WIDTH,
         ));
         columns.push(ResponsiveColumn::fixed_optional(
-            ModelUsageColumn::Performance,
-            90,
-            column_order(ModelUsageColumn::Performance),
-            DETAIL_PERFORMANCE_WIDTH,
-        ));
-        columns.push(ResponsiveColumn::fixed_optional(
             ModelUsageColumn::CostPerMillion,
             100,
             column_order(ModelUsageColumn::CostPerMillion),
@@ -317,7 +308,6 @@ fn density_for_columns(columns: &[ModelUsageColumn]) -> ModelUsageTableDensity {
                 | ModelUsageColumn::Output
                 | ModelUsageColumn::CacheRate
                 | ModelUsageColumn::CacheRead
-                | ModelUsageColumn::Performance
         )
     }) {
         ModelUsageTableDensity::Detail
@@ -550,7 +540,6 @@ mod tests {
             ModelUsageColumn::CacheRate,
             ModelUsageColumn::CacheRead,
             ModelUsageColumn::CacheWrite,
-            ModelUsageColumn::Performance,
             ModelUsageColumn::CostPerMillion,
         ];
         let mut previous_len = 0usize;

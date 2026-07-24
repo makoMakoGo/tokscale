@@ -212,68 +212,6 @@ pub(crate) fn checked_token_sum(values: impl IntoIterator<Item = i64>) -> i64 {
         .expect("token count exceeds i64::MAX while aggregating usage")
 }
 
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelPerformance {
-    #[serde(rename = "msPer1KTokens")]
-    pub ms_per_1k_tokens: Option<f64>,
-    pub total_duration_ms: i64,
-    pub timed_tokens: i64,
-    pub sample_count: i32,
-    pub token_coverage: f64,
-}
-
-impl ModelPerformance {
-    pub fn record_message(&mut self, token_total: i64, duration_ms: Option<i64>) {
-        let Some(duration_ms) = duration_ms else {
-            return;
-        };
-        if duration_ms <= 0 || token_total <= 0 {
-            return;
-        }
-
-        self.total_duration_ms = self.total_duration_ms.saturating_add(duration_ms);
-        self.timed_tokens = checked_token_add(self.timed_tokens, token_total);
-        self.sample_count = self.sample_count.saturating_add(1);
-    }
-
-    pub fn finalize(&mut self, total_tokens: i64) {
-        self.ms_per_1k_tokens = if self.timed_tokens > 0 && self.total_duration_ms > 0 {
-            Some(self.total_duration_ms as f64 * 1000.0 / self.timed_tokens as f64)
-        } else {
-            None
-        };
-
-        self.token_coverage = if total_tokens > 0 {
-            (self.timed_tokens as f64 / total_tokens as f64).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-    }
-
-    pub fn from_totals(total_duration_ms: i64, timed_tokens: i64, sample_count: i32) -> Self {
-        let mut performance = Self {
-            total_duration_ms,
-            timed_tokens,
-            sample_count,
-            ..Self::default()
-        };
-        performance.finalize(timed_tokens);
-        performance
-    }
-
-    /// Merge another partially-filled accumulator. Only the raw counters are
-    /// combined; `finalize` recomputes the derived ratios afterwards, so a
-    /// re-folded bucket finalizes exactly like a directly-folded one.
-    pub(crate) fn merge(&mut self, other: &Self) {
-        self.total_duration_ms = self
-            .total_duration_ms
-            .saturating_add(other.total_duration_ms);
-        self.timed_tokens = checked_token_add(self.timed_tokens, other.timed_tokens);
-        self.sample_count = self.sample_count.saturating_add(other.sample_count);
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct LocalLoadMetadata {
     pub input_inventory_signature: InputInventorySignature,

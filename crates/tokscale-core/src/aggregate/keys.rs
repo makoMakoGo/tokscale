@@ -342,7 +342,6 @@ mod tests {
             timestamp: 0,
             tokens: TokenBreakdown::default(),
             cost: 0.0,
-            duration_ms: None,
             message_count: 1,
             agent: None,
             agent_instance: None,

@@ -25,12 +25,8 @@ use crate::{
         workspace_fields, FineHourlyModelKey, FineModelKey, GroupedModelKey, HourlyModelKey,
         IdentitySet,
     },
-    ClientContributionOrder, ClientId, GroupBy, ModelPerformance, UnifiedMessage,
+    ClientContributionOrder, ClientId, GroupBy, UnifiedMessage,
 };
-
-fn positive_unified_token_total(tokens: &crate::TokenBreakdown) -> i64 {
-    crate::positive_token_total(tokens)
-}
 
 /// Sanitize a message cost: non-finite/negative -> 0 (the TUI never shows debt).
 fn sane_cost(cost: f64) -> f64 {
@@ -596,7 +592,6 @@ struct FineModelBucket {
     tokens: UsageTokenBreakdown,
     cost: f64,
     contribution_tokens: u64,
-    performance: ModelPerformance,
 }
 
 /// Grouped model bucket materialized by re-folding [`FineModelBucket`]s for
@@ -610,7 +605,6 @@ struct TuiModelBucket {
     workspace_label: Option<Arc<str>>,
     tokens: UsageTokenBreakdown,
     cost: f64,
-    performance: ModelPerformance,
     sessions: IdentitySet<(Arc<str>, Arc<str>)>,
     // Boxed only for grouping modes that merge clients; keeps client-scoped
     // high-cardinality buckets free of an inline HashMap.
@@ -709,7 +703,7 @@ struct HourlyModelBucket {
     cost: f64,
 }
 
-fn materialize_tui_model(mut bucket: TuiModelBucket) -> UsageModelEntry {
+fn materialize_tui_model(bucket: TuiModelBucket) -> UsageModelEntry {
     let provider = bucket.providers.to_sorted_string();
     let client = if let Some(client_totals) = bucket.client_totals {
         let mut clients: Vec<_> = (*client_totals).into_iter().collect();
@@ -728,7 +722,6 @@ fn materialize_tui_model(mut bucket: TuiModelBucket) -> UsageModelEntry {
     } else {
         bucket.client.to_string()
     };
-    bucket.performance.finalize(bucket.tokens.total() as i64);
     UsageModelEntry {
         model_id: bucket.model.to_string(),
         display_name: bucket.model.to_string(),
@@ -738,7 +731,6 @@ fn materialize_tui_model(mut bucket: TuiModelBucket) -> UsageModelEntry {
         workspace_label: bucket.workspace_label.map(|label| label.to_string()),
         tokens: bucket.tokens,
         cost: bucket.cost,
-        performance: bucket.performance,
         session_count: bucket
             .sessions
             .len()
@@ -1003,7 +995,6 @@ impl TuiAcc {
                 tokens: UsageTokenBreakdown::default(),
                 cost: 0.0,
                 contribution_tokens: 0,
-                performance: ModelPerformance::default(),
             });
 
         add_unified_tokens(&mut model_entry.tokens, &msg.tokens);
@@ -1012,10 +1003,6 @@ impl TuiAcc {
             .contribution_tokens
             .checked_add(msg.tokens.total().max(0) as u64)
             .expect("client token contribution exceeds u64::MAX");
-        model_entry
-            .performance
-            .record_message(positive_unified_token_total(&msg.tokens), msg.duration_ms);
-
         if let Some(agent) = msg.agent.as_ref() {
             let agent_entry = self
                 .agent_map
@@ -1175,7 +1162,6 @@ impl TuiAcc {
                         workspace_label,
                         tokens: UsageTokenBreakdown::default(),
                         cost: 0.0,
-                        performance: ModelPerformance::default(),
                         sessions: IdentitySet::default(),
                         client_totals: merge_clients.then(|| Box::new(HashMap::new())),
                     }
@@ -1201,7 +1187,6 @@ impl TuiAcc {
 
                 add_tokens(&mut model_entry.tokens, &fine_model.tokens);
                 model_entry.cost += fine_model.cost;
-                model_entry.performance.merge(&fine_model.performance);
 
                 model_entry
                     .sessions
@@ -2603,7 +2588,6 @@ mod tests {
         cost: f64,
         workspace_key: Option<&str>,
         workspace_label: Option<&str>,
-        duration_ms: Option<i64>,
         is_turn_start: bool,
         agent: Option<&str>,
     ) -> UnifiedMessage {
@@ -2627,7 +2611,6 @@ mod tests {
             workspace_key.map(str::to_string),
             workspace_label.map(str::to_string),
         );
-        msg.duration_ms = duration_ms;
         msg.is_turn_start = is_turn_start;
         msg
     }
@@ -2641,7 +2624,7 @@ mod tests {
     /// One corpus exercising every dimension a grouping can re-fold: shared
     /// models across clients, one client:model pair across two providers,
     /// workspaces with/without labels and an unknown workspace, two sessions
-    /// per client, two days, two hours, durations, turn starts, and an agent.
+    /// per client, two days, two hours, turn starts, and an agent.
     fn reprojection_corpus() -> Vec<UnifiedMessage> {
         vec![
             reprojection_message(
@@ -2655,7 +2638,6 @@ mod tests {
                 0.1,
                 Some("/repo-a"),
                 Some("repo-a"),
-                Some(1000),
                 true,
                 Some("builder"),
             ),
@@ -2670,7 +2652,6 @@ mod tests {
                 0.2,
                 Some("/repo-a"),
                 Some("repo-a"),
-                Some(2000),
                 false,
                 None,
             ),
@@ -2684,7 +2665,6 @@ mod tests {
                 70,
                 0.3,
                 Some("/repo-b"),
-                None,
                 None,
                 false,
                 None,
@@ -2700,7 +2680,6 @@ mod tests {
                 0.4,
                 None,
                 None,
-                Some(4000),
                 true,
                 None,
             ),
@@ -2715,7 +2694,6 @@ mod tests {
                 0.5,
                 Some("/repo-a"),
                 Some("repo-a"),
-                None,
                 false,
                 None,
             ),
@@ -2785,7 +2763,6 @@ mod tests {
             assert_eq!(left.workspace_label, right.workspace_label);
             assert_tokens_eq(&left.tokens, &right.tokens);
             assert_eq!(left.cost.to_bits(), right.cost.to_bits());
-            assert_eq!(left.performance, right.performance);
             assert_eq!(left.session_count, right.session_count);
         }
 
@@ -3085,20 +3062,12 @@ mod tests {
         assert!((gpt.cost - 1.1).abs() < 1e-9);
         assert_eq!(gpt.workspace_key, None);
         assert_eq!(gpt.workspace_label, None);
-        assert_eq!(gpt.performance.total_duration_ms, 3000);
-        assert_eq!(gpt.performance.timed_tokens, 410);
-        assert_eq!(gpt.performance.sample_count, 2);
         let sonnet = model
             .models
             .iter()
             .find(|entry| entry.model_id == "claude-sonnet-4.5")
             .expect("claude-sonnet-4.5 entry");
         assert_eq!(sonnet.session_count, 1);
-        assert_eq!(
-            sonnet.performance.ms_per_1k_tokens,
-            Some(4000.0 * 1000.0 / 480.0)
-        );
-        assert_eq!(sonnet.performance.token_coverage, 1.0);
 
         // Model grouping merges providers in the daily detail, attributing
         // the first-seen provider, and keeps bare-model hourly keys.

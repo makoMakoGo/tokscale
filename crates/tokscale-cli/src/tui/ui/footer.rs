@@ -753,7 +753,6 @@ mod tests {
             workspace_label: None,
             tokens: TokenBreakdown::default(),
             cost: 0.0,
-            performance: Default::default(),
             session_count: 1,
         });
         app

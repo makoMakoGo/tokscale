@@ -153,14 +153,15 @@ no row to operate on.
 
 `UsageData.graph` is a total value. A valid empty graph is
 `UsageGraphData { weeks: [] }`; `Option<UsageGraphData>` is not part of the
-domain. Schema 46 stores the graph once in Common. A missing or `null` graph,
-a missing Common or Grouped part, a model Client outside the immutable
-universe, or disagreeing Common/Grouped daily or hourly shapes makes the
-complete generation a cache miss.
+domain. The cache stores the graph once in Common. A missing or `null` graph, a
+missing Common or Grouped part, a model Client outside the immutable universe,
+or disagreeing Common/Grouped daily or hourly shapes makes the complete
+generation a cache miss.
 
-The TUI accepts only schema 47 and validates all four Grouped projections,
-including inactive ones, before installing the generation. No omitted field,
-partial projection, synthesized default, or alternative schema is accepted.
+The TUI accepts exactly its current cache schema and validates all four Grouped
+projections, including inactive ones, before installing the generation. No
+omitted field, partial projection, synthesized default, or alternative schema
+is accepted.
 
 ## Consequences
 

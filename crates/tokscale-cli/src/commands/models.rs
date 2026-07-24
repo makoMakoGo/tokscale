@@ -4,14 +4,13 @@ use crate::commands::shared::{
     emit_client_diagnostics, get_date_range_label, resolve_effective_home_dir, ReportEnvelope,
 };
 use crate::tui::{
-    self, format_cache_hit_rate, format_cost_per_million, format_ms_per_1k,
-    format_usage_tokens_with_commas, get_client_display_name, get_provider_display_name,
-    truncate_model_display_name,
+    self, format_cache_hit_rate, format_cost_per_million, format_usage_tokens_with_commas,
+    get_client_display_name, get_provider_display_name, truncate_model_display_name,
 };
 use anyhow::Result;
 use std::io::{self, IsTerminal, Write};
 use tokscale_core::usage_views::{UsageData, UsageModelEntry, UsageTokenBreakdown};
-use tokscale_core::{GroupBy, ModelPerformance, ReportOptions};
+use tokscale_core::{GroupBy, ReportOptions};
 
 fn checked_add_tokens(
     total: &UsageTokenBreakdown,
@@ -28,33 +27,6 @@ fn model_totals(models: &[UsageModelEntry]) -> UsageTokenBreakdown {
         .fold(UsageTokenBreakdown::default(), |total, model| {
             checked_add_tokens(&total, &model.tokens)
         })
-}
-
-fn aggregate_performance(models: &[UsageModelEntry], total_tokens: u64) -> ModelPerformance {
-    let total_duration_ms = models
-        .iter()
-        .map(|model| model.performance.total_duration_ms)
-        .fold(0_i64, i64::saturating_add);
-    let timed_tokens = models
-        .iter()
-        .map(|model| model.performance.timed_tokens)
-        .fold(0_i64, i64::saturating_add);
-    let sample_count = models
-        .iter()
-        .map(|model| model.performance.sample_count)
-        .fold(0_i32, i32::saturating_add);
-    ModelPerformance {
-        ms_per_1k_tokens: (timed_tokens > 0 && total_duration_ms > 0)
-            .then(|| total_duration_ms as f64 * 1000.0 / timed_tokens as f64),
-        total_duration_ms,
-        timed_tokens,
-        sample_count,
-        token_coverage: if total_tokens > 0 {
-            (timed_tokens.max(0) as f64 / total_tokens as f64).clamp(0.0, 1.0)
-        } else {
-            0.0
-        },
-    }
 }
 
 fn model_clients_include(model: &UsageModelEntry, client: &str) -> bool {
@@ -174,7 +146,6 @@ fn render_models_table(
         Cell::new("Total").fg(Color::Cyan),
         Cell::new("Cost").fg(Color::Cyan),
         Cell::new("Cost/1M").fg(Color::Cyan),
-        Cell::new("ms/1K").fg(Color::Cyan),
     ]);
     table.set_header(header);
 
@@ -207,14 +178,12 @@ fn render_models_table(
             numeric_cell(format_usage_tokens_with_commas(model.tokens.total())),
             numeric_cell(format_currency(model.cost)),
             numeric_cell(format_cost_per_million(model.cost, model.tokens.total())),
-            numeric_cell(format_ms_per_1k(model.performance.ms_per_1k_tokens)),
         ]);
         table.add_row(row);
     }
 
     let totals = model_totals(&data.models);
     debug_assert_eq!(totals.total(), data.total_tokens);
-    let total_performance = aggregate_performance(&data.models, totals.total());
     let mut total_row = Vec::new();
     if workspace_grouping {
         total_row.push(Cell::new(""));
@@ -237,7 +206,6 @@ fn render_models_table(
         total_cell(format_usage_tokens_with_commas(totals.total())),
         total_cell(format_currency(data.total_cost)),
         total_cell(format_cost_per_million(data.total_cost, totals.total())),
-        total_cell(format_ms_per_1k(total_performance.ms_per_1k_tokens)),
     ]);
     table.add_row(total_row);
 

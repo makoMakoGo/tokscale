@@ -36,7 +36,7 @@ use std::sync::mpsc::TryRecvError;
 use std::thread;
 use std::time::Duration;
 pub(crate) use ui::widgets::{
-    format_cache_hit_rate, format_cost_per_million, format_ms_per_1k,
+    format_cache_hit_rate, format_cost_per_million,
     format_tokens_with_commas as format_usage_tokens_with_commas, get_client_display_name,
     get_provider_display_name, truncate_model_display_name,
 };
@@ -994,7 +994,6 @@ mod tests {
                 ..Default::default()
             },
             cost: 0.0,
-            performance: Default::default(),
             session_count: 1,
         });
         let mut view_state = view_state::ViewState::default();

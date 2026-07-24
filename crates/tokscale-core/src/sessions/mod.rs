@@ -56,8 +56,6 @@ pub struct UnifiedMessage {
     pub timestamp: i64,
     pub tokens: TokenBreakdown,
     pub cost: f64,
-    #[serde(default)]
-    pub duration_ms: Option<i64>,
     #[serde(default = "default_message_count")]
     pub message_count: i32,
     #[serde(default, deserialize_with = "intern::de_intern_opt")]
@@ -336,7 +334,6 @@ impl UnifiedMessage {
             timestamp,
             tokens,
             cost,
-            duration_ms: None,
             message_count: default_message_count(),
             agent: agent.as_deref().map(intern::intern),
             agent_instance: None,

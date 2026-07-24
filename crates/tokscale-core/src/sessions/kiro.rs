@@ -474,24 +474,25 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedInput> {
                 )
             })?;
 
-            let end_timestamp_ms = match turn.end_timestamp.as_ref() {
-                Some(value) => Some(parse_timestamp_value(Some(value)).ok_or_else(|| {
-                    invalid_at_path(
-                        path,
-                        "validate Kiro turn timestamp",
-                        format!("turn {index} has an invalid end_timestamp"),
-                    )
-                })?),
-                None => None,
+            let timestamp = match prompt_timestamp_ms {
+                Some(timestamp) => timestamp,
+                None => match turn.end_timestamp.as_ref() {
+                    Some(value) => parse_timestamp_value(Some(value)).ok_or_else(|| {
+                        invalid_at_path(
+                            path,
+                            "validate Kiro turn timestamp",
+                            format!("turn {index} has an invalid end_timestamp"),
+                        )
+                    })?,
+                    None => {
+                        return Err(invalid_at_path(
+                            path,
+                            "validate Kiro turn",
+                            format!("turn {index} has no valid timestamp"),
+                        ));
+                    }
+                },
             };
-            let duration_ms = duration_between_ms(prompt_timestamp_ms, end_timestamp_ms);
-            let timestamp = prompt_timestamp_ms.or(end_timestamp_ms).ok_or_else(|| {
-                invalid_at_path(
-                    path,
-                    "validate Kiro turn",
-                    format!("turn {index} has no valid timestamp"),
-                )
-            })?;
 
             let tokens = TokenBreakdown {
                 input,
@@ -522,7 +523,6 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedInput> {
                 ))),
             );
             message.message_count = turn.total_request_count.unwrap_or(1).max(1);
-            message.duration_ms = duration_ms;
             message.is_turn_start = true;
             message.set_workspace(workspace_key.clone(), workspace_label.clone());
             Ok(Some(message))
@@ -589,11 +589,6 @@ fn checked_context_token_estimate(context_window: i64, percentage: f64) -> Optio
         return None;
     }
     Some(estimated as i64)
-}
-
-fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64> {
-    let duration = end_ms?.saturating_sub(start_ms?);
-    (duration > 0).then_some(duration)
 }
 
 fn parse_timestamp_value(value: Option<&serde_json::Value>) -> Option<i64> {
@@ -884,10 +879,6 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
                 continue;
             };
 
-            let duration_ms = duration_between_ms(
-                meta.request_start_timestamp_ms,
-                meta.stream_end_timestamp_ms,
-            );
             let timestamp = meta
                 .request_start_timestamp_ms
                 .or(meta.stream_end_timestamp_ms)
@@ -927,7 +918,6 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
                 ))),
             );
             message.message_count = 1;
-            message.duration_ms = duration_ms;
             message.is_turn_start = true;
             message.set_workspace(workspace_key.clone(), workspace_label.clone());
             scanned.messages.push(message);
@@ -1006,9 +996,24 @@ mod tests {
         assert_eq!(messages[0].message_count, 2);
         assert!(messages[0].is_turn_start);
         assert_eq!(messages[0].timestamp, 1770983426420);
-        assert_eq!(messages[0].duration_ms, Some(580));
         assert_eq!(messages[0].workspace_key.as_deref(), Some("/tmp/project"));
         assert_eq!(messages[0].workspace_label.as_deref(), Some("project"));
+    }
+
+    #[test]
+    fn prompt_timestamp_takes_precedence_without_parsing_malformed_end_timestamp() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{"session_id":"session-prompt-timestamp","session_state":{"rts_model_state":{"model_info":{"model_id":"claude-sonnet-4-5"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":1,"end_timestamp":"malformed","message_ids":["prompt-timestamp","assistant-timestamp"]}]}}}"#;
+        let jsonl = r#"{"version":"v1","kind":"Prompt","data":{"message_id":"prompt-timestamp","content":[{"kind":"text","data":"hello"}],"meta":{"timestamp":1770983426.5}}}
+{"version":"v1","kind":"AssistantMessage","data":{"message_id":"assistant-timestamp","content":[{"kind":"text","data":"response"}]}}"#;
+        let path = create_session_files(&dir, "prompt-timestamp", json, jsonl);
+
+        let scanned = super::parse_kiro_file(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].timestamp, 1770983426500);
+        assert!(scanned.rejections.is_empty());
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]
@@ -1299,7 +1304,7 @@ not json
     }
 
     #[test]
-    fn test_parse_kiro_sqlite_sets_duration_from_request_metadata() {
+    fn test_parse_kiro_sqlite_uses_request_start_timestamp() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("data.sqlite3");
         let conn = Connection::open(&db_path).unwrap();
@@ -1333,7 +1338,6 @@ not json
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].timestamp, 1770983426000);
-        assert_eq!(messages[0].duration_ms, Some(1500));
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 10);
     }

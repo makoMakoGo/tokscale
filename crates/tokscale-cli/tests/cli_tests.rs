@@ -1138,17 +1138,6 @@ fn test_models_json_output() {
     }
     assert!(first.get("cost").is_some());
     assert!(first.get("sessionCount").is_some());
-    let performance = first
-        .get("performance")
-        .expect("Missing performance")
-        .as_object()
-        .expect("performance should be an object");
-    assert!(performance.contains_key("msPer1KTokens"));
-    assert!(performance.contains_key("totalDurationMs"));
-    assert!(performance.contains_key("timedTokens"));
-    assert!(performance.contains_key("sampleCount"));
-    assert!(performance.contains_key("tokenCoverage"));
-    assert!(performance["msPer1KTokens"].as_f64().unwrap() > 0.0);
 }
 
 #[test]
@@ -1217,8 +1206,7 @@ fn test_models_table_uses_tui_metric_columns() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Cache×"))
-        .stdout(predicate::str::contains("Cost/1M"))
-        .stdout(predicate::str::contains("ms/1K"));
+        .stdout(predicate::str::contains("Cost/1M"));
 }
 
 #[test]
@@ -1894,8 +1882,7 @@ fn test_models_table_output() {
         .args(["models", "--client", "opencode", "--no-spinner"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Token Usage Report by Model"))
-        .stdout(predicate::str::contains("ms/1K"));
+        .stdout(predicate::str::contains("Token Usage Report by Model"));
 }
 
 #[test]
