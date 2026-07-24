@@ -17,7 +17,6 @@ pub(crate) enum Action {
     Sort(SortField),
     OpenDetails,
     Back,
-    JumpToday,
     ToggleView,
     Clients,
     GroupBy,
@@ -148,7 +147,6 @@ impl ActionSet {
             KeyCode::Char('c') => Some(Action::Sort(SortField::Cost)),
             KeyCode::Enter => Some(Action::OpenDetails),
             KeyCode::Esc | KeyCode::Backspace => Some(Action::Back),
-            KeyCode::Char('j') => Some(Action::JumpToday),
             KeyCode::Char('h') if app.current_tab == Tab::Overview => Some(Action::ToggleView),
             KeyCode::Char('v') if matches!(app.current_tab, Tab::Daily | Tab::Hourly) => {
                 Some(Action::ToggleView)
@@ -226,7 +224,7 @@ fn view_actions(app: &App, state: &ViewState) -> Vec<Action> {
         Tab::Monthly | Tab::Weekly => vec![Action::OpenDetails],
         Tab::Daily if app.is_daily_detail_active() => vec![Action::Back],
         Tab::Daily if state.daily_profile_active() => vec![Action::ToggleView],
-        Tab::Daily => vec![Action::OpenDetails, Action::JumpToday, Action::ToggleView],
+        Tab::Daily => vec![Action::OpenDetails, Action::ToggleView],
         Tab::Hourly => vec![Action::ToggleView],
         Tab::Sessions if state.session_detail_active() => vec![Action::Back],
         Tab::Sessions => state
@@ -609,6 +607,10 @@ mod tests {
         );
         assert_eq!(
             ActionSet::action_for_key(&overview, &key(KeyCode::Char('v'))),
+            None
+        );
+        assert_eq!(
+            ActionSet::action_for_key(&daily, &key(KeyCode::Char('j'))),
             None
         );
     }
