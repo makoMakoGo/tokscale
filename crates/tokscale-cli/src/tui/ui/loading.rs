@@ -72,12 +72,28 @@ const POND_TIMELINE: [usize; 10] = [0, 0, 1, 2, 3, 4, 5, 5, 5, 5];
 const POND_WIDTH: u16 = 23;
 
 /// Centered "spinner + message" loading state with the fish-pond animation
-/// above it; cramped areas degrade to the spinner line alone.
+/// above it; cramped areas degrade to the spinner line, then the glyph alone.
 pub(super) fn render(frame: &mut Frame, app: &App, area: Rect, message: &str) {
+    if area.is_empty() {
+        return;
+    }
+
     let show_pond = area.width >= POND_WIDTH + 4 && area.height >= 12;
-    let spinner = spinner_line(app, message);
 
     if !show_pond {
+        if area.height < 3 {
+            let row = Rect {
+                y: area.y + area.height / 2,
+                height: 1,
+                ..area
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(spinner_span(app))).alignment(Alignment::Center),
+                row,
+            );
+            return;
+        }
+
         let center = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -86,11 +102,12 @@ pub(super) fn render(frame: &mut Frame, app: &App, area: Rect, message: &str) {
                 Constraint::Percentage(40),
             ])
             .split(area)[1];
-        let paragraph = Paragraph::new(spinner).alignment(Alignment::Center);
+        let paragraph = Paragraph::new(spinner_line(app, message)).alignment(Alignment::Center);
         frame.render_widget(paragraph, center);
         return;
     }
 
+    let spinner = spinner_line(app, message);
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(9);
     let pond_frame = POND_FRAMES[POND_TIMELINE[app.spinner_frame % POND_TIMELINE.len()]];
     for row in pond_frame {
@@ -110,18 +127,21 @@ pub(super) fn render(frame: &mut Frame, app: &App, area: Rect, message: &str) {
 }
 
 fn spinner_line(app: &App, message: &str) -> Line<'static> {
-    let glyph = SPINNER_FRAMES[app.spinner_frame % SPINNER_FRAMES.len()];
     Line::from(vec![
-        Span::styled(
-            glyph.to_string(),
-            Style::default().fg(app.theme.status.pending),
-        ),
+        spinner_span(app),
         Span::raw(" "),
         Span::styled(
             format!("{message}..."),
             Style::default().fg(app.theme.text.secondary),
         ),
     ])
+}
+
+fn spinner_span(app: &App) -> Span<'static> {
+    Span::styled(
+        SPINNER_FRAMES[app.spinner_frame % SPINNER_FRAMES.len()].to_string(),
+        Style::default().fg(app.theme.status.pending),
+    )
 }
 
 /// Colors one pond row by character role so the artwork follows the active
