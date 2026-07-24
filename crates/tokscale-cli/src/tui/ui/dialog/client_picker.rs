@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
@@ -220,24 +220,27 @@ impl DialogContent for ClientPickerDialog {
         let block = Block::default()
             .title(" Clients ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.accent));
+            .border_style(Style::default().fg(theme.chrome.focus));
         frame.render_widget(block, area);
 
         let rows = client_picker_areas(area);
 
         let filter_text = if self.filter.is_empty() {
-            Span::styled("Type to filter...", Style::default().fg(theme.muted))
+            Span::styled(
+                "Type to filter...",
+                Style::default().fg(theme.text.disabled),
+            )
         } else {
-            Span::styled(&self.filter, Style::default().fg(theme.foreground))
+            Span::styled(&self.filter, Style::default().fg(theme.text.primary))
         };
         let filter_line = Paragraph::new(Line::from(vec![
-            Span::styled("Filter: ", Style::default().fg(theme.accent)),
+            Span::styled("Filter: ", Style::default().fg(theme.chrome.focus)),
             filter_text,
         ]));
         frame.render_widget(filter_line, rows.filter);
 
         let divider = Paragraph::new("-".repeat(rows.divider.width as usize))
-            .style(Style::default().fg(theme.border));
+            .style(Style::default().fg(theme.chrome.border));
         frame.render_widget(divider, rows.divider);
 
         let list_area = rows.list;
@@ -265,14 +268,11 @@ impl DialogContent for ClientPickerDialog {
             let padding = usable.saturating_sub(left.chars().count());
 
             let base_style = if is_selected {
-                Style::default()
-                    .bg(theme.accent)
-                    .fg(theme.background)
-                    .add_modifier(Modifier::BOLD)
+                theme.selection_style()
             } else if is_enabled {
-                Style::default().fg(theme.foreground)
+                Style::default().fg(theme.text.primary)
             } else {
-                Style::default().fg(theme.muted)
+                Style::default().fg(theme.text.disabled)
             };
 
             items.push(ListItem::new(Line::from(vec![
@@ -284,7 +284,7 @@ impl DialogContent for ClientPickerDialog {
         if items.is_empty() {
             items.push(ListItem::new(Line::from(Span::styled(
                 "  No results",
-                Style::default().fg(theme.muted),
+                Style::default().fg(theme.text.muted),
             ))));
         }
 
@@ -294,9 +294,9 @@ impl DialogContent for ClientPickerDialog {
             .last_error
             .unwrap_or_else(|| client_picker_hint(rows.hint.width));
         let hint_style = if self.last_error.is_some() {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(theme.status.warning)
         } else {
-            Style::default().fg(theme.muted)
+            Style::default().fg(theme.text.muted)
         };
         let hint = Paragraph::new(hint_text)
             .alignment(Alignment::Center)
@@ -399,7 +399,7 @@ mod tests {
 
     fn render_symbols(dialog: &ClientPickerDialog, area: Rect) -> String {
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-        let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+        let theme = Theme::from_name(ThemeName::Blue);
         let frame = terminal
             .draw(|frame| dialog.render(frame, area, &theme))
             .unwrap();

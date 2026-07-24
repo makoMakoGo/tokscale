@@ -41,7 +41,7 @@ Tokscale stores most local settings under the platform config directory:
 
 | Setting | Type | Meaning |
 | --- | --- | --- |
-| `colorPalette` | string | TUI color theme. Known values include `green`, `halloween`, `teal`, `blue`, `pink`, `purple`, `orange`, `monochrome`, `ylgnbu`, `graphite`, `lagoon`, and `dusk`. An explicit `--theme` overrides this saved value. |
+| `colorPalette` | string | Complete TUI semantic theme, covering surfaces, navigation, selections, metrics, status, and visualizations. Known values include `green`, `halloween`, `teal`, `blue`, `pink`, `purple`, `orange`, `monochrome`, `ylgnbu`, `graphite`, `lagoon`, and `dusk`. An explicit `--theme` overrides this saved value. |
 | `includeUnusedModels` | boolean | Show zero-token models in reports. |
 | `autoRefreshEnabled` | boolean | Enable background TUI refresh of the fixed startup client universe. |
 | `autoRefreshMs` | number | Background TUI refresh interval in milliseconds. View changes do not reset it. |

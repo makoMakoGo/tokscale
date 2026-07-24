@@ -223,6 +223,15 @@ enum StatusMessageKind {
     LocalReport,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum StatusTone {
+    #[default]
+    Info,
+    Success,
+    Warning,
+    Danger,
+}
+
 fn pricing_warning(status: PricingStatus) -> Option<&'static str> {
     match status {
         PricingStatus::Available => None,
@@ -487,10 +496,12 @@ pub struct App {
     pub status_message: Option<String>,
     pub status_message_time: Option<Instant>,
     status_message_kind: StatusMessageKind,
+    status_message_tone: StatusTone,
     cache_persistence_warning: Option<String>,
     pricing_status: PricingStatus,
     pub subscription_status_message: Option<String>,
     pub subscription_status_message_time: Option<Instant>,
+    subscription_status_message_tone: StatusTone,
 
     pub terminal_width: u16,
     pub terminal_height: u16,
@@ -563,7 +574,7 @@ impl App {
             })?,
             None => settings.theme_name()?,
         };
-        let theme = Theme::from_name_for_current_terminal(theme_name);
+        let theme = Theme::from_name(theme_name);
 
         let client_universe: HashSet<ClientId> = if let Some(ref cli_clients) = config.clients {
             // CLI-provided filter list. Each entry is the canonical
@@ -689,10 +700,16 @@ impl App {
             } else {
                 StatusMessageKind::General
             },
+            status_message_tone: if has_data {
+                StatusTone::Success
+            } else {
+                StatusTone::Info
+            },
             cache_persistence_warning: None,
             pricing_status: PricingStatus::Available,
             subscription_status_message: None,
             subscription_status_message_time: None,
+            subscription_status_message_tone: StatusTone::Info,
             terminal_width: 80,
             terminal_height: 24,
             click_areas: Vec::new(),
@@ -783,7 +800,10 @@ impl App {
         if !selected_clients.is_subset(&self.client_universe) || selected_clients.is_empty() {
             *self.selected_clients.borrow_mut() = self.data_clients.clone();
             *self.group_by.borrow_mut() = self.data_group_by.clone();
-            self.set_status("Client selection is outside the loaded client universe");
+            self.set_status_with_tone(
+                "Client selection is outside the loaded client universe",
+                StatusTone::Danger,
+            );
             return;
         }
         if selected_clients == self.data_clients && group_by == self.data_group_by {
@@ -792,7 +812,7 @@ impl App {
         let Some(backend) = self.projection_backend.as_mut() else {
             *self.selected_clients.borrow_mut() = self.data_clients.clone();
             *self.group_by.borrow_mut() = self.data_group_by.clone();
-            self.set_status("Local reports are not loaded yet");
+            self.set_status_with_tone("Local reports are not loaded yet", StatusTone::Warning);
             return;
         };
 
@@ -807,7 +827,7 @@ impl App {
                 let diagnostic = format!("{operation} failed: {error:#}");
                 *self.selected_clients.borrow_mut() = self.data_clients.clone();
                 *self.group_by.borrow_mut() = self.data_group_by.clone();
-                self.set_status(&diagnostic);
+                self.set_status_with_tone(&diagnostic, StatusTone::Danger);
                 return;
             }
         };
@@ -820,9 +840,12 @@ impl App {
                 Err(error) => {
                     *self.selected_clients.borrow_mut() = self.data_clients.clone();
                     *self.group_by.borrow_mut() = self.data_group_by.clone();
-                    self.set_status(&format!(
-                        "Client projection failed while refreshing model details: {error:#}"
-                    ));
+                    self.set_status_with_tone(
+                        &format!(
+                            "Client projection failed while refreshing model details: {error:#}"
+                        ),
+                        StatusTone::Danger,
+                    );
                     return;
                 }
             }
@@ -837,15 +860,21 @@ impl App {
             Some(match detail_update {
                 ModelDetailClientUpdate::Ready(models) => {
                     self.model_detail_models = Some(models);
-                    "Clients filtered locally; model details updated"
+                    (
+                        "Clients filtered locally; model details updated",
+                        StatusTone::Success,
+                    )
                 }
                 ModelDetailClientUpdate::MissingSelection => {
                     self.clear_model_detail_state(true);
-                    "Selected model is not available for the current Client filter"
+                    (
+                        "Selected model is not available for the current Client filter",
+                        StatusTone::Warning,
+                    )
                 }
                 ModelDetailClientUpdate::Inactive => {
                     self.clear_model_detail_state(true);
-                    "Clients filtered locally"
+                    ("Clients filtered locally", StatusTone::Success)
                 }
             })
         } else {
@@ -854,10 +883,13 @@ impl App {
         self.update_projected_data(data);
         self.data_group_by = group_by.clone();
         self.data_clients = selected_clients;
-        if let Some(status) = client_status {
-            self.set_local_report_status(status);
+        if let Some((status, tone)) = client_status {
+            self.set_local_report_status_with_tone(status, tone);
         } else {
-            self.set_local_report_status(&format!("Regrouped by {group_by}"));
+            self.set_local_report_status_with_tone(
+                &format!("Regrouped by {group_by}"),
+                StatusTone::Success,
+            );
         }
     }
 
@@ -1021,7 +1053,7 @@ impl App {
     }
 
     pub fn model_color(&self, model_id: &str) -> Color {
-        self.theme.color(super::colors::model_color(model_id))
+        super::colors::resolve_model_color(model_id, &self.theme)
     }
 
     pub fn client_color(&self, client_id: &str) -> Color {
@@ -1072,12 +1104,14 @@ impl App {
                 self.status_message = None;
                 self.status_message_time = None;
                 self.status_message_kind = StatusMessageKind::General;
+                self.status_message_tone = StatusTone::Info;
             }
         }
         if let Some(status_time) = self.subscription_status_message_time {
             if status_time.elapsed() > Duration::from_secs(3) {
                 self.subscription_status_message = None;
                 self.subscription_status_message_time = None;
+                self.subscription_status_message_tone = StatusTone::Info;
             }
         }
 
@@ -1106,7 +1140,10 @@ impl App {
                         }];
                     let now = std::time::Instant::now();
                     self.last_subscription_usage_check = Some(now);
-                    self.set_subscription_status("Usage fetch failed");
+                    self.set_subscription_status_with_tone(
+                        "Usage fetch failed",
+                        StatusTone::Danger,
+                    );
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
@@ -1129,16 +1166,22 @@ impl App {
             }
             self.subscription_usage_errors = errors;
             if self.subscription_usage_errors.is_empty() {
-                self.set_subscription_status("Usage data loaded");
+                self.set_subscription_status_with_tone("Usage data loaded", StatusTone::Success);
             } else {
-                self.set_subscription_status("Usage data loaded with provider errors");
+                self.set_subscription_status_with_tone(
+                    "Usage data loaded with provider errors",
+                    StatusTone::Warning,
+                );
             }
         } else {
             self.subscription_usage_errors = errors;
             if self.subscription_usage_errors.is_empty() {
-                self.set_subscription_status("No usage data available");
+                self.set_subscription_status_with_tone(
+                    "No usage data available",
+                    StatusTone::Warning,
+                );
             } else {
-                self.set_subscription_status("Usage fetch failed");
+                self.set_subscription_status_with_tone("Usage fetch failed", StatusTone::Danger);
             }
         }
     }
@@ -1309,7 +1352,10 @@ impl App {
             return;
         }
         if self.subscription_provider_ids.is_empty() {
-            self.set_subscription_status("No subscription usage providers enabled");
+            self.set_subscription_status_with_tone(
+                "No subscription usage providers enabled",
+                StatusTone::Warning,
+            );
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1948,21 +1994,23 @@ impl App {
             self.persist_current_list_interaction();
             self.set_local_report_status("Jumped to today's usage");
         } else {
-            self.set_local_report_status("No usage recorded for today");
+            self.set_local_report_status_with_tone(
+                "No usage recorded for today",
+                StatusTone::Warning,
+            );
         }
     }
 
     fn cycle_theme(&mut self) {
         let new_theme = self.theme.name.next();
-        self.theme = Theme::from_name_for_current_terminal(new_theme);
+        self.theme = Theme::from_name(new_theme);
         self.dialog_stack.set_theme(self.theme.clone());
         self.settings.set_theme(new_theme);
         if let Err(e) = self.settings.save() {
-            self.set_status(&format!(
-                "Theme: {} (save failed: {})",
-                new_theme.as_str(),
-                e
-            ));
+            self.set_status_with_tone(
+                &format!("Theme: {} (save failed: {})", new_theme.as_str(), e),
+                StatusTone::Danger,
+            );
         } else {
             self.set_status(&format!("Theme: {}", new_theme.as_str()));
         }
@@ -1970,7 +2018,10 @@ impl App {
 
     fn open_client_picker(&mut self) {
         if !self.has_installed_generation() {
-            self.set_status("Clients are unavailable until local reports finish loading");
+            self.set_status_with_tone(
+                "Clients are unavailable until local reports finish loading",
+                StatusTone::Warning,
+            );
             return;
         }
         let mut clients: Vec<ClientId> = self.client_universe.iter().copied().collect();
@@ -2009,7 +2060,10 @@ impl App {
 
     fn open_group_by_picker(&mut self) {
         if !self.has_installed_generation() {
-            self.set_status("Group By is unavailable until local reports finish loading");
+            self.set_status_with_tone(
+                "Group By is unavailable until local reports finish loading",
+                StatusTone::Warning,
+            );
             return;
         }
         use super::ui::dialog::GroupByPickerDialog;
@@ -2093,7 +2147,10 @@ impl App {
         if self.model_detail_models.is_none() {
             let selected_clients = self.selected_clients.borrow().clone();
             let Some(backend) = self.projection_backend.as_mut() else {
-                self.set_status("Model details are unavailable until local reports finish loading");
+                self.set_status_with_tone(
+                    "Model details are unavailable until local reports finish loading",
+                    StatusTone::Warning,
+                );
                 return;
             };
             let detail_data = match backend.project(
@@ -2102,7 +2159,10 @@ impl App {
             ) {
                 Ok(data) => data,
                 Err(error) => {
-                    self.set_status(&format!("Model details failed: {error:#}"));
+                    self.set_status_with_tone(
+                        &format!("Model details failed: {error:#}"),
+                        StatusTone::Danger,
+                    );
                     return;
                 }
             };
@@ -2115,7 +2175,10 @@ impl App {
                 .any(|model| Self::model_detail_matches(&selection, model))
         });
         if !has_rows {
-            self.set_status("No provider details are available for the selected model");
+            self.set_status_with_tone(
+                "No provider details are available for the selected model",
+                StatusTone::Warning,
+            );
             return;
         }
 
@@ -2315,7 +2378,7 @@ impl App {
             "Auto-refresh OFF".to_string()
         };
         if let Err(e) = save_result {
-            self.set_status(&format!("{} (save failed: {})", msg, e));
+            self.set_status_with_tone(&format!("{} (save failed: {})", msg, e), StatusTone::Danger);
         } else {
             self.set_status(&msg);
         }
@@ -2329,7 +2392,7 @@ impl App {
         let save_result = self.settings.save();
         let msg = format!("Refresh interval: {}s", new_ms / 1000);
         if let Err(e) = save_result {
-            self.set_status(&format!("{} (save failed: {})", msg, e));
+            self.set_status_with_tone(&format!("{} (save failed: {})", msg, e), StatusTone::Danger);
         } else {
             self.set_status(&msg);
         }
@@ -2343,7 +2406,7 @@ impl App {
         let save_result = self.settings.save();
         let msg = format!("Refresh interval: {}s", new_ms / 1000);
         if let Err(e) = save_result {
-            self.set_status(&format!("{} (save failed: {})", msg, e));
+            self.set_status_with_tone(&format!("{} (save failed: {})", msg, e), StatusTone::Danger);
         } else {
             self.set_status(&msg);
         }
@@ -2440,8 +2503,8 @@ impl App {
 
         if let Some(text) = text {
             match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
-                Ok(_) => self.set_status("Copied to clipboard"),
-                Err(_) => self.set_status("Failed to copy"),
+                Ok(_) => self.set_status_with_tone("Copied to clipboard", StatusTone::Success),
+                Err(_) => self.set_status_with_tone("Failed to copy", StatusTone::Danger),
             }
         }
     }
@@ -2460,7 +2523,7 @@ impl App {
         let export_dir = match crate::paths::try_get_config_dir() {
             Ok(directory) => directory.join("exports"),
             Err(error) => {
-                self.set_status(&format!("Export failed: {error}"));
+                self.set_status_with_tone(&format!("Export failed: {error}"), StatusTone::Danger);
                 return;
             }
         };
@@ -2468,13 +2531,20 @@ impl App {
         let group_by = self.export_group_by();
 
         match super::export::build_export_json(&self.data, &group_by) {
-            Ok(json) => match std::fs::create_dir_all(&export_dir)
-                .and_then(|_| std::fs::write(&path, json))
-            {
-                Ok(_) => self.set_status(&format!("Exported to {}", path.display())),
-                Err(e) => self.set_status(&format!("Export failed: {}", e)),
-            },
-            Err(e) => self.set_status(&format!("Export failed: {}", e)),
+            Ok(json) => {
+                match std::fs::create_dir_all(&export_dir).and_then(|_| std::fs::write(&path, json))
+                {
+                    Ok(_) => self.set_status_with_tone(
+                        &format!("Exported to {}", path.display()),
+                        StatusTone::Success,
+                    ),
+                    Err(e) => self
+                        .set_status_with_tone(&format!("Export failed: {}", e), StatusTone::Danger),
+                }
+            }
+            Err(e) => {
+                self.set_status_with_tone(&format!("Export failed: {}", e), StatusTone::Danger)
+            }
         }
     }
 
@@ -2485,22 +2555,37 @@ impl App {
     }
 
     pub fn set_status(&mut self, message: &str) {
+        self.set_status_with_tone(message, StatusTone::Info);
+    }
+
+    pub(crate) fn set_status_with_tone(&mut self, message: &str, tone: StatusTone) {
         self.status_message = Some(message.to_string());
         self.status_message_time = Some(Instant::now());
         self.status_message_kind = StatusMessageKind::General;
+        self.status_message_tone = tone;
     }
 
     pub(crate) fn set_local_report_status(&mut self, message: &str) {
+        self.set_local_report_status_with_tone(message, StatusTone::Info);
+    }
+
+    pub(crate) fn set_local_report_status_with_tone(&mut self, message: &str, tone: StatusTone) {
         self.status_message = Some(message.to_string());
         self.status_message_time = Some(Instant::now());
         self.status_message_kind = StatusMessageKind::LocalReport;
+        self.status_message_tone = tone;
     }
 
     fn set_subscription_status(&mut self, message: &str) {
+        self.set_subscription_status_with_tone(message, StatusTone::Info);
+    }
+
+    pub(crate) fn set_subscription_status_with_tone(&mut self, message: &str, tone: StatusTone) {
         let now = Instant::now();
         let message = message.to_string();
         self.subscription_status_message = Some(message);
         self.subscription_status_message_time = Some(now);
+        self.subscription_status_message_tone = tone;
     }
 
     pub fn general_status_message(&self) -> Option<&str> {
@@ -2509,6 +2594,14 @@ impl App {
         } else {
             None
         }
+    }
+
+    pub(crate) fn status_message_tone(&self) -> StatusTone {
+        self.status_message_tone
+    }
+
+    pub(crate) fn subscription_status_message_tone(&self) -> StatusTone {
+        self.subscription_status_message_tone
     }
 
     pub fn get_sorted_models(&self) -> Vec<&ModelUsage> {
@@ -5017,6 +5110,7 @@ mod tests {
             app.status_message.as_deref(),
             Some("Group By is unavailable until local reports finish loading")
         );
+        assert_eq!(app.status_message_tone(), StatusTone::Warning);
     }
 
     #[test]
@@ -5062,6 +5156,7 @@ mod tests {
             app.status_message.as_deref(),
             Some("Group By is unavailable until local reports finish loading")
         );
+        assert_eq!(app.status_message_tone(), StatusTone::Warning);
     }
 
     #[test]
@@ -5200,6 +5295,7 @@ mod tests {
             app.status_message.as_deref(),
             Some("Clients are unavailable until local reports finish loading")
         );
+        assert_eq!(app.status_message_tone(), StatusTone::Warning);
     }
 
     // ── handle_key_event: misc keys ─────────────────────────────────

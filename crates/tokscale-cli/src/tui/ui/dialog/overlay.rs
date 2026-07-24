@@ -1,6 +1,5 @@
 use ratatui::{
     layout::Rect,
-    style::Style,
     widgets::{Block, Clear},
     Frame,
 };
@@ -21,13 +20,13 @@ pub fn render_backdrop(frame: &mut Frame, viewport: Rect, theme: &Theme) {
     // Clear the area first
     frame.render_widget(Clear, viewport);
     // Render dark backdrop
-    let backdrop = Block::default().style(Style::default().bg(theme.background));
+    let backdrop = Block::default().style(theme.canvas_style());
     frame.render_widget(backdrop, viewport);
 }
 
 /// Render the dialog surface (panel background)
 pub fn render_dialog_surface(frame: &mut Frame, area: Rect, theme: &Theme) {
     frame.render_widget(Clear, area);
-    let panel = Block::default().style(Style::default().bg(theme.background).fg(theme.foreground));
+    let panel = Block::default().style(theme.panel_style());
     frame.render_widget(panel, area);
 }

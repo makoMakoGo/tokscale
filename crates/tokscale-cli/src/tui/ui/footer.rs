@@ -6,7 +6,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::widgets::{format_cost, format_tokens, truncate_display_width};
 use crate::tui::actions::{Action, ActionSet};
-use crate::tui::app::{App, ClickAction, SortField, Tab};
+use crate::tui::app::{App, ClickAction, SortField, StatusTone, Tab};
 use crate::tui::data::{build_period_usage, PeriodKind};
 use crate::tui::presentation::SubscriptionPresentation;
 
@@ -121,8 +121,8 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect, content: Foot
 fn render_shell(frame: &mut Frame, app: &App, area: Rect) -> Rect {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
-        .style(Style::default().bg(app.theme.background));
+        .border_style(Style::default().fg(app.theme.chrome.border))
+        .style(app.theme.panel_style());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -250,29 +250,35 @@ fn timed_activity_line(
 
     if available >= MIN_WAVE_WIDTH && UnicodeWidthStr::width(decorated.as_str()) <= available {
         return Line::from(vec![
-            Span::styled(WAVE.to_string(), Style::default().fg(app.theme.accent)),
+            Span::styled(
+                WAVE.to_string(),
+                Style::default().fg(app.theme.status.pending),
+            ),
             Span::raw("  "),
-            Span::styled(message, Style::default().fg(app.theme.muted)),
-            Span::styled(" ·", Style::default().fg(app.theme.muted)),
+            Span::styled(message, Style::default().fg(app.theme.text.muted)),
+            Span::styled(" ·", Style::default().fg(app.theme.text.muted)),
             Span::styled(
                 elapsed,
                 Style::default()
-                    .fg(app.theme.foreground)
+                    .fg(app.theme.text.primary)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(WAVE.to_string(), Style::default().fg(app.theme.accent)),
+            Span::styled(
+                WAVE.to_string(),
+                Style::default().fg(app.theme.status.pending),
+            ),
         ]);
     }
 
     if UnicodeWidthStr::width(plain.as_str()) <= available {
         return Line::from(vec![
-            Span::styled(message, Style::default().fg(app.theme.muted)),
-            Span::styled(" ·", Style::default().fg(app.theme.muted)),
+            Span::styled(message, Style::default().fg(app.theme.text.muted)),
+            Span::styled(" ·", Style::default().fg(app.theme.text.muted)),
             Span::styled(
                 elapsed,
                 Style::default()
-                    .fg(app.theme.foreground)
+                    .fg(app.theme.text.primary)
                     .add_modifier(Modifier::BOLD),
             ),
         ]);
@@ -281,7 +287,7 @@ fn timed_activity_line(
     let compact = format!("{compact_message} ·{elapsed}");
     Line::from(Span::styled(
         truncate_display_width(&compact, available),
-        Style::default().fg(app.theme.muted),
+        Style::default().fg(app.theme.text.muted),
     ))
 }
 
@@ -295,20 +301,22 @@ fn cold_failed_line(app: &App, width: u16) -> Line<'static> {
         return Line::from(vec![
             Span::styled(
                 "Scan failed",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(app.theme.status.danger)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" · ", Style::default().fg(app.theme.muted)),
-            Span::styled("[r] Retry", Style::default().fg(Color::Yellow)),
-            Span::styled(" · ", Style::default().fg(app.theme.muted)),
-            Span::styled("[q] Quit", Style::default().fg(app.theme.muted)),
+            Span::styled(" · ", Style::default().fg(app.theme.text.muted)),
+            Span::styled("[r] Retry", Style::default().fg(app.theme.chrome.focus)),
+            Span::styled(" · ", Style::default().fg(app.theme.text.muted)),
+            Span::styled("[q] Quit", Style::default().fg(app.theme.text.muted)),
         ]);
     }
 
     if UnicodeWidthStr::width(ACTIONS) <= available {
         return Line::from(vec![
-            Span::styled("[r] Retry", Style::default().fg(Color::Yellow)),
-            Span::styled(" · ", Style::default().fg(app.theme.muted)),
-            Span::styled("[q] Quit", Style::default().fg(app.theme.muted)),
+            Span::styled("[r] Retry", Style::default().fg(app.theme.chrome.focus)),
+            Span::styled(" · ", Style::default().fg(app.theme.text.muted)),
+            Span::styled("[q] Quit", Style::default().fg(app.theme.text.muted)),
         ]);
     }
 
@@ -319,7 +327,10 @@ fn cold_failed_line(app: &App, width: u16) -> Line<'static> {
     } else {
         truncate_display_width("r q", available)
     };
-    Line::from(Span::styled(compact, Style::default().fg(app.theme.muted)))
+    Line::from(Span::styled(
+        compact,
+        Style::default().fg(app.theme.text.muted),
+    ))
 }
 
 fn render_main_row(
@@ -345,17 +356,20 @@ fn render_main_row(
     // The leading region is sortable only when the current ActionSet allows it.
     if !is_very_narrow && !sort_controls.is_empty() {
         let mut spans: Vec<Span> = Vec::new();
-        spans.push(Span::styled("Sort: ", Style::default().fg(app.theme.muted)));
+        spans.push(Span::styled(
+            "Sort: ",
+            Style::default().fg(app.theme.text.muted),
+        ));
         let mut x_offset = chunks[0].x.saturating_add(6);
 
         for control in sort_controls {
             let is_active = app.sort_field == control.field;
             let style = if is_active {
                 Style::default()
-                    .fg(app.theme.foreground)
+                    .fg(app.theme.chrome.current)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(app.theme.muted)
+                Style::default().fg(app.theme.text.muted)
             };
 
             spans.push(Span::styled(control.label, style));
@@ -376,7 +390,7 @@ fn render_main_row(
     } else if let Some(leading) = leading {
         frame.render_widget(
             Paragraph::new(truncate_display_width(&leading, chunks[0].width as usize))
-                .style(Style::default().fg(app.theme.muted)),
+                .style(Style::default().fg(app.theme.text.muted)),
             chunks[0],
         );
     }
@@ -395,22 +409,25 @@ pub(super) fn summary_row_line(app: &App, actions: &ActionSet) -> Line<'static> 
     let total_tokens = app.data.total_tokens;
     right_spans.push(Span::styled(
         format_tokens(total_tokens),
-        Style::default().fg(Color::Cyan),
+        Style::default().fg(app.theme.metrics.tokens),
     ));
     if !is_very_narrow && !actions.is_empty_view() {
         right_spans.push(Span::styled(
             " tokens",
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         ));
     }
 
-    right_spans.push(Span::styled(" | ", Style::default().fg(app.theme.muted)));
+    right_spans.push(Span::styled(
+        " | ",
+        Style::default().fg(app.theme.text.muted),
+    ));
 
     // Total cost
     right_spans.push(Span::styled(
         format_cost(app.data.total_cost),
         Style::default()
-            .fg(Color::Green)
+            .fg(app.theme.metrics.cost)
             .add_modifier(Modifier::BOLD),
     ));
 
@@ -419,7 +436,7 @@ pub(super) fn summary_row_line(app: &App, actions: &ActionSet) -> Line<'static> 
         let count_label = current_count_label(app);
         right_spans.push(Span::styled(
             count_label,
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         ));
     }
 
@@ -434,22 +451,22 @@ fn subscription_summary_line(app: &App, presentation: SubscriptionPresentation) 
             if configured == 0 {
                 Line::from(Span::styled(
                     "No providers configured",
-                    Style::default().fg(app.theme.muted),
+                    Style::default().fg(app.theme.text.muted),
                 ))
             } else {
                 Line::from(vec![
                     Span::styled(
                         count_label(configured, "provider", "providers"),
-                        Style::default().fg(Color::Cyan),
+                        Style::default().fg(app.theme.metrics.total),
                     ),
-                    Span::styled(" configured", Style::default().fg(app.theme.muted)),
+                    Span::styled(" configured", Style::default().fg(app.theme.text.muted)),
                 ])
             }
         }
         SubscriptionPresentation::Empty { .. } if app.subscription_usage.is_empty() => {
             Line::from(Span::styled(
                 "No subscription results",
-                Style::default().fg(app.theme.muted),
+                Style::default().fg(app.theme.text.muted),
             ))
         }
         SubscriptionPresentation::Empty { .. } | SubscriptionPresentation::Results { .. } => {
@@ -463,19 +480,22 @@ fn subscription_summary_line(app: &App, presentation: SubscriptionPresentation) 
             let mut spans = vec![
                 Span::styled(
                     count_label(providers, "provider", "providers"),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(app.theme.metrics.total),
                 ),
-                Span::styled(" · ", Style::default().fg(app.theme.muted)),
+                Span::styled(" · ", Style::default().fg(app.theme.text.muted)),
                 Span::styled(
                     count_label(limits, "limit", "limits"),
-                    Style::default().fg(app.theme.foreground),
+                    Style::default().fg(app.theme.text.primary),
                 ),
             ];
             if errors > 0 {
-                spans.push(Span::styled(" · ", Style::default().fg(app.theme.muted)));
+                spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(app.theme.text.muted),
+                ));
                 spans.push(Span::styled(
                     count_label(errors, "error", "errors"),
-                    Style::default().fg(Color::Red),
+                    Style::default().fg(app.theme.status.danger),
                 ));
             }
             Line::from(spans)
@@ -548,29 +568,29 @@ fn subscription_help_line(app: &App, actions: &ActionSet) -> Line<'static> {
     if actions.contains(Action::RefreshSubscription) {
         items.push((
             (if narrow { "[u]" } else { "[u:refresh]" }).to_string(),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(app.theme.chrome.focus),
         ));
     }
     if actions.contains(Action::Scroll) {
         items.push((
             (if narrow { "↑↓" } else { "↑↓ scroll" }).to_string(),
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         ));
     }
     if actions.contains(Action::PreviousTab) || actions.contains(Action::NextTab) {
         items.push((
             (if narrow { "←→" } else { "←→/tab view" }).to_string(),
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         ));
     }
     if actions.contains(Action::Theme) {
         items.push((
             (if narrow { "[p]" } else { "[p:theme]" }).to_string(),
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(app.theme.chrome.focus),
         ));
     }
     if actions.contains(Action::Quit) {
-        items.push(("q".to_string(), Style::default().fg(app.theme.muted)));
+        items.push(("q".to_string(), Style::default().fg(app.theme.text.muted)));
     }
 
     let mut spans = Vec::new();
@@ -578,7 +598,7 @@ fn subscription_help_line(app: &App, actions: &ActionSet) -> Line<'static> {
         if !spans.is_empty() {
             spans.push(Span::styled(
                 separator.to_string(),
-                Style::default().fg(app.theme.muted),
+                Style::default().fg(app.theme.text.muted),
             ));
         }
         spans.push(Span::styled(label, style));
@@ -711,7 +731,7 @@ pub(super) fn action_help_row_line(
         if !spans.is_empty() {
             spans.push(Span::styled(
                 separator.to_string(),
-                Style::default().fg(app.theme.muted),
+                Style::default().fg(app.theme.text.muted),
             ));
         }
         spans.push(Span::styled(label, action_style(app, action)));
@@ -748,15 +768,14 @@ fn toggle_action_label(app: &App, target: Option<&str>, narrow: bool) -> String 
 
 fn action_style(app: &App, action: Action) -> Style {
     let color = match action {
-        Action::Sort(_) => Color::Blue,
-        Action::Clients | Action::GroupBy => Color::Cyan,
-        Action::Theme => Color::Magenta,
-        Action::ToggleAutoRefresh if app.auto_refresh => Color::Green,
+        Action::Sort(_) => app.theme.chrome.current,
+        Action::Clients | Action::GroupBy | Action::Theme => app.theme.chrome.focus,
+        Action::ToggleAutoRefresh if app.auto_refresh => app.theme.status.success,
         Action::OpenDetails
         | Action::Back
         | Action::JumpToday
         | Action::ToggleView
-        | Action::RefreshLocal => Color::Yellow,
+        | Action::RefreshLocal => app.theme.chrome.focus,
         Action::Scroll
         | Action::PreviousTab
         | Action::NextTab
@@ -766,7 +785,7 @@ fn action_style(app: &App, action: Action) -> Style {
         | Action::RefreshSubscription
         | Action::Copy
         | Action::Export
-        | Action::Quit => app.theme.muted,
+        | Action::Quit => app.theme.text.muted,
     };
     Style::default().fg(color)
 }
@@ -777,12 +796,22 @@ pub(super) fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
+fn status_style(app: &App, tone: StatusTone) -> Style {
+    let color = match tone {
+        StatusTone::Info => app.theme.status.info,
+        StatusTone::Success => app.theme.status.success,
+        StatusTone::Warning => app.theme.status.warning,
+        StatusTone::Danger => app.theme.status.danger,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
 fn status_row_line(app: &App) -> Line<'static> {
     if let Some(warning) = app.cache_persistence_warning() {
         return Line::from(Span::styled(
             warning.to_string(),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(app.theme.status.warning)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -798,20 +827,18 @@ fn status_row_line(app: &App) -> Line<'static> {
     if app.background_loading {
         spans.push(Span::styled(
             "Refreshing cached data in background...",
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.status.pending),
         ));
     } else if let Some(ref msg) = app.status_message {
         spans.push(Span::styled(
             msg.clone(),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            status_style(app, app.status_message_tone()),
         ));
     } else if let Some(warning) = app.pricing_warning() {
         spans.push(Span::styled(
             warning,
             Style::default()
-                .fg(Color::Yellow)
+                .fg(app.theme.status.warning)
                 .add_modifier(Modifier::BOLD),
         ));
     } else {
@@ -825,13 +852,13 @@ fn status_row_line(app: &App) -> Line<'static> {
         };
         spans.push(Span::styled(
             format!("Last updated: {}", ago),
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         ));
 
         if app.auto_refresh {
             spans.push(Span::styled(
                 format!(" • Auto: {}s", app.auto_refresh_interval.as_secs()),
-                Style::default().fg(app.theme.muted),
+                Style::default().fg(app.theme.text.muted),
             ));
         }
     }
@@ -844,25 +871,26 @@ fn subscription_status_row_line(app: &App) -> Line<'static> {
         (
             "Refreshing subscription usage...".to_string(),
             Style::default()
-                .fg(Color::Green)
+                .fg(app.theme.status.pending)
                 .add_modifier(Modifier::BOLD),
         )
     } else if let Some(msg) = subscription_status_message(app) {
         (
             msg.to_string(),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            status_style(app, app.subscription_status_message_tone()),
         )
     } else if let Some(msg) = app.general_status_message() {
-        (msg.to_string(), Style::default().fg(app.theme.muted))
+        (
+            msg.to_string(),
+            status_style(app, app.status_message_tone()),
+        )
     } else if let Some(updated_at) = app.last_subscription_usage_check {
         (
             format!(
                 "Subscription checked: {}",
                 elapsed_label(updated_at.elapsed())
             ),
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         )
     } else if !app.subscription_usage.is_empty() {
         (
@@ -871,17 +899,17 @@ fn subscription_status_row_line(app: &App) -> Line<'static> {
             } else {
                 "Showing cached subscription usage; no remote providers enabled".to_string()
             },
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         )
     } else if !app.has_enabled_subscription_providers() {
         (
             "No remote subscription providers enabled; configure usageProviders".to_string(),
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         )
     } else {
         (
             "Press u to refresh subscription usage".to_string(),
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         )
     };
 
@@ -980,6 +1008,87 @@ mod tests {
             }
             _ => line_text(help_row_line(app, &actions)),
         }
+    }
+
+    #[test]
+    fn footer_actions_use_semantic_interaction_and_status_colors() {
+        let mut app = nonempty_installed_app_on(Tab::Overview);
+
+        assert_eq!(
+            action_style(&app, Action::Sort(SortField::Date)).fg,
+            Some(app.theme.chrome.current)
+        );
+        assert_eq!(
+            action_style(&app, Action::Clients).fg,
+            Some(app.theme.chrome.focus)
+        );
+        assert_eq!(
+            action_style(&app, Action::Theme).fg,
+            Some(app.theme.chrome.focus)
+        );
+        assert_eq!(
+            action_style(&app, Action::Scroll).fg,
+            Some(app.theme.text.muted)
+        );
+
+        app.auto_refresh = true;
+        assert_eq!(
+            action_style(&app, Action::ToggleAutoRefresh).fg,
+            Some(app.theme.status.success)
+        );
+    }
+
+    #[test]
+    fn standard_status_messages_use_their_semantic_tone_colors() {
+        let mut app = installed_app_on(Tab::Overview);
+
+        app.set_status("Informational status");
+        assert_eq!(
+            status_row_line(&app).spans[0].style.fg,
+            Some(app.theme.status.info)
+        );
+        app.set_local_report_status("Local informational status");
+        assert_eq!(
+            status_row_line(&app).spans[0].style.fg,
+            Some(app.theme.status.info)
+        );
+
+        for (tone, expected) in [
+            (StatusTone::Success, app.theme.status.success),
+            (StatusTone::Warning, app.theme.status.warning),
+            (StatusTone::Danger, app.theme.status.danger),
+        ] {
+            app.set_status_with_tone("Transient status", tone);
+            assert_eq!(status_row_line(&app).spans[0].style.fg, Some(expected));
+        }
+    }
+
+    #[test]
+    fn subscription_status_messages_use_their_semantic_tone_colors() {
+        let mut app = make_app_on(Tab::Usage);
+
+        for (tone, expected) in [
+            (StatusTone::Success, app.theme.status.success),
+            (StatusTone::Warning, app.theme.status.warning),
+            (StatusTone::Danger, app.theme.status.danger),
+        ] {
+            app.set_subscription_status_with_tone("Subscription status", tone);
+            assert_eq!(
+                subscription_status_row_line(&app).spans[0].style.fg,
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn cold_failure_footer_uses_danger_focus_and_muted_roles() {
+        let app = make_app_on(Tab::Overview);
+        let line = cold_failed_line(&app, 80);
+
+        assert_eq!(line.spans[0].style.fg, Some(app.theme.status.danger));
+        assert_eq!(line.spans[1].style.fg, Some(app.theme.text.muted));
+        assert_eq!(line.spans[2].style.fg, Some(app.theme.chrome.focus));
+        assert_eq!(line.spans[4].style.fg, Some(app.theme.text.muted));
     }
 
     #[test]

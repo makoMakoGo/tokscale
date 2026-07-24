@@ -120,7 +120,7 @@ pub(super) fn lines(theme: &Theme, achievements: &[Achievement]) -> Vec<Line<'st
     lines.push(Line::from(Span::styled(
         "Achievements",
         Style::default()
-            .fg(theme.foreground)
+            .fg(theme.text.primary)
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::default());
@@ -135,7 +135,7 @@ pub(super) fn lines(theme: &Theme, achievements: &[Achievement]) -> Vec<Line<'st
 fn ladder_line(theme: &Theme, achievement: &Achievement) -> Line<'static> {
     let locked = achievement.current < 0;
     let title_style = Style::default()
-        .fg(theme.foreground)
+        .fg(theme.text.primary)
         .add_modifier(Modifier::BOLD);
     let title_pad = TITLE_WIDTH.saturating_sub(text_width(achievement.title));
 
@@ -149,18 +149,18 @@ fn ladder_line(theme: &Theme, achievement: &Achievement) -> Line<'static> {
             spans.push(Span::styled(
                 format!("[{display}]"),
                 Style::default()
-                    .fg(theme.accent)
+                    .fg(theme.status.success)
                     .add_modifier(Modifier::BOLD),
             ));
         } else if !locked && tier < achievement.current {
             spans.push(Span::styled(
                 display.to_string(),
-                Style::default().fg(theme.accent),
+                Style::default().fg(theme.status.success),
             ));
         } else {
             spans.push(Span::styled(
                 display.to_string(),
-                Style::default().fg(theme.muted),
+                Style::default().fg(theme.text.muted),
             ));
         }
         spans.push(Span::raw(" "));
@@ -176,10 +176,10 @@ fn text_width(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::themes::{TerminalColorMode, ThemeName};
+    use crate::tui::themes::ThemeName;
 
     fn theme() -> Theme {
-        Theme::from_name_with_color_mode(ThemeName::Blue, TerminalColorMode::FullColor)
+        Theme::from_name(ThemeName::Blue)
     }
 
     #[test]
@@ -243,30 +243,30 @@ mod tests {
         let unlocked_line = ladder_line(&theme, &unlocked);
 
         assert_eq!(locked_line.spans[0].style, unlocked_line.spans[0].style);
-        assert_eq!(locked_line.spans[0].style.fg, Some(theme.foreground));
+        assert_eq!(locked_line.spans[0].style.fg, Some(theme.text.primary));
         assert!(locked_line.spans[0]
             .style
             .add_modifier
             .contains(Modifier::BOLD));
 
         for tier_span in locked_line.spans.iter().skip(2).step_by(2) {
-            assert_eq!(tier_span.style.fg, Some(theme.muted));
+            assert_eq!(tier_span.style.fg, Some(theme.text.muted));
             assert!(!tier_span.style.add_modifier.contains(Modifier::BOLD));
         }
 
-        assert_eq!(unlocked_line.spans[2].style.fg, Some(theme.accent));
+        assert_eq!(unlocked_line.spans[2].style.fg, Some(theme.status.success));
         assert!(!unlocked_line.spans[2]
             .style
             .add_modifier
             .contains(Modifier::BOLD));
         assert_eq!(unlocked_line.spans[4].content.as_ref(), "[15]");
-        assert_eq!(unlocked_line.spans[4].style.fg, Some(theme.accent));
+        assert_eq!(unlocked_line.spans[4].style.fg, Some(theme.status.success));
         assert!(unlocked_line.spans[4]
             .style
             .add_modifier
             .contains(Modifier::BOLD));
         for tier_span in unlocked_line.spans.iter().skip(6).step_by(2) {
-            assert_eq!(tier_span.style.fg, Some(theme.muted));
+            assert_eq!(tier_span.style.fg, Some(theme.text.muted));
         }
     }
 }

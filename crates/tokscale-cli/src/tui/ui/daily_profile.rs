@@ -74,14 +74,14 @@ pub fn render(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(app.theme.chrome.border))
         .title(Span::styled(
             " Daily Profile ",
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.heading)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(app.theme.background));
+        .style(app.theme.panel_style());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let content = inner.inner(Margin {
@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn peak_weekday_label_renders_bold_yellow() {
+    fn peak_weekday_label_renders_bold_chart_highlight_style() {
         let (mut app, _home_dir) = make_app();
         app.data.daily = vec![day("2026-07-13", 400, 4.0), day("2026-07-17", 600, 6.0)];
         app.data.total_tokens = 1_000;
@@ -455,12 +455,14 @@ mod tests {
 
         let peak_label = buffer.cell((2, peak_y)).unwrap();
         assert_eq!(peak_label.symbol(), "F");
-        assert_eq!(peak_label.fg, Color::Yellow);
+        assert_eq!(peak_label.fg, app.theme.visualization.chart_highlight);
         assert!(peak_label.modifier.contains(Modifier::BOLD));
 
         let plain_y = (1..height - 1)
             .find(|&y| buffer_row(&buffer, width, y).contains("Monday"))
             .expect("Monday row should render");
-        assert_ne!(buffer.cell((2, plain_y)).unwrap().fg, Color::Yellow);
+        let plain_label = buffer.cell((2, plain_y)).unwrap();
+        assert_eq!(plain_label.fg, app.theme.text.primary);
+        assert!(!plain_label.modifier.contains(Modifier::BOLD));
     }
 }

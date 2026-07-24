@@ -56,14 +56,14 @@ pub fn render(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(app.theme.chrome.border))
         .title(Span::styled(
             " Agents ",
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.heading)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(app.theme.background));
+        .style(app.theme.panel_style());
 
     let inner = block.inner(area);
     let table_area = distributed_table_area(inner);
@@ -79,9 +79,9 @@ pub fn render(
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
-    let theme_accent = app.theme.accent;
-    let theme_muted = app.theme.muted;
-    let theme_selection = app.theme.selection;
+    let theme_heading = app.theme.chrome.heading;
+    let theme_muted = app.theme.text.muted;
+    let theme_selection_style = app.theme.selection_style();
     let striped_row_style = app.theme.striped_row_style();
 
     let agents = app.get_sorted_agents();
@@ -133,7 +133,7 @@ pub fn render(
     )
     .style(
         Style::default()
-            .fg(theme_accent)
+            .fg(theme_heading)
             .add_modifier(Modifier::BOLD),
     )
     .height(1);
@@ -147,45 +147,45 @@ pub fn render(
             let is_striped = idx % 2 == 1;
 
             let client_label = get_client_display_name(&agent.client);
-            let cell_for_column =
-                |column: AgentColumn| -> Cell {
-                    match column {
-                        AgentColumn::Rank => Cell::from(format!("{}", idx + 1))
-                            .style(Style::default().fg(theme_muted)),
-                        AgentColumn::Agent => Cell::from(truncate_display_width(
-                            &agent.agent,
-                            table_layout.width_for(AgentColumn::Agent),
-                        ))
-                        .style(
-                            Style::default()
-                                .fg(app.theme.foreground)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        AgentColumn::Client => Cell::from(truncate_display_width(
-                            &client_label,
-                            table_layout.width_for(AgentColumn::Client),
-                        ))
-                        .style(Style::default().fg(theme_muted)),
-                        AgentColumn::Tokens => total_tokens_cell(agent.tokens.total(), &app.theme),
-                        AgentColumn::Cost => Cell::from(format_cost(agent.cost))
-                            .style(Style::default().fg(Color::Green)),
-                        AgentColumn::Messages => Cell::from(agent.message_count.to_string())
-                            .style(Style::default().fg(theme_muted)),
-                        AgentColumn::Instances => Cell::from(if agent.instance_count > 1 {
-                            agent.instance_count.to_string()
-                        } else {
-                            "-".to_string()
-                        })
-                        .style(Style::default().fg(theme_muted)),
+            let cell_for_column = |column: AgentColumn| -> Cell {
+                match column {
+                    AgentColumn::Rank => {
+                        Cell::from(format!("{}", idx + 1)).style(Style::default().fg(theme_muted))
                     }
-                };
+                    AgentColumn::Agent => Cell::from(truncate_display_width(
+                        &agent.agent,
+                        table_layout.width_for(AgentColumn::Agent),
+                    ))
+                    .style(
+                        Style::default()
+                            .fg(app.theme.text.primary)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    AgentColumn::Client => Cell::from(truncate_display_width(
+                        &client_label,
+                        table_layout.width_for(AgentColumn::Client),
+                    ))
+                    .style(Style::default().fg(theme_muted)),
+                    AgentColumn::Tokens => total_tokens_cell(agent.tokens.total(), &app.theme),
+                    AgentColumn::Cost => Cell::from(format_cost(agent.cost))
+                        .style(Style::default().fg(app.theme.metrics.cost)),
+                    AgentColumn::Messages => Cell::from(agent.message_count.to_string())
+                        .style(Style::default().fg(theme_muted)),
+                    AgentColumn::Instances => Cell::from(if agent.instance_count > 1 {
+                        agent.instance_count.to_string()
+                    } else {
+                        "-".to_string()
+                    })
+                    .style(Style::default().fg(theme_muted)),
+                }
+            };
             let cells: Vec<Cell> = columns
                 .iter()
                 .map(|column| cell_for_column(*column))
                 .collect();
 
             let row_style = if is_selected {
-                Style::default().bg(theme_selection)
+                theme_selection_style
             } else if is_striped {
                 striped_row_style
             } else {
@@ -201,7 +201,7 @@ pub fn render(
         .header(header)
         .column_spacing(TABLE_COLUMN_SPACING)
         .flex(DISTRIBUTED_TABLE_FLEX)
-        .row_highlight_style(Style::default().bg(theme_selection));
+        .row_highlight_style(theme_selection_style);
 
     frame.render_widget(table, table_area);
 

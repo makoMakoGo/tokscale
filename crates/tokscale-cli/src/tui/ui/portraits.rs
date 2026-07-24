@@ -42,10 +42,10 @@ pub(super) fn slogan(family: ModelFamily) -> &'static str {
     }
 }
 
-/// Fixed brand color per family (logo primary colors), run through the
-/// theme's color-mode mapping so legacy terminals degrade gracefully.
+/// Fixed brand color per family (logo primary colors), adapted through the
+/// shared identity-color path for surface contrast.
 pub(super) fn family_color(app: &App, family: ModelFamily) -> Color {
-    app.theme.color(colors::family_color(family))
+    colors::resolve_family_color(family, &app.theme)
 }
 
 /// Overview card artwork uses one fixed three-row visual contract.

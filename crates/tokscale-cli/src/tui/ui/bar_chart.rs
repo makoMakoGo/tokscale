@@ -74,7 +74,7 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
         for x in area.x..area.x + area.width {
             buf[(x, grid_y)]
                 .set_char('┄')
-                .set_style(Style::default().fg(app.theme.border));
+                .set_style(Style::default().fg(app.theme.visualization.grid));
         }
     }
 
@@ -101,8 +101,8 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
                 row_threshold,
                 prev_threshold,
                 threshold_diff,
-                app.theme.muted,
-                app.theme.highlight,
+                app.theme.text.muted,
+                app.theme.visualization.chart_highlight,
             );
 
             for _ in 0..bar_width {
@@ -122,7 +122,7 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
     for x in area.x..area.x + area.width {
         buf[(x, baseline_y)]
             .set_char('─')
-            .set_style(Style::default().fg(app.theme.muted));
+            .set_style(Style::default().fg(app.theme.visualization.grid));
     }
 
     // Compact peak marker, right-aligned on the top bar row; drawn after the
@@ -135,8 +135,8 @@ pub fn render_stacked_bar_chart(frame: &mut Frame, app: &App, area: Rect, data: 
             for (i, ch) in peak_label.chars().enumerate() {
                 buf[(peak_x + i as u16, area.y)].set_char(ch).set_style(
                     Style::default()
-                        .fg(app.theme.muted)
-                        .bg(app.theme.background),
+                        .fg(app.theme.text.muted)
+                        .bg(app.theme.surface.panel),
                 );
             }
         }
@@ -197,7 +197,7 @@ fn render_date_labels(buf: &mut Buffer, app: &App, area: Rect, data: &[StackedBa
             if x < area.x + area.width {
                 buf[(x, label_y)]
                     .set_char(ch)
-                    .set_style(Style::default().fg(app.theme.muted));
+                    .set_style(Style::default().fg(app.theme.text.muted));
             }
         }
     }
@@ -390,7 +390,7 @@ mod tests {
         let baseline_y = area.y + area.height - 2;
         for x in area.x..area.x + area.width {
             assert_eq!(buf[(x, baseline_y)].symbol(), "─");
-            assert_eq!(buf[(x, baseline_y)].fg, app.theme.muted);
+            assert_eq!(buf[(x, baseline_y)].fg, app.theme.visualization.grid);
         }
     }
 
@@ -408,8 +408,8 @@ mod tests {
             .skip(start_x as usize)
             .collect();
         assert_eq!(row, label);
-        assert_eq!(buf[(start_x, area.y)].fg, app.theme.muted);
-        assert_eq!(buf[(start_x, area.y)].bg, app.theme.background);
+        assert_eq!(buf[(start_x, area.y)].fg, app.theme.text.muted);
+        assert_eq!(buf[(start_x, area.y)].bg, app.theme.surface.panel);
     }
 
     #[test]
@@ -434,7 +434,7 @@ mod tests {
         assert_eq!(buf[(2, grid_y)].symbol(), "█");
         // Empty bar lets the gridline show through on the right half.
         assert_eq!(buf[(15, grid_y)].symbol(), "┄");
-        assert_eq!(buf[(15, grid_y)].fg, app.theme.border);
+        assert_eq!(buf[(15, grid_y)].fg, app.theme.visualization.grid);
     }
 
     #[test]

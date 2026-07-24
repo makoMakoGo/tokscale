@@ -134,14 +134,14 @@ pub fn render(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(app.theme.chrome.border))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.heading)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(app.theme.background));
+        .style(app.theme.panel_style());
 
     let inner = block.inner(area);
     let table_area = distributed_table_area(inner);
@@ -158,9 +158,9 @@ pub fn render(
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
     let group_by = app.group_by.borrow().clone();
-    let theme_accent = app.theme.accent;
-    let theme_muted = app.theme.muted;
-    let theme_selection = app.theme.selection;
+    let theme_heading = app.theme.chrome.heading;
+    let theme_muted = app.theme.text.muted;
+    let theme_selection_style = app.theme.selection_style();
     let metric_input_style = app.theme.metric_input_style();
     let metric_output_style = app.theme.metric_output_style();
     let metric_cache_read_style = app.theme.metric_cache_read_style();
@@ -229,7 +229,7 @@ pub fn render(
     )
     .style(
         Style::default()
-            .fg(theme_accent)
+            .fg(theme_heading)
             .add_modifier(Modifier::BOLD),
     )
     .height(1);
@@ -242,7 +242,11 @@ pub fn render(
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
 
-            let model_color = app.model_color(&model.model_id);
+            let model_color = if is_selected {
+                app.theme.selection.foreground
+            } else {
+                app.model_color(&model.model_id)
+            };
             let display_name = model_display_name(model);
             let cell_for_column = |column: ModelsColumn| -> Cell {
                 match column {
@@ -287,14 +291,13 @@ pub fn render(
                         model.tokens.input,
                         model.tokens.cache_write,
                     ))
-                    .style(Style::default().fg(Color::Cyan)),
+                    .style(Style::default().fg(app.theme.metrics.rate)),
                     ModelsColumn::Total => total_tokens_cell(model.tokens.total(), &app.theme),
-                    ModelsColumn::Cost => {
-                        Cell::from(format_cost(model.cost)).style(Style::default().fg(Color::Green))
-                    }
+                    ModelsColumn::Cost => Cell::from(format_cost(model.cost))
+                        .style(Style::default().fg(app.theme.metrics.cost)),
                     ModelsColumn::CostPerMillion => {
                         Cell::from(format_cost_per_million(model.cost, model.tokens.total()))
-                            .style(Style::default().fg(Color::Rgb(150, 200, 150)))
+                            .style(Style::default().fg(app.theme.metrics.secondary_cost))
                     }
                 }
             };
@@ -304,7 +307,7 @@ pub fn render(
                 .collect();
 
             let row_style = if is_selected {
-                Style::default().bg(theme_selection)
+                theme_selection_style
             } else if is_striped {
                 striped_row_style
             } else {
@@ -321,7 +324,7 @@ pub fn render(
         .header(header)
         .column_spacing(TABLE_COLUMN_SPACING)
         .flex(DISTRIBUTED_TABLE_FLEX)
-        .row_highlight_style(Style::default().bg(theme_selection));
+        .row_highlight_style(theme_selection_style);
 
     frame.render_widget(table, table_area);
 
@@ -756,6 +759,52 @@ mod tests {
             "Workspace column must not render under GroupBy::Model\n{body}"
         );
         assert!(body.contains("gpt-5"), "expected bare model name\n{body}");
+    }
+
+    #[test]
+    fn selected_model_identity_yields_to_semantic_selection_style() {
+        const MODEL_ID: &str = "unknown-model";
+        let width = 140;
+        let height = 8;
+        let mut app = make_models_app(width, GroupBy::Model);
+        app.theme = crate::tui::themes::Theme::from_name(crate::tui::themes::ThemeName::Monochrome);
+        app.data.models = vec![workspace_model_usage(MODEL_ID, "ws-alpha", 3.0)];
+        app.selected_index = 0;
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let state = crate::tui::view_state::ViewState::default();
+        let presentation = crate::tui::presentation::Presentation::for_view(&app, &state);
+        let actions = ActionSet::for_view(&app, &state, presentation);
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &mut app,
+                    Rect::new(0, 0, width, height),
+                    None,
+                    &actions,
+                )
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut found = false;
+        for y in 0..height {
+            let row = (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>();
+            let Some(x) = row.find(MODEL_ID) else {
+                continue;
+            };
+            found = true;
+            for offset in 0..MODEL_ID.len() as u16 {
+                let cell = &buffer[(x as u16 + offset, y)];
+                assert_eq!(cell.fg, app.theme.selection.foreground);
+                assert_eq!(cell.bg, app.theme.selection.background);
+                assert!(cell.modifier.contains(Modifier::BOLD));
+            }
+        }
+        assert!(found, "selected model row was not rendered");
     }
 
     #[test]

@@ -516,14 +516,14 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(app.theme.chrome.border))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.heading)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(app.theme.background));
+        .style(app.theme.panel_style());
 
     let inner = block.inner(area);
     let table_area = distributed_table_area(inner);
@@ -538,9 +538,9 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
-    let theme_accent = app.theme.accent;
-    let theme_muted = app.theme.muted;
-    let theme_selection = app.theme.selection;
+    let theme_heading = app.theme.chrome.heading;
+    let theme_muted = app.theme.text.muted;
+    let theme_selection_style = app.theme.selection_style();
     let metric_input_style = app.theme.metric_input_style();
     let metric_output_style = app.theme.metric_output_style();
     let metric_cache_read_style = app.theme.metric_cache_read_style();
@@ -607,7 +607,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     )
     .style(
         Style::default()
-            .fg(theme_accent)
+            .fg(theme_heading)
             .add_modifier(Modifier::BOLD),
     )
     .height(1);
@@ -623,7 +623,11 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             let idx = i + start;
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
-            let model_color = app.model_color(&row.model_id);
+            let model_color = if is_selected {
+                app.theme.selection.foreground
+            } else {
+                app.model_color(&row.model_id)
+            };
 
             let cell_for_column = |column: PeriodDetailColumn| -> Cell {
                 match column {
@@ -672,14 +676,13 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         row.tokens.input,
                         row.tokens.cache_write,
                     ))
-                    .style(Style::default().fg(Color::Cyan)),
+                    .style(Style::default().fg(app.theme.metrics.rate)),
                     PeriodDetailColumn::Total => total_tokens_cell(row.tokens.total(), &app.theme),
-                    PeriodDetailColumn::Cost => {
-                        Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green))
-                    }
+                    PeriodDetailColumn::Cost => Cell::from(format_cost(row.cost))
+                        .style(Style::default().fg(app.theme.metrics.cost)),
                     PeriodDetailColumn::CostPerMillion => {
                         Cell::from(format_cost_per_million(row.cost, row.tokens.total()))
-                            .style(Style::default().fg(Color::Rgb(150, 200, 150)))
+                            .style(Style::default().fg(app.theme.metrics.secondary_cost))
                     }
                 }
             };
@@ -689,7 +692,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                 .collect();
 
             let row_style = if is_selected {
-                Style::default().bg(theme_selection)
+                theme_selection_style
             } else if is_striped {
                 striped_row_style
             } else {
@@ -706,7 +709,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .header(header)
         .column_spacing(TABLE_COLUMN_SPACING)
         .flex(DISTRIBUTED_TABLE_FLEX)
-        .row_highlight_style(Style::default().bg(theme_selection));
+        .row_highlight_style(theme_selection_style);
 
     frame.render_widget(table, table_area);
 
@@ -740,14 +743,14 @@ fn render_period(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(app.theme.chrome.border))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.heading)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(app.theme.background));
+        .style(app.theme.panel_style());
 
     let inner = block.inner(area);
     let table_area = distributed_table_area(inner);
@@ -781,9 +784,9 @@ fn render_period(
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
-    let theme_accent = app.theme.accent;
-    let theme_muted = app.theme.muted;
-    let theme_selection = app.theme.selection;
+    let theme_heading = app.theme.chrome.heading;
+    let theme_muted = app.theme.text.muted;
+    let theme_selection_style = app.theme.selection_style();
     let metric_input_style = app.theme.metric_input_style();
     let metric_output_style = app.theme.metric_output_style();
     let metric_cache_read_style = app.theme.metric_cache_read_style();
@@ -825,7 +828,7 @@ fn render_period(
     )
     .style(
         Style::default()
-            .fg(theme_accent)
+            .fg(theme_heading)
             .add_modifier(Modifier::BOLD),
     )
     .height(1);
@@ -834,8 +837,8 @@ fn render_period(
     let start = clamped_period_start(scroll_offset, period_len);
 
     let separator_style = Style::default()
-        .fg(theme_accent)
-        .bg(Color::Rgb(24, 28, 36))
+        .fg(theme_heading)
+        .bg(app.theme.surface.row_alt)
         .add_modifier(Modifier::BOLD);
 
     let mut rows: Vec<Row> = Vec::with_capacity(visible_height.saturating_add(1));
@@ -862,7 +865,7 @@ fn render_period(
         let period_text = period_label(period, is_very_narrow).to_string();
         let period_style = if is_current {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(app.theme.chrome.current)
                 .add_modifier(Modifier::BOLD)
         } else if table_layout.density == PeriodTableDensity::Full {
             Style::default().add_modifier(Modifier::BOLD)
@@ -898,7 +901,11 @@ fn render_period(
                 }
                 PeriodColumn::TopModel => {
                     if let Some(model) = top_model.as_ref() {
-                        let model_color = app.model_color(&model.key);
+                        let model_color = if is_selected {
+                            app.theme.selection.foreground
+                        } else {
+                            app.model_color(&model.key)
+                        };
                         Cell::from(truncate_model_display_name_to(
                             &model.label,
                             table_layout.width_for(PeriodColumn::TopModel),
@@ -928,14 +935,13 @@ fn render_period(
                     period.tokens.input,
                     period.tokens.cache_write,
                 ))
-                .style(Style::default().fg(Color::Cyan)),
+                .style(Style::default().fg(app.theme.metrics.rate)),
                 PeriodColumn::Total => total_tokens_cell(period.tokens.total(), &app.theme),
-                PeriodColumn::Cost => {
-                    Cell::from(format_cost(period.cost)).style(Style::default().fg(Color::Green))
-                }
+                PeriodColumn::Cost => Cell::from(format_cost(period.cost))
+                    .style(Style::default().fg(app.theme.metrics.cost)),
                 PeriodColumn::CostPerMillion => {
                     Cell::from(format_cost_per_million(period.cost, period.tokens.total()))
-                        .style(Style::default().fg(Color::Rgb(150, 200, 150)))
+                        .style(Style::default().fg(app.theme.metrics.secondary_cost))
                 }
             }
         };
@@ -945,7 +951,7 @@ fn render_period(
             .collect();
 
         let row_style = if is_selected {
-            Style::default().bg(theme_selection)
+            theme_selection_style
         } else if is_current {
             current_row_style
         } else if is_striped {
@@ -967,7 +973,7 @@ fn render_period(
         .header(header)
         .column_spacing(TABLE_COLUMN_SPACING)
         .flex(DISTRIBUTED_TABLE_FLEX)
-        .row_highlight_style(Style::default().bg(theme_selection));
+        .row_highlight_style(theme_selection_style);
 
     frame.render_widget(table, table_area);
 
