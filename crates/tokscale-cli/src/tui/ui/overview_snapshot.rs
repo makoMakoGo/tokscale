@@ -263,7 +263,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
                 Span::styled(
                     display,
                     Style::default()
-                        .fg(app.theme.foreground)
+                        .fg(app.client_color(&favorite.id))
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
@@ -686,7 +686,10 @@ fn left_lines(
                 app,
                 "Favorite Client",
                 truncate(&favorite_client, favorite_width),
-                app.theme.foreground,
+                data.favorite_client
+                    .as_ref()
+                    .map(|favorite| app.client_color(&favorite.id))
+                    .unwrap_or(app.theme.foreground),
             ),
         ],
     ];
@@ -775,10 +778,14 @@ fn truncate(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashSet};
 
     use super::*;
     use crate::tui::app::{ProjectionBackend, TuiConfig};
+    use crate::tui::data::{
+        DailyClientInfo, DailyModelInfo, DailyUsage, TokenBreakdown, UsageData,
+    };
+    use chrono::NaiveDate;
     use ratatui::{backend::TestBackend, Terminal};
     use tokscale_core::{ClientId, TuiSessionEntry};
     use unicode_width::UnicodeWidthStr;
@@ -804,6 +811,40 @@ mod tests {
         app
     }
 
+    fn install_favorite_client(app: &mut App, client_id: &str) {
+        let tokens = TokenBreakdown {
+            input: 10_000,
+            ..TokenBreakdown::default()
+        };
+        let model = DailyModelInfo {
+            provider: "openai".to_string(),
+            model_id: "gpt-5.4".to_string(),
+            display_name: "gpt-5.4".to_string(),
+            workspace_key: None,
+            workspace_label: None,
+            tokens: tokens.clone(),
+            cost: 1.0,
+            messages: 1,
+        };
+        let client = DailyClientInfo {
+            tokens: tokens.clone(),
+            cost: 1.0,
+            models: BTreeMap::from([("gpt-5.4".to_string(), model)]),
+        };
+        let day = DailyUsage {
+            date: NaiveDate::from_ymd_opt(2026, 7, 16).unwrap(),
+            tokens,
+            cost: 1.0,
+            client_breakdown: BTreeMap::from([(client_id.to_string(), client)]),
+            message_count: 1,
+            turn_count: 1,
+        };
+        app.update_data(UsageData {
+            daily: vec![day],
+            ..UsageData::default()
+        });
+    }
+
     #[test]
     fn favorite_model_uses_its_own_family_brand_color() {
         let app = make_app(120);
@@ -826,6 +867,23 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    fn buffer_text_cell(
+        terminal: &Terminal<TestBackend>,
+        row_text: &str,
+        cell_text: &str,
+    ) -> (u16, u16) {
+        let lines = buffer_lines(terminal);
+        let (y, row) = lines
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.contains(row_text))
+            .expect("expected row should render");
+        let x = row
+            .find(cell_text)
+            .expect("expected cell text should render");
+        (x as u16, y as u16)
     }
 
     fn render_snapshot(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -931,6 +989,50 @@ mod tests {
         append_favorite_client_block(&mut compact, block(), 15);
         let compact_tail = compact[11..].iter().map(line_text).collect::<Vec<_>>();
         assert_eq!(compact_tail, ["", "Favorite Client", "slogan", "stats"]);
+    }
+
+    #[test]
+    fn wide_favorite_client_uses_app_client_color() {
+        let width = 60;
+        let height = 30;
+        let mut app = make_app(width);
+        install_favorite_client(&mut app, "codex");
+        let expected = app.client_color("codex");
+        assert_ne!(expected, app.theme.foreground);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_fun_things(frame, &app, frame.area(), app.overview_summary());
+            })
+            .unwrap();
+
+        let (x, y) = buffer_text_cell(&terminal, "Codex", "Codex");
+        assert_eq!(
+            terminal.backend().buffer().cell((x, y)).unwrap().fg,
+            expected
+        );
+    }
+
+    #[test]
+    fn narrow_favorite_client_metric_uses_app_client_color() {
+        let width = 30;
+        let height = 50;
+        let mut app = make_app(width);
+        install_favorite_client(&mut app, "codex");
+        let expected = app.client_color("codex");
+        assert_ne!(expected, app.theme.foreground);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        terminal
+            .draw(|frame| render_snapshot(frame, &mut app, frame.area()))
+            .unwrap();
+
+        let (x, y) = buffer_text_cell(&terminal, "Favorite Client", "Codex");
+        assert_eq!(
+            terminal.backend().buffer().cell((x, y)).unwrap().fg,
+            expected
+        );
     }
 
     #[test]

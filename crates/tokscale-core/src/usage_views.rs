@@ -233,6 +233,7 @@ pub struct ContributionDay {
     pub date: NaiveDate,
     pub tokens: u64,
     pub cost: f64,
+    /// Discrete theme-grade representative derived from visible-window token activity.
     pub intensity: f64,
 }
 
