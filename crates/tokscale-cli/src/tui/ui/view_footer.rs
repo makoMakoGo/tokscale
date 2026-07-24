@@ -4,7 +4,7 @@ use super::footer::{self, FooterContent, SortControl};
 use super::widgets::{format_cost, format_tokens};
 use crate::tui::actions::{Action, ActionSet};
 use crate::tui::app::{App, SortField, Tab};
-use crate::tui::presentation::Presentation;
+use crate::tui::presentation::{Presentation, SubscriptionPresentation};
 use crate::tui::view_state::ViewState;
 
 pub(crate) fn render(
@@ -16,6 +16,24 @@ pub(crate) fn render(
     actions: &ActionSet,
 ) {
     match presentation {
+        Presentation::Subscription(SubscriptionPresentation::ColdFetching) => {
+            footer::render_timed_activity(
+                frame,
+                app,
+                area,
+                super::loading::FETCHING_SUBSCRIPTION_DATA,
+                "Fetching",
+                app.subscription_fetch_elapsed()
+                    .unwrap_or_default()
+                    .as_secs(),
+            );
+            return;
+        }
+        Presentation::Subscription(subscription) => {
+            let content = footer::subscription_content(app, subscription, actions);
+            footer::render(frame, app, area, content);
+            return;
+        }
         Presentation::Loading => {
             footer::render_cold_loading(frame, app, area);
             return;

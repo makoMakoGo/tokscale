@@ -72,7 +72,10 @@ visible. If that refresh fails, the same generation remains installed and the
 failure is exposed as a degraded diagnostic.
 
 The remote Subscription Usage tab has the separate ADR 0014 lifecycle and is
-not classified from the local generation.
+not classified from the local generation. Its content, footer, and contextual
+actions share an independent Subscription Presentation authority. Local and
+subscription states may reuse stateless layout and activity renderers, but
+neither reads the other's timers, summaries, diagnostics, or acquisition state.
 
 ### Projection
 
@@ -99,11 +102,12 @@ change the amount of input data acquired for the generation.
 
 ### Presentation
 
-Every render frame classifies each top-level view through one presentation
-authority:
+Every render frame classifies the current top-level view through exactly one
+of two presentation authorities:
 
 ```text
-Loading | Failed | Empty(subject) | Ready
+Local:        Loading | Failed | Empty(subject) | Ready
+Subscription: ColdFetching | Prompt | Empty(refreshing) | Results(refreshing)
 ```
 
 `Loading` and `Failed` require the absence of an installed local generation.
@@ -144,10 +148,17 @@ not a command bus.
 An empty view advertises only recovery and navigation actions. Valid global
 operations remain accepted without being promoted as recovery. TUI export
 writes `groupBy`, `models`, `totals`, `agents`, `daily`, and `health` from the
-installed projection even when the displayed collection is empty. It does not
-claim to export hourly rows, graph cells, Sessions, or processing metadata.
-Row sorting, details, copying a row, and row hit areas are absent when there is
-no row to operate on.
+installed projection even when the displayed local collection is empty. It
+does not claim to export hourly rows, graph cells, Sessions, Subscription
+Usage, or processing metadata. Row sorting, details, copying a row, and row hit
+areas are absent when there is no row to operate on.
+
+Usage accepts Subscription Usage refresh and scrolling plus shell-level tab
+navigation, theme, and quit. Local-report refresh, auto-refresh control,
+refresh-interval adjustment, and export are unavailable while Usage is active;
+the user switches to a local-report tab to invoke them. Usage footer summaries
+and status never substitute constructor-default local totals or local
+diagnostics for absent subscription data.
 
 ### Data and cache shape
 
@@ -170,7 +181,7 @@ is accepted.
 - A selected client with no usage receives the same honest, scoped template
   across local report pages without claiming a scan failure or a global lack
   of data.
-- Adding a top-level page requires declaring its structural readiness and
+- Adding a local-report page requires declaring its structural readiness and
   empty subject once; it must not create another lifecycle or shortcut table.
 - Cache or refresh failures remain explicit, while valid empty projections are
   ordinary installed data rather than disguised errors.

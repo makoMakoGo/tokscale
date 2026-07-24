@@ -529,6 +529,7 @@ pub struct App {
 
     pub usage_fetch_attempted: bool,
     usage_initial_fetch_started: bool,
+    subscription_fetch_started_at: Option<Instant>,
     usage_rx: Option<std::sync::mpsc::Receiver<crate::tui::subscription_usage::UsageFetchBatch>>,
 }
 
@@ -711,6 +712,7 @@ impl App {
             subscription_provider_ids,
             usage_fetch_attempted: false,
             usage_initial_fetch_started: false,
+            subscription_fetch_started_at: None,
             usage_rx: None,
         };
         app.try_auto_select_stats_today();
@@ -1087,7 +1089,7 @@ impl App {
         if let Some(ref rx) = self.usage_rx {
             match rx.try_recv() {
                 Ok(batch) => {
-                    self.usage_rx = None;
+                    self.finish_subscription_usage_fetch();
                     self.install_subscription_usage_batch(
                         batch,
                         crate::tui::subscription_usage::save_cache,
@@ -1096,7 +1098,7 @@ impl App {
                     self.last_subscription_usage_check = Some(now);
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.usage_rx = None;
+                    self.finish_subscription_usage_fetch();
                     self.subscription_usage_errors =
                         vec![crate::tui::subscription_usage::UsageProviderError {
                             provider: "unknown".to_string(),
@@ -1211,7 +1213,7 @@ impl App {
             KeyCode::Char('p') => {
                 self.cycle_theme();
             }
-            KeyCode::Char('r') => {
+            KeyCode::Char('r') if self.current_tab != Tab::Usage => {
                 let now = Instant::now();
                 self.last_refresh = now;
                 if self.background_loading {
@@ -1221,19 +1223,22 @@ impl App {
                     self.reload_force = true;
                 }
             }
-            KeyCode::Char('R') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Char('R')
+                if self.current_tab != Tab::Usage
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
                 self.toggle_auto_refresh();
             }
-            KeyCode::Char('+') | KeyCode::Char('=') => {
+            KeyCode::Char('+') | KeyCode::Char('=') if self.current_tab != Tab::Usage => {
                 self.increase_refresh_interval();
             }
-            KeyCode::Char('-') => {
+            KeyCode::Char('-') if self.current_tab != Tab::Usage => {
                 self.decrease_refresh_interval();
             }
             KeyCode::Char('y') => {
                 self.copy_selected_to_clipboard();
             }
-            KeyCode::Char('e') => {
+            KeyCode::Char('e') if self.current_tab != Tab::Usage => {
                 self.export_to_json();
             }
             KeyCode::Char('s') => {
@@ -1308,14 +1313,27 @@ impl App {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        self.usage_fetch_attempted = true;
-        self.set_subscription_status("Fetching subscription usage...");
-        self.usage_rx = Some(rx);
         let enabled = self.subscription_provider_ids.clone();
+        self.start_subscription_usage_fetch(rx);
         std::thread::spawn(move || {
             let batch = crate::tui::subscription_usage::fetch_enabled(&enabled);
             let _ = tx.send(batch);
         });
+    }
+
+    fn start_subscription_usage_fetch(
+        &mut self,
+        rx: std::sync::mpsc::Receiver<crate::tui::subscription_usage::UsageFetchBatch>,
+    ) {
+        self.usage_fetch_attempted = true;
+        self.subscription_fetch_started_at = Some(Instant::now());
+        self.set_subscription_status("Fetching subscription usage...");
+        self.usage_rx = Some(rx);
+    }
+
+    fn finish_subscription_usage_fetch(&mut self) {
+        self.usage_rx = None;
+        self.subscription_fetch_started_at = None;
     }
 
     fn should_start_initial_subscription_usage_fetch(&self) -> bool {
@@ -1339,17 +1357,27 @@ impl App {
     }
 
     #[cfg(test)]
-    fn start_subscription_usage_fetch_for_test(
+    pub(crate) fn start_subscription_usage_fetch_for_test(
         &mut self,
         rx: std::sync::mpsc::Receiver<crate::tui::subscription_usage::UsageFetchBatch>,
     ) {
-        self.usage_fetch_attempted = true;
-        self.set_subscription_status("Fetching subscription usage...");
-        self.usage_rx = Some(rx);
+        self.start_subscription_usage_fetch(rx);
     }
 
     pub fn is_fetching_usage(&self) -> bool {
         self.usage_rx.is_some()
+    }
+
+    pub(crate) fn subscription_fetch_elapsed(&self) -> Option<Duration> {
+        if !self.is_fetching_usage() {
+            return None;
+        }
+        self.subscription_fetch_started_at
+            .map(|started| started.elapsed())
+    }
+
+    pub(crate) fn enabled_subscription_provider_count(&self) -> usize {
+        self.subscription_provider_ids.len()
     }
 
     pub fn handle_mouse_event(&mut self, event: MouseEvent) {
@@ -5344,6 +5372,8 @@ mod tests {
         assert!(app.status_message.is_none());
         assert!(app.usage_fetch_attempted);
         assert!(app.is_fetching_usage());
+        assert!(app.subscription_fetch_started_at.is_some());
+        assert!(app.subscription_fetch_elapsed().is_some());
     }
 
     #[test]
@@ -5363,6 +5393,8 @@ mod tests {
         assert!(app.status_message.is_none());
         assert!(app.last_subscription_usage_check.is_some());
         assert!(!app.is_fetching_usage());
+        assert!(app.subscription_fetch_started_at.is_none());
+        assert!(app.subscription_fetch_elapsed().is_none());
     }
 
     fn subscription_output(provider: &str) -> crate::tui::subscription_usage::UsageOutput {
@@ -5441,6 +5473,7 @@ mod tests {
         app.current_tab = Tab::Usage;
         let (_tx, rx) = std::sync::mpsc::channel();
         app.start_subscription_usage_fetch_for_test(rx);
+        let started_at = app.subscription_fetch_started_at;
 
         app.fetch_subscription_usage();
 
@@ -5450,6 +5483,7 @@ mod tests {
         );
         assert!(app.status_message.is_none());
         assert!(app.is_fetching_usage());
+        assert_eq!(app.subscription_fetch_started_at, started_at);
     }
 
     #[test]
@@ -5536,14 +5570,25 @@ mod tests {
     }
 
     #[test]
-    fn test_r_refreshes_local_report_only_with_enabled_usage_provider() {
+    fn test_usage_tab_rejects_local_report_refresh_keys() {
         let mut app = make_app_with_usage_providers(&["codex"]);
         app.current_tab = Tab::Usage;
+        let last_refresh = app.last_refresh;
+        let auto_refresh = app.auto_refresh;
+        let refresh_interval = app.auto_refresh_interval;
 
         app.handle_key_event(key(KeyCode::Char('r')));
+        app.handle_key_event(key_with_mod(KeyCode::Char('R'), KeyModifiers::SHIFT));
+        app.handle_key_event(key(KeyCode::Char('+')));
+        app.handle_key_event(key(KeyCode::Char('-')));
+        app.handle_key_event(key(KeyCode::Char('e')));
 
-        assert!(app.needs_reload);
-        assert!(app.reload_force);
+        assert!(!app.needs_reload);
+        assert!(!app.reload_force);
+        assert_eq!(app.last_refresh, last_refresh);
+        assert_eq!(app.auto_refresh, auto_refresh);
+        assert_eq!(app.auto_refresh_interval, refresh_interval);
+        assert!(app.status_message.is_none());
         assert!(!app.usage_fetch_attempted);
         assert!(!app.is_fetching_usage());
     }
