@@ -42,6 +42,7 @@ pub(crate) fn render_with_state(frame: &mut Frame, app: &mut App, state: &mut Vi
 
     app.clear_click_areas();
     app.handle_resize(area.width, area.height);
+    frame.render_widget(Block::default().style(app.theme.canvas_style()), area);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -107,8 +108,8 @@ fn render_cold_failed(frame: &mut Frame, app: &App, area: Rect) {
         .expect("cold report failure must carry its diagnostic");
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
-        .style(Style::default().bg(app.theme.background));
+        .border_style(Style::default().fg(app.theme.chrome.border))
+        .style(app.theme.panel_style());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -119,12 +120,14 @@ fn render_cold_failed(frame: &mut Frame, app: &App, area: Rect) {
     let lines = vec![
         Line::from(Span::styled(
             "Could not load local reports",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(app.theme.status.danger)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
             diagnostic.to_string(),
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         )),
     ];
     let paragraph = Paragraph::new(lines)
@@ -195,8 +198,8 @@ fn render_daily(
 fn render_loading(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
-        .style(Style::default().bg(app.theme.background));
+        .border_style(Style::default().fg(app.theme.chrome.border))
+        .style(app.theme.panel_style());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);

@@ -17,6 +17,7 @@ use crate::tui::actions::ActionSet;
 use crate::tui::app::App;
 use crate::tui::presentation::EmptySubject;
 use crate::tui::session_data::SessionProjectionStatus;
+use crate::tui::themes::Theme;
 use crate::tui::view_state::ViewState;
 
 const CLIENT_MIN_WIDTH: u16 = 10;
@@ -152,9 +153,9 @@ pub(crate) fn render(
 fn panel_block<'a>(app: &App, title: impl Into<Line<'a>>) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(app.theme.chrome.border))
         .title(title)
-        .style(Style::default().bg(app.theme.background))
+        .style(app.theme.panel_style())
 }
 
 fn render_clients(
@@ -172,7 +173,7 @@ fn render_clients(
         Span::styled(
             " Sessions ",
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.heading)
                 .add_modifier(Modifier::BOLD),
         ),
     );
@@ -214,12 +215,9 @@ fn render_clients(
             let index = range.start + offset;
             let is_selected = index == selected;
             let style = if is_selected {
-                Style::default()
-                    .fg(app.theme.accent)
-                    .bg(app.theme.selection)
-                    .add_modifier(Modifier::BOLD)
+                app.theme.selection_style()
             } else {
-                Style::default().fg(app.theme.foreground)
+                Style::default().fg(app.theme.text.primary)
             };
             let cells = columns
                 .iter()
@@ -271,7 +269,7 @@ fn render_clients(
     )
     .style(
         Style::default()
-            .fg(app.theme.accent)
+            .fg(app.theme.chrome.heading)
             .add_modifier(Modifier::BOLD),
     );
     let table = Table::new(table_rows, layout.widths)
@@ -302,7 +300,7 @@ fn render_session_details(
     let title = Line::from(Span::styled(
         format!(" Sessions / {display_client} "),
         Style::default()
-            .fg(app.theme.accent)
+            .fg(app.theme.chrome.heading)
             .add_modifier(Modifier::BOLD),
     ));
     let rows = state.session_rows(app);
@@ -363,12 +361,9 @@ fn render_session_details(
             let index = range.start + offset;
             let is_selected = index == selected;
             let style = if is_selected {
-                Style::default()
-                    .fg(app.theme.accent)
-                    .bg(app.theme.selection)
-                    .add_modifier(Modifier::BOLD)
+                app.theme.selection_style()
             } else {
-                Style::default().fg(app.theme.foreground)
+                Style::default().fg(app.theme.text.primary)
             };
             let workspace = row
                 .workspace_label
@@ -436,7 +431,7 @@ fn render_session_details(
     )
     .style(
         Style::default()
-            .fg(app.theme.accent)
+            .fg(app.theme.chrome.heading)
             .add_modifier(Modifier::BOLD),
     );
     let table = Table::new(table_rows, layout.widths)
@@ -482,7 +477,7 @@ fn render_projection_status(
     area: Rect,
     projection_status: &SessionProjectionStatus,
 ) {
-    let Some(line) = projection_status_line(projection_status, app.theme.muted) else {
+    let Some(line) = projection_status_line(projection_status, &app.theme) else {
         return;
     };
     frame.render_widget(Paragraph::new(line), distributed_table_area(area));
@@ -490,7 +485,7 @@ fn render_projection_status(
 
 fn projection_status_line(
     projection_status: &SessionProjectionStatus,
-    muted: Color,
+    theme: &Theme,
 ) -> Option<Line<'static>> {
     let (label, message, diagnostic) = match projection_status {
         SessionProjectionStatus::Degraded { diagnostic } => (
@@ -508,11 +503,14 @@ fn projection_status_line(
         Span::styled(
             label,
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.status.warning)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(message, Style::default().fg(muted)),
-        Span::styled(format!(" · {diagnostic}"), Style::default().fg(muted)),
+        Span::styled(message, Style::default().fg(theme.text.muted)),
+        Span::styled(
+            format!(" · {diagnostic}"),
+            Style::default().fg(theme.text.muted),
+        ),
     ]))
 }
 
@@ -562,6 +560,7 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::themes::ThemeName;
     use crate::tui::ui::table_layout::{constraint_lengths, spaced_width};
 
     fn layout_width<C>(layout: &ResponsiveTableLayout<C>) -> u16 {
@@ -586,26 +585,32 @@ mod tests {
         let status = SessionProjectionStatus::Degraded {
             diagnostic: "database locked".to_string(),
         };
+        let theme = Theme::from_name(ThemeName::Blue);
 
         let (content, status_area) = panel_body_areas(inner, &status);
 
         assert_eq!(content, Rect::new(12, 4, 80, 19));
         assert_eq!(status_area, Some(Rect::new(12, 23, 80, 1)));
+        let line = projection_status_line(&status, &theme).unwrap();
         assert_eq!(
-            line_text(projection_status_line(&status, Color::Gray).unwrap()),
+            line_text(line.clone()),
             "Degraded · last refresh failed; showing previous snapshot · database locked"
         );
+        assert_eq!(line.spans[0].style.fg, Some(theme.status.warning));
+        assert_eq!(line.spans[1].style.fg, Some(theme.text.muted));
+        assert_eq!(line.spans[2].style.fg, Some(theme.text.muted));
     }
 
     #[test]
     fn healthy_projection_does_not_reserve_a_status_row() {
         let inner = Rect::new(12, 4, 80, 20);
+        let theme = Theme::from_name(ThemeName::Blue);
 
         assert_eq!(
             panel_body_areas(inner, &SessionProjectionStatus::Ready),
             (inner, None)
         );
-        assert!(projection_status_line(&SessionProjectionStatus::Ready, Color::Gray).is_none());
+        assert!(projection_status_line(&SessionProjectionStatus::Ready, &theme).is_none());
     }
 
     #[test]

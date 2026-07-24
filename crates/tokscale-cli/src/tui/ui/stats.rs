@@ -66,14 +66,14 @@ pub fn render(
 fn graph_block(app: &App) -> Block<'_> {
     Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(app.theme.chrome.border))
         .title(Span::styled(
             " Contribution Graph (52 weeks) ",
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.heading)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(app.theme.background))
+        .style(app.theme.panel_style())
 }
 
 fn render_empty_graph(
@@ -150,10 +150,10 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                 };
                 let style = if is_selected_row {
                     Style::default()
-                        .fg(app.theme.accent)
+                        .fg(app.theme.chrome.current)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(app.theme.muted)
+                    Style::default().fg(app.theme.text.muted)
                 };
                 frame.render_widget(
                     Paragraph::new(display_label).style(style),
@@ -166,7 +166,7 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
     let max_weeks = (content.width.saturating_sub(label_width) / CELL_WIDTH) as usize;
     let weeks_to_show = graph.weeks.len().min(max_weeks);
     let start_week = graph.weeks.len().saturating_sub(weeks_to_show);
-    let colors = app.theme.colors;
+    let colors = app.theme.visualization.activity;
     let intensity_color = |intensity: f64| grade_color(colors, intensity);
 
     for (week_idx, week) in graph.weeks.iter().skip(start_week).enumerate() {
@@ -231,10 +231,10 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
             if label_x >= graph_start_x && !too_close && month_idx < MONTH_LABELS.len() {
                 let style = if selected_month == Some(month) {
                     Style::default()
-                        .fg(app.theme.accent)
+                        .fg(app.theme.chrome.current)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(app.theme.muted)
+                    Style::default().fg(app.theme.text.muted)
                 };
                 frame.render_widget(
                     Paragraph::new(MONTH_LABELS[month_idx]).style(style),
@@ -273,20 +273,20 @@ fn render_graph_metrics(
     let metrics_y = last_grid_row.saturating_add(2);
     if metrics_y < content.bottom() {
         let metrics = Line::from(vec![
-            Span::styled("Current ", Style::default().fg(app.theme.muted)),
+            Span::styled("Current ", Style::default().fg(app.theme.text.muted)),
             Span::styled(
                 format!("{}d", app.data.current_streak),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(app.theme.metrics.total),
             ),
-            Span::styled("  ·  Longest ", Style::default().fg(app.theme.muted)),
+            Span::styled("  ·  Longest ", Style::default().fg(app.theme.text.muted)),
             Span::styled(
                 format!("{}d", app.data.longest_streak),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(app.theme.metrics.total),
             ),
-            Span::styled("  ·  Active ", Style::default().fg(app.theme.muted)),
+            Span::styled("  ·  Active ", Style::default().fg(app.theme.text.muted)),
             Span::styled(
                 format!("{active_days}/{total_days}"),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(app.theme.metrics.total),
             ),
         ]);
         frame.render_widget(
@@ -298,17 +298,32 @@ fn render_graph_metrics(
     let legend_y = metrics_y.saturating_add(1);
     if legend_y < content.bottom() {
         let legend = Line::from(vec![
-            Span::styled("Less ", Style::default().fg(app.theme.muted)),
-            Span::styled("██", Style::default().fg(app.theme.colors[0])),
+            Span::styled("Less ", Style::default().fg(app.theme.text.muted)),
+            Span::styled(
+                "██",
+                Style::default().fg(app.theme.visualization.activity[0]),
+            ),
             Span::raw(" "),
-            Span::styled("██", Style::default().fg(app.theme.colors[1])),
+            Span::styled(
+                "██",
+                Style::default().fg(app.theme.visualization.activity[1]),
+            ),
             Span::raw(" "),
-            Span::styled("██", Style::default().fg(app.theme.colors[2])),
+            Span::styled(
+                "██",
+                Style::default().fg(app.theme.visualization.activity[2]),
+            ),
             Span::raw(" "),
-            Span::styled("██", Style::default().fg(app.theme.colors[3])),
+            Span::styled(
+                "██",
+                Style::default().fg(app.theme.visualization.activity[3]),
+            ),
             Span::raw(" "),
-            Span::styled("██", Style::default().fg(app.theme.colors[4])),
-            Span::styled(" More", Style::default().fg(app.theme.muted)),
+            Span::styled(
+                "██",
+                Style::default().fg(app.theme.visualization.activity[4]),
+            ),
+            Span::styled(" More", Style::default().fg(app.theme.text.muted)),
         ]);
         frame.render_widget(
             Paragraph::new(legend),
@@ -321,7 +336,10 @@ fn render_graph_metrics(
         let hint_x = content.right().saturating_sub(hint_width);
         if hint_x >= legend_end {
             frame.render_widget(
-                Paragraph::new(Span::styled(hint, Style::default().fg(app.theme.muted))),
+                Paragraph::new(Span::styled(
+                    hint,
+                    Style::default().fg(app.theme.text.muted),
+                )),
                 Rect::new(hint_x, legend_y, hint_width, 1),
             );
         }
@@ -430,14 +448,14 @@ fn grade_color(colors: [Color; 5], intensity: f64) -> Color {
 fn render_day_insights(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(app.theme.chrome.border))
         .title(Span::styled(
             " Day Insights ",
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.heading)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(app.theme.background));
+        .style(app.theme.panel_style());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.is_empty() {
@@ -449,7 +467,7 @@ fn render_day_insights(frame: &mut Frame, app: &App, area: Rect) {
             Paragraph::new(
                 "Select a day in the contribution graph to inspect its client and model usage.",
             )
-            .style(Style::default().fg(app.theme.muted))
+            .style(Style::default().fg(app.theme.text.muted))
             .alignment(Alignment::Center),
             inner,
         );
@@ -523,16 +541,19 @@ fn render_day_stats_lines(
         Span::styled(
             day.date.format("%a, %b %d, %Y").to_string(),
             Style::default()
-                .fg(app.theme.foreground)
+                .fg(app.theme.text.primary)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(format_tokens(day.tokens), Style::default().fg(Color::Cyan)),
+        Span::styled(
+            format_tokens(day.tokens),
+            Style::default().fg(app.theme.metrics.tokens),
+        ),
         Span::raw("  "),
         Span::styled(
             format_cost(day.cost),
             Style::default()
-                .fg(Color::Green)
+                .fg(app.theme.metrics.cost)
                 .add_modifier(Modifier::BOLD),
         ),
     ]))];
@@ -548,7 +569,7 @@ fn render_day_stats_lines(
         let model_color = app.model_color(&model.canonical_id);
         rows.push(StatRow::KeyVal(
             Line::from(vec![
-                Span::styled("Top model: ", Style::default().fg(app.theme.muted)),
+                Span::styled("Top model: ", Style::default().fg(app.theme.text.muted)),
                 Span::styled(
                     truncate_model_display_name_to(&model.canonical_id, name_budget),
                     Style::default().fg(model_color),
@@ -564,7 +585,7 @@ fn render_day_stats_lines(
         };
         rows.push(StatRow::Line(Line::from(Span::styled(
             message,
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         ))));
     }
 
@@ -580,7 +601,7 @@ fn render_day_stats_lines(
                 .max(4);
             rows.push(StatRow::KeyVal(
                 Line::from(vec![
-                    Span::styled("Top client: ", Style::default().fg(app.theme.muted)),
+                    Span::styled("Top client: ", Style::default().fg(app.theme.text.muted)),
                     Span::styled(
                         truncate_model_display_name_to(&display_name, name_budget),
                         Style::default().fg(app.client_color(client)),
@@ -603,7 +624,7 @@ fn render_day_stats_lines(
     };
     rows.push(StatRow::Line(Line::from(Span::styled(
         hours_label,
-        Style::default().fg(app.theme.muted),
+        Style::default().fg(app.theme.text.muted),
     ))));
 
     let mut hour_spans = Vec::with_capacity(HOUR_STRIP_LEN + 3);
@@ -615,7 +636,7 @@ fn render_day_stats_lines(
             // Shade active hours by the theme's contribution grades, like the graph.
             Span::styled(
                 "█",
-                Style::default().fg(grade_color(app.theme.colors, *intensity)),
+                Style::default().fg(grade_color(app.theme.visualization.activity, *intensity)),
             )
         } else {
             Span::styled("·", app.theme.subtle_text_style())
@@ -649,7 +670,7 @@ fn render_day_stats_lines(
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         rule,
-                        Style::default().fg(app.theme.border),
+                        Style::default().fg(app.theme.visualization.grid),
                     ))),
                     Rect::new(area.x, y, area.width, 1),
                 );
@@ -661,7 +682,7 @@ fn render_day_stats_lines(
                     frame.render_widget(
                         Paragraph::new(Line::from(Span::styled(
                             value,
-                            Style::default().fg(Color::Cyan),
+                            Style::default().fg(app.theme.metrics.tokens),
                         ))),
                         Rect::new(area.right().saturating_sub(value_width), y, value_width, 1),
                     );
@@ -715,10 +736,10 @@ fn render_day_radar(frame: &mut Frame, app: &App, area: Rect, ranked_models: &[R
         frame,
         area,
         &axes,
-        app.theme.accent,
-        app.theme.muted,
-        app.theme.colors[2],
-        app.theme.background,
+        app.theme.visualization.chart_highlight,
+        app.theme.visualization.grid,
+        app.theme.visualization.activity[2],
+        app.theme.surface.panel,
     );
 }
 
@@ -729,7 +750,7 @@ mod tests {
     use crate::tui::data::{
         DailyClientInfo, DailyModelInfo, DailyUsage, GraphData, HourlyUsage, TokenBreakdown,
     };
-    use crate::tui::themes::{TerminalColorMode, Theme, ThemeName};
+    use crate::tui::themes::{Theme, ThemeName};
     use chrono::NaiveDate;
     use ratatui::{backend::TestBackend, Terminal};
     use std::collections::BTreeSet;
@@ -982,56 +1003,28 @@ mod tests {
         assert_eq!(selected.symbol(), "▓");
         assert_eq!(
             selected.fg,
-            app.theme.contrasting_foreground(app.theme.colors[4])
+            app.theme
+                .contrasting_foreground(app.theme.visualization.activity[4])
         );
-        assert_eq!(selected.bg, app.theme.colors[4]);
+        assert_eq!(selected.bg, app.theme.visualization.activity[4]);
         let pair = buffer.cell((7, selected_y)).unwrap();
         assert_eq!(pair.symbol(), "▓");
         assert_eq!(
             pair.fg,
-            app.theme.contrasting_foreground(app.theme.colors[4])
+            app.theme
+                .contrasting_foreground(app.theme.visualization.activity[4])
         );
-        assert_eq!(pair.bg, app.theme.colors[4]);
+        assert_eq!(pair.bg, app.theme.visualization.activity[4]);
 
         let weekday = buffer.cell((2, selected_y)).unwrap();
         assert_eq!(weekday.symbol(), "T");
-        assert_eq!(weekday.fg, app.theme.accent);
+        assert_eq!(weekday.fg, app.theme.chrome.current);
         assert!(weekday.modifier.contains(Modifier::BOLD));
 
         let month = buffer.cell((6, 1)).unwrap();
         assert_eq!(month.symbol(), "J");
-        assert_eq!(month.fg, app.theme.accent);
+        assert_eq!(month.fg, app.theme.chrome.current);
         assert!(month.modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn compatible_grade_four_selection_remains_distinct() {
-        let mut app = make_app(120);
-        app.theme =
-            Theme::from_name_with_color_mode(ThemeName::Blue, TerminalColorMode::Compatible);
-        app.data.graph = sample_week_graph();
-        app.data.graph.weeks[0][5]
-            .as_mut()
-            .expect("fixture day must exist")
-            .intensity = 0.75;
-        app.selected_graph_cell = Some((0, 4));
-        let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
-
-        let frame = terminal
-            .draw(|frame| render_graph(frame, &mut app, frame.area()))
-            .unwrap();
-        let selected = frame.buffer.cell((6, 2 + 4)).unwrap();
-        let unselected = frame.buffer.cell((6, 2 + 5)).unwrap();
-
-        assert_eq!(selected.symbol(), "▓");
-        assert_eq!(selected.fg, Color::Black);
-        assert_eq!(selected.bg, Color::White);
-        assert_eq!(unselected.symbol(), "█");
-        assert_eq!(unselected.fg, Color::White);
-        assert_ne!(
-            (selected.symbol(), selected.fg, selected.bg),
-            (unselected.symbol(), unselected.fg, unselected.bg)
-        );
     }
 
     #[test]
@@ -1070,7 +1063,7 @@ mod tests {
         assert_eq!(month_label, "May");
         for x in 75..78 {
             let cell = buffer.cell((x, 1)).unwrap();
-            assert_eq!(cell.fg, app.theme.accent);
+            assert_eq!(cell.fg, app.theme.chrome.current);
             assert!(cell.modifier.contains(Modifier::BOLD));
         }
     }
@@ -1095,11 +1088,17 @@ mod tests {
             .join("\n");
 
         assert_eq!(buffer.cell((6, 6)).unwrap().symbol(), "█");
-        assert_eq!(buffer.cell((6, 6)).unwrap().fg, app.theme.colors[4]);
+        assert_eq!(
+            buffer.cell((6, 6)).unwrap().fg,
+            app.theme.visualization.activity[4]
+        );
         assert_eq!(buffer.cell((6, 2)).unwrap().symbol(), "█");
-        assert_eq!(buffer.cell((6, 2)).unwrap().fg, app.theme.colors[0]);
+        assert_eq!(
+            buffer.cell((6, 2)).unwrap().fg,
+            app.theme.visualization.activity[0]
+        );
         assert_eq!(buffer.cell((2, 6)).unwrap().symbol(), " ");
-        assert_eq!(buffer.cell((6, 1)).unwrap().fg, app.theme.muted);
+        assert_eq!(buffer.cell((6, 1)).unwrap().fg, app.theme.text.muted);
         assert!(rendered.contains("click a day to inspect details"));
         assert!(!rendered.contains("keyboard"));
     }
@@ -1169,7 +1168,7 @@ mod tests {
             for x in [6, 7] {
                 let cell = buffer.cell((x, y)).unwrap();
                 assert_eq!(cell.symbol(), "█");
-                assert_eq!(cell.fg, app.theme.colors[*grade]);
+                assert_eq!(cell.fg, app.theme.visualization.activity[*grade]);
             }
         }
     }
@@ -1259,7 +1258,7 @@ mod tests {
         assert_eq!(buffer.cell((2, 10)).unwrap().symbol(), "C");
         assert_eq!(buffer.cell((1, 11)).unwrap().symbol(), " ");
         assert_eq!(buffer.cell((2, 11)).unwrap().symbol(), "L");
-        for (grade, expected) in app.theme.colors.iter().enumerate() {
+        for (grade, expected) in app.theme.visualization.activity.iter().enumerate() {
             for x in [7 + grade as u16 * 3, 8 + grade as u16 * 3] {
                 let cell = buffer.cell((x, 11)).unwrap();
                 assert_eq!(cell.symbol(), "█");
@@ -1624,25 +1623,24 @@ mod tests {
         assert_eq!(buffer.cell((hour_x(9), strip_y)).unwrap().symbol(), "█");
         assert_eq!(
             buffer.cell((hour_x(9), strip_y)).unwrap().fg,
-            app.theme.colors[4]
+            app.theme.visualization.activity[4]
         );
         assert_eq!(
             buffer.cell((hour_x(10), strip_y)).unwrap().fg,
-            app.theme.colors[2]
+            app.theme.visualization.activity[2]
         );
         assert_eq!(
             buffer.cell((hour_x(11), strip_y)).unwrap().fg,
-            app.theme.colors[1]
+            app.theme.visualization.activity[1]
         );
         assert_eq!(buffer.cell((hour_x(0), strip_y)).unwrap().symbol(), "·");
     }
 
     #[test]
-    fn top_model_uses_inferred_family_color() {
+    fn day_insights_top_model_uses_app_model_color() {
         let date = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
         let mut app = make_app(120);
-        app.theme =
-            Theme::from_name_with_color_mode(ThemeName::Blue, TerminalColorMode::Compatible);
+        app.theme = Theme::from_name(ThemeName::Blue);
         app.data.daily = vec![day_usage(
             date,
             5_000,
@@ -1677,21 +1675,15 @@ mod tests {
             .find(|(_, row)| row.contains("Top model:"))
             .expect("top model row rendered");
         let name_x = top_row.find("gpt-5.4").expect("model name rendered") as u16;
-        let raw_brand_color = crate::tui::colors::model_color("gpt-5.4");
-        let compatible_brand_color = app.theme.color(raw_brand_color);
-        assert_ne!(compatible_brand_color, raw_brand_color);
-        assert_eq!(
-            buf.cell((name_x, top_y)).unwrap().fg,
-            compatible_brand_color
-        );
+        let expected = app.model_color("gpt-5.4");
+        assert_eq!(buf.cell((name_x, top_y)).unwrap().fg, expected);
     }
 
     #[test]
     fn day_insights_top_client_uses_app_client_color() {
         let date = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
         let mut app = make_app(120);
-        app.theme =
-            Theme::from_name_with_color_mode(ThemeName::Blue, TerminalColorMode::Compatible);
+        app.theme = Theme::from_name(ThemeName::Blue);
         app.data.daily = vec![day_usage(
             date,
             5_000,

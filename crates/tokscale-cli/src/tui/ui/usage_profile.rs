@@ -11,7 +11,7 @@ const PROFILE_MIN_BAR_WIDTH: usize = 6;
 ///
 /// Row layout adapts to the available content `width`:
 /// `label  detail  ████████░░░  12.3%`
-/// - The filled bar always uses `app.theme.accent`; the track uses the subtle
+/// - The filled bar always uses `app.theme.metrics.tokens`; the track uses the subtle
 ///   text style; the percentage column is never clipped.
 /// - As width shrinks the row degrades gracefully: the detail column drops
 ///   first, then the bar, leaving label + percentage.
@@ -27,7 +27,7 @@ pub(crate) struct ProfileBarRow {
     pub max_value: u64,
     /// Percentage denominator.
     pub total: u64,
-    /// Peak styling: the label renders bold yellow.
+    /// Peak styling: the label uses the chart highlight color and bold weight.
     pub highlight: bool,
 }
 
@@ -52,10 +52,10 @@ pub(crate) fn bar_row(app: &App, row: &ProfileBarRow, width: usize) -> Line<'sta
     };
     let label_style = if row.highlight {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(app.theme.visualization.chart_highlight)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(app.theme.foreground)
+        Style::default().fg(app.theme.text.primary)
     };
 
     // Width left for the bar after the fixed columns and gaps. Degradation
@@ -88,7 +88,7 @@ pub(crate) fn bar_row(app: &App, row: &ProfileBarRow, width: usize) -> Line<'sta
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             format!("{detail:>12}"),
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         ));
     }
     if bar_width > 0 {
@@ -101,7 +101,7 @@ pub(crate) fn bar_row(app: &App, row: &ProfileBarRow, width: usize) -> Line<'sta
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             "█".repeat(filled),
-            Style::default().fg(app.theme.accent),
+            Style::default().fg(app.theme.metrics.tokens),
         ));
         spans.push(Span::styled(
             "░".repeat(bar_width - filled),
@@ -113,7 +113,7 @@ pub(crate) fn bar_row(app: &App, row: &ProfileBarRow, width: usize) -> Line<'sta
     }
     spans.push(Span::styled(
         format!("{percentage:>5.1}%"),
-        Style::default().fg(app.theme.foreground),
+        Style::default().fg(app.theme.text.primary),
     ));
     Line::from(spans)
 }
@@ -136,26 +136,26 @@ where
             Span::styled(
                 "When You Work Most",
                 Style::default()
-                    .fg(app.theme.accent)
+                    .fg(app.theme.chrome.heading)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(date_range, Style::default().fg(app.theme.muted)),
+            Span::styled(date_range, Style::default().fg(app.theme.text.muted)),
         ]),
         Line::from(vec![
             Span::styled(
                 format!("{active_count} {activity_label}"),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(app.theme.metrics.total),
             ),
-            Span::styled("  ·  ", Style::default().fg(app.theme.muted)),
+            Span::styled("  ·  ", Style::default().fg(app.theme.text.muted)),
             Span::styled(
                 format!("{} tokens", format_tokens(app.data.total_tokens)),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(app.theme.metrics.tokens),
             ),
-            Span::styled("  ·  ", Style::default().fg(app.theme.muted)),
+            Span::styled("  ·  ", Style::default().fg(app.theme.text.muted)),
             Span::styled(
                 format_cost(app.data.total_cost),
-                Style::default().fg(Color::Green),
+                Style::default().fg(app.theme.metrics.cost),
             ),
         ]),
     ]
@@ -172,24 +172,33 @@ pub(crate) fn peak_line(
         Span::styled(
             label,
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.heading)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(period, Style::default().fg(Color::Yellow)),
-        Span::styled("  ·  ", Style::default().fg(app.theme.muted)),
-        Span::styled(format_tokens(tokens), Style::default().fg(Color::Cyan)),
-        Span::styled(" tokens  ·  ", Style::default().fg(app.theme.muted)),
-        Span::styled(format_cost(cost), Style::default().fg(Color::Green)),
+        Span::styled(
+            period,
+            Style::default().fg(app.theme.visualization.chart_highlight),
+        ),
+        Span::styled("  ·  ", Style::default().fg(app.theme.text.muted)),
+        Span::styled(
+            format_tokens(tokens),
+            Style::default().fg(app.theme.metrics.tokens),
+        ),
+        Span::styled(" tokens  ·  ", Style::default().fg(app.theme.text.muted)),
+        Span::styled(
+            format_cost(cost),
+            Style::default().fg(app.theme.metrics.cost),
+        ),
     ])
 }
 
 pub(crate) fn switch_to_table_line(app: &App) -> Line<'static> {
     Line::from(vec![
-        Span::styled("Press ", Style::default().fg(app.theme.muted)),
-        Span::styled("[v]", Style::default().fg(Color::Yellow)),
+        Span::styled("Press ", Style::default().fg(app.theme.text.muted)),
+        Span::styled("[v]", Style::default().fg(app.theme.chrome.focus)),
         Span::styled(
             " to switch to table view",
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         ),
     ])
 }
@@ -284,7 +293,7 @@ mod tests {
             .iter()
             .find(|span| span.content.contains('█'))
             .expect("fill span");
-        assert_eq!(fill.style.fg, Some(app.theme.accent));
+        assert_eq!(fill.style.fg, Some(app.theme.metrics.tokens));
 
         let track = line
             .spans
@@ -295,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn bar_row_peak_highlight_renders_bold_yellow_label() {
+    fn bar_row_peak_uses_chart_highlight_for_label() {
         let app = make_app();
         let row = ProfileBarRow {
             highlight: true,
@@ -305,8 +314,24 @@ mod tests {
 
         let label = &line.spans[0];
         assert!(label.content.contains("Monday"));
-        assert_eq!(label.style.fg, Some(Color::Yellow));
+        assert_eq!(
+            label.style.fg,
+            Some(app.theme.visualization.chart_highlight)
+        );
         assert!(label.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn peak_line_uses_chart_highlight_for_period() {
+        let app = make_app();
+        let line = peak_line(&app, "Peak day: ", "Monday".to_string(), 100, 0.25);
+
+        let period = &line.spans[1];
+        assert_eq!(period.content.as_ref(), "Monday");
+        assert_eq!(
+            period.style.fg,
+            Some(app.theme.visualization.chart_highlight)
+        );
     }
 
     #[test]

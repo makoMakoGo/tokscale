@@ -29,10 +29,7 @@ pub(crate) fn render(
     actions: &ActionSet,
 ) -> Rect {
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(app.theme.background)),
-        area,
-    );
+    frame.render_widget(Block::default().style(app.theme.panel_style()), area);
 
     if area.is_empty() {
         return area;
@@ -60,14 +57,14 @@ pub(crate) fn render(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(app.theme.chrome.border))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.heading)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(app.theme.background));
+        .style(app.theme.panel_style());
     let inner = block.inner(chunks[0]);
     frame.render_widget(block, chunks[0]);
 
@@ -242,7 +239,7 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
         }
         spans.push(Span::styled(
             format!("+{hidden_count}"),
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         ));
     }
 

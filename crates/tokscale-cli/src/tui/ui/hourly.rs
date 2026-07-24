@@ -220,14 +220,14 @@ fn render_table(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(app.theme.chrome.border))
         .title(Span::styled(
             " Hourly Usage ",
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.heading)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(app.theme.background));
+        .style(app.theme.panel_style());
 
     let inner = block.inner(area);
     let table_area = distributed_table_area(inner);
@@ -251,8 +251,8 @@ fn render_table(
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
-    let theme_accent = app.theme.accent;
-    let theme_selection = app.theme.selection;
+    let theme_heading = app.theme.chrome.heading;
+    let theme_selection_style = app.theme.selection_style();
     let metric_input_style = app.theme.metric_input_style();
     let metric_output_style = app.theme.metric_output_style();
     let metric_cache_read_style = app.theme.metric_cache_read_style();
@@ -289,7 +289,7 @@ fn render_table(
     )
     .style(
         Style::default()
-            .fg(theme_accent)
+            .fg(theme_heading)
             .add_modifier(Modifier::BOLD),
     )
     .height(1);
@@ -302,8 +302,8 @@ fn render_table(
     }
 
     let separator_style = Style::default()
-        .fg(theme_accent)
-        .bg(Color::Rgb(24, 28, 36))
+        .fg(theme_heading)
+        .bg(app.theme.surface.row_alt)
         .add_modifier(Modifier::BOLD);
 
     let mut rows: Vec<Row> = Vec::with_capacity(visible_height.saturating_add(1));
@@ -333,7 +333,7 @@ fn render_table(
         let hour_label = format_hour_label(hour.datetime);
         let hour_style = if is_current {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(app.theme.chrome.current)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().add_modifier(Modifier::BOLD)
@@ -368,14 +368,13 @@ fn render_table(
                     hour.tokens.input,
                     hour.tokens.cache_write,
                 ))
-                .style(Style::default().fg(Color::Cyan)),
+                .style(Style::default().fg(app.theme.metrics.rate)),
                 HourlyColumn::Total => total_tokens_cell(hour.tokens.total(), &app.theme),
-                HourlyColumn::Cost => {
-                    Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green))
-                }
+                HourlyColumn::Cost => Cell::from(format_cost(hour.cost))
+                    .style(Style::default().fg(app.theme.metrics.cost)),
                 HourlyColumn::CostPerMillion => {
                     Cell::from(format_cost_per_million(hour.cost, hour.tokens.total()))
-                        .style(Style::default().fg(Color::Rgb(150, 200, 150)))
+                        .style(Style::default().fg(app.theme.metrics.secondary_cost))
                 }
             }
         };
@@ -385,7 +384,7 @@ fn render_table(
             .collect();
 
         let row_style = if is_selected {
-            Style::default().bg(theme_selection)
+            theme_selection_style
         } else if is_current {
             current_row_style
         } else if is_striped {
@@ -409,7 +408,7 @@ fn render_table(
         .header(header)
         .column_spacing(TABLE_COLUMN_SPACING)
         .flex(DISTRIBUTED_TABLE_FLEX)
-        .row_highlight_style(Style::default().bg(theme_selection));
+        .row_highlight_style(theme_selection_style);
 
     frame.render_widget(table, table_area);
 

@@ -32,13 +32,13 @@ pub(super) fn render(
     }
 
     let width = area.width as usize;
-    let headline = fitted_line(headline(subject), width, app.theme.foreground);
-    let scope = fitted_line(&scope_text(app, width), width, app.theme.muted);
+    let headline = fitted_line(headline(subject), width, app.theme.text.primary);
+    let scope = fitted_line(&scope_text(app, width), width, app.theme.text.muted);
     let hint = fitted_hint(
         &recovery_hint(actions),
         width,
-        app.theme.accent,
-        app.theme.muted,
+        app.theme.chrome.focus,
+        app.theme.text.muted,
     );
 
     let lines = match area.height {

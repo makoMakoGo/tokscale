@@ -51,7 +51,12 @@ pub(crate) enum Commands {
 pub(crate) struct TuiArgs {
     #[arg(long, value_enum, help = "Open a specific tab")]
     pub(crate) tab: Option<Tab>,
-    #[arg(short, long, value_parser = parse_theme_arg)]
+    #[arg(
+        short,
+        long,
+        value_parser = parse_theme_arg,
+        help = "Use a complete TUI semantic color theme"
+    )]
     pub(crate) theme: Option<String>,
     #[arg(
         short,

@@ -386,6 +386,47 @@ mod tests {
     }
 
     #[test]
+    fn all_legacy_color_palettes_remain_readable_and_writable() {
+        const LEGACY_COLOR_PALETTES: [&str; 12] = [
+            "green",
+            "halloween",
+            "teal",
+            "blue",
+            "pink",
+            "purple",
+            "orange",
+            "monochrome",
+            "ylgnbu",
+            "graphite",
+            "lagoon",
+            "dusk",
+        ];
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = Settings::explicit_home_config_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        for palette in LEGACY_COLOR_PALETTES {
+            fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({ "colorPalette": palette })).unwrap(),
+            )
+            .unwrap();
+
+            let loaded = Settings::load_for_home_override(Some(temp.path())).unwrap();
+            assert_eq!(loaded.color_palette, palette);
+            loaded.save().unwrap();
+
+            let saved: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["colorPalette"], palette);
+
+            let reloaded = Settings::load_for_home_override(Some(temp.path())).unwrap();
+            assert_eq!(reloaded.color_palette, palette);
+        }
+    }
+
+    #[test]
     fn load_for_home_override_reports_malformed_json_with_path_and_source() {
         let temp = tempfile::TempDir::new().unwrap();
         let path = Settings::explicit_home_config_path(temp.path());

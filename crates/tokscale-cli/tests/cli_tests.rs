@@ -822,6 +822,69 @@ fn test_theme_flag_is_owned_by_tui() {
 }
 
 #[test]
+fn test_tui_accepts_all_legacy_theme_values_before_terminal_validation() {
+    const LEGACY_THEME_NAMES: [&str; 12] = [
+        "green",
+        "halloween",
+        "teal",
+        "blue",
+        "pink",
+        "purple",
+        "orange",
+        "monochrome",
+        "ylgnbu",
+        "graphite",
+        "lagoon",
+        "dusk",
+    ];
+
+    for theme in LEGACY_THEME_NAMES {
+        cargo_bin_cmd!("tokscale")
+            .args(["tui", "--theme", theme])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains(
+                "TUI requires an interactive terminal",
+            ))
+            .stderr(predicate::str::contains("invalid theme").not());
+    }
+}
+
+#[test]
+fn test_tui_rejects_unknown_theme_and_lists_valid_values() {
+    let output = cargo_bin_cmd!("tokscale")
+        .args(["tui", "--theme", "ultraviolet"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid theme `ultraviolet`"),
+        "stderr: {stderr}"
+    );
+    for theme in [
+        "green",
+        "halloween",
+        "teal",
+        "blue",
+        "pink",
+        "purple",
+        "orange",
+        "monochrome",
+        "ylgnbu",
+        "graphite",
+        "lagoon",
+        "dusk",
+    ] {
+        assert!(
+            stderr.contains(theme),
+            "valid theme `{theme}` missing from stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn test_debug_flag_is_owned_by_tui() {
     let mut cmd = cargo_bin_cmd!("tokscale");
     cmd.args(["tui", "--debug", "--help"]).assert().success();

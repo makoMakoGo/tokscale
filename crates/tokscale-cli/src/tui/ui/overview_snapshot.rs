@@ -40,14 +40,14 @@ pub(crate) fn render(
     let data = app.overview_summary();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(app.theme.chrome.border))
         .title(Span::styled(
             " Snapshot ",
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.heading)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(app.theme.background));
+        .style(app.theme.panel_style());
     let inner = block.inner(snapshot_area);
     frame.render_widget(block, snapshot_area);
     if inner.is_empty() {
@@ -119,17 +119,17 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary)
             Span::styled(
                 format_tokens(app.data.total_tokens),
                 Style::default()
-                    .fg(app.theme.accent)
+                    .fg(app.theme.metrics.tokens)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" tokens    ", Style::default().fg(app.theme.muted)),
+            Span::styled(" tokens    ", Style::default().fg(app.theme.text.muted)),
             Span::styled(
                 format_cost(app.data.total_cost),
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(app.theme.metrics.cost)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" cost", Style::default().fg(app.theme.muted)),
+            Span::styled(" cost", Style::default().fg(app.theme.text.muted)),
         ]),
         separator_line(app, area.width as usize),
         section_title(app, "Fact"),
@@ -138,26 +138,31 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary)
             app,
             "Active Days",
             data.active_days.to_string(),
-            Color::Cyan,
+            app.theme.metrics.total,
         ),
         metric_line(
             app,
             "Sessions Scanned",
             data.main_session_count.to_string(),
-            Color::Cyan,
+            app.theme.metrics.total,
         ),
-        metric_line(app, "Cache Rate", data.cache_rate.to_string(), Color::Cyan),
+        metric_line(
+            app,
+            "Cache Rate",
+            data.cache_rate.to_string(),
+            app.theme.metrics.rate,
+        ),
         metric_line(
             app,
             "Models Eaten",
             data.model_count.to_string(),
-            Color::Cyan,
+            app.theme.metrics.total,
         ),
         metric_line(
             app,
             "Clients Used",
             data.client_count.to_string(),
-            Color::Cyan,
+            app.theme.metrics.total,
         ),
     ];
     let diagnostics = [
@@ -166,7 +171,7 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary)
             app,
             "Data Size",
             format_bytes(app.data.health.input_data_bytes),
-            app.theme.foreground,
+            app.theme.text.primary,
         ),
     ];
 
@@ -191,7 +196,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
     let color = portraits::family_color(app, family);
     let favorite_label = Some(Line::from(Span::styled(
         "Favorite Model",
-        Style::default().fg(app.theme.muted),
+        Style::default().fg(app.theme.text.muted),
     )));
     let portrait = portraits::lines(app, family).map(|line| center_line(line, width));
     let slogan = Some(center_line(
@@ -214,7 +219,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
                     share_percent(favorite.tokens, total),
                     format_cost(favorite.cost),
                 ),
-                Style::default().fg(app.theme.muted),
+                Style::default().fg(app.theme.text.muted),
             ),
         ]),
         width,
@@ -236,7 +241,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
                         share_percent(favorite.tokens, total),
                         format_cost(favorite.cost),
                     ),
-                    Style::default().fg(app.theme.muted),
+                    Style::default().fg(app.theme.text.muted),
                 ),
             ]),
             width,
@@ -249,12 +254,12 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
         client_block.push(Line::default());
         client_block.push(Line::from(Span::styled(
             "Favorite Client",
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         )));
         client_block.push(center_line(
             Line::from(Span::styled(
                 client_slogan(&favorite.id),
-                Style::default().fg(app.theme.accent),
+                Style::default().fg(app.theme.visualization.artwork),
             )),
             width,
         ));
@@ -273,7 +278,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
                         share_percent(favorite.tokens, total),
                         format_cost(favorite.cost),
                     ),
-                    Style::default().fg(app.theme.muted),
+                    Style::default().fg(app.theme.text.muted),
                 ),
             ]),
             width,
@@ -379,7 +384,7 @@ fn render_empty_fun_things(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(center_line(
         Line::from(Span::styled(
             "no data yet",
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         )),
         width,
     ));
@@ -429,7 +434,7 @@ fn inputs_healthy_metric_line(app: &App) -> Line<'static> {
     let (value, color) = if inputs > 0 && app.data.health.clean_inputs == inputs {
         (
             format!("✓ {} clean", format_tokens_with_commas(inputs as u64)),
-            Color::Green,
+            app.theme.status.success,
         )
     } else {
         (health_percentage(app), health_color(app))
@@ -464,12 +469,12 @@ fn render_fact_box(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSumm
     };
     let lines = vec![
         Line::from(vec![
-            Span::styled("▸ ", Style::default().fg(app.theme.accent)),
-            Span::styled(first, Style::default().fg(app.theme.muted)),
+            Span::styled("▸ ", Style::default().fg(app.theme.chrome.focus)),
+            Span::styled(first, Style::default().fg(app.theme.text.muted)),
         ]),
         Line::from(Span::styled(
             format!("  {second}"),
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         )),
     ];
     frame.render_widget(Paragraph::new(lines), area);
@@ -551,7 +556,10 @@ fn fun_facts(app: &App, data: &OverviewSummary) -> Vec<String> {
 }
 
 fn render_divider(frame: &mut Frame, app: &App, area: Rect) {
-    let divider = Line::from(Span::styled("│", Style::default().fg(app.theme.border)));
+    let divider = Line::from(Span::styled(
+        "│",
+        Style::default().fg(app.theme.chrome.border),
+    ));
     frame.render_widget(Paragraph::new(vec![divider; area.height as usize]), area);
 }
 
@@ -586,7 +594,7 @@ fn section_title(app: &App, title: &'static str) -> Line<'static> {
     Line::from(Span::styled(
         title,
         Style::default()
-            .fg(app.theme.foreground)
+            .fg(app.theme.text.primary)
             .add_modifier(Modifier::BOLD),
     ))
 }
@@ -594,7 +602,7 @@ fn section_title(app: &App, title: &'static str) -> Line<'static> {
 fn separator_line(app: &App, width: usize) -> Line<'static> {
     Line::from(Span::styled(
         "-".repeat(width),
-        Style::default().fg(app.theme.muted),
+        Style::default().fg(app.theme.text.muted),
     ))
 }
 
@@ -622,13 +630,13 @@ fn left_lines(
                 app,
                 "Total Tokens",
                 format_tokens(app.data.total_tokens),
-                Color::Cyan,
+                app.theme.metrics.tokens,
             ),
             metric_line(
                 app,
                 "Peak Daily Tokens",
                 format_tokens(data.peak_daily_tokens),
-                Color::Cyan,
+                app.theme.metrics.tokens,
             ),
         ],
         vec![
@@ -636,13 +644,13 @@ fn left_lines(
                 app,
                 "Total Cost",
                 format_cost(app.data.total_cost),
-                Color::Green,
+                app.theme.metrics.cost,
             ),
             metric_line(
                 app,
                 "Peak Daily Cost",
                 format_cost(data.peak_daily_cost),
-                Color::Green,
+                app.theme.metrics.cost,
             ),
         ],
         vec![
@@ -650,7 +658,7 @@ fn left_lines(
                 app,
                 "Input Data",
                 format_bytes(app.data.health.input_data_bytes),
-                app.theme.foreground,
+                app.theme.text.primary,
             ),
             // The narrow fallback omits input health; Active Days keeps this
             // group paired with Input Data.
@@ -658,7 +666,7 @@ fn left_lines(
                 app,
                 "Active Days",
                 data.active_days.to_string(),
-                Color::Cyan,
+                app.theme.metrics.total,
             ),
         ],
         vec![
@@ -666,7 +674,7 @@ fn left_lines(
                 app,
                 "Models Eaten",
                 data.model_count.to_string(),
-                Color::Cyan,
+                app.theme.metrics.total,
             ),
             metric_line(
                 app,
@@ -680,7 +688,7 @@ fn left_lines(
                 app,
                 "Clients Used",
                 data.client_count.to_string(),
-                Color::Cyan,
+                app.theme.metrics.total,
             ),
             metric_line(
                 app,
@@ -689,7 +697,7 @@ fn left_lines(
                 data.favorite_client
                     .as_ref()
                     .map(|favorite| app.client_color(&favorite.id))
-                    .unwrap_or(app.theme.foreground),
+                    .unwrap_or(app.theme.text.primary),
             ),
         ],
     ];
@@ -721,7 +729,7 @@ fn metric_line(app: &App, label: &str, value: String, color: Color) -> Line<'sta
     Line::from(vec![
         Span::styled(
             format!("{label:<METRIC_LABEL_WIDTH$}"),
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         ),
         Span::styled(value, Style::default().fg(color)),
     ])
@@ -744,15 +752,15 @@ fn health_percentage(app: &App) -> String {
 fn health_color(app: &App) -> Color {
     let total = total_inputs(app);
     if total == 0 {
-        app.theme.muted
+        app.theme.text.muted
     } else {
         let ratio = app.data.health.clean_inputs as f64 / total as f64;
         if ratio >= 0.99 {
-            Color::Green
+            app.theme.status.success
         } else if ratio >= 0.95 {
-            Color::Yellow
+            app.theme.status.warning
         } else {
-            Color::Red
+            app.theme.status.danger
         }
     }
 }
@@ -949,7 +957,7 @@ mod tests {
         expected.push(line_text(&center_line(
             Line::from(Span::styled(
                 "no data yet",
-                Style::default().fg(app.theme.muted),
+                Style::default().fg(app.theme.text.muted),
             )),
             width as usize,
         )));
@@ -998,7 +1006,7 @@ mod tests {
         let mut app = make_app(width);
         install_favorite_client(&mut app, "codex");
         let expected = app.client_color("codex");
-        assert_ne!(expected, app.theme.foreground);
+        assert_ne!(expected, app.theme.text.primary);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
         terminal
@@ -1021,7 +1029,7 @@ mod tests {
         let mut app = make_app(width);
         install_favorite_client(&mut app, "codex");
         let expected = app.client_color("codex");
-        assert_ne!(expected, app.theme.foreground);
+        assert_ne!(expected, app.theme.text.primary);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
         terminal

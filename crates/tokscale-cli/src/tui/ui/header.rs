@@ -27,10 +27,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             let name = tab_label(app, *t, label_mode);
             let style = if *t == app.current_tab {
                 Style::default()
-                    .fg(app.theme.accent)
+                    .fg(app.theme.chrome.nav_active)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(app.theme.muted)
+                Style::default().fg(app.theme.text.muted)
             };
             Line::from(Span::styled(name, style))
         })
@@ -46,7 +46,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .select(selected)
         .highlight_style(
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.nav_active)
                 .add_modifier(Modifier::BOLD),
         )
         .padding(TAB_PADDING_LEFT, TAB_PADDING_RIGHT)
@@ -60,15 +60,15 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 fn header_block(app: &App) -> Block<'static> {
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(app.theme.chrome.border))
         .title(Span::styled(
             " tokscale ",
             Style::default()
-                .fg(app.theme.accent)
+                .fg(app.theme.chrome.heading)
                 .add_modifier(Modifier::BOLD),
         ))
         .title_alignment(Alignment::Left)
-        .style(Style::default().bg(app.theme.background));
+        .style(app.theme.panel_style());
 
     if !app.is_narrow() {
         block = block.title_top(
@@ -84,7 +84,7 @@ fn header_block(app: &App) -> Block<'static> {
 }
 
 fn tab_divider(app: &App) -> Span<'static> {
-    Span::styled(TAB_DIVIDER, Style::default().fg(app.theme.border))
+    Span::styled(TAB_DIVIDER, Style::default().fg(app.theme.chrome.border))
 }
 
 fn tab_label(_app: &App, tab: Tab, mode: TabLabelMode) -> Cow<'static, str> {
@@ -221,6 +221,7 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     use crate::tui::app::TuiConfig;
+    use crate::tui::themes::{Theme, ThemeName};
 
     fn make_app(width: u16) -> App {
         let config = TuiConfig {
@@ -305,6 +306,18 @@ mod tests {
         width: u16,
         height: u16,
     ) -> Vec<Vec<String>> {
+        let buffer = render_header_buffer(app, area, width, height);
+
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn render_header_buffer(app: &mut App, area: Rect, width: u16, height: u16) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let frame = terminal
             .draw(|frame| {
@@ -312,13 +325,7 @@ mod tests {
             })
             .unwrap();
 
-        (0..height)
-            .map(|y| {
-                (0..width)
-                    .map(|x| frame.buffer.cell((x, y)).unwrap().symbol().to_string())
-                    .collect::<Vec<_>>()
-            })
-            .collect()
+        frame.buffer.clone()
     }
 
     fn symbols_at(lines: &[Vec<String>], y: u16, x: u16, width: u16) -> String {
@@ -365,6 +372,60 @@ mod tests {
                     app.current_tab,
                     Tab::Agents,
                     "clicking divider column {column} should not switch tabs"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_theme_drives_rendered_header_semantic_roles() {
+        const MIN_RGB_DISTANCE_SQUARED: i32 = 30 * 30;
+
+        assert_eq!(ThemeName::all().len(), 12);
+
+        let mut active_tab_colors = Vec::with_capacity(ThemeName::all().len());
+        for &theme_name in ThemeName::all() {
+            let mut app = make_app(120);
+            app.theme = Theme::from_name(theme_name);
+
+            let panel = app.theme.surface.panel;
+            let heading = app.theme.chrome.heading;
+            let nav_active = app.theme.chrome.nav_active;
+            let buffer = render_header_buffer(&mut app, Rect::new(0, 0, 120, 3), 120, 4);
+
+            let panel_cell = buffer.cell((110, 1)).unwrap();
+            assert_eq!(panel_cell.symbol(), " ", "{theme_name:?} panel sample");
+            assert_eq!(panel_cell.bg, panel, "{theme_name:?} panel background");
+
+            let title_cell = buffer.cell((2, 0)).unwrap();
+            assert_eq!(title_cell.symbol(), "t", "{theme_name:?} title sample");
+            assert_eq!(title_cell.fg, heading, "{theme_name:?} title heading");
+
+            let active_tab_cell = buffer.cell((2, 1)).unwrap();
+            assert_eq!(
+                active_tab_cell.symbol(),
+                "O",
+                "{theme_name:?} active tab sample"
+            );
+            assert_eq!(active_tab_cell.fg, nav_active, "{theme_name:?} active tab");
+            active_tab_colors.push((theme_name, active_tab_cell.fg));
+        }
+
+        for (index, &(theme_name, color)) in active_tab_colors.iter().enumerate() {
+            for &(other_theme_name, other_color) in &active_tab_colors[index + 1..] {
+                let (Color::Rgb(red, green, blue), Color::Rgb(other_red, other_green, other_blue)) =
+                    (color, other_color)
+                else {
+                    panic!("rendered header theme signatures must use RGB colors");
+                };
+                let red = i32::from(red) - i32::from(other_red);
+                let green = i32::from(green) - i32::from(other_green);
+                let blue = i32::from(blue) - i32::from(other_blue);
+                let distance_squared = red * red + green * green + blue * blue;
+
+                assert!(
+                    distance_squared >= MIN_RGB_DISTANCE_SQUARED,
+                    "{theme_name:?} and {other_theme_name:?} rendered active tabs are too similar: squared RGB distance {distance_squared}"
                 );
             }
         }

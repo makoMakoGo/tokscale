@@ -3,6 +3,7 @@ mod app;
 mod cache;
 mod colors;
 pub mod config;
+mod contrast;
 pub mod data;
 mod event;
 mod export;
@@ -18,7 +19,7 @@ mod view_state;
 
 use actions::{Action, ActionSet};
 pub use app::{App, Tab, TuiConfig, TuiExit};
-use app::{KeyEventOutcome, ProjectionBackend};
+use app::{KeyEventOutcome, ProjectionBackend, StatusTone};
 pub use cache::{
     load_cache, save_tui_bundle_cache, CacheReportScope, CacheResult, LoadedTuiCache,
     TUI_DEFAULT_GROUP_BY,
@@ -117,7 +118,7 @@ fn report_background_failure(app: &mut App, diagnostic: String) {
     if !has_installed_generation {
         app.set_error(Some(diagnostic.clone()));
     }
-    app.set_local_report_status(&format!("Error: {diagnostic}"));
+    app.set_local_report_status_with_tone(&format!("Error: {diagnostic}"), StatusTone::Danger);
 }
 
 fn load_background_data(
@@ -279,7 +280,7 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
             app.last_input_digest = Some(digest);
             app.set_cache_persistence_warning(None);
             app.set_pricing_diagnostics(&pricing_diagnostics);
-            app.set_status("Data loaded");
+            app.set_local_report_status_with_tone("Data loaded", StatusTone::Success);
         }
         Ok(BackgroundLoad::Loaded {
             data,
@@ -321,7 +322,7 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
             app.last_input_digest = Some(digest);
             app.set_cache_persistence_warning(cache_persistence_warning);
             app.set_pricing_diagnostics(&pricing_diagnostics);
-            app.set_status("Data loaded");
+            app.set_local_report_status_with_tone("Data loaded", StatusTone::Success);
         }
         Ok(BackgroundLoad::Unchanged) => {
             app.mark_refresh_checked();
@@ -465,7 +466,7 @@ pub fn run(
             ProjectionBackend::Cache(cached.projection_store),
             initial_group_by,
         );
-        app.set_status("Loaded from cache");
+        app.set_local_report_status_with_tone("Loaded from cache", StatusTone::Success);
     }
     app.last_input_digest = initial_input_digest;
     let mut view_state = view_state::ViewState::default();
@@ -1326,6 +1327,13 @@ mod tests {
         assert_eq!(
             app.session_projection_status,
             session_data::SessionProjectionStatus::Ready
+        );
+        assert_eq!(app.status_message.as_deref(), Some("Data loaded"));
+        assert_eq!(app.status_message_tone(), StatusTone::Success);
+        assert_eq!(
+            app.general_status_message(),
+            None,
+            "local load success must not leak into the Usage status row"
         );
     }
 

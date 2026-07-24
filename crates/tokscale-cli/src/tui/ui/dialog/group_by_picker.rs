@@ -4,7 +4,7 @@ use std::rc::Rc;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
@@ -160,20 +160,23 @@ impl DialogContent for GroupByPickerDialog {
         let block = Block::default()
             .title(" Group By ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.accent));
+            .border_style(Style::default().fg(theme.chrome.focus));
         frame.render_widget(block, area);
 
         let rows = group_by_picker_areas(area);
 
         let current = self.selected.borrow();
         let header = Paragraph::new(Line::from(vec![
-            Span::styled("Current: ", Style::default().fg(theme.muted)),
-            Span::styled(current.to_string(), Style::default().fg(theme.accent)),
+            Span::styled("Current: ", Style::default().fg(theme.text.muted)),
+            Span::styled(
+                current.to_string(),
+                Style::default().fg(theme.chrome.current),
+            ),
         ]));
         frame.render_widget(header, rows.header);
 
         let divider = Paragraph::new("-".repeat(rows.divider.width as usize))
-            .style(Style::default().fg(theme.border));
+            .style(Style::default().fg(theme.chrome.border));
         frame.render_widget(divider, rows.divider);
 
         let list_area = rows.list;
@@ -193,20 +196,17 @@ impl DialogContent for GroupByPickerDialog {
             let desc = format!("    {}", opt.description);
 
             let base_style = if is_cursor {
-                Style::default()
-                    .bg(theme.accent)
-                    .fg(theme.background)
-                    .add_modifier(Modifier::BOLD)
+                theme.selection_style()
             } else if is_active {
-                Style::default().fg(theme.foreground)
+                Style::default().fg(theme.chrome.current)
             } else {
-                Style::default().fg(theme.muted)
+                Style::default().fg(theme.text.muted)
             };
 
             let desc_style = if is_cursor {
-                Style::default().bg(theme.accent).fg(theme.background)
+                theme.selection_style()
             } else {
-                Style::default().fg(theme.muted)
+                Style::default().fg(theme.text.muted)
             };
 
             let padding = usable.saturating_sub(left.chars().count());
@@ -226,7 +226,7 @@ impl DialogContent for GroupByPickerDialog {
 
         let hint = Paragraph::new("↑↓ navigate • Enter select • Esc close")
             .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.muted));
+            .style(Style::default().fg(theme.text.muted));
         frame.render_widget(hint, rows.hint);
     }
 
@@ -286,7 +286,7 @@ mod tests {
 
     fn render_symbols(dialog: &GroupByPickerDialog, area: Rect) -> String {
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-        let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+        let theme = Theme::from_name(ThemeName::Blue);
         let frame = terminal
             .draw(|frame| {
                 dialog.render(frame, area, &theme);

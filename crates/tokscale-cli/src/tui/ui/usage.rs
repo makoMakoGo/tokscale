@@ -21,10 +21,10 @@ pub fn render(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
+        .border_style(Style::default().fg(app.theme.chrome.border))
         .title(" Subscription Usage ")
-        .title_style(Style::default().fg(app.theme.foreground))
-        .style(Style::default().bg(app.theme.background));
+        .title_style(Style::default().fg(app.theme.chrome.heading))
+        .style(app.theme.panel_style());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -69,7 +69,7 @@ fn render_centered_message(frame: &mut Frame, app: &App, area: Rect, message: &s
         .split(area)[1];
 
     let paragraph = Paragraph::new(message)
-        .style(Style::default().fg(app.theme.muted))
+        .style(Style::default().fg(app.theme.text.muted))
         .alignment(Alignment::Center);
     frame.render_widget(paragraph, center);
 }
@@ -113,7 +113,7 @@ pub(crate) fn build_usage_lines(
         lines.push(Line::from(Span::styled(
             format!(" {} ", output.display_name()),
             Style::default()
-                .fg(theme.foreground)
+                .fg(theme.text.primary)
                 .add_modifier(Modifier::BOLD),
         )));
 
@@ -131,23 +131,23 @@ pub(crate) fn build_usage_lines(
 
             let label = Span::styled(
                 format!(" {:<14}", m.label),
-                Style::default().fg(theme.foreground),
+                Style::default().fg(theme.text.primary),
             );
             let value = Span::styled(
                 format!("{:<11}", remaining),
-                Style::default().fg(theme.foreground),
+                Style::default().fg(theme.text.primary),
             );
             let bar_span = Span::styled(
                 format!("{:<24}", bar),
                 Style::default().fg(if m.remaining_percent < 10.0 {
-                    Color::Red
+                    theme.status.danger
                 } else if m.remaining_percent < 25.0 {
-                    Color::Yellow
+                    theme.status.warning
                 } else {
-                    theme.accent
+                    theme.status.success
                 }),
             );
-            let reset_span = Span::styled(reset, Style::default().fg(theme.muted));
+            let reset_span = Span::styled(reset, Style::default().fg(theme.text.muted));
 
             lines.push(Line::from(vec![label, value, bar_span, reset_span]));
         }
@@ -155,13 +155,13 @@ pub(crate) fn build_usage_lines(
         if let Some(ref email) = output.email {
             lines.push(Line::from(Span::styled(
                 format!(" {:<12}{email}", "Account"),
-                Style::default().fg(theme.muted),
+                Style::default().fg(theme.text.muted),
             )));
         }
         if let Some(ref plan) = output.plan {
             lines.push(Line::from(Span::styled(
                 format!(" {:<12}{plan}", "Plan"),
-                Style::default().fg(theme.muted),
+                Style::default().fg(theme.text.muted),
             )));
         }
     }
@@ -172,15 +172,17 @@ pub(crate) fn build_usage_lines(
         }
         lines.push(Line::from(Span::styled(
             " Provider errors ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.status.danger)
+                .add_modifier(Modifier::BOLD),
         )));
         for error in errors {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {:<14}", error.provider),
-                    Style::default().fg(theme.foreground),
+                    Style::default().fg(theme.text.primary),
                 ),
-                Span::styled(error.message.clone(), Style::default().fg(theme.muted)),
+                Span::styled(error.message.clone(), Style::default().fg(theme.text.muted)),
             ]));
         }
     }
@@ -197,7 +199,10 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some(notice) = cache_display_notice(app) {
         lines.insert(
             0,
-            Line::from(Span::styled(notice, Style::default().fg(app.theme.muted))),
+            Line::from(Span::styled(
+                notice,
+                Style::default().fg(app.theme.text.muted),
+            )),
         );
         lines.insert(1, Line::from(""));
     }
@@ -307,7 +312,7 @@ mod tests {
 
     #[test]
     fn usage_lines_render_provider_errors_without_outputs() {
-        let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+        let theme = Theme::from_name(ThemeName::Blue);
         let errors = vec![UsageProviderError {
             provider: "MiniMax Token Plan CN".to_string(),
             message: "session expired".to_string(),
@@ -323,7 +328,7 @@ mod tests {
 
     #[test]
     fn usage_lines_render_the_normalized_display_identity() {
-        let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+        let theme = Theme::from_name(ThemeName::Blue);
         let output = UsageOutput {
             provider: "Codex".to_string(),
             account: Some(UsageAccount {

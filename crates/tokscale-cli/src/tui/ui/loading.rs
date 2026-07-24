@@ -112,11 +112,14 @@ pub(super) fn render(frame: &mut Frame, app: &App, area: Rect, message: &str) {
 fn spinner_line(app: &App, message: &str) -> Line<'static> {
     let glyph = SPINNER_FRAMES[app.spinner_frame % SPINNER_FRAMES.len()];
     Line::from(vec![
-        Span::styled(glyph.to_string(), Style::default().fg(app.theme.accent)),
+        Span::styled(
+            glyph.to_string(),
+            Style::default().fg(app.theme.status.pending),
+        ),
         Span::raw(" "),
         Span::styled(
             format!("{message}..."),
-            Style::default().fg(app.theme.muted),
+            Style::default().fg(app.theme.text.muted),
         ),
     ])
 }
@@ -132,13 +135,14 @@ fn pond_line(app: &App, row: &str) -> Line<'static> {
             ' ' => Span::raw(" "),
             '~' => Span::styled(
                 ch.to_string(),
-                Style::default().fg(app.theme.color(Color::Rgb(94, 174, 212))),
+                Style::default().fg(app.theme.visualization.artwork),
             ),
-            '>' | '<' | '}' | '{' | '°' => {
-                Span::styled(ch.to_string(), Style::default().fg(app.theme.accent))
-            }
-            '*' => Span::styled(ch.to_string(), Style::default().fg(app.theme.foreground)),
-            _ => Span::styled(ch.to_string(), Style::default().fg(app.theme.muted)),
+            '>' | '<' | '}' | '{' | '°' => Span::styled(
+                ch.to_string(),
+                Style::default().fg(app.theme.visualization.chart_highlight),
+            ),
+            '*' => Span::styled(ch.to_string(), Style::default().fg(app.theme.text.primary)),
+            _ => Span::styled(ch.to_string(), Style::default().fg(app.theme.text.muted)),
         })
         .collect::<Vec<_>>();
     Line::from(spans)
