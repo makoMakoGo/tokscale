@@ -63,12 +63,15 @@ fn sessions_content(app: &App, state: &ViewState, actions: &ActionSet) -> Footer
         sort_controls,
         sessions_summary_line(app, state, actions),
         footer::help_row_line(app, actions),
-    )
-    .with_sort_column_percent(42);
+    );
     footer::with_empty_scope(content, app, actions)
 }
 
-fn sessions_summary_line(app: &App, state: &ViewState, actions: &ActionSet) -> Line<'static> {
+fn sessions_summary_line(
+    app: &App,
+    state: &ViewState,
+    actions: &ActionSet,
+) -> footer::ResponsiveLine {
     let count = if actions.is_empty_view() {
         String::new()
     } else if state.session_detail_active() {
@@ -80,20 +83,35 @@ fn sessions_summary_line(app: &App, state: &ViewState, actions: &ActionSet) -> L
             state.session_count(app)
         )
     };
-    Line::from(vec![
-        Span::styled(
-            format_tokens(app.data.total_tokens),
-            Style::default().fg(app.theme.metrics.tokens),
-        ),
-        Span::styled(" tokens | ", Style::default().fg(app.theme.text.secondary)),
-        Span::styled(
-            format_cost(app.data.total_cost),
-            Style::default()
-                .fg(app.theme.metrics.cost)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(count, Style::default().fg(app.theme.text.secondary)),
-    ])
+    footer::ResponsiveLine::new(
+        Line::from(vec![
+            Span::styled(
+                format_tokens(app.data.total_tokens),
+                Style::default().fg(app.theme.metrics.tokens),
+            ),
+            Span::styled(" tokens | ", Style::default().fg(app.theme.text.secondary)),
+            Span::styled(
+                format_cost(app.data.total_cost),
+                Style::default()
+                    .fg(app.theme.metrics.cost)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(count, Style::default().fg(app.theme.text.secondary)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format_tokens(app.data.total_tokens),
+                Style::default().fg(app.theme.metrics.tokens),
+            ),
+            Span::styled(" | ", Style::default().fg(app.theme.text.secondary)),
+            Span::styled(
+                format_cost(app.data.total_cost),
+                Style::default()
+                    .fg(app.theme.metrics.cost)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    )
 }
 
 fn daily_content(app: &App, state: &ViewState, actions: &ActionSet) -> FooterContent {
@@ -234,8 +252,8 @@ mod tests {
 
     #[test]
     fn sessions_footer_renders_only_the_current_copy() {
-        let width = 140;
-        let height = 5;
+        let width = 180;
+        let height = footer::HEIGHT;
         let mut app = make_app(width);
         let mut state = ViewState::default();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -264,7 +282,7 @@ mod tests {
     #[test]
     fn sessions_detail_footer_uses_detail_labels_and_click_areas() {
         let width = 140;
-        let height = 5;
+        let height = footer::HEIGHT;
         let mut app = make_app(width);
         let mut state = ViewState::default();
         state.select_session_client_for_test("codex");
@@ -291,7 +309,7 @@ mod tests {
     #[test]
     fn daily_profile_omits_table_sort_controls_and_click_areas() {
         let width = 140;
-        let height = 5;
+        let height = footer::HEIGHT;
         let mut app = make_app(width);
         app.current_tab = Tab::Daily;
         let mut state = ViewState::default();
@@ -311,8 +329,8 @@ mod tests {
 
     #[test]
     fn daily_table_keeps_its_sort_controls_and_click_areas() {
-        let width = 140;
-        let height = 5;
+        let width = 180;
+        let height = footer::HEIGHT;
         let mut app = make_app(width);
         app.current_tab = Tab::Daily;
         let mut state = ViewState::default();
@@ -335,9 +353,42 @@ mod tests {
     }
 
     #[test]
+    fn constrained_footer_help_fits_complete_items() {
+        for width in [40, 100] {
+            let height = footer::HEIGHT;
+            let mut app = make_app(width);
+            app.current_tab = Tab::Weekly;
+            let mut state = ViewState::default();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+            terminal
+                .draw(|frame| render_footer(frame, &mut app, &mut state, frame.area()))
+                .unwrap();
+
+            let screen = screen_text(&terminal);
+            let help_row = screen
+                .lines()
+                .find(|row| row.contains("d/t/c"))
+                .expect("compact help row");
+            let help = help_row.trim().trim_matches('│').trim();
+
+            assert!(help.contains("[R]"), "width {width}:\n{screen}");
+            assert!(help.ends_with('q'), "width {width}:\n{screen}");
+            assert!(!help.contains("[d/t/c:sort]"), "width {width}:\n{screen}");
+            assert!(help_row.starts_with("│ ") && help_row.ends_with(" │"));
+            if width == 40 {
+                assert!(help.ends_with("…·q"), "width {width}:\n{screen}");
+            } else {
+                assert!(help.contains("[r]"), "width {width}:\n{screen}");
+                assert!(!help.contains('…'), "width {width}:\n{screen}");
+            }
+        }
+    }
+
+    #[test]
     fn hidden_narrow_sort_controls_do_not_leave_click_areas() {
-        let width = 50;
-        let height = 5;
+        let width = 36;
+        let height = footer::HEIGHT;
         let mut app = make_app(width);
         let mut state = ViewState::default();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -346,14 +397,23 @@ mod tests {
             .draw(|frame| render_footer(frame, &mut app, &mut state, frame.area()))
             .unwrap();
 
-        assert!(!screen_text(&terminal).contains("Sort:"));
+        let screen = screen_text(&terminal);
+        let help_row = screen
+            .lines()
+            .find(|row| row.contains("d/t/c"))
+            .expect("fitted help row");
+        let help = help_row.trim().trim_matches('│').trim();
+
+        assert!(!screen.contains("Sort:"));
         assert!(sort_clicks(&app).is_empty());
+        assert!(help.ends_with("…·q"), "{screen}");
+        assert!(help_row.ends_with(" │"), "{screen}");
     }
 
     #[test]
     fn empty_report_footer_shows_scope_without_noop_controls_or_clicks() {
         let width = 140;
-        let height = 5;
+        let height = footer::HEIGHT;
         let mut app = make_app(width);
         app.current_tab = Tab::Models;
         assert!(app.data.models.is_empty());

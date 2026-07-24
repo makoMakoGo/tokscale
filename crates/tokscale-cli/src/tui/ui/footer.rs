@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use super::widgets::{format_cost, format_tokens, truncate_display_width};
@@ -9,6 +9,8 @@ use crate::tui::actions::{Action, ActionSet};
 use crate::tui::app::{App, ClickAction, SortField, StatusTone, Tab};
 use crate::tui::data::{build_period_usage, PeriodKind};
 use crate::tui::presentation::SubscriptionPresentation;
+
+pub(super) const HEIGHT: u16 = 7;
 
 #[derive(Clone, Copy)]
 pub(super) struct SortControl {
@@ -22,34 +24,183 @@ impl SortControl {
     }
 }
 
+pub(super) struct ResponsiveLine {
+    full: Line<'static>,
+    compact: Line<'static>,
+}
+
+impl ResponsiveLine {
+    pub(super) fn new(full: Line<'static>, compact: Line<'static>) -> Self {
+        Self { full, compact }
+    }
+
+    fn for_width(&self, width: usize) -> Line<'static> {
+        if self.full.width() <= width {
+            self.full.clone()
+        } else {
+            self.compact.clone()
+        }
+    }
+}
+
+impl From<Line<'static>> for ResponsiveLine {
+    fn from(line: Line<'static>) -> Self {
+        Self {
+            compact: line.clone(),
+            full: line,
+        }
+    }
+}
+
+struct HelpItem {
+    full: String,
+    compact: String,
+    style: Style,
+}
+
+impl HelpItem {
+    fn new(full: impl Into<String>, compact: impl Into<String>, style: Style) -> Self {
+        Self {
+            full: full.into(),
+            compact: compact.into(),
+            style,
+        }
+    }
+}
+
+pub(super) struct HelpLine {
+    items: Vec<HelpItem>,
+    full_separator: &'static str,
+    separator_style: Style,
+}
+
+impl HelpLine {
+    fn new(items: Vec<HelpItem>, full_separator: &'static str, separator_style: Style) -> Self {
+        Self {
+            items,
+            full_separator,
+            separator_style,
+        }
+    }
+
+    fn for_width(&self, width: usize) -> Line<'static> {
+        let full = self.line(false);
+        if full.width() <= width {
+            return full;
+        }
+
+        let compact = self.line(true);
+        if compact.width() <= width {
+            return compact;
+        }
+
+        self.fitted_compact_line(width)
+    }
+
+    fn line(&self, compact: bool) -> Line<'static> {
+        let separator = if compact { "·" } else { self.full_separator };
+        let mut spans = Vec::new();
+        for item in &self.items {
+            push_help_span(
+                &mut spans,
+                if compact { &item.compact } else { &item.full },
+                item.style,
+                separator,
+                self.separator_style,
+            );
+        }
+        Line::from(spans)
+    }
+
+    fn fitted_compact_line(&self, width: usize) -> Line<'static> {
+        // Keep the final action visible and elide only at item boundaries.
+        let Some(last) = self.items.last() else {
+            return Line::default();
+        };
+        if self.items.len() == 1 || width < "…·".width() + last.compact.width() {
+            return Line::from(Span::styled(
+                truncate_display_width(&last.compact, width),
+                last.style,
+            ));
+        }
+
+        let suffix_width = "·…·".width() + last.compact.width();
+        let separator_width = "·".width();
+        let mut prefix_width = 0;
+        let mut kept = Vec::new();
+        for item in &self.items[..self.items.len() - 1] {
+            let item_width = item.compact.width();
+            let next_width =
+                prefix_width + separator_width * usize::from(!kept.is_empty()) + item_width;
+            if next_width + suffix_width > width {
+                break;
+            }
+            kept.push(item);
+            prefix_width = next_width;
+        }
+
+        let mut spans = Vec::new();
+        for item in kept {
+            push_help_span(
+                &mut spans,
+                &item.compact,
+                item.style,
+                "·",
+                self.separator_style,
+            );
+        }
+        push_help_span(
+            &mut spans,
+            "…",
+            self.separator_style,
+            "·",
+            self.separator_style,
+        );
+        push_help_span(
+            &mut spans,
+            &last.compact,
+            last.style,
+            "·",
+            self.separator_style,
+        );
+        Line::from(spans)
+    }
+}
+
+fn push_help_span(
+    spans: &mut Vec<Span<'static>>,
+    label: &str,
+    style: Style,
+    separator: &str,
+    separator_style: Style,
+) {
+    if !spans.is_empty() {
+        spans.push(Span::styled(separator.to_string(), separator_style));
+    }
+    spans.push(Span::styled(label.to_string(), style));
+}
+
 pub(super) struct FooterContent {
     sort_controls: Vec<SortControl>,
-    sort_column_percent: u16,
     leading: Option<String>,
-    summary: Line<'static>,
-    help: Line<'static>,
+    summary: ResponsiveLine,
+    help: HelpLine,
     status: Option<Line<'static>>,
 }
 
 impl FooterContent {
     pub(super) fn new(
         sort_controls: Vec<SortControl>,
-        summary: Line<'static>,
-        help: Line<'static>,
+        summary: impl Into<ResponsiveLine>,
+        help: HelpLine,
     ) -> Self {
         Self {
             sort_controls,
-            sort_column_percent: 40,
             leading: None,
-            summary,
+            summary: summary.into(),
             help,
             status: None,
         }
-    }
-
-    pub(super) fn with_sort_column_percent(mut self, percent: u16) -> Self {
-        self.sort_column_percent = percent.min(100);
-        self
     }
 
     pub(super) fn with_leading(mut self, leading: String) -> Self {
@@ -121,6 +272,7 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect, content: Foot
 fn render_shell(frame: &mut Frame, app: &App, area: Rect) -> Rect {
     let block = Block::default()
         .borders(Borders::ALL)
+        .padding(Padding::uniform(1))
         .border_style(Style::default().fg(app.theme.chrome.border))
         .style(app.theme.panel_style());
 
@@ -150,24 +302,15 @@ fn render_rows(frame: &mut Frame, app: &mut App, inner: Rect, content: FooterCon
 
     let FooterContent {
         sort_controls,
-        sort_column_percent,
         leading,
         summary,
         help,
         status,
     } = content;
-    render_main_row(
-        frame,
-        app,
-        rows[0],
-        &sort_controls,
-        sort_column_percent,
-        leading,
-        summary,
-    );
+    render_main_row(frame, app, rows[0], &sort_controls, leading, summary);
 
     if let Some(area) = rows.get(1).copied() {
-        frame.render_widget(Paragraph::new(help), area);
+        frame.render_widget(Paragraph::new(help.for_width(area.width as usize)), area);
     }
 
     if let Some(area) = rows.get(2).copied() {
@@ -338,71 +481,105 @@ fn render_main_row(
     app: &mut App,
     area: Rect,
     sort_controls: &[SortControl],
-    sort_column_percent: u16,
     leading: Option<String>,
-    summary: Line<'static>,
+    summary: ResponsiveLine,
 ) {
-    let is_very_narrow = app.is_very_narrow();
+    let left_width = if sort_controls.is_empty() {
+        leading.as_deref().map_or(0, UnicodeWidthStr::width)
+    } else {
+        sort_controls_width(sort_controls)
+    };
+    let summary_width = (area.width as usize).saturating_sub(left_width.saturating_add(1));
+    let split_summary = summary.for_width(summary_width);
+    let split_fits =
+        left_width > 0 && left_width + 1 + split_summary.width() <= area.width as usize;
 
-    // Split into an optional leading/sort region and the summary.
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(sort_column_percent),
-            Constraint::Percentage(100u16.saturating_sub(sort_column_percent)),
-        ])
-        .split(area);
-
-    // The leading region is sortable only when the current ActionSet allows it.
-    if !is_very_narrow && !sort_controls.is_empty() {
-        let mut spans: Vec<Span> = Vec::new();
-        spans.push(Span::styled(
-            "Sort: ",
-            Style::default().fg(app.theme.text.secondary),
-        ));
-        let mut x_offset = chunks[0].x.saturating_add(6);
-
-        for control in sort_controls {
-            let is_active = app.sort_field == control.field;
-            let style = if is_active {
-                Style::default()
-                    .fg(app.theme.chrome.current)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(app.theme.text.secondary)
-            };
-
-            spans.push(Span::styled(control.label, style));
-            spans.push(Span::raw(" "));
-
-            let label_width = control.label.width() as u16;
-            let visible_width = label_width.min(chunks[0].right().saturating_sub(x_offset));
-            if visible_width > 0 {
-                app.add_click_area(
-                    Rect::new(x_offset, chunks[0].y, visible_width, 1),
-                    ClickAction::Sort(control.field),
-                );
-            }
-            x_offset = x_offset.saturating_add(label_width).saturating_add(1);
-        }
-
-        frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
-    } else if let Some(leading) = leading {
-        frame.render_widget(
-            Paragraph::new(truncate_display_width(&leading, chunks[0].width as usize))
-                .style(Style::default().fg(app.theme.text.secondary)),
-            chunks[0],
+    if split_fits {
+        let left_area = Rect::new(area.x, area.y, left_width as u16, 1);
+        let summary_area = Rect::new(
+            left_area.right().saturating_add(1),
+            area.y,
+            area.width.saturating_sub(left_area.width + 1),
+            1,
         );
+        if sort_controls.is_empty() {
+            frame.render_widget(
+                Paragraph::new(leading.expect("measured leading footer text"))
+                    .style(Style::default().fg(app.theme.text.secondary)),
+                left_area,
+            );
+        } else {
+            render_sort_controls(frame, app, left_area, sort_controls);
+        }
+        frame.render_widget(
+            Paragraph::new(split_summary).alignment(Alignment::Right),
+            summary_area,
+        );
+        return;
+    }
+
+    if let Some(leading) = leading {
+        frame.render_widget(
+            Paragraph::new(truncate_display_width(&leading, area.width as usize))
+                .style(Style::default().fg(app.theme.text.secondary)),
+            area,
+        );
+        return;
     }
 
     frame.render_widget(
-        Paragraph::new(summary).alignment(Alignment::Right),
-        chunks[1],
+        Paragraph::new(summary.for_width(area.width as usize)).alignment(Alignment::Right),
+        area,
     );
 }
 
-pub(super) fn summary_row_line(app: &App, actions: &ActionSet) -> Line<'static> {
-    let is_very_narrow = app.is_very_narrow();
+fn sort_controls_width(sort_controls: &[SortControl]) -> usize {
+    "Sort: ".width()
+        + sort_controls
+            .iter()
+            .map(|control| control.label.width())
+            .sum::<usize>()
+        + sort_controls.len().saturating_sub(1)
+}
+
+fn render_sort_controls(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    sort_controls: &[SortControl],
+) {
+    let mut spans = vec![Span::styled(
+        "Sort: ",
+        Style::default().fg(app.theme.text.secondary),
+    )];
+    let mut x_offset = area.x.saturating_add("Sort: ".width() as u16);
+
+    for (index, control) in sort_controls.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(" "));
+            x_offset = x_offset.saturating_add(1);
+        }
+        let style = if app.sort_field == control.field {
+            Style::default()
+                .fg(app.theme.chrome.current)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.text.secondary)
+        };
+        spans.push(Span::styled(control.label, style));
+
+        let label_width = control.label.width() as u16;
+        app.add_click_area(
+            Rect::new(x_offset, area.y, label_width, 1),
+            ClickAction::Sort(control.field),
+        );
+        x_offset = x_offset.saturating_add(label_width);
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+pub(super) fn summary_row_line(app: &App, actions: &ActionSet) -> ResponsiveLine {
     let mut right_spans: Vec<Span> = Vec::new();
 
     // Total tokens
@@ -411,7 +588,7 @@ pub(super) fn summary_row_line(app: &App, actions: &ActionSet) -> Line<'static> 
         format_tokens(total_tokens),
         Style::default().fg(app.theme.metrics.tokens),
     ));
-    if !is_very_narrow && !actions.is_empty_view() {
+    if !actions.is_empty_view() {
         right_spans.push(Span::styled(
             " tokens",
             Style::default().fg(app.theme.text.secondary),
@@ -431,16 +608,27 @@ pub(super) fn summary_row_line(app: &App, actions: &ActionSet) -> Line<'static> 
             .add_modifier(Modifier::BOLD),
     ));
 
-    // Current list count
-    if !is_very_narrow {
-        let count_label = current_count_label(app);
-        right_spans.push(Span::styled(
-            count_label,
-            Style::default().fg(app.theme.text.secondary),
-        ));
-    }
+    right_spans.push(Span::styled(
+        current_count_label(app),
+        Style::default().fg(app.theme.text.secondary),
+    ));
 
-    Line::from(right_spans)
+    ResponsiveLine::new(
+        Line::from(right_spans),
+        Line::from(vec![
+            Span::styled(
+                format_tokens(total_tokens),
+                Style::default().fg(app.theme.metrics.tokens),
+            ),
+            Span::styled(" | ", Style::default().fg(app.theme.text.secondary)),
+            Span::styled(
+                format_cost(app.data.total_cost),
+                Style::default()
+                    .fg(app.theme.metrics.cost)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    )
 }
 
 fn subscription_summary_line(app: &App, presentation: SubscriptionPresentation) -> Line<'static> {
@@ -470,24 +658,12 @@ fn subscription_summary_line(app: &App, presentation: SubscriptionPresentation) 
             ))
         }
         SubscriptionPresentation::Empty { .. } | SubscriptionPresentation::Results { .. } => {
-            let providers = app.subscription_usage.len();
-            let limits = app
-                .subscription_usage
-                .iter()
-                .map(|output| output.metrics.len())
-                .sum();
+            let subscriptions = app.subscription_usage.len();
             let errors = app.subscription_usage_errors.len();
-            let mut spans = vec![
-                Span::styled(
-                    count_label(providers, "provider", "providers"),
-                    Style::default().fg(app.theme.metrics.total),
-                ),
-                Span::styled(" · ", Style::default().fg(app.theme.text.secondary)),
-                Span::styled(
-                    count_label(limits, "limit", "limits"),
-                    Style::default().fg(app.theme.text.primary),
-                ),
-            ];
+            let mut spans = vec![Span::styled(
+                count_label(subscriptions, "subscription", "subscriptions"),
+                Style::default().fg(app.theme.metrics.total),
+            )];
             if errors > 0 {
                 spans.push(Span::styled(
                     " · ",
@@ -556,69 +732,60 @@ fn current_count_label(app: &App) -> String {
     }
 }
 
-pub(super) fn help_row_line(app: &App, actions: &ActionSet) -> Line<'static> {
+pub(super) fn help_row_line(app: &App, actions: &ActionSet) -> HelpLine {
     action_help_row_line(app, actions, None)
 }
 
-fn subscription_help_line(app: &App, actions: &ActionSet) -> Line<'static> {
-    let narrow = app.is_very_narrow();
-    let separator = if narrow { "·" } else { " · " };
-    let mut items = Vec::<(String, Style)>::new();
+fn subscription_help_line(app: &App, actions: &ActionSet) -> HelpLine {
+    let mut items = Vec::new();
 
     if actions.contains(Action::RefreshSubscription) {
-        items.push((
-            (if narrow { "[u]" } else { "[u:refresh]" }).to_string(),
+        items.push(HelpItem::new(
+            "[u:refresh]",
+            "[u]",
             Style::default().fg(app.theme.chrome.focus),
         ));
     }
     if actions.contains(Action::Scroll) {
-        items.push((
-            (if narrow { "↑↓" } else { "↑↓ scroll" }).to_string(),
+        items.push(HelpItem::new(
+            "↑↓ scroll",
+            "↑↓",
             Style::default().fg(app.theme.text.secondary),
         ));
     }
     if actions.contains(Action::PreviousTab) || actions.contains(Action::NextTab) {
-        items.push((
-            (if narrow { "←→" } else { "←→/tab view" }).to_string(),
+        items.push(HelpItem::new(
+            "←→/tab view",
+            "←→",
             Style::default().fg(app.theme.text.secondary),
         ));
     }
     if actions.contains(Action::Theme) {
-        items.push((
-            (if narrow { "[p]" } else { "[p:theme]" }).to_string(),
+        items.push(HelpItem::new(
+            "[p:theme]",
+            "[p]",
             Style::default().fg(app.theme.chrome.focus),
         ));
     }
     if actions.contains(Action::Quit) {
-        items.push((
-            "q".to_string(),
+        items.push(HelpItem::new(
+            "q",
+            "q",
             Style::default().fg(app.theme.text.secondary),
         ));
     }
 
-    let mut spans = Vec::new();
-    for (label, style) in items {
-        if !spans.is_empty() {
-            spans.push(Span::styled(
-                separator.to_string(),
-                Style::default().fg(app.theme.text.secondary),
-            ));
-        }
-        spans.push(Span::styled(label, style));
-    }
-    Line::from(spans)
+    HelpLine::new(items, " · ", Style::default().fg(app.theme.text.secondary))
 }
 
 pub(super) fn action_help_row_line(
     app: &App,
     actions: &ActionSet,
     toggle_target: Option<&str>,
-) -> Line<'static> {
-    let is_very_narrow = app.is_very_narrow();
+) -> HelpLine {
     debug_assert_ne!(app.current_tab, Tab::Usage);
 
-    let separator = if is_very_narrow { "·" } else { " • " };
-    let mut spans = Vec::new();
+    let mut items = Vec::new();
     let mut emitted_navigation = false;
     let mut emitted_sort = false;
 
@@ -632,118 +799,64 @@ pub(super) fn action_help_row_line(
             continue;
         }
 
-        let label = match action {
+        let (full, compact) = match action {
             Action::PreviousTab | Action::NextTab => {
                 if emitted_navigation {
                     continue;
                 }
                 emitted_navigation = true;
-                if is_very_narrow {
-                    "←→".to_string()
-                } else {
-                    "←→/tab view".to_string()
-                }
+                ("←→/tab view".to_string(), "←→".to_string())
             }
             Action::Sort(_) => {
                 if emitted_sort {
                     continue;
                 }
                 emitted_sort = true;
-                if is_very_narrow {
-                    "d/t/c".to_string()
-                } else {
-                    "[d/t/c:sort]".to_string()
-                }
+                ("[d/t/c:sort]".to_string(), "d/t/c".to_string())
             }
-            Action::Scroll => {
-                if is_very_narrow {
-                    "↑↓".to_string()
+            Action::Scroll => ("↑↓ scroll".to_string(), "↑↓".to_string()),
+            Action::OpenDetails => (
+                if app.current_tab == Tab::Sessions {
+                    "[enter:sessions]"
                 } else {
-                    "↑↓ scroll".to_string()
+                    "[enter:details]"
                 }
-            }
-            Action::OpenDetails => {
-                if is_very_narrow {
-                    "↵".to_string()
-                } else if app.current_tab == Tab::Sessions {
-                    "[enter:sessions]".to_string()
-                } else {
-                    "[enter:details]".to_string()
-                }
-            }
-            Action::Back => {
-                if is_very_narrow {
-                    "esc".to_string()
-                } else {
-                    "[esc:back]".to_string()
-                }
-            }
-            Action::JumpToday => {
-                if is_very_narrow {
-                    "j".to_string()
-                } else {
-                    "[j:today]".to_string()
-                }
-            }
-            Action::ToggleView => toggle_action_label(app, toggle_target, is_very_narrow),
-            Action::Clients => {
-                if is_very_narrow {
-                    "[s]".to_string()
-                } else {
-                    "[s:clients]".to_string()
-                }
-            }
-            Action::GroupBy => {
-                if is_very_narrow {
-                    "[g]".to_string()
-                } else {
-                    format!("[g:{}]", app.group_by.borrow())
-                }
-            }
-            Action::Theme => {
-                if is_very_narrow {
-                    "[p]".to_string()
-                } else {
-                    format!("[p:{}]", app.theme.name.as_str())
-                }
-            }
-            Action::ToggleAutoRefresh => {
-                if is_very_narrow {
-                    "[R]".to_string()
-                } else if app.auto_refresh {
+                .to_string(),
+                "↵".to_string(),
+            ),
+            Action::Back => ("[esc:back]".to_string(), "esc".to_string()),
+            Action::JumpToday => ("[j:today]".to_string(), "j".to_string()),
+            Action::ToggleView => toggle_action_labels(app, toggle_target),
+            Action::Clients => ("[s:clients]".to_string(), "[s]".to_string()),
+            Action::GroupBy => (format!("[g:{}]", app.group_by.borrow()), "[g]".to_string()),
+            Action::Theme => (
+                format!("[p:{}]", app.theme.name.as_str()),
+                "[p]".to_string(),
+            ),
+            Action::ToggleAutoRefresh => (
+                if app.auto_refresh {
                     format!("[R:local auto {}s]", app.auto_refresh_interval.as_secs())
                 } else {
                     "[R:local auto off]".to_string()
-                }
-            }
-            Action::RefreshLocal => {
-                if is_very_narrow {
-                    "[r]".to_string()
-                } else {
-                    "[r:rescan]".to_string()
-                }
-            }
+                },
+                "[R]".to_string(),
+            ),
+            Action::RefreshLocal => ("[r:rescan]".to_string(), "[r]".to_string()),
             Action::IncreaseRefreshInterval
             | Action::DecreaseRefreshInterval
             | Action::RefreshSubscription
             | Action::Copy => continue,
-            Action::Export => "e".to_string(),
-            Action::Quit => "q".to_string(),
+            Action::Export => ("e".to_string(), "e".to_string()),
+            Action::Quit => ("q".to_string(), "q".to_string()),
         };
 
-        if !spans.is_empty() {
-            spans.push(Span::styled(
-                separator.to_string(),
-                Style::default().fg(app.theme.text.secondary),
-            ));
-        }
-        spans.push(Span::styled(label, action_style(app, action)));
+        items.push(HelpItem::new(full, compact, action_style(app, action)));
     }
 
-    Line::from(spans)
+    HelpLine::new(items, " • ", Style::default().fg(app.theme.text.secondary))
 }
 
-fn toggle_action_label(app: &App, target: Option<&str>, narrow: bool) -> String {
+fn toggle_action_labels(app: &App, target: Option<&str>) -> (String, String) {
     let (key, target) = match app.current_tab {
         Tab::Overview => (
             'h',
@@ -762,11 +875,7 @@ fn toggle_action_label(app: &App, target: Option<&str>, narrow: bool) -> String 
         ),
         _ => ('v', target.unwrap_or("view")),
     };
-    if narrow {
-        key.to_string()
-    } else {
-        format!("[{key}:{target}]")
-    }
+    (format!("[{key}:{target}]"), key.to_string())
 }
 
 fn action_style(app: &App, action: Action) -> Style {
@@ -1005,12 +1114,13 @@ mod tests {
         let state = crate::tui::view_state::ViewState::default();
         let presentation = crate::tui::presentation::Presentation::for_view(app, &state);
         let actions = ActionSet::for_view(app, &state, presentation);
-        match presentation {
+        let help = match presentation {
             crate::tui::presentation::Presentation::Subscription(_) => {
-                line_text(subscription_help_line(app, &actions))
+                subscription_help_line(app, &actions)
             }
-            _ => line_text(help_row_line(app, &actions)),
-        }
+            _ => help_row_line(app, &actions),
+        };
+        line_text(help.for_width(app.terminal_width.saturating_sub(4) as usize))
     }
 
     #[test]
@@ -1151,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_usage_help_row_hides_u_without_enabled_providers() {
+    fn fitting_usage_help_keeps_full_labels_at_50_columns() {
         let mut app = make_app_on(Tab::Overview);
         app.current_tab = Tab::Usage;
         app.terminal_width = 50;
@@ -1160,8 +1270,8 @@ mod tests {
         let text = help_text(&app);
 
         assert!(!text.contains("[u]"));
-        assert!(text.contains("←→"));
-        assert!(text.contains("[p]"));
+        assert!(text.contains("←→/tab view"));
+        assert!(text.contains("[p:theme]"));
         assert!(text.ends_with('q'));
         assert!(!text.contains("local"));
     }
@@ -1170,7 +1280,7 @@ mod tests {
     fn group_by_hint_only_shows_on_group_keyed_tabs() {
         for tab in [Tab::Models, Tab::Daily, Tab::Monthly, Tab::Weekly] {
             let text = help_text(&nonempty_installed_app_on(tab));
-            assert!(text.contains("[g:"), "expected [g: hint on {tab:?}");
+            assert!(text.contains("[g"), "expected group hint on {tab:?}");
         }
         for tab in [
             Tab::Overview,
@@ -1181,7 +1291,7 @@ mod tests {
             Tab::Agents,
         ] {
             let text = help_text(&nonempty_installed_app_on(tab));
-            assert!(!text.contains("[g:"), "unexpected [g: hint on {tab:?}");
+            assert!(!text.contains("[g"), "unexpected group hint on {tab:?}");
         }
     }
 
