@@ -199,91 +199,47 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
         Style::default().fg(app.theme.text.secondary),
     )));
     let portrait = portraits::lines(app, family).map(|line| center_line(line, width));
-    let slogan = Some(center_line(
-        Line::from(Span::styled(
-            portraits::slogan(family),
-            Style::default().fg(color),
-        )),
+    let slogan = Some(centered_identity_slogan_line(
+        portraits::slogan(family),
+        color,
         width,
     ));
-    let family_stats = Some(center_line(
-        Line::from(vec![
-            Span::styled(
-                portraits::display_name(family),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(
-                    "  {} · {:.1}% · {}",
-                    format_tokens(favorite.tokens),
-                    share_percent(favorite.tokens, total),
-                    format_cost(favorite.cost),
-                ),
-                Style::default().fg(app.theme.text.secondary),
-            ),
-        ]),
+    let family_stats = Some(centered_identity_usage_line(
+        app,
+        portraits::display_name(family).to_string(),
+        favorite.tokens,
+        favorite.cost,
+        total,
+        color,
         width,
     ));
 
     let model_stats = data.favorite_model.as_ref().map(|favorite| {
-        center_line(
-            Line::from(vec![
-                Span::styled(
-                    favorite.id.clone(),
-                    Style::default()
-                        .fg(app.model_color(&favorite.id))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(
-                        "  {} · {:.1}% · {}",
-                        format_tokens(favorite.tokens),
-                        share_percent(favorite.tokens, total),
-                        format_cost(favorite.cost),
-                    ),
-                    Style::default().fg(app.theme.text.secondary),
-                ),
-            ]),
+        centered_identity_usage_line(
+            app,
+            favorite.id.clone(),
+            favorite.tokens,
+            favorite.cost,
+            total,
+            app.model_color(&favorite.id),
             width,
         )
     });
 
-    let mut client_block = Vec::new();
-    if let Some(favorite) = data.favorite_client.as_ref() {
-        let display = get_client_display_name(&favorite.id).to_string();
-        client_block.push(Line::default());
-        client_block.push(Line::from(Span::styled(
-            "Favorite Client",
-            Style::default().fg(app.theme.text.secondary),
-        )));
-        client_block.push(center_line(
-            Line::from(Span::styled(
-                client_slogan(&favorite.id),
-                Style::default().fg(app.theme.visualization.artwork),
-            )),
-            width,
-        ));
-        client_block.push(center_line(
-            Line::from(vec![
-                Span::styled(
-                    display,
-                    Style::default()
-                        .fg(app.client_color(&favorite.id))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(
-                        "  {} · {:.1}% · {}",
-                        format_tokens(favorite.tokens),
-                        share_percent(favorite.tokens, total),
-                        format_cost(favorite.cost),
-                    ),
-                    Style::default().fg(app.theme.text.secondary),
-                ),
-            ]),
-            width,
-        ));
-    }
+    let client_block = data
+        .favorite_client
+        .as_ref()
+        .map(|favorite| {
+            favorite_client_block(
+                app,
+                &favorite.id,
+                favorite.tokens,
+                favorite.cost,
+                total,
+                width,
+            )
+        })
+        .unwrap_or_default();
 
     let height = area.height as usize;
     let has_favorite_label = favorite_label.is_some();
@@ -339,6 +295,74 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
     // No wrap: the center padding on the portrait block is meaningful and
     // `Wrap { trim: true }` would strip it.
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn favorite_client_block(
+    app: &App,
+    client_id: &str,
+    tokens: u64,
+    cost: f64,
+    total: u64,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let color = app.client_color(client_id);
+    vec![
+        Line::default(),
+        Line::from(Span::styled(
+            "Favorite Client",
+            Style::default().fg(app.theme.text.secondary),
+        )),
+        centered_identity_slogan_line(client_slogan(client_id), color, width),
+        centered_identity_usage_line(
+            app,
+            get_client_display_name(client_id),
+            tokens,
+            cost,
+            total,
+            color,
+            width,
+        ),
+    ]
+}
+
+fn centered_identity_slogan_line(
+    slogan: &'static str,
+    color: Color,
+    width: usize,
+) -> Line<'static> {
+    center_line(
+        Line::from(Span::styled(slogan, Style::default().fg(color))),
+        width,
+    )
+}
+
+fn centered_identity_usage_line(
+    app: &App,
+    name: String,
+    tokens: u64,
+    cost: f64,
+    total: u64,
+    color: Color,
+    width: usize,
+) -> Line<'static> {
+    center_line(
+        Line::from(vec![
+            Span::styled(
+                name,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "  {} · {:.1}% · {}",
+                    format_tokens(tokens),
+                    share_percent(tokens, total),
+                    format_cost(cost),
+                ),
+                Style::default().fg(app.theme.text.secondary),
+            ),
+        ]),
+        width,
+    )
 }
 
 fn append_favorite_client_block(
@@ -854,13 +878,32 @@ mod tests {
     }
 
     #[test]
-    fn favorite_model_uses_its_own_family_brand_color() {
-        let app = make_app(120);
+    fn favorite_model_family_identity_uses_one_brand_color() {
+        let width = 60;
+        let height = 30;
+        let mut app = make_app(width);
+        install_favorite_client(&mut app, "omp");
+        let expected = portraits::family_color(&app, ModelFamily::Gpt);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
-        assert_eq!(
-            app.model_color("claude-opus-4.6"),
-            portraits::family_color(&app, ModelFamily::Claude)
-        );
+        terminal
+            .draw(|frame| {
+                render_fun_things(frame, &app, frame.area(), app.overview_summary());
+            })
+            .unwrap();
+
+        for (role, row_text, cell_text) in [
+            ("portrait", "¬", "¬"),
+            ("slogan", "最", "最"),
+            ("family name", "gpt  10K", "gpt"),
+        ] {
+            let (x, y) = buffer_text_cell(&terminal, row_text, cell_text);
+            assert_eq!(
+                terminal.backend().buffer().cell((x, y)).unwrap().fg,
+                expected,
+                "{role} must use the favorite model family color"
+            );
+        }
     }
 
     fn buffer_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {
@@ -887,7 +930,12 @@ mod tests {
             .iter()
             .enumerate()
             .find(|(_, row)| row.contains(row_text))
-            .expect("expected row should render");
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected row {row_text:?} should render:\n{}",
+                    lines.join("\n")
+                )
+            });
         let x = row
             .find(cell_text)
             .expect("expected cell text should render");
@@ -1000,13 +1048,14 @@ mod tests {
     }
 
     #[test]
-    fn wide_favorite_client_uses_app_client_color() {
+    fn favorite_client_slogan_and_name_share_client_color() {
         let width = 60;
         let height = 30;
         let mut app = make_app(width);
-        install_favorite_client(&mut app, "codex");
-        let expected = app.client_color("codex");
+        install_favorite_client(&mut app, "omp");
+        let expected = app.client_color("omp");
         assert_ne!(expected, app.theme.text.primary);
+        assert_ne!(expected, app.theme.visualization.artwork);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
         terminal
@@ -1015,11 +1064,15 @@ mod tests {
             })
             .unwrap();
 
-        let (x, y) = buffer_text_cell(&terminal, "Codex", "Codex");
-        assert_eq!(
-            terminal.backend().buffer().cell((x, y)).unwrap().fg,
-            expected
-        );
+        for (role, row_text, cell_text) in [("slogan", "顶", "顶"), ("client name", "OMP", "OMP")]
+        {
+            let (x, y) = buffer_text_cell(&terminal, row_text, cell_text);
+            assert_eq!(
+                terminal.backend().buffer().cell((x, y)).unwrap().fg,
+                expected,
+                "{role} must use the favorite client color"
+            );
+        }
     }
 
     #[test]
