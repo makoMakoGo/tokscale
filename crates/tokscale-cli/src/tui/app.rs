@@ -1007,6 +1007,10 @@ impl App {
         self.theme.color(super::colors::model_color(model_id))
     }
 
+    pub fn client_color(&self, client_id: &str) -> Color {
+        super::colors::resolve_client_color(client_id, &self.theme)
+    }
+
     pub fn set_error(&mut self, error: Option<String>) {
         self.data.error = error;
     }

@@ -222,6 +222,85 @@ pub fn build_contribution_graph_for_today(
     )
 }
 
+const CONTRIBUTION_GRADE_INTENSITIES: [f64; 5] = [0.0, 0.125, 0.375, 0.625, 0.875];
+
+#[derive(Debug, Clone, Copy)]
+struct ContributionLogMad {
+    center: f64,
+    scale: Option<f64>,
+    max_tokens: u64,
+}
+
+impl ContributionLogMad {
+    fn from_tokens(tokens: &[u64]) -> Option<Self> {
+        let max_tokens = tokens.iter().copied().max()?;
+        let mut logs: Vec<f64> = tokens
+            .iter()
+            .copied()
+            .filter(|tokens| *tokens > 0)
+            .map(|tokens| (tokens as f64).ln())
+            .collect();
+        if logs.is_empty() {
+            return None;
+        }
+        logs.sort_unstable_by(f64::total_cmp);
+        let center = median_of_sorted(&logs);
+
+        let mut deviations: Vec<f64> = logs.iter().map(|value| (value - center).abs()).collect();
+        deviations.sort_unstable_by(f64::total_cmp);
+        let mad = median_of_sorted(&deviations);
+        let scale = if mad > 0.0 {
+            Some(mad)
+        } else {
+            let positive_deviations: Vec<f64> = deviations
+                .into_iter()
+                .filter(|deviation| *deviation > 0.0)
+                .collect();
+            (!positive_deviations.is_empty()).then(|| median_of_sorted(&positive_deviations))
+        };
+
+        Some(Self {
+            center,
+            scale,
+            max_tokens,
+        })
+    }
+
+    fn intensity(self, tokens: u64) -> f64 {
+        if tokens == 0 {
+            return CONTRIBUTION_GRADE_INTENSITIES[0];
+        }
+        if tokens == self.max_tokens {
+            return CONTRIBUTION_GRADE_INTENSITIES[4];
+        }
+        let Some(scale) = self.scale else {
+            return CONTRIBUTION_GRADE_INTENSITIES[4];
+        };
+
+        let value = (tokens as f64).ln();
+        let grade = if value < self.center - scale {
+            1
+        } else if value < self.center {
+            2
+        } else if value < self.center + scale {
+            3
+        } else {
+            4
+        };
+        CONTRIBUTION_GRADE_INTENSITIES[grade]
+    }
+}
+
+fn median_of_sorted(values: &[f64]) -> f64 {
+    debug_assert!(!values.is_empty());
+    let middle = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    }
+}
+
 fn build_common_contribution_graph_for_today(
     daily: &[DailyUsageCommon],
     today: NaiveDate,
@@ -250,25 +329,23 @@ fn build_contribution_graph_for_today_by<T>(
     let start_date = end_date - chrono::Duration::days(364 + days_to_sunday as i64);
     let daily_map: HashMap<NaiveDate, &T> =
         daily.iter().map(|usage| (date_of(usage), usage)).collect();
-    let max_cost = daily.iter().map(cost_of).fold(0.0_f64, |a, b| a.max(b));
+    let visible_active_tokens: Vec<u64> = daily_map
+        .iter()
+        .filter(|(date, _)| **date >= start_date && **date <= end_date)
+        .map(|(_, usage)| tokens_of(usage))
+        .filter(|tokens| *tokens > 0)
+        .collect();
+    let intensity_scale = ContributionLogMad::from_tokens(&visible_active_tokens);
     let mut weeks: Vec<Vec<Option<ContributionDay>>> = Vec::new();
     let mut current_week: Vec<Option<ContributionDay>> = Vec::new();
     let mut current_date = start_date;
     while current_date <= end_date {
         let day = if let Some(usage) = daily_map.get(&current_date) {
-            let raw_intensity = if max_cost > 0.0 {
-                cost_of(usage) / max_cost
-            } else {
-                0.0
-            };
-            let intensity = if raw_intensity.is_finite() {
-                raw_intensity.clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
+            let tokens = tokens_of(usage);
+            let intensity = intensity_scale.map_or(0.0, |scale| scale.intensity(tokens));
             Some(ContributionDay {
                 date: current_date,
-                tokens: tokens_of(usage),
+                tokens,
                 cost: cost_of(usage),
                 intensity,
             })
@@ -1457,6 +1534,216 @@ mod tests {
             },
             0.0,
         )
+    }
+
+    fn daily_usage(date: NaiveDate, tokens: u64, cost: f64) -> DailyUsage {
+        DailyUsage {
+            date,
+            tokens: UsageTokenBreakdown {
+                input: tokens,
+                ..UsageTokenBreakdown::default()
+            },
+            cost,
+            client_breakdown: BTreeMap::new(),
+            message_count: 1,
+            turn_count: 1,
+        }
+    }
+
+    fn contribution_day(graph: &UsageGraphData, date: NaiveDate) -> &ContributionDay {
+        graph
+            .weeks
+            .iter()
+            .flatten()
+            .flatten()
+            .find(|day| day.date == date)
+            .expect("graph must contain the requested visible date")
+    }
+
+    #[test]
+    fn contribution_graph_colors_unpriced_activity_by_tokens() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 24).unwrap();
+        let lower_date = today.pred_opt().unwrap();
+        let daily = [
+            daily_usage(lower_date, 25, 0.0),
+            daily_usage(today, 100, 0.0),
+        ];
+
+        let graph = build_contribution_graph_for_today(&daily, today);
+        let lower = contribution_day(&graph, lower_date);
+        let peak = contribution_day(&graph, today);
+
+        assert_eq!(lower.tokens, 25);
+        assert_eq!(lower.cost, 0.0);
+        assert!(lower.intensity > 0.0);
+        assert_eq!(peak.tokens, 100);
+        assert_eq!(peak.cost, 0.0);
+        assert_eq!(peak.intensity, 0.875);
+    }
+
+    #[test]
+    fn contribution_graph_ignores_off_window_history_when_assigning_grades() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 24).unwrap();
+        let days_to_sunday = today.weekday().num_days_from_sunday();
+        let start_date = today - chrono::Duration::days(364 + days_to_sunday as i64);
+        let off_window_date = start_date.pred_opt().unwrap();
+        let visible_daily = [
+            daily_usage(today - chrono::Duration::days(2), 10, 0.1),
+            daily_usage(today - chrono::Duration::days(1), 100, 1.0),
+            daily_usage(today, 1_000, 10.0),
+        ];
+        let mut daily = visible_daily.to_vec();
+        daily.push(daily_usage(off_window_date, 1_000_000_000, 1_000_000.0));
+
+        let baseline = build_contribution_graph_for_today(&visible_daily, today);
+        let graph = build_contribution_graph_for_today(&daily, today);
+        for usage in &visible_daily {
+            assert_eq!(
+                contribution_day(&graph, usage.date).intensity,
+                contribution_day(&baseline, usage.date).intensity
+            );
+        }
+        assert!(graph
+            .weeks
+            .iter()
+            .flatten()
+            .flatten()
+            .all(|day| day.date != off_window_date));
+    }
+
+    #[test]
+    fn contribution_graph_cost_does_not_influence_equal_token_grades() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 24).unwrap();
+        let expensive_date = today.pred_opt().unwrap();
+        let free_date = expensive_date.pred_opt().unwrap();
+        let daily = [
+            daily_usage(free_date.pred_opt().unwrap(), 25, 0.01),
+            daily_usage(free_date, 50, 0.0),
+            daily_usage(expensive_date, 50, 10_000.0),
+            daily_usage(today, 100, 1.0),
+        ];
+
+        let graph = build_contribution_graph_for_today(&daily, today);
+        let expensive = contribution_day(&graph, expensive_date);
+        let free = contribution_day(&graph, free_date);
+
+        assert_eq!(expensive.tokens, free.tokens);
+        assert_eq!(expensive.cost, 10_000.0);
+        assert_eq!(free.cost, 0.0);
+        assert_eq!(expensive.intensity, 0.625);
+        assert_eq!(free.intensity, 0.625);
+    }
+
+    #[test]
+    fn contribution_graph_log_mad_assigns_all_four_active_grades() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 24).unwrap();
+        let tokens = [1, 2, 4, 16, 256, 1_024, 8_192, 131_072];
+        let expected_intensities = [0.125, 0.125, 0.375, 0.375, 0.625, 0.625, 0.875, 0.875];
+        let daily: Vec<DailyUsage> = tokens
+            .iter()
+            .enumerate()
+            .map(|(index, token_total)| {
+                daily_usage(
+                    today - chrono::Duration::days((tokens.len() - 1 - index) as i64),
+                    *token_total,
+                    0.0,
+                )
+            })
+            .collect();
+
+        let graph = build_contribution_graph_for_today(&daily, today);
+        for (usage, expected) in daily.iter().zip(expected_intensities) {
+            assert_eq!(contribution_day(&graph, usage.date).intensity, expected);
+        }
+    }
+
+    #[test]
+    fn contribution_graph_log_mad_resists_one_large_visible_outlier() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 24).unwrap();
+        let tokens = [1, 2, 4, 8, 16, 32, 64, 1_u64 << 60];
+        let expected_intensities = [0.125, 0.125, 0.375, 0.375, 0.625, 0.625, 0.875, 0.875];
+        let daily: Vec<DailyUsage> = tokens
+            .iter()
+            .enumerate()
+            .map(|(index, token_total)| {
+                daily_usage(
+                    today - chrono::Duration::days((tokens.len() - 1 - index) as i64),
+                    *token_total,
+                    0.0,
+                )
+            })
+            .collect();
+
+        let graph = build_contribution_graph_for_today(&daily, today);
+        for (usage, expected) in daily.iter().zip(expected_intensities) {
+            assert_eq!(contribution_day(&graph, usage.date).intensity, expected);
+        }
+    }
+
+    #[test]
+    fn contribution_graph_handles_zero_mad_degeneracies() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 24).unwrap();
+        let one_day = [daily_usage(today, 7, 0.0)];
+        let one_day_graph = build_contribution_graph_for_today(&one_day, today);
+        assert_eq!(contribution_day(&one_day_graph, today).intensity, 0.875);
+
+        let all_equal = [
+            daily_usage(today - chrono::Duration::days(2), 42, 1.0),
+            daily_usage(today - chrono::Duration::days(1), 42, 2.0),
+            daily_usage(today, 42, 3.0),
+        ];
+        let all_equal_graph = build_contribution_graph_for_today(&all_equal, today);
+        assert!(all_equal
+            .iter()
+            .all(|usage| { contribution_day(&all_equal_graph, usage.date).intensity == 0.875 }));
+
+        let fallback_daily = [
+            daily_usage(today - chrono::Duration::days(3), 8, 0.0),
+            daily_usage(today - chrono::Duration::days(2), 8, 1.0),
+            daily_usage(today - chrono::Duration::days(1), 8, 2.0),
+            daily_usage(today, 64, 3.0),
+        ];
+        let fallback_graph = build_contribution_graph_for_today(&fallback_daily, today);
+        for usage in &fallback_daily[..3] {
+            assert_eq!(
+                contribution_day(&fallback_graph, usage.date).intensity,
+                0.625
+            );
+        }
+        assert_eq!(contribution_day(&fallback_graph, today).intensity, 0.875);
+    }
+
+    #[test]
+    fn contribution_graph_reserves_grade_zero_for_zero_tokens() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 24).unwrap();
+        let zero_date = today.pred_opt().unwrap();
+        let daily = [
+            daily_usage(zero_date, 0, 1_000_000.0),
+            daily_usage(today, 1, 0.0),
+        ];
+
+        let graph = build_contribution_graph_for_today(&daily, today);
+        let zero = contribution_day(&graph, zero_date);
+        let active = contribution_day(&graph, today);
+
+        assert_eq!(zero.tokens, 0);
+        assert_eq!(zero.cost, 1_000_000.0);
+        assert_eq!(zero.intensity, 0.0);
+        assert_eq!(active.tokens, 1);
+        assert_eq!(active.cost, 0.0);
+        assert_eq!(active.intensity, 0.875);
+    }
+
+    #[test]
+    fn contribution_graph_retains_visible_token_and_cost_fields() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 24).unwrap();
+        let daily = [daily_usage(today, 100, 1.25)];
+
+        let graph = build_contribution_graph_for_today(&daily, today);
+        let visible = contribution_day(&graph, today);
+
+        assert_eq!(visible.tokens, 100);
+        assert_eq!(visible.cost, 1.25);
     }
 
     #[test]

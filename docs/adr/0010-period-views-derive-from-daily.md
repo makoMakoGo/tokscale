@@ -201,6 +201,16 @@ graph remain projections of the same TUI generation. The graph is the total
 `UsageCommonData.graph` value stored once in Common; it is not an independent
 command, JSON product, acquisition path, or pricing authority.
 
+Contribution-graph activity and color intensity use each day's total tokens.
+For nonzero-token days in the visible graph window, let `x = ln(tokens)`,
+`center = median(x)`, and `MAD = median(abs(x - center))`. Thresholds at
+`center - MAD`, `center`, and `center + MAD` assign grades 1 through 4; fixed
+representative intensities preserve those grades in presentation. Grade 0 is
+reserved for zero-token days. If `MAD` is zero, the median positive deviation
+is the scale; if no positive deviation exists, every active day is grade 4.
+The maximum active day is always grade 4. Cost and off-window history cannot
+change visible grades, while graph days retain both token and cost fields.
+
 Raw unified-message APIs remain available when materialized messages are their
 stated result. Cross-crate aggregate types used to connect core and CLI are
 implementation seams for the canonical local-report pipeline, not separate

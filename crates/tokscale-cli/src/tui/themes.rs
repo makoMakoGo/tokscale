@@ -151,90 +151,90 @@ impl Theme {
         color_mode: TerminalColorMode,
     ) -> Self {
         let colors = match name {
-            // Colors match contribution graph palettes (higher grade = darker = more activity)
+            // Contribution grades become brighter as activity increases on the dark TUI surface.
             ThemeName::Green => [
                 Color::Rgb(22, 27, 34),    // grade0: empty
-                Color::Rgb(155, 233, 168), // grade1: #9be9a8
-                Color::Rgb(64, 196, 99),   // grade2: #40c463
-                Color::Rgb(48, 161, 78),   // grade3: #30a14e
-                Color::Rgb(33, 110, 57),   // grade4: #216e39
+                Color::Rgb(33, 110, 57),   // grade1: #216e39
+                Color::Rgb(48, 161, 78),   // grade2: #30a14e
+                Color::Rgb(64, 196, 99),   // grade3: #40c463
+                Color::Rgb(155, 233, 168), // grade4: #9be9a8
             ],
             ThemeName::Halloween => [
                 Color::Rgb(22, 27, 34),   // grade0: empty
-                Color::Rgb(255, 238, 74), // grade1: #FFEE4A
-                Color::Rgb(255, 197, 1),  // grade2: #FFC501
-                Color::Rgb(254, 150, 0),  // grade3: #FE9600
-                Color::Rgb(3, 0, 28),     // grade4: #03001C
+                Color::Rgb(99, 29, 0),    // grade1: #631D00
+                Color::Rgb(254, 150, 0),  // grade2: #FE9600
+                Color::Rgb(255, 197, 1),  // grade3: #FFC501
+                Color::Rgb(255, 238, 74), // grade4: #FFEE4A
             ],
             ThemeName::Teal => [
                 Color::Rgb(22, 27, 34),    // grade0: empty
-                Color::Rgb(126, 229, 229), // grade1: #7ee5e5
-                Color::Rgb(45, 197, 197),  // grade2: #2dc5c5
-                Color::Rgb(13, 158, 158),  // grade3: #0d9e9e
-                Color::Rgb(14, 109, 109),  // grade4: #0e6d6d
+                Color::Rgb(14, 109, 109),  // grade1: #0e6d6d
+                Color::Rgb(13, 158, 158),  // grade2: #0d9e9e
+                Color::Rgb(45, 197, 197),  // grade3: #2dc5c5
+                Color::Rgb(126, 229, 229), // grade4: #7ee5e5
             ],
             ThemeName::Blue => [
                 Color::Rgb(22, 27, 34),    // grade0: empty
-                Color::Rgb(121, 184, 255), // grade1: #79b8ff
-                Color::Rgb(56, 139, 253),  // grade2: #388bfd
-                Color::Rgb(31, 111, 235),  // grade3: #1f6feb
-                Color::Rgb(13, 65, 157),   // grade4: #0d419d
+                Color::Rgb(13, 65, 157),   // grade1: #0d419d
+                Color::Rgb(31, 111, 235),  // grade2: #1f6feb
+                Color::Rgb(56, 139, 253),  // grade3: #388bfd
+                Color::Rgb(121, 184, 255), // grade4: #79b8ff
             ],
             ThemeName::Pink => [
                 Color::Rgb(22, 27, 34),    // grade0: empty
-                Color::Rgb(240, 181, 210), // grade1: #f0b5d2
-                Color::Rgb(217, 97, 160),  // grade2: #d961a0
-                Color::Rgb(191, 75, 138),  // grade3: #bf4b8a
-                Color::Rgb(153, 40, 110),  // grade4: #99286e
+                Color::Rgb(153, 40, 110),  // grade1: #99286e
+                Color::Rgb(191, 75, 138),  // grade2: #bf4b8a
+                Color::Rgb(217, 97, 160),  // grade3: #d961a0
+                Color::Rgb(240, 181, 210), // grade4: #f0b5d2
             ],
             ThemeName::Purple => [
                 Color::Rgb(22, 27, 34),    // grade0: empty
-                Color::Rgb(205, 180, 255), // grade1: #cdb4ff
-                Color::Rgb(163, 113, 247), // grade2: #a371f7
-                Color::Rgb(137, 87, 229),  // grade3: #8957e5
-                Color::Rgb(110, 64, 201),  // grade4: #6e40c9
+                Color::Rgb(110, 64, 201),  // grade1: #6e40c9
+                Color::Rgb(137, 87, 229),  // grade2: #8957e5
+                Color::Rgb(163, 113, 247), // grade3: #a371f7
+                Color::Rgb(205, 180, 255), // grade4: #cdb4ff
             ],
             ThemeName::Orange => [
                 Color::Rgb(22, 27, 34),    // grade0: empty
-                Color::Rgb(255, 214, 153), // grade1: #ffd699
-                Color::Rgb(255, 179, 71),  // grade2: #ffb347
-                Color::Rgb(255, 140, 0),   // grade3: #ff8c00
-                Color::Rgb(204, 85, 0),    // grade4: #cc5500
+                Color::Rgb(204, 85, 0),    // grade1: #cc5500
+                Color::Rgb(255, 140, 0),   // grade2: #ff8c00
+                Color::Rgb(255, 179, 71),  // grade3: #ffb347
+                Color::Rgb(255, 214, 153), // grade4: #ffd699
             ],
             ThemeName::Monochrome => [
                 Color::Rgb(22, 27, 34),    // grade0: empty
-                Color::Rgb(158, 158, 158), // grade1: #9e9e9e
-                Color::Rgb(117, 117, 117), // grade2: #757575
-                Color::Rgb(66, 66, 66),    // grade3: #424242
-                Color::Rgb(33, 33, 33),    // grade4: #212121
+                Color::Rgb(56, 56, 56),    // grade1: #383838
+                Color::Rgb(82, 82, 82),    // grade2: #525252
+                Color::Rgb(117, 117, 117), // grade3: #757575
+                Color::Rgb(158, 158, 158), // grade4: #9e9e9e
             ],
             ThemeName::YlGnBu => [
                 Color::Rgb(22, 27, 34),    // grade0: empty
-                Color::Rgb(161, 218, 180), // grade1: #a1dab4
-                Color::Rgb(65, 182, 196),  // grade2: #41b6c4
-                Color::Rgb(44, 127, 184),  // grade3: #2c7fb8
-                Color::Rgb(37, 52, 148),   // grade4: #253494
+                Color::Rgb(37, 52, 148),   // grade1: #253494
+                Color::Rgb(44, 127, 184),  // grade2: #2c7fb8
+                Color::Rgb(65, 182, 196),  // grade3: #41b6c4
+                Color::Rgb(161, 218, 180), // grade4: #a1dab4
             ],
             ThemeName::Graphite => [
                 Color::Rgb(24, 27, 34),
-                Color::Rgb(148, 163, 184),
-                Color::Rgb(125, 211, 252),
-                Color::Rgb(56, 189, 248),
                 Color::Rgb(14, 116, 144),
+                Color::Rgb(148, 163, 184),
+                Color::Rgb(56, 189, 248),
+                Color::Rgb(125, 211, 252),
             ],
             ThemeName::Lagoon => [
                 Color::Rgb(6, 32, 36),
-                Color::Rgb(153, 246, 228),
-                Color::Rgb(94, 234, 212),
-                Color::Rgb(45, 212, 191),
                 Color::Rgb(15, 118, 110),
+                Color::Rgb(45, 212, 191),
+                Color::Rgb(94, 234, 212),
+                Color::Rgb(153, 246, 228),
             ],
             ThemeName::Dusk => [
                 Color::Rgb(27, 24, 38),
-                Color::Rgb(196, 181, 253),
-                Color::Rgb(167, 139, 250),
-                Color::Rgb(139, 92, 246),
                 Color::Rgb(109, 40, 217),
+                Color::Rgb(139, 92, 246),
+                Color::Rgb(167, 139, 250),
+                Color::Rgb(196, 181, 253),
             ],
         };
 
@@ -292,8 +292,8 @@ impl Theme {
                 Color::Black,
                 Color::DarkGray,
                 Color::Gray,
-                Color::White,
                 Color::Cyan,
+                Color::White,
             ];
             theme.background = Color::Black;
             theme.foreground = Color::White;
@@ -313,6 +313,23 @@ impl Theme {
         match (self.color_mode, color) {
             (TerminalColorMode::Compatible, Color::Rgb(r, g, b)) => compatible_rgb(r, g, b),
             _ => color,
+        }
+    }
+
+    /// Chooses whichever theme surface color is more legible on `background`.
+    pub(crate) fn contrasting_foreground(&self, background: Color) -> Color {
+        match (background, self.background, self.foreground) {
+            (Color::Rgb(..), Color::Rgb(..), Color::Rgb(..)) => {
+                let foreground_contrast = rgb_contrast_ratio(self.foreground, background);
+                let background_contrast = rgb_contrast_ratio(self.background, background);
+                if foreground_contrast >= background_contrast {
+                    self.foreground
+                } else {
+                    self.background
+                }
+            }
+            (Color::White | Color::Gray | Color::Cyan, _, _) => Color::Black,
+            _ => Color::White,
         }
     }
 
@@ -357,6 +374,27 @@ impl Theme {
             Style::default().bg(self.current_row)
         }
     }
+}
+
+fn rgb_contrast_ratio(first: Color, second: Color) -> f64 {
+    let first = rgb_relative_luminance(first);
+    let second = rgb_relative_luminance(second);
+    (first.max(second) + 0.05) / (first.min(second) + 0.05)
+}
+
+fn rgb_relative_luminance(color: Color) -> f64 {
+    let Color::Rgb(red, green, blue) = color else {
+        unreachable!("RGB contrast requires RGB colors");
+    };
+    let linearize = |channel: u8| {
+        let channel = f64::from(channel) / 255.0;
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linearize(red) + 0.7152 * linearize(green) + 0.0722 * linearize(blue)
 }
 
 fn compatible_rgb(r: u8, g: u8, b: u8) -> Color {
@@ -409,6 +447,29 @@ mod tests {
             .collect()
     }
 
+    fn relative_luminance(color: Color) -> f64 {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("relative luminance requires an RGB color, got {color:?}");
+        };
+
+        fn linearize(channel: u8) -> f64 {
+            let channel = f64::from(channel) / 255.0;
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        }
+
+        0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b)
+    }
+
+    fn contrast_ratio(first: Color, second: Color) -> f64 {
+        let first = relative_luminance(first);
+        let second = relative_luminance(second);
+        (first.max(second) + 0.05) / (first.min(second) + 0.05)
+    }
+
     #[test]
     fn apple_terminal_uses_compatible_color_mode() {
         let mode = TerminalColorMode::from_env(env(&[
@@ -442,6 +503,104 @@ mod tests {
     fn theme_names_round_trip_through_settings_values() {
         for theme in ThemeName::all() {
             assert_eq!(theme.as_str().parse::<ThemeName>(), Ok(*theme));
+        }
+    }
+
+    #[test]
+    fn full_color_activity_grades_do_not_decrease_in_luminance() {
+        for &name in ThemeName::all() {
+            let theme = Theme::from_name_with_color_mode(name, TerminalColorMode::FullColor);
+
+            let empty = relative_luminance(theme.colors[0]);
+            let first_activity = relative_luminance(theme.colors[1]);
+            assert!(
+                empty < first_activity,
+                "{name:?} grade 1 luminance ({first_activity:.4}) must exceed empty grade 0 ({empty:.4})"
+            );
+
+            for grade in 1..4 {
+                let lower = relative_luminance(theme.colors[grade]);
+                let higher = relative_luminance(theme.colors[grade + 1]);
+                assert!(
+                    lower <= higher,
+                    "{name:?} grade {grade} luminance ({lower:.4}) exceeds grade {} ({higher:.4})",
+                    grade + 1
+                );
+            }
+
+            assert!(
+                relative_luminance(theme.colors[1]) < relative_luminance(theme.colors[4]),
+                "{name:?} highest activity grade must be brighter than its lowest activity grade"
+            );
+        }
+    }
+
+    #[test]
+    fn monochrome_adjacent_grades_remain_visibly_distinct() {
+        const MIN_ADJACENT_CONTRAST: f64 = 1.4;
+
+        let theme =
+            Theme::from_name_with_color_mode(ThemeName::Monochrome, TerminalColorMode::FullColor);
+        for grade in 0..4 {
+            let contrast = contrast_ratio(theme.colors[grade], theme.colors[grade + 1]);
+            assert!(
+                contrast >= MIN_ADJACENT_CONTRAST,
+                "Monochrome grades {grade} and {} have contrast {contrast:.2}, below {MIN_ADJACENT_CONTRAST:.2}",
+                grade + 1
+            );
+        }
+    }
+
+    #[test]
+    fn compatible_activity_grades_end_with_the_brightest_color() {
+        let expected = [
+            Color::Black,
+            Color::DarkGray,
+            Color::Gray,
+            Color::Cyan,
+            Color::White,
+        ];
+
+        for &name in ThemeName::all() {
+            let theme = Theme::from_name_with_color_mode(name, TerminalColorMode::Compatible);
+            assert_eq!(theme.colors, expected, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn contribution_selection_uses_the_more_contrasting_surface_color() {
+        for &name in ThemeName::all() {
+            let theme = Theme::from_name_with_color_mode(name, TerminalColorMode::FullColor);
+            for color in theme.colors {
+                let selected = theme.contrasting_foreground(color);
+                let alternative = if selected == theme.foreground {
+                    theme.background
+                } else {
+                    theme.foreground
+                };
+                assert!(
+                    contrast_ratio(selected, color) >= contrast_ratio(alternative, color),
+                    "{name:?} selected {selected:?} instead of the more legible {alternative:?} on {color:?}"
+                );
+            }
+        }
+
+        for &name in ThemeName::all() {
+            let theme = Theme::from_name_with_color_mode(name, TerminalColorMode::Compatible);
+            let foregrounds = theme
+                .colors
+                .map(|color| theme.contrasting_foreground(color));
+            assert_eq!(
+                foregrounds,
+                [
+                    Color::White,
+                    Color::White,
+                    Color::Black,
+                    Color::Black,
+                    Color::Black,
+                ],
+                "{name:?}"
+            );
         }
     }
 

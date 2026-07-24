@@ -2,6 +2,7 @@ use ratatui::style::Color;
 use tokscale_core::ClientId;
 
 use super::model_family::ModelFamily;
+use super::themes::Theme;
 
 const GPT_COLOR: Color = Color::Rgb(16, 163, 127);
 const CLAUDE_COLOR: Color = Color::Rgb(217, 119, 87);
@@ -16,6 +17,7 @@ const MIMO_COLOR: Color = Color::Rgb(255, 105, 0);
 const MISTRAL_COLOR: Color = Color::Rgb(255, 112, 0);
 const UNKNOWN_MODEL_COLOR: Color = Color::Rgb(136, 136, 136);
 const UNKNOWN_CLIENT_COLOR: Color = Color::Rgb(136, 136, 136);
+const WCAG_AA_TEXT_CONTRAST: f64 = 4.5;
 
 /// Returns the fixed brand color for a canonical model id.
 ///
@@ -59,7 +61,7 @@ fn parse_catalog_color(hex: &str) -> Color {
     Color::Rgb(component(0..2), component(2..4), component(4..6))
 }
 
-pub fn get_client_color(client: &str) -> Color {
+fn get_client_color(client: &str) -> Color {
     let client_key = client.trim().to_lowercase();
     let Some(client_id) = ClientId::from_str(&client_key) else {
         return UNKNOWN_CLIENT_COLOR;
@@ -67,9 +69,128 @@ pub fn get_client_color(client: &str) -> Color {
     parse_catalog_color(client_id.color())
 }
 
+/// Resolves a client catalog brand color for the active terminal theme.
+///
+/// Catalog RGB is authoritative. Compatible terminals first map it to a named
+/// ANSI color; full-color themes retain it unless WCAG text contrast requires
+/// the smallest possible blend toward the theme foreground.
+pub(crate) fn resolve_client_color(client: &str, theme: &Theme) -> Color {
+    let color = theme.color(get_client_color(client));
+    ensure_contrast(
+        color,
+        theme.background,
+        theme.foreground,
+        WCAG_AA_TEXT_CONTRAST,
+    )
+}
+
+/// Returns the WCAG contrast ratio for two RGB colors.
+///
+/// Named terminal colors have palette-dependent RGB values, so callers must
+/// leave them unchanged rather than assuming a concrete luminance.
+fn contrast_ratio(first: Color, second: Color) -> Option<f64> {
+    let first = relative_luminance(first)?;
+    let second = relative_luminance(second)?;
+    let (lighter, darker) = if first >= second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    Some((lighter + 0.05) / (darker + 0.05))
+}
+
+/// Moves an RGB color toward the supplied foreground until it reaches the
+/// requested contrast against the background.
+///
+/// The 255 discrete blend steps make the result deterministic while retaining
+/// as much of the source brand color as possible. Named terminal colors are
+/// otherwise left unchanged, except that black or an exact background match is
+/// promoted to gray so compatible dark terminals do not render invisible text.
+fn ensure_contrast(
+    color: Color,
+    background: Color,
+    foreground: Color,
+    minimum_ratio: f64,
+) -> Color {
+    if !matches!(color, Color::Rgb(..)) && (color == background || color == Color::Black) {
+        return if background == Color::Gray {
+            foreground
+        } else {
+            Color::Gray
+        };
+    }
+
+    let (
+        Color::Rgb(red, green, blue),
+        Color::Rgb(background_red, background_green, background_blue),
+        Color::Rgb(foreground_red, foreground_green, foreground_blue),
+    ) = (color, background, foreground)
+    else {
+        return color;
+    };
+    let background = Color::Rgb(background_red, background_green, background_blue);
+    if contrast_ratio(color, background).is_some_and(|ratio| ratio >= minimum_ratio) {
+        return color;
+    }
+
+    let mix = |source: u8, target: u8, step: u16| {
+        let source_weight = 255 - step;
+        ((u16::from(source) * source_weight + u16::from(target) * step + 127) / 255) as u8
+    };
+    for step in 1..=255 {
+        let candidate = Color::Rgb(
+            mix(red, foreground_red, step),
+            mix(green, foreground_green, step),
+            mix(blue, foreground_blue, step),
+        );
+        if contrast_ratio(candidate, background).is_some_and(|ratio| ratio >= minimum_ratio) {
+            return candidate;
+        }
+    }
+
+    foreground
+}
+
+fn relative_luminance(color: Color) -> Option<f64> {
+    let Color::Rgb(red, green, blue) = color else {
+        return None;
+    };
+    let linearize = |channel: u8| {
+        let channel = f64::from(channel) / 255.0;
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    Some(0.2126 * linearize(red) + 0.7152 * linearize(green) + 0.0722 * linearize(blue))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::app::{App, TuiConfig};
+    use crate::tui::themes::{TerminalColorMode, ThemeName};
+
+    fn app_with_theme(theme_name: ThemeName, color_mode: TerminalColorMode) -> App {
+        let mut app = App::new_with_cached_data(
+            TuiConfig {
+                theme: Some(theme_name.as_str().to_string()),
+                refresh: 0,
+                no_refresh: false,
+                home_dir: None,
+                clients: None,
+                since: None,
+                until: None,
+                year: None,
+                initial_tab: None,
+            },
+            None,
+        )
+        .unwrap();
+        app.theme = Theme::from_name_with_color_mode(theme_name, color_mode);
+        app
+    }
 
     #[test]
     fn canonical_model_families_use_fixed_brand_colors() {
@@ -134,6 +255,10 @@ mod tests {
     fn client_color_uses_catalog_for_known_clients() {
         assert_eq!(get_client_color("opencode"), Color::Rgb(0, 168, 232));
         assert_eq!(get_client_color("droid"), Color::Rgb(31, 29, 28));
+        assert_eq!(get_client_color("mux"), Color::Rgb(23, 23, 23));
+        assert_eq!(get_client_color("grok"), Color::Rgb(23, 23, 23));
+        assert_eq!(get_client_color("zcode"), Color::Rgb(17, 24, 39));
+        assert_eq!(get_client_color("commandcode"), Color::Rgb(17, 24, 39));
         assert_eq!(get_client_color("openclaw"), Color::Rgb(239, 68, 68));
     }
 
@@ -147,5 +272,61 @@ mod tests {
         for client in ClientId::iter() {
             parse_catalog_color(client.color());
         }
+    }
+
+    #[test]
+    fn dark_catalog_client_color_is_adjusted_for_full_color_background() {
+        let app = app_with_theme(ThemeName::Blue, TerminalColorMode::FullColor);
+        let raw = get_client_color("droid");
+        let adjusted = app.client_color("droid");
+
+        assert!(
+            contrast_ratio(raw, app.theme.background).unwrap() < WCAG_AA_TEXT_CONTRAST,
+            "test fixture must begin below the policy threshold"
+        );
+        assert_ne!(adjusted, raw);
+        assert!(contrast_ratio(adjusted, app.theme.background).unwrap() >= WCAG_AA_TEXT_CONTRAST);
+    }
+
+    #[test]
+    fn every_catalog_client_color_meets_contrast_on_full_color_themes() {
+        for &theme_name in ThemeName::all() {
+            let app = app_with_theme(theme_name, TerminalColorMode::FullColor);
+            for client_id in ClientId::iter() {
+                let color = app.client_color(client_id.as_str());
+                let ratio = contrast_ratio(color, app.theme.background).unwrap();
+                assert!(
+                    ratio >= WCAG_AA_TEXT_CONTRAST,
+                    "{theme_name:?} {} uses {color:?} at contrast {ratio:.3}",
+                    client_id.as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compatible_dark_client_color_is_promoted_from_black() {
+        let app = app_with_theme(ThemeName::Blue, TerminalColorMode::Compatible);
+
+        for client_id in ["droid", "mux", "grok", "zcode", "commandcode"] {
+            assert_eq!(app.client_color(client_id), Color::Gray, "{client_id}");
+            assert_ne!(app.client_color(client_id), app.theme.background);
+        }
+        assert_eq!(
+            app.client_color("codex"),
+            app.theme.color(get_client_color("codex"))
+        );
+    }
+
+    #[test]
+    fn exact_rgb_background_match_is_blended_to_rgb_contrast() {
+        let background = Color::Rgb(13, 17, 23);
+        let foreground = Color::Rgb(201, 209, 217);
+
+        let adjusted = ensure_contrast(background, background, foreground, WCAG_AA_TEXT_CONTRAST);
+
+        assert!(matches!(adjusted, Color::Rgb(..)));
+        assert_ne!(adjusted, background);
+        assert!(contrast_ratio(adjusted, background).unwrap() >= WCAG_AA_TEXT_CONTRAST);
     }
 }

@@ -6,7 +6,6 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::tui::actions::ActionSet;
 use crate::tui::app::{App, ClickAction};
-use crate::tui::colors::get_client_color;
 use crate::tui::data::{ContributionDay, DailyClientInfo, DailyUsage};
 use crate::tui::presentation::EmptySubject;
 
@@ -192,7 +191,12 @@ fn render_graph(frame: &mut Frame, app: &mut App, area: Rect) {
                     );
                     let color = intensity_color(day.intensity);
                     if selected {
-                        ("▓▓", Style::default().fg(Color::White).bg(color))
+                        (
+                            "▓▓",
+                            Style::default()
+                                .fg(app.theme.contrasting_foreground(color))
+                                .bg(color),
+                        )
                     } else {
                         ("██", Style::default().fg(color))
                     }
@@ -579,7 +583,7 @@ fn render_day_stats_lines(
                     Span::styled("Top client: ", Style::default().fg(app.theme.muted)),
                     Span::styled(
                         truncate_model_display_name_to(&display_name, name_budget),
-                        Style::default().fg(app.theme.color(get_client_color(client))),
+                        Style::default().fg(app.client_color(client)),
                     ),
                 ]),
                 value,
@@ -976,11 +980,17 @@ mod tests {
 
         let selected = buffer.cell((6, selected_y)).unwrap();
         assert_eq!(selected.symbol(), "▓");
-        assert_eq!(selected.fg, Color::White);
+        assert_eq!(
+            selected.fg,
+            app.theme.contrasting_foreground(app.theme.colors[4])
+        );
         assert_eq!(selected.bg, app.theme.colors[4]);
         let pair = buffer.cell((7, selected_y)).unwrap();
         assert_eq!(pair.symbol(), "▓");
-        assert_eq!(pair.fg, Color::White);
+        assert_eq!(
+            pair.fg,
+            app.theme.contrasting_foreground(app.theme.colors[4])
+        );
         assert_eq!(pair.bg, app.theme.colors[4]);
 
         let weekday = buffer.cell((2, selected_y)).unwrap();
@@ -992,6 +1002,36 @@ mod tests {
         assert_eq!(month.symbol(), "J");
         assert_eq!(month.fg, app.theme.accent);
         assert!(month.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn compatible_grade_four_selection_remains_distinct() {
+        let mut app = make_app(120);
+        app.theme =
+            Theme::from_name_with_color_mode(ThemeName::Blue, TerminalColorMode::Compatible);
+        app.data.graph = sample_week_graph();
+        app.data.graph.weeks[0][5]
+            .as_mut()
+            .expect("fixture day must exist")
+            .intensity = 0.75;
+        app.selected_graph_cell = Some((0, 4));
+        let mut terminal = Terminal::new(TestBackend::new(120, GRAPH_PANEL_H)).unwrap();
+
+        let frame = terminal
+            .draw(|frame| render_graph(frame, &mut app, frame.area()))
+            .unwrap();
+        let selected = frame.buffer.cell((6, 2 + 4)).unwrap();
+        let unselected = frame.buffer.cell((6, 2 + 5)).unwrap();
+
+        assert_eq!(selected.symbol(), "▓");
+        assert_eq!(selected.fg, Color::Black);
+        assert_eq!(selected.bg, Color::White);
+        assert_eq!(unselected.symbol(), "█");
+        assert_eq!(unselected.fg, Color::White);
+        assert_ne!(
+            (selected.symbol(), selected.fg, selected.bg),
+            (unselected.symbol(), unselected.fg, unselected.bg)
+        );
     }
 
     #[test]
@@ -1644,6 +1684,51 @@ mod tests {
             buf.cell((name_x, top_y)).unwrap().fg,
             compatible_brand_color
         );
+    }
+
+    #[test]
+    fn day_insights_top_client_uses_app_client_color() {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 16).unwrap();
+        let mut app = make_app(120);
+        app.theme =
+            Theme::from_name_with_color_mode(ThemeName::Blue, TerminalColorMode::Compatible);
+        app.data.daily = vec![day_usage(
+            date,
+            5_000,
+            0.0,
+            vec![(
+                "codex",
+                client_info(
+                    5_000,
+                    0.0,
+                    vec![(
+                        "gpt-5.4",
+                        model_info("openai", "gpt-5.4", "gpt-5.4", 5_000, 0.0),
+                    )],
+                ),
+            )],
+        )];
+        select_day(&mut app, date, 5_000, 0.0);
+        let expected = app.client_color("codex");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let actions = actions_for(&app);
+        let frame = terminal
+            .draw(|frame| render(frame, &mut app, Rect::new(0, 0, 120, 40), None, &actions))
+            .unwrap();
+        let buffer = frame.buffer;
+        let (client_y, client_row) = (0..40u16)
+            .map(|y| {
+                let row: String = (0..120u16)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                    .collect();
+                (y, row)
+            })
+            .find(|(_, row)| row.contains("Top client:"))
+            .expect("top client row rendered");
+        let client_x = client_row.find("Codex").expect("client name rendered") as u16;
+
+        assert_eq!(buffer.cell((client_x, client_y)).unwrap().fg, expected);
     }
 
     #[test]
