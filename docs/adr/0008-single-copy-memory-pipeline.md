@@ -171,10 +171,10 @@ Cache writes serialize borrowed message slices and do not clone messages merely
 to construct a cache representation. Parser-semantic changes bump the owning
 parser revision; serialization-layout changes bump the shard format.
 
-The current message-shard format is **v9**. Its envelope is the `TOKSHRD\0`
-magic, little-endian format version `9`, a little-endian `u64` header length,
-the bincode header, and the bincode message body. Ordinary reads and explicit
-pruning accept only this envelope.
+The message-shard envelope is the `TOKSHRD\0` magic, a little-endian format
+version, a little-endian `u64` header length, the bincode header, and the
+bincode message body. Ordinary reads and explicit pruning accept only the
+format version supported by the running binary.
 
 `tokscale cache prune` is an explicit full traversal of current shard files;
 ordinary report and TUI loads never invoke it. Pruning first validates and
@@ -191,8 +191,8 @@ reported explicitly; already completed removals are not rolled back.
 
 One local fold produces health data, client-space accounting, sessions,
 client-aware canonical accumulator, one group-agnostic Common projection, and
-four full-universe Grouped projections. The current schema 47 TUI cache stores
-them in one atomic JSON bundle.
+four full-universe Grouped projections. The current TUI cache schema stores them
+in one atomic JSON bundle.
 
 Common stores Agents, daily and hourly totals with Client membership, the
 contribution graph, report totals, and streaks exactly once. Each Grouped

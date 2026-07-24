@@ -91,20 +91,21 @@ want a fresh local rebuild:
 - `fonts/`
 - `images/`
 
-Scan-input message cache writes use the v9 shard envelope and stable explicit
-parser keys. Ordinary reports and `tokscale cache prune` accept only current v9
-shards. Pruning explicitly traverses the shard directory and removes current
-shards whose authoritative input is absent, whose path is not canonical
-for the input and parser key, or whose parser revision has been superseded.
+Scan-input message cache writes use the current shard envelope and stable
+explicit parser keys. Ordinary reports and `tokscale cache prune` accept only
+shards in the format supported by the running binary. Pruning explicitly
+traverses the shard directory and removes current shards whose authoritative
+input is absent, whose path is not canonical for the input and parser key, or
+whose parser revision has been superseded.
 Traversal and classification complete before deletion; an unknown, future,
 truncated, malformed, undecodable, or oversized shard aborts pruning without
 deleting anything.
 
-The current schema 47 TUI generation bundle is separate from scan-input message
-shards. It contains one canonical accumulator, one Common projection, four
-Grouped projections, Sessions, Data Health, and generation metadata. Models
-never writes it; use `tokscale cache warm` when you intentionally want to
-prebuild the complete all-date generation.
+The current TUI generation bundle is separate from scan-input message shards.
+It contains one canonical accumulator, one Common projection, four Grouped
+projections, Sessions, Data Health, and generation metadata. Models never writes
+it; use `tokscale cache warm` when you intentionally want to prebuild the
+complete all-date generation.
 
 ## Subscription providers
 
