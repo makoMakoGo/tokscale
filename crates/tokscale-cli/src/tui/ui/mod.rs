@@ -59,7 +59,7 @@ pub(crate) fn render_with_state(frame: &mut Frame, app: &mut App, state: &mut Vi
     match presentation {
         Presentation::Loading => render_loading(frame, app, chunks[1]),
         Presentation::Failed => render_cold_failed(frame, app, chunks[1]),
-        Presentation::Empty(_) | Presentation::Ready => {
+        Presentation::Empty(_) | Presentation::Ready | Presentation::Subscription(_) => {
             render_current_tab(frame, app, state, chunks[1], presentation, &actions)
         }
     }
@@ -89,7 +89,12 @@ fn render_current_tab(
         Tab::Monthly => period::render_monthly(frame, app, area, empty, actions),
         Tab::Weekly => period::render_weekly(frame, app, area, empty, actions),
         Tab::Stats => stats::render(frame, app, area, empty, actions),
-        Tab::Usage => usage::render(frame, app, area),
+        Tab::Usage => {
+            let Presentation::Subscription(subscription) = presentation else {
+                unreachable!("Usage must carry SubscriptionPresentation");
+            };
+            usage::render(frame, app, area, subscription);
+        }
         Tab::Sessions => sessions::render(frame, app, state, area, empty, actions),
     }
 }
@@ -355,10 +360,132 @@ mod tests {
         app.current_tab = Tab::Usage;
         app.set_background_loading(true);
 
-        let screen = render_screen(&mut app, 120, 32).join("\n");
+        let lines = render_screen(&mut app, 120, 32);
+        let screen = lines.join("\n");
+        let footer = lines[lines.len() - 5..].join("\n");
 
         assert!(!screen.contains("Scanning local data"), "{screen}");
         assert!(screen.contains("subscription"), "{screen}");
+        assert!(footer.contains("No providers configured"), "{footer}");
+        assert!(!footer.contains("tokens"), "{footer}");
+        assert!(!footer.contains("$0.00"), "{footer}");
+        assert!(!footer.contains("local"), "{footer}");
+    }
+
+    #[test]
+    fn cold_subscription_fetch_uses_its_own_centered_footer() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(vec![
+            crate::tui::subscription_usage::UsageProviderId::Codex,
+        ]);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.start_subscription_usage_fetch_for_test(rx);
+
+        let lines = render_screen(&mut app, 120, 32);
+        let screen = lines.join("\n");
+        let footer = &lines[lines.len() - 5..];
+
+        assert_eq!(
+            screen.matches("Fetching subscription data...").count(),
+            1,
+            "{screen}"
+        );
+        assert!(
+            footer[2].contains("~ ~")
+                && footer[2].contains("Fetching subscription data")
+                && footer[2].contains("0s"),
+            "subscription fetch status should occupy the centered footer row: {screen}"
+        );
+        assert!(!footer.join("\n").contains("local"), "{screen}");
+    }
+
+    #[test]
+    fn usage_footer_summarizes_subscription_results_only() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(vec![
+            crate::tui::subscription_usage::UsageProviderId::Codex,
+        ]);
+        app.subscription_usage = vec![crate::tui::subscription_usage::UsageOutput {
+            provider: "Codex".to_string(),
+            account: None,
+            plan: None,
+            email: None,
+            metrics: vec![
+                crate::tui::subscription_usage::UsageMetric {
+                    label: "Weekly".to_string(),
+                    used_percent: 20.0,
+                    remaining_percent: 80.0,
+                    remaining_label: None,
+                    resets_at: None,
+                },
+                crate::tui::subscription_usage::UsageMetric {
+                    label: "Five hour".to_string(),
+                    used_percent: 10.0,
+                    remaining_percent: 90.0,
+                    remaining_label: None,
+                    resets_at: None,
+                },
+            ],
+        }];
+        app.subscription_usage_errors = vec![crate::tui::subscription_usage::UsageProviderError {
+            provider: "Claude".to_string(),
+            message: "credential expired".to_string(),
+        }];
+
+        let lines = render_screen(&mut app, 120, 32);
+        let footer = lines[lines.len() - 5..].join("\n");
+
+        assert!(footer.contains("1 provider"), "{footer}");
+        assert!(footer.contains("2 limits"), "{footer}");
+        assert!(footer.contains("1 error"), "{footer}");
+        assert!(footer.contains("[u:refresh]"), "{footer}");
+        assert!(footer.contains("[p:theme]"), "{footer}");
+        assert!(!footer.contains("tokens"), "{footer}");
+        assert!(!footer.contains("$0.00"), "{footer}");
+        for local_hint in ["r:local", "R:local", "e:local"] {
+            assert!(!footer.contains(local_hint), "{footer}");
+        }
+    }
+
+    #[test]
+    fn warm_subscription_fetch_keeps_results_and_dedicated_footer() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(vec![
+            crate::tui::subscription_usage::UsageProviderId::Codex,
+        ]);
+        app.subscription_usage = vec![crate::tui::subscription_usage::UsageOutput {
+            provider: "Codex".to_string(),
+            account: None,
+            plan: None,
+            email: None,
+            metrics: vec![crate::tui::subscription_usage::UsageMetric {
+                label: "Weekly".to_string(),
+                used_percent: 20.0,
+                remaining_percent: 80.0,
+                remaining_label: None,
+                resets_at: None,
+            }],
+        }];
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.start_subscription_usage_fetch_for_test(rx);
+
+        let lines = render_screen(&mut app, 120, 32);
+        let content = lines[3..lines.len() - 5].join("\n");
+        let footer = lines[lines.len() - 5..].join("\n");
+
+        assert!(content.contains("Codex"), "{content}");
+        assert!(content.contains("Weekly"), "{content}");
+        assert!(footer.contains("1 provider"), "{footer}");
+        assert!(footer.contains("1 limit"), "{footer}");
+        assert!(
+            footer.contains("Refreshing subscription usage..."),
+            "{footer}"
+        );
+        assert!(!footer.contains("Fetching subscription data"), "{footer}");
+        assert!(!footer.contains("local"), "{footer}");
     }
 
     #[test]

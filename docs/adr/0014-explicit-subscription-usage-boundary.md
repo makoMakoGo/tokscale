@@ -60,9 +60,21 @@ The TUI lifecycle is:
 
 - entering Usage starts at most one automatic fetch in a TUI session;
 - `u` explicitly starts a Subscription Usage fetch;
-- `r` refreshes local reports only;
-- `R` controls local-report automatic refresh only; and
+- Usage accepts only Subscription Usage actions plus shell navigation, theme,
+  and quit actions;
+- local-report `r`, `R`, `+`, `-`, and `e` actions are unavailable while Usage
+  is active; and
 - Subscription Usage is never polled in the background.
+
+Usage content, footer, and contextual actions consume one independent
+`SubscriptionPresentation`: cold fetching without an installed result, prompt,
+empty, or attributed results with an optional refresh in progress. A cold fetch
+uses its own elapsed timer and centered activity footer. Existing results remain
+visible during a warm fetch. The ordinary Usage footer summarizes only
+subscription providers, limits, and provider errors; it never reads local
+tokens, cost, generation cache warnings, pricing status, or local refresh
+state. Local and subscription presentations may reuse stateless renderers, but
+they do not share lifecycle state.
 
 An explicitly configured TUI provider without usable credentials produces a
 provider error rather than ordinary empty data.
@@ -130,6 +142,10 @@ one or more healthy outputs atomically replaces the complete installed
 in-memory snapshot, even when other providers failed; those failures remain
 visible beside the new snapshot. An empty or wholly failed fetch keeps the
 installed snapshot and disk cache while exposing the new errors.
+
+Provider-attributed errors are Subscription Usage results even when every
+provider failed. They remain visible in the Usage content and result summary
+instead of collapsing into a generic failure page.
 
 The in-memory installation and disk publication are separate atomic
 boundaries. Disk publication uses a temporary file and rename. A disk write

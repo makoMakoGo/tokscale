@@ -15,6 +15,49 @@ pub(crate) enum Presentation {
     Failed,
     Empty(EmptySubject),
     Ready,
+    Subscription(SubscriptionPresentation),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubscriptionPresentation {
+    ColdFetching,
+    Prompt,
+    Empty { refreshing: bool },
+    Results { refreshing: bool },
+}
+
+impl SubscriptionPresentation {
+    pub(crate) fn for_app(app: &App) -> Self {
+        let refreshing = app.is_fetching_usage();
+        let has_snapshot =
+            !app.subscription_usage.is_empty() || !app.subscription_usage_errors.is_empty();
+        if refreshing && !has_snapshot {
+            return Self::ColdFetching;
+        }
+
+        let has_results = !app.subscription_usage_errors.is_empty()
+            || app
+                .subscription_usage
+                .iter()
+                .any(|output| !output.metrics.is_empty());
+        if has_results {
+            return Self::Results { refreshing };
+        }
+
+        if app.usage_fetch_attempted || !app.subscription_usage.is_empty() {
+            Self::Empty { refreshing }
+        } else {
+            Self::Prompt
+        }
+    }
+
+    pub(crate) const fn is_refreshing(self) -> bool {
+        match self {
+            Self::ColdFetching => true,
+            Self::Prompt => false,
+            Self::Empty { refreshing } | Self::Results { refreshing } => refreshing,
+        }
+    }
 }
 
 impl Presentation {
@@ -23,10 +66,10 @@ impl Presentation {
     /// Local tabs have one acquisition boundary: before the first generation
     /// they are loading or failed; afterwards they render the installed
     /// generation, which may be empty for the current projection. The remote
-    /// Usage tab owns a separate lifecycle and is always rendered by its page.
+    /// Usage tab owns a separate presentation authority nested in this route.
     pub(crate) fn for_view(app: &App, state: &ViewState) -> Self {
         if !app.current_tab.depends_on_local_generation() {
-            return Self::Ready;
+            return Self::Subscription(SubscriptionPresentation::for_app(app));
         }
 
         if !app.has_installed_generation() {
@@ -43,7 +86,7 @@ impl Presentation {
     pub(crate) fn empty_subject(self) -> Option<EmptySubject> {
         match self {
             Self::Empty(subject) => Some(subject),
-            Self::Loading | Self::Failed | Self::Ready => None,
+            Self::Loading | Self::Failed | Self::Ready | Self::Subscription(_) => None,
         }
     }
 
@@ -179,13 +222,54 @@ mod tests {
     }
 
     #[test]
-    fn remote_usage_does_not_inherit_local_acquisition_state() {
+    fn subscription_prompt_does_not_inherit_local_acquisition_state() {
         let mut app = app(Tab::Usage, false);
         app.background_loading = true;
 
         assert_eq!(
             Presentation::for_view(&app, &ViewState::default()),
-            Presentation::Ready
+            Presentation::Subscription(SubscriptionPresentation::Prompt)
+        );
+    }
+
+    #[test]
+    fn subscription_presentation_classifies_its_own_lifecycle() {
+        let mut prompt = app(Tab::Usage, false);
+        assert_eq!(
+            SubscriptionPresentation::for_app(&prompt),
+            SubscriptionPresentation::Prompt
+        );
+
+        prompt.usage_fetch_attempted = true;
+        assert_eq!(
+            SubscriptionPresentation::for_app(&prompt),
+            SubscriptionPresentation::Empty { refreshing: false }
+        );
+
+        let mut cold_fetch = app(Tab::Usage, false);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        cold_fetch.start_subscription_usage_fetch_for_test(rx);
+        assert_eq!(
+            SubscriptionPresentation::for_app(&cold_fetch),
+            SubscriptionPresentation::ColdFetching
+        );
+
+        let mut results = app(Tab::Usage, false);
+        results.subscription_usage_errors =
+            vec![crate::tui::subscription_usage::UsageProviderError {
+                provider: "Codex".to_string(),
+                message: "credential expired".to_string(),
+            }];
+        assert_eq!(
+            SubscriptionPresentation::for_app(&results),
+            SubscriptionPresentation::Results { refreshing: false }
+        );
+
+        let (_tx, rx) = std::sync::mpsc::channel();
+        results.start_subscription_usage_fetch_for_test(rx);
+        assert_eq!(
+            SubscriptionPresentation::for_app(&results),
+            SubscriptionPresentation::Results { refreshing: true }
         );
     }
 

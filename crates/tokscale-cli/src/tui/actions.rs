@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::app::{App, HourlyViewMode, SortField, Tab};
-use super::presentation::Presentation;
+use super::presentation::{Presentation, SubscriptionPresentation};
 use super::view_state::ViewState;
 
 /// A capability exposed by the current TUI view.
@@ -41,9 +41,11 @@ pub(crate) struct ActionSet {
 
 impl ActionSet {
     pub(crate) fn for_view(app: &App, state: &ViewState, presentation: Presentation) -> Self {
-        if app.current_tab == Tab::Usage {
-            return Self::for_usage(app);
+        if let Presentation::Subscription(subscription) = presentation {
+            debug_assert_eq!(app.current_tab, Tab::Usage);
+            return Self::for_usage(app, subscription);
         }
+        debug_assert_ne!(app.current_tab, Tab::Usage);
 
         let installed = app.has_installed_generation();
         let empty = presentation.is_empty();
@@ -168,21 +170,14 @@ impl ActionSet {
         }
     }
 
-    fn for_usage(app: &App) -> Self {
-        let mut actions = vec![Action::Scroll, Action::PreviousTab, Action::NextTab];
-        actions.extend([Action::Theme, Action::ToggleAutoRefresh]);
-        actions.extend([
-            Action::IncreaseRefreshInterval,
-            Action::DecreaseRefreshInterval,
-        ]);
-        if !app.background_loading {
-            actions.push(Action::RefreshLocal);
+    fn for_usage(app: &App, presentation: SubscriptionPresentation) -> Self {
+        let mut actions = Vec::new();
+        if matches!(presentation, SubscriptionPresentation::Results { .. }) {
+            actions.push(Action::Scroll);
         }
-        if app.has_enabled_subscription_providers() {
+        actions.extend([Action::PreviousTab, Action::NextTab, Action::Theme]);
+        if app.has_enabled_subscription_providers() && !presentation.is_refreshing() {
             actions.push(Action::RefreshSubscription);
-        }
-        if app.has_installed_generation() {
-            actions.push(Action::Export);
         }
         actions.push(Action::Quit);
         Self {
@@ -431,6 +426,42 @@ mod tests {
         assert!(!set.contains(Action::RefreshLocal));
         assert!(!set.contains(Action::Clients));
         assert!(!set.contains(Action::GroupBy));
+    }
+
+    #[test]
+    fn usage_actions_are_subscription_or_shell_scoped() {
+        let mut app = make_app(Tab::Usage, true);
+        app.set_subscription_provider_ids_for_test(vec![
+            crate::tui::subscription_usage::UsageProviderId::Codex,
+        ]);
+        app.subscription_usage_errors = vec![crate::tui::subscription_usage::UsageProviderError {
+            provider: "Claude".to_string(),
+            message: "credential expired".to_string(),
+        }];
+
+        let set = action_set(&app, &ViewState::default());
+
+        for action in [
+            Action::Scroll,
+            Action::PreviousTab,
+            Action::NextTab,
+            Action::Theme,
+            Action::RefreshSubscription,
+            Action::Quit,
+        ] {
+            assert!(set.contains(action), "missing {action:?}");
+        }
+        for action in [
+            Action::RefreshLocal,
+            Action::ToggleAutoRefresh,
+            Action::IncreaseRefreshInterval,
+            Action::DecreaseRefreshInterval,
+            Action::Export,
+            Action::Clients,
+            Action::GroupBy,
+        ] {
+            assert!(!set.contains(action), "unexpected {action:?}");
+        }
     }
 
     #[test]

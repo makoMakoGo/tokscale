@@ -8,6 +8,7 @@ use super::widgets::{format_cost, format_tokens, truncate_display_width};
 use crate::tui::actions::{Action, ActionSet};
 use crate::tui::app::{App, ClickAction, SortField, Tab};
 use crate::tui::data::{build_period_usage, PeriodKind};
+use crate::tui::presentation::SubscriptionPresentation;
 
 #[derive(Clone, Copy)]
 pub(super) struct SortControl {
@@ -27,6 +28,7 @@ pub(super) struct FooterContent {
     leading: Option<String>,
     summary: Line<'static>,
     help: Line<'static>,
+    status: Option<Line<'static>>,
 }
 
 impl FooterContent {
@@ -41,6 +43,7 @@ impl FooterContent {
             leading: None,
             summary,
             help,
+            status: None,
         }
     }
 
@@ -53,6 +56,11 @@ impl FooterContent {
         self.leading = Some(leading);
         self
     }
+
+    pub(super) fn with_status(mut self, status: Line<'static>) -> Self {
+        self.status = Some(status);
+        self
+    }
 }
 
 pub(super) fn standard_content(app: &App, actions: &ActionSet) -> FooterContent {
@@ -63,6 +71,19 @@ pub(super) fn standard_content(app: &App, actions: &ActionSet) -> FooterContent 
         help_row_line(app, actions),
     );
     with_empty_scope(content, app, actions)
+}
+
+pub(super) fn subscription_content(
+    app: &App,
+    presentation: SubscriptionPresentation,
+    actions: &ActionSet,
+) -> FooterContent {
+    FooterContent::new(
+        Vec::new(),
+        subscription_summary_line(app, presentation),
+        subscription_help_line(app, actions),
+    )
+    .with_status(subscription_status_row_line(app))
 }
 
 pub(super) fn standard_sort_controls(actions: &ActionSet) -> Vec<SortControl> {
@@ -133,6 +154,7 @@ fn render_rows(frame: &mut Frame, app: &mut App, inner: Rect, content: FooterCon
         leading,
         summary,
         help,
+        status,
     } = content;
     render_main_row(
         frame,
@@ -149,18 +171,43 @@ fn render_rows(frame: &mut Frame, app: &mut App, inner: Rect, content: FooterCon
     }
 
     if let Some(area) = rows.get(2).copied() {
-        render_status_row(frame, app, area);
+        if let Some(status) = status {
+            frame.render_widget(Paragraph::new(status), area);
+        } else {
+            render_status_row(frame, app, area);
+        }
     }
 }
 
 pub(super) fn render_cold_loading(frame: &mut Frame, app: &App, area: Rect) {
+    render_timed_activity(
+        frame,
+        app,
+        area,
+        super::loading::SCANNING_LOCAL_DATA,
+        "Scanning",
+        app.background_load_elapsed().unwrap_or_default().as_secs(),
+    );
+}
+
+pub(super) fn render_timed_activity(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    message: &'static str,
+    compact_message: &'static str,
+    elapsed_secs: u64,
+) {
     let inner = render_shell(frame, app, area);
     if inner.is_empty() {
         return;
     }
 
-    let elapsed = app.background_load_elapsed().unwrap_or_default().as_secs();
-    render_centered_line(frame, inner, cold_loading_line(app, inner.width, elapsed));
+    render_centered_line(
+        frame,
+        inner,
+        timed_activity_line(app, inner.width, message, compact_message, elapsed_secs),
+    );
 }
 
 pub(super) fn render_cold_failed(frame: &mut Frame, app: &App, area: Rect, actions: &ActionSet) {
@@ -184,14 +231,20 @@ fn render_centered_line(frame: &mut Frame, area: Rect, line: Line<'static>) {
     frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), row);
 }
 
-fn cold_loading_line(app: &App, width: u16, elapsed_secs: u64) -> Line<'static> {
+fn timed_activity_line(
+    app: &App,
+    width: u16,
+    message: &'static str,
+    compact_message: &'static str,
+    elapsed_secs: u64,
+) -> Line<'static> {
     const WAVE: &str = "~ ~";
     const MIN_WAVE_WIDTH: usize = 56;
     const TIMER_WIDTH: usize = 4;
 
     let elapsed = format!("{elapsed_secs}s");
     let elapsed = format!("{elapsed:>TIMER_WIDTH$}");
-    let plain = format!("{} ·{}", super::loading::SCANNING_LOCAL_DATA, elapsed);
+    let plain = format!("{message} ·{elapsed}");
     let decorated = format!("{WAVE}  {plain}  {WAVE}");
     let available = width as usize;
 
@@ -199,10 +252,7 @@ fn cold_loading_line(app: &App, width: u16, elapsed_secs: u64) -> Line<'static> 
         return Line::from(vec![
             Span::styled(WAVE.to_string(), Style::default().fg(app.theme.accent)),
             Span::raw("  "),
-            Span::styled(
-                super::loading::SCANNING_LOCAL_DATA.to_string(),
-                Style::default().fg(app.theme.muted),
-            ),
+            Span::styled(message, Style::default().fg(app.theme.muted)),
             Span::styled(" ·", Style::default().fg(app.theme.muted)),
             Span::styled(
                 elapsed,
@@ -217,10 +267,7 @@ fn cold_loading_line(app: &App, width: u16, elapsed_secs: u64) -> Line<'static> 
 
     if UnicodeWidthStr::width(plain.as_str()) <= available {
         return Line::from(vec![
-            Span::styled(
-                super::loading::SCANNING_LOCAL_DATA.to_string(),
-                Style::default().fg(app.theme.muted),
-            ),
+            Span::styled(message, Style::default().fg(app.theme.muted)),
             Span::styled(" ·", Style::default().fg(app.theme.muted)),
             Span::styled(
                 elapsed,
@@ -231,7 +278,7 @@ fn cold_loading_line(app: &App, width: u16, elapsed_secs: u64) -> Line<'static> 
         ]);
     }
 
-    let compact = format!("Scanning ·{elapsed}");
+    let compact = format!("{compact_message} ·{elapsed}");
     Line::from(Span::styled(
         truncate_display_width(&compact, available),
         Style::default().fg(app.theme.muted),
@@ -379,6 +426,67 @@ pub(super) fn summary_row_line(app: &App, actions: &ActionSet) -> Line<'static> 
     Line::from(right_spans)
 }
 
+fn subscription_summary_line(app: &App, presentation: SubscriptionPresentation) -> Line<'static> {
+    match presentation {
+        SubscriptionPresentation::ColdFetching => Line::default(),
+        SubscriptionPresentation::Prompt => {
+            let configured = app.enabled_subscription_provider_count();
+            if configured == 0 {
+                Line::from(Span::styled(
+                    "No providers configured",
+                    Style::default().fg(app.theme.muted),
+                ))
+            } else {
+                Line::from(vec![
+                    Span::styled(
+                        count_label(configured, "provider", "providers"),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(" configured", Style::default().fg(app.theme.muted)),
+                ])
+            }
+        }
+        SubscriptionPresentation::Empty { .. } if app.subscription_usage.is_empty() => {
+            Line::from(Span::styled(
+                "No subscription results",
+                Style::default().fg(app.theme.muted),
+            ))
+        }
+        SubscriptionPresentation::Empty { .. } | SubscriptionPresentation::Results { .. } => {
+            let providers = app.subscription_usage.len();
+            let limits = app
+                .subscription_usage
+                .iter()
+                .map(|output| output.metrics.len())
+                .sum();
+            let errors = app.subscription_usage_errors.len();
+            let mut spans = vec![
+                Span::styled(
+                    count_label(providers, "provider", "providers"),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(" · ", Style::default().fg(app.theme.muted)),
+                Span::styled(
+                    count_label(limits, "limit", "limits"),
+                    Style::default().fg(app.theme.foreground),
+                ),
+            ];
+            if errors > 0 {
+                spans.push(Span::styled(" · ", Style::default().fg(app.theme.muted)));
+                spans.push(Span::styled(
+                    count_label(errors, "error", "errors"),
+                    Style::default().fg(Color::Red),
+                ));
+            }
+            Line::from(spans)
+        }
+    }
+}
+
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
 fn current_count_label(app: &App) -> String {
     match app.current_tab {
         Tab::Overview => {
@@ -432,76 +540,59 @@ pub(super) fn help_row_line(app: &App, actions: &ActionSet) -> Line<'static> {
     action_help_row_line(app, actions, None)
 }
 
+fn subscription_help_line(app: &App, actions: &ActionSet) -> Line<'static> {
+    let narrow = app.is_very_narrow();
+    let separator = if narrow { "·" } else { " · " };
+    let mut items = Vec::<(String, Style)>::new();
+
+    if actions.contains(Action::RefreshSubscription) {
+        items.push((
+            (if narrow { "[u]" } else { "[u:refresh]" }).to_string(),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    if actions.contains(Action::Scroll) {
+        items.push((
+            (if narrow { "↑↓" } else { "↑↓ scroll" }).to_string(),
+            Style::default().fg(app.theme.muted),
+        ));
+    }
+    if actions.contains(Action::PreviousTab) || actions.contains(Action::NextTab) {
+        items.push((
+            (if narrow { "←→" } else { "←→/tab view" }).to_string(),
+            Style::default().fg(app.theme.muted),
+        ));
+    }
+    if actions.contains(Action::Theme) {
+        items.push((
+            (if narrow { "[p]" } else { "[p:theme]" }).to_string(),
+            Style::default().fg(Color::Magenta),
+        ));
+    }
+    if actions.contains(Action::Quit) {
+        items.push(("q".to_string(), Style::default().fg(app.theme.muted)));
+    }
+
+    let mut spans = Vec::new();
+    for (label, style) in items {
+        if !spans.is_empty() {
+            spans.push(Span::styled(
+                separator.to_string(),
+                Style::default().fg(app.theme.muted),
+            ));
+        }
+        spans.push(Span::styled(label, style));
+    }
+    Line::from(spans)
+}
+
 pub(super) fn action_help_row_line(
     app: &App,
     actions: &ActionSet,
     toggle_target: Option<&str>,
 ) -> Line<'static> {
     let is_very_narrow = app.is_very_narrow();
-
-    if app.current_tab == Tab::Usage {
-        let local_auto = if app.auto_refresh {
-            format!("[R:local auto {}s]", app.auto_refresh_interval.as_secs())
-        } else {
-            "[R:local auto off]".to_string()
-        };
-
-        let spans = if is_very_narrow {
-            let mut spans = Vec::new();
-            if app.has_enabled_subscription_providers() {
-                spans.push(Span::styled("[u]", Style::default().fg(Color::Yellow)));
-                spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
-            }
-            if actions.contains(Action::RefreshLocal) {
-                spans.push(Span::styled(
-                    "[r:local]",
-                    Style::default().fg(Color::Yellow),
-                ));
-                spans.push(Span::styled("·", Style::default().fg(app.theme.muted)));
-            }
-            spans.push(Span::styled(
-                "[R:local]",
-                Style::default().fg(if app.auto_refresh {
-                    Color::Green
-                } else {
-                    app.theme.muted
-                }),
-            ));
-            spans.push(Span::styled("·e·q", Style::default().fg(app.theme.muted)));
-            spans
-        } else {
-            let mut spans = Vec::new();
-            if app.has_enabled_subscription_providers() {
-                spans.push(Span::styled(
-                    "[u:refresh subscription]",
-                    Style::default().fg(Color::Yellow),
-                ));
-                spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
-            }
-            if actions.contains(Action::RefreshLocal) {
-                spans.push(Span::styled(
-                    "[r:refresh local reports]",
-                    Style::default().fg(Color::Yellow),
-                ));
-                spans.push(Span::styled(" • ", Style::default().fg(app.theme.muted)));
-            }
-            spans.push(Span::styled(
-                local_auto,
-                Style::default().fg(if app.auto_refresh {
-                    Color::Green
-                } else {
-                    app.theme.muted
-                }),
-            ));
-            spans.push(Span::styled(
-                " • e • q",
-                Style::default().fg(app.theme.muted),
-            ));
-            spans
-        };
-
-        return Line::from(spans);
-    }
+    debug_assert_ne!(app.current_tab, Tab::Usage);
 
     let separator = if is_very_narrow { "·" } else { " • " };
     let mut spans = Vec::new();
@@ -681,6 +772,7 @@ fn action_style(app: &App, action: Action) -> Style {
 }
 
 pub(super) fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
+    debug_assert_ne!(app.current_tab, Tab::Usage);
     let paragraph = Paragraph::new(status_row_line(app));
     frame.render_widget(paragraph, area);
 }
@@ -693,10 +785,6 @@ fn status_row_line(app: &App) -> Line<'static> {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ));
-    }
-
-    if app.current_tab == Tab::Usage {
-        return usage_status_row_line(app);
     }
 
     // Cold loading and cold failure use the centered footer presentation.
@@ -751,10 +839,10 @@ fn status_row_line(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-fn usage_status_row_line(app: &App) -> Line<'static> {
+fn subscription_status_row_line(app: &App) -> Line<'static> {
     let (text, style) = if app.is_fetching_usage() {
         (
-            "Fetching subscription usage...".to_string(),
+            "Refreshing subscription usage...".to_string(),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -768,13 +856,6 @@ fn usage_status_row_line(app: &App) -> Line<'static> {
         )
     } else if let Some(msg) = app.general_status_message() {
         (msg.to_string(), Style::default().fg(app.theme.muted))
-    } else if let Some(warning) = app.pricing_warning() {
-        (
-            warning.to_string(),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
     } else if let Some(updated_at) = app.last_subscription_usage_check {
         (
             format!(
@@ -893,7 +974,12 @@ mod tests {
         let state = crate::tui::view_state::ViewState::default();
         let presentation = crate::tui::presentation::Presentation::for_view(app, &state);
         let actions = ActionSet::for_view(app, &state, presentation);
-        line_text(help_row_line(app, &actions))
+        match presentation {
+            crate::tui::presentation::Presentation::Subscription(_) => {
+                line_text(subscription_help_line(app, &actions))
+            }
+            _ => line_text(help_row_line(app, &actions)),
+        }
     }
 
     #[test]
@@ -921,18 +1007,20 @@ mod tests {
     }
 
     #[test]
-    fn usage_help_row_shows_subscription_and_local_refresh_keys() {
+    fn usage_help_row_only_shows_subscription_and_shell_actions() {
         let mut app = make_app_on(Tab::Overview);
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
 
         let text = help_text(&app);
 
-        assert!(text.contains("[u:refresh subscription]"));
-        assert!(text.contains("[r:refresh local reports]"));
-        assert!(text.contains("[R:local auto"));
-        assert!(text.contains(" • e • q"));
-        assert!(!text.contains("[r:refresh]"));
+        assert!(text.contains("[u:refresh]"));
+        assert!(text.contains("←→/tab view"));
+        assert!(text.contains("[p:theme]"));
+        assert!(text.ends_with('q'));
+        for local in ["[r:", "[R:", "[e:"] {
+            assert!(!text.contains(local), "{text}");
+        }
     }
 
     #[test]
@@ -943,10 +1031,11 @@ mod tests {
 
         let text = help_text(&app);
 
-        assert!(!text.contains("[u:refresh subscription]"));
-        assert!(text.contains("[r:refresh local reports]"));
-        assert!(text.contains("[R:local auto"));
-        assert!(text.contains(" • e • q"));
+        assert!(!text.contains("[u:refresh]"));
+        assert!(text.contains("←→/tab view"));
+        assert!(text.contains("[p:theme]"));
+        assert!(text.ends_with('q'));
+        assert!(!text.contains("local"));
     }
 
     #[test]
@@ -959,9 +1048,10 @@ mod tests {
         let text = help_text(&app);
 
         assert!(!text.contains("[u]"));
-        assert!(text.contains("[r:local]"));
-        assert!(text.contains("[R:local]"));
-        assert!(text.contains("·e·q"));
+        assert!(text.contains("←→"));
+        assert!(text.contains("[p]"));
+        assert!(text.ends_with('q'));
+        assert!(!text.contains("local"));
     }
 
     #[test]
@@ -1035,7 +1125,7 @@ mod tests {
         app.last_subscription_usage_check =
             Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
 
-        let text = line_text(status_row_line(&app));
+        let text = line_text(subscription_status_row_line(&app));
 
         assert!(text.contains("Subscription checked:"));
         assert!(!text.contains("Last updated"));
@@ -1049,7 +1139,7 @@ mod tests {
         app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
         app.set_local_report_status("Loaded from cache");
 
-        let text = line_text(status_row_line(&app));
+        let text = line_text(subscription_status_row_line(&app));
 
         assert_eq!(text, "Press u to refresh subscription usage");
     }
@@ -1061,7 +1151,7 @@ mod tests {
         app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
         app.set_local_report_status("Jumped to today's usage");
 
-        let text = line_text(status_row_line(&app));
+        let text = line_text(subscription_status_row_line(&app));
 
         assert_eq!(text, "Press u to refresh subscription usage");
     }
@@ -1071,15 +1161,15 @@ mod tests {
         let mut app = make_app_on(Tab::Overview);
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
-        app.set_status("Export failed: permission denied");
+        app.set_status("Theme save failed: permission denied");
 
-        let text = line_text(status_row_line(&app));
+        let text = line_text(subscription_status_row_line(&app));
 
-        assert_eq!(text, "Export failed: permission denied");
+        assert_eq!(text, "Theme save failed: permission denied");
     }
 
     #[test]
-    fn pricing_warning_persists_in_the_global_footer_status_row() {
+    fn local_report_warnings_do_not_cross_into_usage_status() {
         let mut app = make_app_on(Tab::Models);
         app.status_message = None;
         app.status_message_time = None;
@@ -1093,10 +1183,14 @@ mod tests {
             "Pricing unavailable; costs may be missing"
         );
 
+        app.set_cache_persistence_warning(Some(
+            "Cache persistence warning: permission denied".to_string(),
+        ));
         app.current_tab = Tab::Usage;
+        app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
         assert_eq!(
-            line_text(status_row_line(&app)),
-            "Pricing unavailable; costs may be missing"
+            line_text(subscription_status_row_line(&app)),
+            "Press u to refresh subscription usage"
         );
     }
 
@@ -1119,7 +1213,7 @@ mod tests {
             }],
         });
 
-        let text = line_text(status_row_line(&app));
+        let text = line_text(subscription_status_row_line(&app));
 
         assert_eq!(
             text,
@@ -1133,7 +1227,7 @@ mod tests {
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(Vec::new());
 
-        let text = line_text(status_row_line(&app));
+        let text = line_text(subscription_status_row_line(&app));
 
         assert_eq!(
             text,

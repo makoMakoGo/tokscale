@@ -2,6 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
 use crate::tui::app::App;
+use crate::tui::presentation::SubscriptionPresentation;
 use crate::tui::subscription_usage::{helpers, UsageOutput, UsageProviderError};
 use crate::tui::themes::Theme;
 use crate::tui::ui::widgets::viewport_scrollbar_state;
@@ -12,7 +13,12 @@ const NO_PROVIDERS_PROMPT: &str =
     "No remote subscription providers enabled; configure usageProviders";
 const CACHE_DISPLAY_NOTICE: &str = "Showing cached subscription usage; no remote providers enabled";
 
-pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+pub fn render(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    presentation: SubscriptionPresentation,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
@@ -23,27 +29,25 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if app.subscription_usage.is_empty() && app.subscription_usage_errors.is_empty() {
-        app.set_usage_text_viewport(inner.height as usize, 0);
-        if app.is_fetching_usage() {
+    match presentation {
+        SubscriptionPresentation::ColdFetching => {
+            app.set_usage_text_viewport(inner.height as usize, 0);
             render_fetching(frame, app, inner);
-        } else if app.usage_fetch_attempted {
-            render_empty(frame, app, inner);
-        } else {
+        }
+        SubscriptionPresentation::Prompt => {
+            app.set_usage_text_viewport(inner.height as usize, 0);
             render_prompt(frame, app, inner);
         }
-    } else if app.subscription_usage.iter().all(|o| o.metrics.is_empty())
-        && app.subscription_usage_errors.is_empty()
-    {
-        app.set_usage_text_viewport(inner.height as usize, 0);
-        render_empty(frame, app, inner);
-    } else {
-        render_loaded(frame, app, inner);
+        SubscriptionPresentation::Empty { .. } => {
+            app.set_usage_text_viewport(inner.height as usize, 0);
+            render_empty(frame, app, inner);
+        }
+        SubscriptionPresentation::Results { .. } => render_loaded(frame, app, inner),
     }
 }
 
 fn render_fetching(frame: &mut Frame, app: &App, area: Rect) {
-    super::loading::render(frame, app, area, "Fetching subscription data");
+    super::loading::render(frame, app, area, super::loading::FETCHING_SUBSCRIPTION_DATA);
 }
 
 fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
@@ -268,7 +272,10 @@ mod tests {
     fn render_text(app: &mut App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         terminal
-            .draw(|frame| render(frame, app, frame.area()))
+            .draw(|frame| {
+                let presentation = SubscriptionPresentation::for_app(app);
+                render(frame, app, frame.area(), presentation)
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         let width = buffer.area.width as usize;

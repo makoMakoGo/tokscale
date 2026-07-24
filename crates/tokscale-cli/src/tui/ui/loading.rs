@@ -5,6 +5,7 @@ use crate::tui::app::App;
 
 /// Canonical message stem for the cold-start acquisition state.
 pub(super) const SCANNING_LOCAL_DATA: &str = "Scanning local data";
+pub(super) const FETCHING_SUBSCRIPTION_DATA: &str = "Fetching subscription data";
 
 /// Braille spinner frames shared by every content-area loading state
 /// (cold-start scan, subscription fetch, ...).
