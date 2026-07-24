@@ -3,8 +3,8 @@ use ratatui::widgets::Paragraph;
 
 use crate::tui::app::App;
 
-/// Canonical message for the cold-start acquisition state.
-pub(super) const SCANNING_SESSION_DATA: &str = "Scanning session data...";
+/// Canonical message stem for the cold-start acquisition state.
+pub(super) const SCANNING_LOCAL_DATA: &str = "Scanning local data";
 
 /// Braille spinner frames shared by every content-area loading state
 /// (cold-start scan, subscription fetch, ...).
@@ -113,7 +113,10 @@ fn spinner_line(app: &App, message: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(glyph.to_string(), Style::default().fg(app.theme.accent)),
         Span::raw(" "),
-        Span::styled(message.to_string(), Style::default().fg(app.theme.muted)),
+        Span::styled(
+            format!("{message}..."),
+            Style::default().fg(app.theme.muted),
+        ),
     ])
 }
 

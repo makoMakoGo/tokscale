@@ -15,14 +15,16 @@ pub(crate) fn render(
     presentation: Presentation,
     actions: &ActionSet,
 ) {
-    if matches!(presentation, Presentation::Loading | Presentation::Failed) {
-        footer::render(
-            frame,
-            app,
-            area,
-            FooterContent::new(Vec::new(), Line::default(), Line::default()),
-        );
-        return;
+    match presentation {
+        Presentation::Loading => {
+            footer::render_cold_loading(frame, app, area);
+            return;
+        }
+        Presentation::Failed => {
+            footer::render_cold_failed(frame, app, area, actions);
+            return;
+        }
+        Presentation::Empty(_) | Presentation::Ready => {}
     }
 
     let content = match app.current_tab {
