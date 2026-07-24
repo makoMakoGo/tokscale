@@ -119,7 +119,7 @@ fn spinner_line(app: &App, message: &str) -> Line<'static> {
         Span::raw(" "),
         Span::styled(
             format!("{message}..."),
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         ),
     ])
 }
@@ -142,7 +142,10 @@ fn pond_line(app: &App, row: &str) -> Line<'static> {
                 Style::default().fg(app.theme.visualization.chart_highlight),
             ),
             '*' => Span::styled(ch.to_string(), Style::default().fg(app.theme.text.primary)),
-            _ => Span::styled(ch.to_string(), Style::default().fg(app.theme.text.muted)),
+            _ => Span::styled(
+                ch.to_string(),
+                Style::default().fg(app.theme.text.secondary),
+            ),
         })
         .collect::<Vec<_>>();
     Line::from(spans)

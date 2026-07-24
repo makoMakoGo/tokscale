@@ -228,13 +228,25 @@ pub struct PeriodUsage {
     pub active_days: u32,
 }
 
+/// Discrete activity level for one day in the contribution graph.
+///
+/// `Empty` is reserved for zero-token days. The remaining ordered grades are
+/// assigned from positive token totals within the visible graph window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ContributionGrade {
+    Empty,
+    Low,
+    Medium,
+    High,
+    Peak,
+}
+
 #[derive(Debug, Clone)]
 pub struct ContributionDay {
     pub date: NaiveDate,
     pub tokens: u64,
     pub cost: f64,
-    /// Discrete theme-grade representative derived from visible-window token activity.
-    pub intensity: f64,
+    pub grade: ContributionGrade,
 }
 
 #[derive(Debug, Clone, Default)]

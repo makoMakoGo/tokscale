@@ -5,7 +5,6 @@ use ratatui::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::app::App;
-use crate::tui::colors;
 use crate::tui::model_family::ModelFamily;
 
 pub(super) fn display_name(family: ModelFamily) -> &'static str {
@@ -45,7 +44,7 @@ pub(super) fn slogan(family: ModelFamily) -> &'static str {
 /// Fixed brand color per family (logo primary colors), adapted through the
 /// shared identity-color path for surface contrast.
 pub(super) fn family_color(app: &App, family: ModelFamily) -> Color {
-    colors::resolve_family_color(family, &app.theme)
+    app.family_color(family)
 }
 
 /// Overview card artwork uses one fixed three-row visual contract.

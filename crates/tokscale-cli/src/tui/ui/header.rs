@@ -30,7 +30,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     .fg(app.theme.chrome.nav_active)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(app.theme.text.muted)
+                Style::default().fg(app.theme.text.secondary)
             };
             Line::from(Span::styled(name, style))
         })
@@ -73,8 +73,8 @@ fn header_block(app: &App) -> Block<'static> {
     if !app.is_narrow() {
         block = block.title_top(
             Line::from(vec![
-                Span::styled(" | ", app.theme.subtle_text_style()),
-                Span::styled("GitHub ", app.theme.subtle_text_style()),
+                Span::styled(" | ", Style::default().fg(app.theme.text.secondary)),
+                Span::styled("GitHub ", Style::default().fg(app.theme.text.secondary)),
             ])
             .right_aligned(),
         );

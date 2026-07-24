@@ -19,7 +19,7 @@ const PROFILE_MIN_BAR_WIDTH: usize = 6;
 pub(crate) struct ProfileBarRow {
     /// Left-aligned label ("Monday", "14").
     pub label: String,
-    /// Secondary column rendered muted ("7.2B", "14:00-14:59").
+    /// Secondary column ("7.2B", "14:00-14:59").
     pub detail: String,
     /// Bar magnitude.
     pub value: u64,
@@ -88,7 +88,7 @@ pub(crate) fn bar_row(app: &App, row: &ProfileBarRow, width: usize) -> Line<'sta
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             format!("{detail:>12}"),
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         ));
     }
     if bar_width > 0 {
@@ -105,7 +105,7 @@ pub(crate) fn bar_row(app: &App, row: &ProfileBarRow, width: usize) -> Line<'sta
         ));
         spans.push(Span::styled(
             "░".repeat(bar_width - filled),
-            app.theme.subtle_text_style(),
+            Style::default().fg(app.theme.visualization.track),
         ));
     }
     if !spans.is_empty() {
@@ -140,19 +140,19 @@ where
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(date_range, Style::default().fg(app.theme.text.muted)),
+            Span::styled(date_range, Style::default().fg(app.theme.text.secondary)),
         ]),
         Line::from(vec![
             Span::styled(
                 format!("{active_count} {activity_label}"),
                 Style::default().fg(app.theme.metrics.total),
             ),
-            Span::styled("  ·  ", Style::default().fg(app.theme.text.muted)),
+            Span::styled("  ·  ", Style::default().fg(app.theme.text.secondary)),
             Span::styled(
                 format!("{} tokens", format_tokens(app.data.total_tokens)),
                 Style::default().fg(app.theme.metrics.tokens),
             ),
-            Span::styled("  ·  ", Style::default().fg(app.theme.text.muted)),
+            Span::styled("  ·  ", Style::default().fg(app.theme.text.secondary)),
             Span::styled(
                 format_cost(app.data.total_cost),
                 Style::default().fg(app.theme.metrics.cost),
@@ -179,12 +179,15 @@ pub(crate) fn peak_line(
             period,
             Style::default().fg(app.theme.visualization.chart_highlight),
         ),
-        Span::styled("  ·  ", Style::default().fg(app.theme.text.muted)),
+        Span::styled("  ·  ", Style::default().fg(app.theme.text.secondary)),
         Span::styled(
             format_tokens(tokens),
             Style::default().fg(app.theme.metrics.tokens),
         ),
-        Span::styled(" tokens  ·  ", Style::default().fg(app.theme.text.muted)),
+        Span::styled(
+            " tokens  ·  ",
+            Style::default().fg(app.theme.text.secondary),
+        ),
         Span::styled(
             format_cost(cost),
             Style::default().fg(app.theme.metrics.cost),
@@ -194,11 +197,11 @@ pub(crate) fn peak_line(
 
 pub(crate) fn switch_to_table_line(app: &App) -> Line<'static> {
     Line::from(vec![
-        Span::styled("Press ", Style::default().fg(app.theme.text.muted)),
+        Span::styled("Press ", Style::default().fg(app.theme.text.secondary)),
         Span::styled("[v]", Style::default().fg(app.theme.chrome.focus)),
         Span::styled(
             " to switch to table view",
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         ),
     ])
 }
@@ -300,7 +303,10 @@ mod tests {
             .iter()
             .find(|span| span.content.contains('░'))
             .expect("track span");
-        assert_eq!(track.style, app.theme.subtle_text_style());
+        assert_eq!(
+            track.style,
+            Style::default().fg(app.theme.visualization.track)
+        );
     }
 
     #[test]

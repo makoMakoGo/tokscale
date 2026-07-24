@@ -167,7 +167,7 @@ impl DialogContent for GroupByPickerDialog {
 
         let current = self.selected.borrow();
         let header = Paragraph::new(Line::from(vec![
-            Span::styled("Current: ", Style::default().fg(theme.text.muted)),
+            Span::styled("Current: ", Style::default().fg(theme.text.secondary)),
             Span::styled(
                 current.to_string(),
                 Style::default().fg(theme.chrome.current),
@@ -200,13 +200,13 @@ impl DialogContent for GroupByPickerDialog {
             } else if is_active {
                 Style::default().fg(theme.chrome.current)
             } else {
-                Style::default().fg(theme.text.muted)
+                Style::default().fg(theme.text.secondary)
             };
 
             let desc_style = if is_cursor {
                 theme.selection_style()
             } else {
-                Style::default().fg(theme.text.muted)
+                Style::default().fg(theme.text.secondary)
             };
 
             let padding = usable.saturating_sub(left.chars().count());
@@ -226,7 +226,7 @@ impl DialogContent for GroupByPickerDialog {
 
         let hint = Paragraph::new("↑↓ navigate • Enter select • Esc close")
             .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.text.muted));
+            .style(Style::default().fg(theme.text.secondary));
         frame.render_widget(hint, rows.hint);
     }
 

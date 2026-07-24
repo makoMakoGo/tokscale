@@ -482,7 +482,7 @@ pub fn render(
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
     let theme_heading = app.theme.chrome.heading;
-    let theme_muted = app.theme.text.muted;
+    let theme_secondary = app.theme.text.secondary;
     let theme_selection_style = app.theme.selection_style();
     let metric_input_style = app.theme.metric_input_style();
     let metric_output_style = app.theme.metric_output_style();
@@ -590,9 +590,9 @@ pub fn render(
                             &client.label,
                             table_layout.width_for(DailyColumn::TopClient),
                         ))
-                        .style(Style::default().fg(theme_muted))
+                        .style(Style::default().fg(theme_secondary))
                     } else {
-                        Cell::from("\u{2014}").style(Style::default().fg(theme_muted))
+                        Cell::from("\u{2014}").style(Style::default().fg(theme_secondary))
                     }
                 }
                 DailyColumn::TopModel => {
@@ -612,7 +612,7 @@ pub fn render(
                                 .add_modifier(Modifier::BOLD),
                         )
                     } else {
-                        Cell::from("\u{2014}").style(Style::default().fg(theme_muted))
+                        Cell::from("\u{2014}").style(Style::default().fg(theme_secondary))
                     }
                 }
                 DailyColumn::Turn => Cell::from(turn_str.clone()),
@@ -725,7 +725,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
     let theme_heading = app.theme.chrome.heading;
-    let theme_muted = app.theme.text.muted;
+    let theme_secondary = app.theme.text.secondary;
     let theme_selection_style = app.theme.selection_style();
     let metric_input_style = app.theme.metric_input_style();
     let metric_output_style = app.theme.metric_output_style();
@@ -825,7 +825,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         workspace_label_or_unknown(row.workspace.as_deref()),
                         table_layout.width_for(DailyDetailColumn::Workspace),
                     ))
-                    .style(Style::default().fg(theme_muted)),
+                    .style(Style::default().fg(theme_secondary)),
                     DailyDetailColumn::Model => Cell::from(truncate_model_display_name_to(
                         &row.model,
                         table_layout.model_width,
@@ -839,12 +839,12 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         &get_provider_display_name(&row.provider),
                         table_layout.width_for(DailyDetailColumn::Provider),
                     ))
-                    .style(Style::default().fg(theme_muted)),
+                    .style(Style::default().fg(theme_secondary)),
                     DailyDetailColumn::Client => Cell::from(truncate_display_width(
                         &get_client_display_name(&row.client),
                         table_layout.width_for(DailyDetailColumn::Client),
                     ))
-                    .style(Style::default().fg(theme_muted)),
+                    .style(Style::default().fg(theme_secondary)),
                     DailyDetailColumn::Messages => Cell::from(row.messages.to_string()),
                     DailyDetailColumn::Input => {
                         Cell::from(format_tokens(row.tokens.input)).style(metric_input_style)

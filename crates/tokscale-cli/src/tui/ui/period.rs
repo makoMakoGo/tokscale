@@ -539,7 +539,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
     let theme_heading = app.theme.chrome.heading;
-    let theme_muted = app.theme.text.muted;
+    let theme_secondary = app.theme.text.secondary;
     let theme_selection_style = app.theme.selection_style();
     let metric_input_style = app.theme.metric_input_style();
     let metric_output_style = app.theme.metric_output_style();
@@ -635,7 +635,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         workspace_label_or_unknown(row.workspace.as_deref()),
                         table_layout.width_for(PeriodDetailColumn::Workspace),
                     ))
-                    .style(Style::default().fg(theme_muted)),
+                    .style(Style::default().fg(theme_secondary)),
                     PeriodDetailColumn::Model => Cell::from(truncate_model_display_name_to(
                         &row.model,
                         table_layout.model_width,
@@ -649,12 +649,12 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         &get_provider_display_name(&row.provider),
                         table_layout.width_for(PeriodDetailColumn::Provider),
                     ))
-                    .style(Style::default().fg(theme_muted)),
+                    .style(Style::default().fg(theme_secondary)),
                     PeriodDetailColumn::Client => Cell::from(truncate_display_width(
                         &get_client_display_name(&row.client),
                         table_layout.width_for(PeriodDetailColumn::Client),
                     ))
-                    .style(Style::default().fg(theme_muted)),
+                    .style(Style::default().fg(theme_secondary)),
                     PeriodDetailColumn::Messages => Cell::from(row.messages.to_string()),
                     PeriodDetailColumn::Input => {
                         Cell::from(format_tokens(row.tokens.input)).style(metric_input_style)
@@ -785,7 +785,7 @@ fn render_period(
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
     let theme_heading = app.theme.chrome.heading;
-    let theme_muted = app.theme.text.muted;
+    let theme_secondary = app.theme.text.secondary;
     let theme_selection_style = app.theme.selection_style();
     let metric_input_style = app.theme.metric_input_style();
     let metric_output_style = app.theme.metric_output_style();
@@ -894,9 +894,9 @@ fn render_period(
                             &client.label,
                             table_layout.width_for(PeriodColumn::TopClient),
                         ))
-                        .style(Style::default().fg(theme_muted))
+                        .style(Style::default().fg(theme_secondary))
                     } else {
-                        Cell::from("-").style(Style::default().fg(theme_muted))
+                        Cell::from("-").style(Style::default().fg(theme_secondary))
                     }
                 }
                 PeriodColumn::TopModel => {
@@ -916,7 +916,7 @@ fn render_period(
                                 .add_modifier(Modifier::BOLD),
                         )
                     } else {
-                        Cell::from("-").style(Style::default().fg(theme_muted))
+                        Cell::from("-").style(Style::default().fg(theme_secondary))
                     }
                 }
                 PeriodColumn::Turn => Cell::from(turn_str.clone()),

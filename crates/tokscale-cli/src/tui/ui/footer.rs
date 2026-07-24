@@ -255,8 +255,8 @@ fn timed_activity_line(
                 Style::default().fg(app.theme.status.pending),
             ),
             Span::raw("  "),
-            Span::styled(message, Style::default().fg(app.theme.text.muted)),
-            Span::styled(" ·", Style::default().fg(app.theme.text.muted)),
+            Span::styled(message, Style::default().fg(app.theme.text.secondary)),
+            Span::styled(" ·", Style::default().fg(app.theme.text.secondary)),
             Span::styled(
                 elapsed,
                 Style::default()
@@ -273,8 +273,8 @@ fn timed_activity_line(
 
     if UnicodeWidthStr::width(plain.as_str()) <= available {
         return Line::from(vec![
-            Span::styled(message, Style::default().fg(app.theme.text.muted)),
-            Span::styled(" ·", Style::default().fg(app.theme.text.muted)),
+            Span::styled(message, Style::default().fg(app.theme.text.secondary)),
+            Span::styled(" ·", Style::default().fg(app.theme.text.secondary)),
             Span::styled(
                 elapsed,
                 Style::default()
@@ -287,7 +287,7 @@ fn timed_activity_line(
     let compact = format!("{compact_message} ·{elapsed}");
     Line::from(Span::styled(
         truncate_display_width(&compact, available),
-        Style::default().fg(app.theme.text.muted),
+        Style::default().fg(app.theme.text.secondary),
     ))
 }
 
@@ -305,18 +305,18 @@ fn cold_failed_line(app: &App, width: u16) -> Line<'static> {
                     .fg(app.theme.status.danger)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" · ", Style::default().fg(app.theme.text.muted)),
+            Span::styled(" · ", Style::default().fg(app.theme.text.secondary)),
             Span::styled("[r] Retry", Style::default().fg(app.theme.chrome.focus)),
-            Span::styled(" · ", Style::default().fg(app.theme.text.muted)),
-            Span::styled("[q] Quit", Style::default().fg(app.theme.text.muted)),
+            Span::styled(" · ", Style::default().fg(app.theme.text.secondary)),
+            Span::styled("[q] Quit", Style::default().fg(app.theme.text.secondary)),
         ]);
     }
 
     if UnicodeWidthStr::width(ACTIONS) <= available {
         return Line::from(vec![
             Span::styled("[r] Retry", Style::default().fg(app.theme.chrome.focus)),
-            Span::styled(" · ", Style::default().fg(app.theme.text.muted)),
-            Span::styled("[q] Quit", Style::default().fg(app.theme.text.muted)),
+            Span::styled(" · ", Style::default().fg(app.theme.text.secondary)),
+            Span::styled("[q] Quit", Style::default().fg(app.theme.text.secondary)),
         ]);
     }
 
@@ -329,7 +329,7 @@ fn cold_failed_line(app: &App, width: u16) -> Line<'static> {
     };
     Line::from(Span::styled(
         compact,
-        Style::default().fg(app.theme.text.muted),
+        Style::default().fg(app.theme.text.secondary),
     ))
 }
 
@@ -358,7 +358,7 @@ fn render_main_row(
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled(
             "Sort: ",
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         ));
         let mut x_offset = chunks[0].x.saturating_add(6);
 
@@ -369,7 +369,7 @@ fn render_main_row(
                     .fg(app.theme.chrome.current)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(app.theme.text.muted)
+                Style::default().fg(app.theme.text.secondary)
             };
 
             spans.push(Span::styled(control.label, style));
@@ -390,7 +390,7 @@ fn render_main_row(
     } else if let Some(leading) = leading {
         frame.render_widget(
             Paragraph::new(truncate_display_width(&leading, chunks[0].width as usize))
-                .style(Style::default().fg(app.theme.text.muted)),
+                .style(Style::default().fg(app.theme.text.secondary)),
             chunks[0],
         );
     }
@@ -414,13 +414,13 @@ pub(super) fn summary_row_line(app: &App, actions: &ActionSet) -> Line<'static> 
     if !is_very_narrow && !actions.is_empty_view() {
         right_spans.push(Span::styled(
             " tokens",
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         ));
     }
 
     right_spans.push(Span::styled(
         " | ",
-        Style::default().fg(app.theme.text.muted),
+        Style::default().fg(app.theme.text.secondary),
     ));
 
     // Total cost
@@ -436,7 +436,7 @@ pub(super) fn summary_row_line(app: &App, actions: &ActionSet) -> Line<'static> 
         let count_label = current_count_label(app);
         right_spans.push(Span::styled(
             count_label,
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         ));
     }
 
@@ -451,7 +451,7 @@ fn subscription_summary_line(app: &App, presentation: SubscriptionPresentation) 
             if configured == 0 {
                 Line::from(Span::styled(
                     "No providers configured",
-                    Style::default().fg(app.theme.text.muted),
+                    Style::default().fg(app.theme.text.secondary),
                 ))
             } else {
                 Line::from(vec![
@@ -459,14 +459,14 @@ fn subscription_summary_line(app: &App, presentation: SubscriptionPresentation) 
                         count_label(configured, "provider", "providers"),
                         Style::default().fg(app.theme.metrics.total),
                     ),
-                    Span::styled(" configured", Style::default().fg(app.theme.text.muted)),
+                    Span::styled(" configured", Style::default().fg(app.theme.text.secondary)),
                 ])
             }
         }
         SubscriptionPresentation::Empty { .. } if app.subscription_usage.is_empty() => {
             Line::from(Span::styled(
                 "No subscription results",
-                Style::default().fg(app.theme.text.muted),
+                Style::default().fg(app.theme.text.secondary),
             ))
         }
         SubscriptionPresentation::Empty { .. } | SubscriptionPresentation::Results { .. } => {
@@ -482,7 +482,7 @@ fn subscription_summary_line(app: &App, presentation: SubscriptionPresentation) 
                     count_label(providers, "provider", "providers"),
                     Style::default().fg(app.theme.metrics.total),
                 ),
-                Span::styled(" · ", Style::default().fg(app.theme.text.muted)),
+                Span::styled(" · ", Style::default().fg(app.theme.text.secondary)),
                 Span::styled(
                     count_label(limits, "limit", "limits"),
                     Style::default().fg(app.theme.text.primary),
@@ -491,7 +491,7 @@ fn subscription_summary_line(app: &App, presentation: SubscriptionPresentation) 
             if errors > 0 {
                 spans.push(Span::styled(
                     " · ",
-                    Style::default().fg(app.theme.text.muted),
+                    Style::default().fg(app.theme.text.secondary),
                 ));
                 spans.push(Span::styled(
                     count_label(errors, "error", "errors"),
@@ -574,13 +574,13 @@ fn subscription_help_line(app: &App, actions: &ActionSet) -> Line<'static> {
     if actions.contains(Action::Scroll) {
         items.push((
             (if narrow { "↑↓" } else { "↑↓ scroll" }).to_string(),
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         ));
     }
     if actions.contains(Action::PreviousTab) || actions.contains(Action::NextTab) {
         items.push((
             (if narrow { "←→" } else { "←→/tab view" }).to_string(),
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         ));
     }
     if actions.contains(Action::Theme) {
@@ -590,7 +590,10 @@ fn subscription_help_line(app: &App, actions: &ActionSet) -> Line<'static> {
         ));
     }
     if actions.contains(Action::Quit) {
-        items.push(("q".to_string(), Style::default().fg(app.theme.text.muted)));
+        items.push((
+            "q".to_string(),
+            Style::default().fg(app.theme.text.secondary),
+        ));
     }
 
     let mut spans = Vec::new();
@@ -598,7 +601,7 @@ fn subscription_help_line(app: &App, actions: &ActionSet) -> Line<'static> {
         if !spans.is_empty() {
             spans.push(Span::styled(
                 separator.to_string(),
-                Style::default().fg(app.theme.text.muted),
+                Style::default().fg(app.theme.text.secondary),
             ));
         }
         spans.push(Span::styled(label, style));
@@ -731,7 +734,7 @@ pub(super) fn action_help_row_line(
         if !spans.is_empty() {
             spans.push(Span::styled(
                 separator.to_string(),
-                Style::default().fg(app.theme.text.muted),
+                Style::default().fg(app.theme.text.secondary),
             ));
         }
         spans.push(Span::styled(label, action_style(app, action)));
@@ -785,7 +788,7 @@ fn action_style(app: &App, action: Action) -> Style {
         | Action::RefreshSubscription
         | Action::Copy
         | Action::Export
-        | Action::Quit => app.theme.text.muted,
+        | Action::Quit => app.theme.text.secondary,
     };
     Style::default().fg(color)
 }
@@ -852,13 +855,13 @@ fn status_row_line(app: &App) -> Line<'static> {
         };
         spans.push(Span::styled(
             format!("Last updated: {}", ago),
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         ));
 
         if app.auto_refresh {
             spans.push(Span::styled(
                 format!(" • Auto: {}s", app.auto_refresh_interval.as_secs()),
-                Style::default().fg(app.theme.text.muted),
+                Style::default().fg(app.theme.text.secondary),
             ));
         }
     }
@@ -890,7 +893,7 @@ fn subscription_status_row_line(app: &App) -> Line<'static> {
                 "Subscription checked: {}",
                 elapsed_label(updated_at.elapsed())
             ),
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         )
     } else if !app.subscription_usage.is_empty() {
         (
@@ -899,17 +902,17 @@ fn subscription_status_row_line(app: &App) -> Line<'static> {
             } else {
                 "Showing cached subscription usage; no remote providers enabled".to_string()
             },
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         )
     } else if !app.has_enabled_subscription_providers() {
         (
             "No remote subscription providers enabled; configure usageProviders".to_string(),
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         )
     } else {
         (
             "Press u to refresh subscription usage".to_string(),
-            Style::default().fg(app.theme.text.muted),
+            Style::default().fg(app.theme.text.secondary),
         )
     };
 
@@ -1028,7 +1031,7 @@ mod tests {
         );
         assert_eq!(
             action_style(&app, Action::Scroll).fg,
-            Some(app.theme.text.muted)
+            Some(app.theme.text.secondary)
         );
 
         app.auto_refresh = true;
@@ -1086,9 +1089,9 @@ mod tests {
         let line = cold_failed_line(&app, 80);
 
         assert_eq!(line.spans[0].style.fg, Some(app.theme.status.danger));
-        assert_eq!(line.spans[1].style.fg, Some(app.theme.text.muted));
+        assert_eq!(line.spans[1].style.fg, Some(app.theme.text.secondary));
         assert_eq!(line.spans[2].style.fg, Some(app.theme.chrome.focus));
-        assert_eq!(line.spans[4].style.fg, Some(app.theme.text.muted));
+        assert_eq!(line.spans[4].style.fg, Some(app.theme.text.secondary));
     }
 
     #[test]

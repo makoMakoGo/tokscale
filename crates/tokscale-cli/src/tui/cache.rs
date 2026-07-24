@@ -16,6 +16,7 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
+use tokscale_core::usage_views::ContributionGrade;
 use tokscale_core::{GroupBy, InputInventorySignature, TuiAcc, TuiSessionEntry};
 
 use tokscale_core::ClientId;
@@ -28,7 +29,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 49;
+const CACHE_SCHEMA_VERSION: u32 = 50;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -446,6 +447,21 @@ mod bundle_tests {
         let cached_grouped_hour = &raw["projections"]["model"]["hourly"][0];
         assert!(cached_grouped_hour.get("models").is_some());
         assert!(cached_grouped_hour.get("clients").is_none());
+        let cached_graph_days = raw["common"]["graph"]["weeks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|week| week.as_array().unwrap())
+            .filter_map(serde_json::Value::as_object)
+            .collect::<Vec<_>>();
+        assert!(cached_graph_days.iter().all(|day| {
+            day.get("grade")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+                && !day.contains_key("intensity")
+        }));
+        assert!(cached_graph_days.iter().any(|day| day["grade"] == "empty"));
+        assert!(cached_graph_days.iter().any(|day| day["grade"] != "empty"));
         assert!(raw["projections"]["model"].get("graph").is_none());
         assert!(
             !raw.to_string().contains("\"colorKey\""),
@@ -506,6 +522,39 @@ mod bundle_tests {
                 serde_json::Value::from("2026-05-28 00:00:00");
         }
 
+        fn unknown_contribution_grade(value: &mut serde_json::Value) {
+            let day = value["common"]["graph"]["weeks"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .flat_map(|week| week.as_array_mut().unwrap())
+                .find(|day| day.is_object())
+                .unwrap();
+            day["grade"] = serde_json::Value::from("unknown");
+        }
+
+        fn active_day_with_empty_grade(value: &mut serde_json::Value) {
+            let day = value["common"]["graph"]["weeks"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .flat_map(|week| week.as_array_mut().unwrap())
+                .find(|day| day["tokens"].as_u64().is_some_and(|tokens| tokens > 0))
+                .expect("fixture must contain an active contribution day");
+            day["grade"] = serde_json::Value::from("empty");
+        }
+
+        fn empty_day_with_active_grade(value: &mut serde_json::Value) {
+            let day = value["common"]["graph"]["weeks"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .flat_map(|week| week.as_array_mut().unwrap())
+                .find(|day| day["tokens"].as_u64() == Some(0))
+                .expect("fixture must contain an empty contribution day");
+            day["grade"] = serde_json::Value::from("peak");
+        }
+
         let (temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
         let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
         let accumulator = nonempty_accumulator(temp.path());
@@ -518,6 +567,18 @@ mod bundle_tests {
             ("daily date", mismatch_daily_date as Mutation),
             ("daily client keys", mismatch_daily_clients as Mutation),
             ("hourly datetime", mismatch_hourly_datetime as Mutation),
+            (
+                "unknown contribution grade",
+                unknown_contribution_grade as Mutation,
+            ),
+            (
+                "active day with empty contribution grade",
+                active_day_with_empty_grade as Mutation,
+            ),
+            (
+                "empty day with active contribution grade",
+                empty_day_with_active_grade as Mutation,
+            ),
         ] {
             save_tui_bundle_cache(
                 &accumulator,
@@ -1239,7 +1300,41 @@ struct CachedContributionDay {
     date: String,
     tokens: u64,
     cost: f64,
-    intensity: f64,
+    grade: CachedContributionGrade,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum CachedContributionGrade {
+    Empty,
+    Low,
+    Medium,
+    High,
+    Peak,
+}
+
+impl From<ContributionGrade> for CachedContributionGrade {
+    fn from(grade: ContributionGrade) -> Self {
+        match grade {
+            ContributionGrade::Empty => Self::Empty,
+            ContributionGrade::Low => Self::Low,
+            ContributionGrade::Medium => Self::Medium,
+            ContributionGrade::High => Self::High,
+            ContributionGrade::Peak => Self::Peak,
+        }
+    }
+}
+
+impl From<CachedContributionGrade> for ContributionGrade {
+    fn from(grade: CachedContributionGrade) -> Self {
+        match grade {
+            CachedContributionGrade::Empty => Self::Empty,
+            CachedContributionGrade::Low => Self::Low,
+            CachedContributionGrade::Medium => Self::Medium,
+            CachedContributionGrade::High => Self::High,
+            CachedContributionGrade::Peak => Self::Peak,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1626,7 +1721,7 @@ struct CachedContributionDayRef<'a> {
     date: CachedDateRef<'a>,
     tokens: u64,
     cost: f64,
-    intensity: f64,
+    grade: CachedContributionGrade,
 }
 
 impl<'a> From<&'a ContributionDay> for CachedContributionDayRef<'a> {
@@ -1635,7 +1730,7 @@ impl<'a> From<&'a ContributionDay> for CachedContributionDayRef<'a> {
             date: CachedDateRef(&day.date),
             tokens: day.tokens,
             cost: day.cost,
-            intensity: day.intensity,
+            grade: day.grade.into(),
         }
     }
 }
@@ -1858,21 +1953,28 @@ impl TryFrom<CachedHourlyModelProjection> for HourlyModelProjection {
 }
 
 impl TryFrom<CachedContributionDay> for ContributionDay {
-    type Error = chrono::ParseError;
+    type Error = CacheDataError;
 
     fn try_from(c: CachedContributionDay) -> Result<Self, Self::Error> {
         use chrono::NaiveDate;
+        let grade = ContributionGrade::from(c.grade);
+        if (c.tokens == 0) != (grade == ContributionGrade::Empty) {
+            return Err(CacheDataError::InvalidContributionGrade {
+                tokens: c.tokens,
+                grade,
+            });
+        }
         Ok(Self {
             date: NaiveDate::parse_from_str(&c.date, "%Y-%m-%d")?,
             tokens: c.tokens,
             cost: c.cost,
-            intensity: c.intensity,
+            grade,
         })
     }
 }
 
 impl TryFrom<CachedGraphData> for GraphData {
-    type Error = chrono::ParseError;
+    type Error = CacheDataError;
 
     fn try_from(g: CachedGraphData) -> Result<Self, Self::Error> {
         let weeks: Result<Vec<Vec<Option<ContributionDay>>>, _> = g
@@ -1891,7 +1993,14 @@ impl TryFrom<CachedGraphData> for GraphData {
 #[derive(Debug)]
 enum CacheDataError {
     InvalidDate(chrono::ParseError),
-    DuplicateKey { context: &'static str, key: String },
+    InvalidContributionGrade {
+        tokens: u64,
+        grade: ContributionGrade,
+    },
+    DuplicateKey {
+        context: &'static str,
+        key: String,
+    },
     ProjectionShape(tokscale_core::usage_views::UsageProjectionShapeError),
 }
 
@@ -1899,6 +2008,10 @@ impl std::fmt::Display for CacheDataError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidDate(err) => err.fmt(f),
+            Self::InvalidContributionGrade { tokens, grade } => write!(
+                f,
+                "cached TUI contribution day has incompatible tokens {tokens} and grade {grade:?}"
+            ),
             Self::DuplicateKey { context, key } => {
                 write!(f, "cached TUI {context} contains duplicate key `{key}`")
             }
