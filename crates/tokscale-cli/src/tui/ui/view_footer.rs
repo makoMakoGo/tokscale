@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn constrained_footer_help_fits_complete_items() {
+    fn constrained_footer_help_uses_available_width_without_clipping() {
         for width in [40, 100] {
             let height = footer::HEIGHT;
             let mut app = make_app(width);
@@ -374,11 +374,15 @@ mod tests {
 
             assert!(help.contains("[R]"), "width {width}:\n{screen}");
             assert!(help.ends_with('q'), "width {width}:\n{screen}");
-            assert!(!help.contains("[d/t/c:sort]"), "width {width}:\n{screen}");
             assert!(help_row.starts_with("│ ") && help_row.ends_with(" │"));
             if width == 40 {
+                assert!(!help.contains("[d/t/c:sort]"), "width {width}:\n{screen}");
                 assert!(help.ends_with("…·q"), "width {width}:\n{screen}");
             } else {
+                assert!(help.contains("↑↓ scroll"), "width {width}:\n{screen}");
+                assert!(help.contains("←→/tab view"), "width {width}:\n{screen}");
+                assert!(help.contains("[d/t/c:sort]"), "width {width}:\n{screen}");
+                assert!(help.contains("[enter:details]"), "width {width}:\n{screen}");
                 assert!(help.contains("[r]"), "width {width}:\n{screen}");
                 assert!(!help.contains('…'), "width {width}:\n{screen}");
             }
