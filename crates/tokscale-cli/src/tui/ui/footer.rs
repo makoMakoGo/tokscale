@@ -84,32 +84,68 @@ impl HelpLine {
     }
 
     fn for_width(&self, width: usize) -> Line<'static> {
-        let full = self.line(false);
+        let full = self.full_line();
         if full.width() <= width {
             return full;
         }
 
-        let compact = self.line(true);
-        if compact.width() <= width {
-            return compact;
+        if let Some(line) = self.progressive_line(width) {
+            return line;
         }
 
         self.fitted_compact_line(width)
     }
 
-    fn line(&self, compact: bool) -> Line<'static> {
-        let separator = if compact { "·" } else { self.full_separator };
+    fn full_line(&self) -> Line<'static> {
         let mut spans = Vec::new();
         for item in &self.items {
             push_help_span(
                 &mut spans,
-                if compact { &item.compact } else { &item.full },
+                &item.full,
+                item.style,
+                self.full_separator,
+                self.separator_style,
+            );
+        }
+        Line::from(spans)
+    }
+
+    fn progressive_line(&self, width: usize) -> Option<Line<'static>> {
+        let separator = "·";
+        let separator_width = separator.width() * self.items.len().saturating_sub(1);
+        let compact_width = self
+            .items
+            .iter()
+            .map(|item| item.compact.width())
+            .sum::<usize>()
+            + separator_width;
+        let mut remaining = width.checked_sub(compact_width)?;
+        let mut spans = Vec::new();
+
+        // Preserve display order while letting smaller later expansions use
+        // space that an earlier full label cannot consume.
+        for item in &self.items {
+            let expansion_width = item
+                .full
+                .width()
+                .checked_sub(item.compact.width())
+                .expect("full help label must not be narrower than compact label");
+            let label = if expansion_width <= remaining {
+                remaining -= expansion_width;
+                &item.full
+            } else {
+                &item.compact
+            };
+            push_help_span(
+                &mut spans,
+                label,
                 item.style,
                 separator,
                 self.separator_style,
             );
         }
-        Line::from(spans)
+
+        Some(Line::from(spans))
     }
 
     fn fitted_compact_line(&self, width: usize) -> Line<'static> {
@@ -1075,6 +1111,86 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>()
+    }
+
+    fn progressive_help_line() -> HelpLine {
+        let style = Style::default();
+        HelpLine::new(
+            vec![
+                HelpItem::new("alpha", "a", style),
+                HelpItem::new("bravo", "b", style),
+                HelpItem::new("q", "q", style),
+            ],
+            " • ",
+            style,
+        )
+    }
+
+    #[test]
+    fn help_line_progressively_expands_labels_with_available_width() {
+        let help = progressive_help_line();
+        let compact_width = "a·b·q".width();
+        let first_expanded_width = "alpha·b·q".width();
+        let tight_full_width = "alpha·bravo·q".width();
+        let full_width = "alpha • bravo • q".width();
+
+        assert_eq!(
+            line_text(help.for_width(compact_width.saturating_sub(1))),
+            "…·q"
+        );
+        assert_eq!(line_text(help.for_width(compact_width)), "a·b·q");
+        assert_eq!(line_text(help.for_width(first_expanded_width)), "alpha·b·q");
+        assert_eq!(line_text(help.for_width(tight_full_width)), "alpha·bravo·q");
+        assert_eq!(
+            line_text(help.for_width(full_width.saturating_sub(1))),
+            "alpha·bravo·q"
+        );
+        assert_eq!(line_text(help.for_width(full_width)), "alpha • bravo • q");
+    }
+
+    #[test]
+    fn help_line_skips_an_expansion_that_does_not_fit() {
+        let style = Style::default();
+        let help = HelpLine::new(
+            vec![
+                HelpItem::new("expensive", "x", style),
+                HelpItem::new("mid", "m", style),
+                HelpItem::new("q", "q", style),
+            ],
+            " • ",
+            style,
+        );
+
+        assert_eq!(line_text(help.for_width("x·mid·q".width())), "x·mid·q");
+    }
+
+    #[test]
+    fn help_line_uses_terminal_display_width_for_unicode_labels() {
+        let style = Style::default();
+        let help = HelpLine::new(
+            vec![
+                HelpItem::new("操作", "操", style),
+                HelpItem::new("q", "q", style),
+            ],
+            " • ",
+            style,
+        );
+        let width = "操作·q".width();
+        let line = help.for_width(width);
+
+        assert_eq!(line_text(line.clone()), "操作·q");
+        assert_eq!(line.width(), width);
+    }
+
+    #[test]
+    fn help_line_never_exceeds_its_width_budget() {
+        let help = progressive_help_line();
+        let full_width = "alpha • bravo • q".width();
+
+        for width in 0..=full_width {
+            let line = help.for_width(width);
+            assert!(line.width() <= width, "width {width}: {}", line_text(line));
+        }
     }
 
     fn installed_app_on(tab: Tab) -> App {
