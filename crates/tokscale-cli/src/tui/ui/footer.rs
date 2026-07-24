@@ -825,7 +825,6 @@ pub(super) fn action_help_row_line(
                 "↵".to_string(),
             ),
             Action::Back => ("[esc:back]".to_string(), "esc".to_string()),
-            Action::JumpToday => ("[j:today]".to_string(), "j".to_string()),
             Action::ToggleView => toggle_action_labels(app, toggle_target),
             Action::Clients => ("[s:clients]".to_string(), "[s]".to_string()),
             Action::GroupBy => (format!("[g:{}]", app.group_by.borrow()), "[g]".to_string()),
@@ -883,11 +882,9 @@ fn action_style(app: &App, action: Action) -> Style {
         Action::Sort(_) => app.theme.chrome.current,
         Action::Clients | Action::GroupBy | Action::Theme => app.theme.chrome.focus,
         Action::ToggleAutoRefresh if app.auto_refresh => app.theme.status.success,
-        Action::OpenDetails
-        | Action::Back
-        | Action::JumpToday
-        | Action::ToggleView
-        | Action::RefreshLocal => app.theme.chrome.focus,
+        Action::OpenDetails | Action::Back | Action::ToggleView | Action::RefreshLocal => {
+            app.theme.chrome.focus
+        }
         Action::Scroll
         | Action::PreviousTab
         | Action::NextTab
@@ -1371,7 +1368,7 @@ mod tests {
         let mut app = make_app_on(Tab::Overview);
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
-        app.set_local_report_status("Jumped to today's usage");
+        app.set_local_report_status("Local report refreshed");
 
         let text = line_text(subscription_status_row_line(&app));
 

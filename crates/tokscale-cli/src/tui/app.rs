@@ -1258,9 +1258,6 @@ impl App {
             KeyCode::Char('d') => {
                 self.set_sort(SortField::Date);
             }
-            KeyCode::Char('j') => {
-                self.jump_to_today();
-            }
             KeyCode::Char('p') => {
                 self.cycle_theme();
             }
@@ -1966,47 +1963,6 @@ impl App {
             "Sorted by {:?} {:?}",
             self.sort_field, self.sort_direction
         ));
-    }
-
-    fn jump_to_today(&mut self) {
-        if self.current_tab != Tab::Daily {
-            return;
-        }
-        if self.is_daily_detail_active() {
-            self.leave_daily_detail_sort_context();
-        }
-        self.selected_daily_detail_date = None;
-
-        let today = chrono::Local::now().date_naive();
-        let (today_index, total_len) = {
-            let sorted_daily = self.get_sorted_daily();
-            (
-                sorted_daily.iter().position(|d| d.date == today),
-                sorted_daily.len(),
-            )
-        };
-
-        if let Some(index) = today_index {
-            self.selected_index = index;
-
-            if self.max_visible_items > 0 {
-                let max_scroll = total_len.saturating_sub(self.max_visible_items);
-                self.scroll_offset = index
-                    .saturating_sub(self.max_visible_items / 2)
-                    .min(max_scroll);
-            } else {
-                self.scroll_offset = 0;
-            }
-
-            self.selected_graph_cell = None;
-            self.persist_current_list_interaction();
-            self.set_local_report_status("Jumped to today's usage");
-        } else {
-            self.set_local_report_status_with_tone(
-                "No usage recorded for today",
-                StatusTone::Warning,
-            );
-        }
     }
 
     fn cycle_theme(&mut self) {

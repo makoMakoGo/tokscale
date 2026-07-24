@@ -34,7 +34,7 @@ impl ViewState {
                     self.move_daily_profile(command);
                     return true;
                 }
-                if matches!(key.code, KeyCode::Enter | KeyCode::Char('j')) {
+                if key.code == KeyCode::Enter {
                     return true;
                 }
             }
