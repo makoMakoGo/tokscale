@@ -8,7 +8,7 @@ use crate::tui::presentation::EmptySubject;
 
 use super::widgets::{get_client_display_name, truncate_display_width};
 
-const REPORT_RANGE: &str = "Current report range";
+const DATE_RANGE: &str = "Current date range";
 
 fn headline(subject: EmptySubject) -> &'static str {
     match subject {
@@ -90,8 +90,8 @@ pub(super) fn scope_summary(app: &App) -> String {
             .iter()
             .next()
             .expect("one data client must have one member");
-        get_client_display_name(client.as_str())
-    } else if app.data_clients == app.client_universe {
+        get_client_display_name(*client)
+    } else if app.data_clients == app.client_universe.as_hash_set() {
         "All clients".to_string()
     } else {
         format!("{} selected clients", app.data_clients.len())
@@ -102,12 +102,12 @@ pub(super) fn scope_summary(app: &App) -> String {
 
 fn scope_text(app: &App, width: usize) -> String {
     let summary = scope_summary(app);
-    let full = format!("Scope: {summary} · {REPORT_RANGE}");
+    let full = format!("Scope: {summary} · {DATE_RANGE}");
     if UnicodeWidthStr::width(full.as_str()) <= width {
         return full;
     }
 
-    // The report-range suffix is useful context, but the selected scope is
+    // The date-range suffix is useful context, but the selected scope is
     // the identity users need first. Drop the suffix before clipping a long
     // single-client display name on cramped terminals.
     truncate_display_width(&format!("Scope: {summary}"), width)
@@ -163,11 +163,11 @@ mod tests {
     use std::collections::HashSet;
 
     use ratatui::{backend::TestBackend, Terminal};
-    use tokscale_core::{ClientId, GroupBy, TuiAcc};
+    use tokscale_core::{ClientId, UsageIndex};
     use unicode_width::UnicodeWidthStr;
 
     use super::*;
-    use crate::tui::app::{ProjectionBackend, TuiConfig};
+    use crate::tui::app::TuiConfig;
     use crate::tui::presentation::Presentation;
     use crate::tui::view_state::ViewState;
 
@@ -178,7 +178,7 @@ mod tests {
                 refresh: 0,
                 no_refresh: false,
                 home_dir: None,
-                clients: None,
+                client_universe: tokscale_core::ClientUniverse::all(),
                 since: None,
                 until: None,
                 year: None,
@@ -187,20 +187,12 @@ mod tests {
             None,
         )
         .expect("test app initializes");
-        let accumulator = TuiAcc::default();
-        let data = accumulator.project(&GroupBy::Model);
-        app.install_tui_snapshot(
-            data,
-            Vec::new(),
-            Default::default(),
-            ProjectionBackend::Memory(accumulator),
-            GroupBy::Model,
-        );
+        app.install_generation_fixture(UsageIndex::default(), Vec::new(), Default::default());
         app
     }
 
     fn set_scope(app: &mut App, universe: &[ClientId], data_clients: &[ClientId]) {
-        app.client_universe = universe.iter().copied().collect();
+        app.client_universe = tokscale_core::ClientUniverse::new(universe.iter().copied()).unwrap();
         app.data_clients = data_clients.iter().copied().collect();
     }
 
@@ -235,7 +227,7 @@ mod tests {
 
         assert_eq!(
             scope_text(&app, 80),
-            "Scope: Zed Agent · Current report range"
+            "Scope: Zed Agent · Current date range"
         );
     }
 
@@ -251,7 +243,7 @@ mod tests {
 
         assert_eq!(
             scope_text(&app, 80),
-            "Scope: 2 selected clients · Current report range"
+            "Scope: 2 selected clients · Current date range"
         );
         assert!(!scope_text(&app, 80).contains("Claude"));
         assert!(!scope_text(&app, 80).contains("Codex"));
@@ -268,13 +260,13 @@ mod tests {
 
         assert_eq!(
             scope_text(&app, 80),
-            "Scope: All clients · Current report range"
+            "Scope: All clients · Current date range"
         );
     }
 
     #[test]
     fn fitting_long_cjk_text_obeys_terminal_display_width() {
-        let fitted = truncate_display_width("模型客户端名称非常长 · Current report range", 11);
+        let fitted = truncate_display_width("模型客户端名称非常长 · Current date range", 11);
 
         assert_eq!(fitted, "模型客户...");
         assert!(UnicodeWidthStr::width(fitted.as_str()) <= 11);
@@ -288,16 +280,16 @@ mod tests {
         let one = render_lines(&app, EmptySubject::Usage, 80, 1);
         assert_eq!(one.len(), 1);
         assert!(one[0].contains("No usage in the current view"));
-        assert!(!one[0].contains("Current report range"));
+        assert!(!one[0].contains("Current date range"));
 
         let two = render_lines(&app, EmptySubject::Usage, 80, 2);
         assert!(two[0].contains("No usage in the current view"));
-        assert!(two[1].contains("Scope: Zed Agent · Current report range"));
+        assert!(two[1].contains("Scope: Zed Agent · Current date range"));
         assert!(two.iter().all(|line| !line.contains("Change clients")));
 
         let three = render_lines(&app, EmptySubject::Usage, 80, 3);
         assert!(three[0].contains("No usage in the current view"));
-        assert!(three[1].contains("Scope: Zed Agent · Current report range"));
+        assert!(three[1].contains("Scope: Zed Agent · Current date range"));
         assert!(three[2].contains("[s] Change clients · [r] Rescan"));
     }
 

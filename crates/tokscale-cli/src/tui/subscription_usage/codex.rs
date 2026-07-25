@@ -183,12 +183,9 @@ async fn fetch_async(auth: Auth) -> Result<UsageOutput> {
     })
 }
 
-pub fn fetch() -> Result<UsageOutput> {
+pub async fn fetch() -> Result<UsageOutput> {
     let auth = read_current_credentials()?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(fetch_async(auth))
+    fetch_async(auth).await
 }
 
 #[cfg(test)]

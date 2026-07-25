@@ -139,11 +139,11 @@ impl Default for Settings {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 pub fn load_scanner_settings_for_home(
-    home_dir: &Option<String>,
+    home_dir: Option<&Path>,
 ) -> std::result::Result<ScannerSettings, SettingsLoadError> {
-    Settings::load_for_home_override(home_dir.as_deref().map(Path::new))
-        .map(|settings| settings.scanner)
+    Settings::load_for_home_override(home_dir).map(|settings| settings.scanner)
 }
 
 /// Returns the user's configured `defaultClients` list as raw lowercase
@@ -153,10 +153,9 @@ pub fn load_scanner_settings_for_home(
 /// A missing file or unset field produces an empty list. Malformed or
 /// unreadable settings are reported to the command.
 pub fn load_default_clients_for_home(
-    home_dir: &Option<String>,
+    home_dir: Option<&Path>,
 ) -> std::result::Result<Vec<String>, SettingsLoadError> {
-    Settings::load_for_home_override(home_dir.as_deref().map(Path::new))
-        .map(|settings| settings.default_clients)
+    Settings::load_for_home_override(home_dir).map(|settings| settings.default_clients)
 }
 
 impl Settings {

@@ -25,12 +25,12 @@ wrapped
 cache
 ```
 
-The TUI is the complete local-report product. `--tab` sets its initial focus to
+The TUI is the complete interactive local-usage product. `--tab` sets its initial focus to
 Overview, Usage, Models, Monthly, Weekly, Daily, Hourly, Stats, Agents, or
 Sessions without creating a separate command or partial application.
 
-`models` is the only headless local report. It consumes the same canonical
-Models projection and export builder as the TUI. Its default grouping is
+`models` is the only headless local-usage projection. It derives from the same
+canonical `Generation` as the TUI. Its default grouping is
 `model`; the complete Group By value set is:
 
 ```text

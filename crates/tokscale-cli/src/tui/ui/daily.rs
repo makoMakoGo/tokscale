@@ -16,14 +16,16 @@ use super::table_layout::{
 };
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_display_width,
-    truncate_model_display_name_to, viewport_scrollbar_state, workspace_label_or_unknown,
-    MODEL_DISPLAY_MAX_WIDTH,
+    get_client_display_name, get_client_display_names, get_provider_display_name,
+    total_tokens_cell, truncate_display_width, truncate_model_display_name_to,
+    viewport_scrollbar_state, workspace_label_or_unknown, MODEL_DISPLAY_MAX_WIDTH,
 };
 use crate::tui::actions::ActionSet;
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::DailyUsage;
 use crate::tui::presentation::EmptySubject;
+#[cfg(test)]
+use tokscale_core::ClientId;
 use tokscale_core::GroupBy;
 
 const DATE_WIDTH: u16 = 7;
@@ -368,8 +370,8 @@ fn top_daily_client(day: &DailyUsage) -> Option<TopDailyClient> {
         .filter_map(|(client, info)| {
             let tokens = info.tokens.total();
             (tokens > 0).then(|| TopDailyClient {
-                key: client.clone(),
-                label: get_client_display_name(client),
+                key: client.to_string(),
+                label: get_client_display_name(*client),
                 tokens,
                 cost: info.cost,
             })
@@ -756,10 +758,10 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(DETAIL_PROVIDER_WIDTH);
     let client_content_width = rows_data
         .iter()
-        .map(|row| display_width(&get_client_display_name(&row.client)))
+        .map(|row| display_width(&get_client_display_names(&row.clients)))
         .max()
         .unwrap_or(DETAIL_CLIENT_WIDTH);
-    let group_by = app.group_by.borrow().clone();
+    let group_by = *app.group_by.borrow();
     let workspace_content_width = if group_by == GroupBy::WorkspaceModel {
         rows_data
             .iter()
@@ -841,7 +843,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     ))
                     .style(Style::default().fg(theme_secondary)),
                     DailyDetailColumn::Client => Cell::from(truncate_display_width(
-                        &get_client_display_name(&row.client),
+                        &get_client_display_names(&row.clients),
                         table_layout.width_for(DailyDetailColumn::Client),
                     ))
                     .style(Style::default().fg(theme_secondary)),
@@ -926,14 +928,14 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 mod tests {
     use super::*;
     use crate::tui::app::{Tab, TuiConfig};
-    use crate::tui::data::{DailyClientInfo, DailyModelInfo, DailyUsage, TokenBreakdown};
+    use crate::tui::data::{DailyClientInfo, DailyModelInfo, DailyUsage, UsageTokenBreakdown};
     use ratatui::{backend::TestBackend, Terminal};
     use std::collections::BTreeMap;
 
-    fn token_breakdown(input: u64) -> TokenBreakdown {
-        TokenBreakdown {
+    fn token_breakdown(input: u64) -> UsageTokenBreakdown {
+        UsageTokenBreakdown {
             input,
-            ..TokenBreakdown::default()
+            ..UsageTokenBreakdown::default()
         }
     }
 
@@ -974,7 +976,7 @@ mod tests {
     fn day(date: &str, cost: f64) -> DailyUsage {
         DailyUsage {
             date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
-            tokens: TokenBreakdown::default(),
+            tokens: UsageTokenBreakdown::default(),
             cost,
             client_breakdown: BTreeMap::new(),
             message_count: 10,
@@ -988,7 +990,7 @@ mod tests {
             refresh: 0,
             no_refresh: false,
             home_dir: None,
-            clients: None,
+            client_universe: tokscale_core::ClientUniverse::all(),
             since: None,
             until: None,
             year: None,
@@ -1151,13 +1153,13 @@ mod tests {
         let mut usage = day("2026-06-09", 0.0);
         usage
             .client_breakdown
-            .insert("codex".to_string(), daily_client(100, 10.0, Vec::new()));
+            .insert(ClientId::Codex, daily_client(100, 10.0, Vec::new()));
         usage
             .client_breakdown
-            .insert("kimi".to_string(), daily_client(200, 1.0, Vec::new()));
+            .insert(ClientId::Kimi, daily_client(200, 1.0, Vec::new()));
         usage
             .client_breakdown
-            .insert("opencode".to_string(), daily_client(200, 2.0, Vec::new()));
+            .insert(ClientId::OpenCode, daily_client(200, 2.0, Vec::new()));
 
         let client = top_daily_client(&usage).expect("top client should be selected");
 
@@ -1169,7 +1171,7 @@ mod tests {
     fn top_daily_model_aggregates_matching_model_keys_across_clients() {
         let mut usage = day("2026-06-09", 0.0);
         usage.client_breakdown.insert(
-            "codex".to_string(),
+            ClientId::Codex,
             daily_client(
                 130,
                 1.0,
@@ -1183,7 +1185,7 @@ mod tests {
             ),
         );
         usage.client_breakdown.insert(
-            "kimi".to_string(),
+            ClientId::Kimi,
             daily_client(
                 290,
                 2.0,
@@ -1230,7 +1232,7 @@ mod tests {
         // gpt-5 fragment; canonically gpt-5 wins with 210.
         let mut model_projection = day("2026-06-09", 0.0);
         model_projection.client_breakdown.insert(
-            "codex".to_string(),
+            ClientId::Codex,
             daily_client(
                 410,
                 3.0,
@@ -1246,7 +1248,7 @@ mod tests {
 
         let mut client_model_projection = day("2026-06-09", 0.0);
         client_model_projection.client_breakdown.insert(
-            "codex".to_string(),
+            ClientId::Codex,
             daily_client(
                 120,
                 1.0,
@@ -1257,7 +1259,7 @@ mod tests {
             ),
         );
         client_model_projection.client_breakdown.insert(
-            "kimi".to_string(),
+            ClientId::Kimi,
             daily_client(
                 290,
                 2.0,
@@ -1276,7 +1278,7 @@ mod tests {
 
         let mut client_provider_projection = day("2026-06-09", 0.0);
         client_provider_projection.client_breakdown.insert(
-            "codex".to_string(),
+            ClientId::Codex,
             daily_client(
                 410,
                 3.0,
@@ -1299,7 +1301,7 @@ mod tests {
 
         let mut workspace_projection = day("2026-06-09", 0.0);
         workspace_projection.client_breakdown.insert(
-            "codex".to_string(),
+            ClientId::Codex,
             daily_client(
                 410,
                 3.0,
@@ -1440,7 +1442,7 @@ mod tests {
         let mut app = make_daily_app(130);
         let mut usage = day("2026-06-09", 30.0);
         usage.client_breakdown.insert(
-            "codex".to_string(),
+            ClientId::Codex,
             daily_client(
                 300,
                 3.0,
@@ -1506,7 +1508,7 @@ mod tests {
         *app.group_by.borrow_mut() = GroupBy::WorkspaceModel;
         let mut usage = day("2026-06-09", 30.0);
         usage.client_breakdown.insert(
-            "codex".to_string(),
+            ClientId::Codex,
             daily_client(
                 300,
                 3.0,

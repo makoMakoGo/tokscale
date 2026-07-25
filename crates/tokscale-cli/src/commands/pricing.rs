@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-pub(crate) fn run_pricing_lookup(
+pub(crate) async fn run_pricing_lookup(
     model_id: &str,
     json: bool,
     pricing_source: Option<&str>,
@@ -9,7 +9,6 @@ pub(crate) fn run_pricing_lookup(
     use colored::Colorize;
     use indicatif::ProgressBar;
     use indicatif::ProgressStyle;
-    use tokio::runtime::Runtime;
     use tokscale_core::pricing::PricingService;
 
     let pricing_source_normalized = pricing_source.map(|value| value.to_lowercase());
@@ -27,13 +26,14 @@ pub(crate) fn run_pricing_lookup(
         Some(pb)
     };
 
-    let rt = Runtime::new()?;
-    let result = match rt.block_on(async {
+    let result = match async {
         let svc = PricingService::get_or_init().await?;
         Ok::<_, String>(
             svc.lookup_with_pricing_source(model_id, pricing_source_normalized.as_deref()),
         )
-    }) {
+    }
+    .await
+    {
         Ok(result) => result,
         Err(err) => {
             if let Some(pb) = spinner {

@@ -1,6 +1,6 @@
 # ADR 0028: TUI generation, projection, and presentation contract
 
-Status: Accepted
+Status: Accepted; canonical generation shape revised by ADR 0030
 
 ## Context
 
@@ -20,7 +20,7 @@ This ADR defines the complete contract for those responsibilities.
 Bare `tokscale` and `tokscale tui` launch the complete interactive product.
 `--tab` changes only initial focus among Overview, Usage, Models, Monthly,
 Weekly, Daily, Hourly, Stats, Agents, and Sessions. Every tab participates in
-the same process, navigation, and action system. The local-report tabs share
+the same process, navigation, and action system. The local-usage tabs share
 one generation and Client scope; Subscription Usage follows ADR 0014's
 independent remote lifecycle. ADR 0022 defines the independent headless Models
 projection and the complete command grammar.
@@ -45,14 +45,11 @@ an outside click discards it. The picker has no per-client hotkeys.
 
 ### Generation and acquisition
 
-One local generation contains Data Health, Client-space accounting, report
-scope, Client universe, inventory signature, session snapshot, client-aware
-canonical accumulator, one Common usage projection, and all four Grouped
-projections. Common contains Agents, daily/hourly totals and Client membership,
-contribution graph, report totals, and streaks exactly once. Each Grouped
-projection contains only Models and daily/hourly model buckets. The generation
-is published and installed atomically, so local report tabs cannot mix
-generations.
+One local `Generation` contains its acquisition scope, Client universe,
+confirmed source fingerprint, canonical `UsageIndex`, session snapshot,
+`InputFootprint`, Data Health, and pricing diagnostics. It contains no
+renderer-specific Common/Grouped views. The generation is published and
+installed atomically, so local-usage tabs cannot mix generations.
 
 Only these events may scan inputs:
 
@@ -80,20 +77,18 @@ neither reads the other's timers, summaries, diagnostics, or acquisition state.
 ### Projection
 
 Clients and Group By are projections of the installed generation under the
-ADR 0010 report contract. They never
+ADR 0010 usage contract. They never
 scan inputs, write the generation cache, persist picker state, or reset the
 refresh clock. Projection controls are unavailable until a generation exists
 and remain usable during a warm background refresh.
 
 A usage projection is installed atomically with its `data_clients`, grouping,
-and usage data. For the full Client universe, it is assembled from Common and
-the selected Grouped projection read from the same pinned bundle inode. A
-proper Client subset is derived from canonical state, loaded lazily on first
-use. Sessions filters the fixed generation snapshot through that same committed
-Client scope. Failure restores the complete prior usage projection and reports
-an explicit diagnostic. Detail selections are reconciled by semantic identity
-after a projection; an absent detail closes explicitly instead of becoming an
-empty detail page.
+and usage data. Every Client and Group By selection is derived directly from
+the installed `UsageIndex`. Sessions filters the fixed generation snapshot
+through that same committed Client scope. Failure restores the complete prior
+usage projection and reports an explicit diagnostic. Detail selections are
+reconciled by semantic identity after a projection; an absent detail closes
+explicitly instead of becoming an empty detail page.
 
 Data Health and scanned input bytes describe the immutable generation-wide
 client universe. Usage rows, charts, agents, and Sessions follow the selected
@@ -125,7 +120,7 @@ All empty views use one information template:
 
 ```text
 No <subject> in the current view
-Scope: <selection> · Current report range
+Scope: <selection> · Current date range
 [s] Change clients · [r] Rescan
 ```
 
@@ -154,34 +149,31 @@ Usage, or processing metadata. Row sorting, details, copying a row, and row hit
 areas are absent when there is no row to operate on.
 
 Usage accepts Subscription Usage refresh and scrolling plus shell-level tab
-navigation, theme, and quit. Local-report refresh, auto-refresh control,
+navigation, theme, and quit. Local-generation refresh, auto-refresh control,
 refresh-interval adjustment, and export are unavailable while Usage is active;
-the user switches to a local-report tab to invoke them. Usage footer summaries
+the user switches to a local-usage tab to invoke them. Usage footer summaries
 and status never substitute constructor-default local totals or local
 diagnostics for absent subscription data.
 
 ### Data and cache shape
 
-`UsageData.graph` is a total value. A valid empty graph is
+`UsageGraphData` is a total projection value. A valid empty graph is
 `UsageGraphData { weeks: [] }`; `Option<UsageGraphData>` is not part of the
-domain. The cache stores the graph once in Common. A missing or `null` graph, a
-missing Common or Grouped part, a model Client outside the immutable universe,
-or disagreeing Common/Grouped daily or hourly shapes makes the complete
-generation a cache miss.
+domain.
 
-The TUI accepts exactly its current cache schema and validates all four Grouped
-projections, including inactive ones, before installing the generation. No
-omitted field, partial projection, synthesized default, or alternative schema
-is accepted.
+The cache stores exactly one canonical `Generation` in a versioned envelope.
+It accepts no renderer DTO, precomputed grouping, partial generation,
+synthesized default, trailing payload, or alternative schema. Decoding must
+validate the complete generation before installation.
 
 ## Consequences
 
 - Acquisition, generation installation, projection, presentation, and action
   availability each have one authority and one direction of dependency.
 - A selected client with no usage receives the same honest, scoped template
-  across local report pages without claiming a scan failure or a global lack
+  across local-usage pages without claiming a scan failure or a global lack
   of data.
-- Adding a local-report page requires declaring its structural readiness and
+- Adding a local-usage page requires declaring its structural readiness and
   empty subject once; it must not create another lifecycle or shortcut table.
 - Cache or refresh failures remain explicit, while valid empty projections are
   ordinary installed data rather than disguised errors.

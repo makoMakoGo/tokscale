@@ -21,7 +21,7 @@ pub(crate) fn is_deepseek_v4_beta_alias(model: &str) -> bool {
     )
 }
 
-/// Canonical model-id authority for report grouping, finalization, and pricing.
+/// Canonical model-id authority for usage grouping, finalization, and pricing.
 pub(crate) fn canonicalize_model_id(model_id: &str) -> String {
     let normalized = normalized_terminal_model_id(model_id);
     let normalized_id = normalized.as_ref();

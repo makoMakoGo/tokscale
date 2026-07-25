@@ -174,7 +174,7 @@ pub(crate) fn build_daily_profile_lines(app: &App, area_width: u16) -> Vec<Line<
 mod tests {
     use super::*;
     use crate::tui::app::{Tab, TuiConfig};
-    use crate::tui::data::TokenBreakdown;
+    use crate::tui::data::UsageTokenBreakdown;
     use chrono::NaiveDate;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{backend::TestBackend, Terminal};
@@ -186,8 +186,8 @@ mod tests {
             theme: Some("blue".to_string()),
             refresh: 0,
             no_refresh: false,
-            home_dir: Some(home_dir.path().to_string_lossy().into_owned()),
-            clients: None,
+            home_dir: Some(home_dir.path().to_path_buf()),
+            client_universe: tokscale_core::ClientUniverse::all(),
             since: None,
             until: None,
             year: None,
@@ -199,9 +199,9 @@ mod tests {
     fn day(date: &str, tokens: u64, cost: f64) -> DailyUsage {
         DailyUsage {
             date: NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
-            tokens: TokenBreakdown {
+            tokens: UsageTokenBreakdown {
                 input: tokens,
-                ..TokenBreakdown::default()
+                ..UsageTokenBreakdown::default()
             },
             cost,
             client_breakdown: BTreeMap::new(),

@@ -40,7 +40,7 @@ struct GroupByPickerAreas {
 
 impl GroupByPickerDialog {
     pub fn new(selected: Rc<RefCell<GroupBy>>, changed: Rc<RefCell<bool>>) -> Self {
-        let current = selected.borrow().clone();
+        let current = *selected.borrow();
         let options = vec![
             GroupByOption {
                 value: GroupBy::Model,
@@ -86,7 +86,7 @@ impl GroupByPickerDialog {
     }
 
     fn select_current(&mut self) -> InteractionOutcome {
-        let new_value = self.options[self.cursor].value.clone();
+        let new_value = self.options[self.cursor].value;
         let changed = *self.selected.borrow() != new_value;
         if changed {
             *self.selected.borrow_mut() = new_value;
@@ -363,7 +363,7 @@ mod tests {
             dialog
                 .options
                 .iter()
-                .map(|option| option.value.clone())
+                .map(|option| option.value)
                 .collect::<Vec<_>>(),
             vec![
                 GroupBy::Model,

@@ -20,7 +20,7 @@
 ## What this fork is
 
 Tokscale reads local state from AI coding clients and turns token-bearing
-records into CLI and TUI reports. This fork keeps the terminal-first workflow
+records into CLI output and TUI views. This fork keeps the terminal-first workflow
 from upstream while tightening the rules around local data, client identity,
 pricing, and resource usage.
 
@@ -28,7 +28,7 @@ The active maintained branch is `personal/local-clients`.
 
 ## Why this fork exists
 
-- **Local-first accounting.** Local reports are built from token-bearing
+- **Local-first accounting.** Local usage is built from token-bearing
   records. Vendor-reported spend, credits, balances, and cost-only rows are not
   mixed into derived token cost.
 - **Explicit behavior.** Parser failures, missing data, unknown clients, and
@@ -36,8 +36,8 @@ The active maintained branch is `personal/local-clients`.
   or fake success paths.
 - **Stable client identity.** Client ids, display facts, and generated Rust
   identity data come from `crates/tokscale-core/client-catalog.json`.
-- **One local-report model.** The complete TUI and its headless Models
-  projection consume the same canonical usage data.
+- **One canonical generation.** The complete TUI and its headless Models
+  projection derive from the same immutable usage generation.
 - **Lower memory overhead.** The message pipeline avoids unnecessary clones and
   skips full reloads when input files have not changed.
 - **Curated upstream adoption.** Upstream fixes are reviewed and ported
@@ -69,7 +69,7 @@ Run the local wrapper:
 # Launch the interactive TUI
 bun run cli
 
-# Script-friendly report
+# Script-friendly output
 bun run cli -- models --no-spinner
 
 # Inspect one Client's local usage
@@ -102,7 +102,7 @@ tokscale tui --client opencode,claude --week
 tokscale models --since 2026-01-01 --until 2026-01-31
 tokscale models --group-by client,provider,model --json
 
-# TUI-only reports; --tab opens the full TUI focused on that tab
+# TUI-only views; --tab opens the full TUI focused on that tab
 tokscale tui --tab usage
 tokscale tui --tab monthly
 tokscale tui --tab sessions
@@ -134,16 +134,16 @@ Some catalog entries have explicit boundaries:
 - `commandcode` is transcript-estimated usage, not authoritative vendor token
   accounting.
 - `antigravity` reads current AGY CLI SQLite/WAL data directly through its
-  registered adapter (ADR 0007).
+  registered integration (ADR 0007).
 
 ## Data and pricing semantics
 
-Local reports use one cost meaning: the estimated price of parsed token buckets
+Local usage uses one cost meaning: the estimated price of parsed token buckets
 under Tokscale's pricing service. App-reported cost fields are ignored for
-normal local reports because they can represent subscriptions, credits, bundle
+local usage because they can represent subscriptions, credits, bundle
 balances, reseller markup, rounded UI totals, or aggregate spend.
 
-Local reports canonicalize model ids before grouping and pricing, stripping
+Tokscale canonicalizes model ids before grouping and pricing, stripping
 release, date, free-channel, and route decorations that this fork does not
 preserve as model identity.
 

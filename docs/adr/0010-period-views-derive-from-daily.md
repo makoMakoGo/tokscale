@@ -1,16 +1,16 @@
-# ADR 0010: Report aggregation, identity, and pricing contract
+# ADR 0010: Usage aggregation, identity, and pricing contract
 
-Status: Accepted
+Status: Accepted; canonical generation boundary revised by ADR 0030
 
 ## Context
 
-Local reports combine authoritative model/token facts with several derived
+Local usage combines authoritative model/token facts with several derived
 views: time buckets, workspace and agent attribution, Group By projections,
 estimated cost, and the contribution graph. If those layers independently reinterpret
-identity or refold the same messages, reports can disagree and the single-copy
+identity or refold the same messages, projections can disagree and the single-copy
 pipeline loses its benefit.
 
-This ADR defines the complete local-report projection, identity, pricing, and
+This ADR defines the complete local-usage projection, identity, pricing, and
 contribution-graph contract. ADR 0008 owns input execution and storage; ADR
 0028 owns TUI generation and interaction.
 
@@ -18,7 +18,7 @@ contribution-graph contract. ADR 0008 owns input execution and storage; ADR
 
 ### Aggregation boundary
 
-Usage aggregation lives in the core and is shared by reports and the TUI.
+Usage aggregation lives in the core and is shared by headless projections and the TUI.
 Per-message folding produces the canonical model/client/provider/session/
 workspace facts, daily totals, and finer-than-daily data that cannot be
 recovered later.
@@ -70,7 +70,7 @@ Group By is a projection of an installed canonical aggregate. It changes model
 row keys and labels, never authoritative totals, health, input space, sessions,
 the refresh clock, or the underlying generation.
 
-The TUI and headless Models report share the complete public Group By set:
+The TUI and headless Models projection share the complete public Group By set:
 
 ```text
 model
@@ -128,7 +128,7 @@ Groupings already exposing Provider or Workspace do not offer that transition.
 
 Observed model strings may include provider, route, plan, reasoning, service
 tier, release date, or private alias information. Core canonicalization runs
-before grouping and pricing and produces the report's authoritative
+before grouping and pricing and produces local usage's authoritative
 `model_id`; provider remains a separate dimension.
 
 Model identity and token buckets are primary accounting facts. Cost is a
@@ -169,7 +169,7 @@ billing.
 ### Total-only token projection
 
 Inputs that expose a positive authoritative total but no bucket split may enter
-normal reports through one fixed allocation. The five bucket weights are:
+local usage through one fixed allocation. The five bucket weights are:
 
 | Bucket | Numerator | Ratio |
 | --- | ---: | ---: |
@@ -185,21 +185,21 @@ input unit, allocation is batched so row totals remain exact and aggregate
 buckets equal the allocation of the aggregate total.
 
 This is a fixed documented projection, not evidence that the input supplied
-real buckets. Grok Build and local Warp use it. Changing the ratio is a report
+real buckets. Grok Build and local Warp use it. Changing the ratio is a usage
 semantic change requiring this ADR, focused tests, and parser/cache revision
 review.
 
-### Report and contribution-graph surface
+### Product and contribution-graph surface
 
-The complete local-report product is the TUI. `models` is its one headless
-projection and consumes the same canonical `UsageData.models` result and export
-builder. Its JSON envelope contains `data.groupBy`, `data.models`,
+The complete interactive local-usage product is the TUI. `models` is its one
+headless projection and calls `Generation::project` with the same `UsageQuery`
+as the TUI. Its renderer-owned JSON document contains `data.groupBy`, `data.models`,
 `data.totals`, Data Health, and `metadata.processingTimeMs`.
 
 Monthly, Weekly, Daily, Hourly, Stats, Agents, Sessions, and the contribution
-graph remain projections of the same TUI generation. The graph is the total
-`UsageCommonData.graph` value stored once in Common; it is not an independent
-command, JSON product, acquisition path, or pricing authority.
+graph remain projections of the same generation. The graph is derived from
+the projected daily buckets; it is not an independent command, cache record,
+JSON product, acquisition path, or pricing authority.
 
 Contribution-graph activity grades use the visible-window sample of days with
 positive token totals. For each sampled day, let `x = ln(tokens)`,
@@ -220,14 +220,14 @@ The maximum-token rule overrides these thresholds. Cost and off-window history
 cannot change visible grades, while graph days retain both token and cost
 fields.
 
-The persisted TUI cache stores this symbolic grade rather than a synthetic
-floating-point intensity. Introducing the discrete representation increments
-the TUI cache schema from 49 to 50; an older cache is an explicit cache miss and
-is rebuilt from canonical inputs.
+The projection emits this symbolic grade rather than a synthetic floating-point
+intensity. The canonical generation cache does not persist renderer graph
+cells; schema changes remain explicit cache misses and rebuild from local
+inputs.
 
 Raw unified-message APIs remain available when materialized messages are their
 stated result. Cross-crate aggregate types used to connect core and CLI are
-implementation seams for the canonical local-report pipeline, not separate
+implementation seams for the canonical local-usage pipeline, not separate
 product contracts.
 
 Pricing caches are fresh for one hour. A missing or expired cache may refresh;

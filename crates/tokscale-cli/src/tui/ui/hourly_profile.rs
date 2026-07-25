@@ -131,7 +131,7 @@ pub(crate) fn build_hourly_profile_lines(app: &App, area_width: u16) -> Vec<Line
 mod tests {
     use super::*;
     use crate::tui::app::TuiConfig;
-    use crate::tui::data::{HourlyUsage, TokenBreakdown};
+    use crate::tui::data::{HourlyUsage, UsageTokenBreakdown};
     use chrono::NaiveDate;
     use ratatui::{backend::TestBackend, Terminal};
     use std::collections::{BTreeMap, BTreeSet};
@@ -142,7 +142,7 @@ mod tests {
             refresh: 0,
             no_refresh: false,
             home_dir: None,
-            clients: None,
+            client_universe: tokscale_core::ClientUniverse::all(),
             since: None,
             until: None,
             year: None,
@@ -157,9 +157,9 @@ mod tests {
                 .unwrap()
                 .and_hms_opt(hour, 0, 0)
                 .unwrap(),
-            tokens: TokenBreakdown {
+            tokens: UsageTokenBreakdown {
                 input: tokens,
-                ..TokenBreakdown::default()
+                ..UsageTokenBreakdown::default()
             },
             cost,
             clients: BTreeSet::new(),

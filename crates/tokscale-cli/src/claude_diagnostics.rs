@@ -24,9 +24,9 @@ const CLAUDE_DESKTOP_MESSAGE: &str =
 
 const CLAUDE_DESKTOP_HELP: &str = "Claude Desktop chat storage and Claude data exports do not expose a documented per-message token ledger. The TUI Usage tab shows Claude subscription quota bars; organization/API billing requires Anthropic Admin Usage/Cost API outside local scanning.";
 
-pub fn diagnostics_for_empty_explicit_report(
+pub fn diagnostics_for_empty_explicit_models(
     home_dir: &Path,
-    clients: &Option<Vec<String>>,
+    clients: &Option<Vec<tokscale_core::ClientId>>,
     claude_message_count: i32,
 ) -> Vec<ClientDiagnostic> {
     if !explicitly_requests_claude(clients) || claude_message_count > 0 {
@@ -36,10 +36,10 @@ pub fn diagnostics_for_empty_explicit_report(
     claude_diagnostics(home_dir)
 }
 
-fn explicitly_requests_claude(clients: &Option<Vec<String>>) -> bool {
+fn explicitly_requests_claude(clients: &Option<Vec<tokscale_core::ClientId>>) -> bool {
     clients
         .as_ref()
-        .is_some_and(|ids| ids.iter().any(|id| id == "claude"))
+        .is_some_and(|ids| ids.contains(&tokscale_core::ClientId::Claude))
 }
 
 fn claude_diagnostics(home_dir: &Path) -> Vec<ClientDiagnostic> {

@@ -176,22 +176,17 @@ pub fn has_credentials() -> bool {
     super::helpers::read_env(API_KEY_ENV).is_some()
 }
 
-pub fn fetch() -> Result<UsageOutput> {
+pub async fn fetch() -> Result<UsageOutput> {
     let api_key = super::helpers::read_env(API_KEY_ENV).ok_or_else(|| {
         anyhow::anyhow!(
             "No Z.ai coding plan API key set. Configure TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY."
         )
     })?;
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let client = reqwest::Client::new();
-        let quota = fetch_quota(&client, &api_key).await?;
-        let sub = fetch_sub(&client, &api_key).await.ok();
-        Ok(usage_output_from_parts(quota, sub))
-    })
+    let client = reqwest::Client::new();
+    let quota = fetch_quota(&client, &api_key).await?;
+    let sub = fetch_sub(&client, &api_key).await.ok();
+    Ok(usage_output_from_parts(quota, sub))
 }
 
 #[cfg(test)]

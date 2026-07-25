@@ -1080,8 +1080,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::tui::app::{ProjectionBackend, TuiConfig};
-    use crate::tui::data::{DailyUsage, ModelUsage, TokenBreakdown, UsageData};
+    use crate::tui::app::TuiConfig;
+    use crate::tui::data::{DailyUsage, UsageModelEntry, UsageTokenBreakdown, UsageView};
     use crate::tui::settings::Settings;
     use crate::tui::subscription_usage::{UsageMetric, UsageOutput, UsageProviderId};
     use chrono::NaiveDate;
@@ -1092,7 +1092,7 @@ mod tests {
             refresh: 0,
             no_refresh: false,
             home_dir: None,
-            clients: None,
+            client_universe: tokscale_core::ClientUniverse::all(),
             since: None,
             until: None,
             year: None,
@@ -1102,7 +1102,7 @@ mod tests {
             usage_tab_enabled: true,
             ..Settings::default()
         };
-        App::new_with_cached_data_and_settings(config, Some(UsageData::default()), settings)
+        App::new_with_cached_data_and_settings(config, Some(UsageView::default()), settings)
             .unwrap()
     }
 
@@ -1195,7 +1195,11 @@ mod tests {
 
     fn installed_app_on(tab: Tab) -> App {
         let mut app = make_app_on(tab);
-        app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
+        app.install_generation_fixture(
+            tokscale_core::UsageIndex::new(),
+            Vec::new(),
+            Default::default(),
+        );
         app
     }
 
@@ -1203,20 +1207,20 @@ mod tests {
         let mut app = installed_app_on(tab);
         app.data.daily.push(DailyUsage {
             date: NaiveDate::from_ymd_opt(2026, 7, 22).unwrap(),
-            tokens: TokenBreakdown::default(),
+            tokens: UsageTokenBreakdown::default(),
             cost: 0.0,
             client_breakdown: BTreeMap::new(),
             message_count: 0,
             turn_count: 0,
         });
-        app.data.models.push(ModelUsage {
+        app.data.models.push(UsageModelEntry {
             model_id: "test-model".to_string(),
             display_name: "Test Model".to_string(),
             provider: "test-provider".to_string(),
-            client: "codex".to_string(),
+            clients: vec![tokscale_core::ClientId::Codex],
             workspace_key: None,
             workspace_label: None,
-            tokens: TokenBreakdown::default(),
+            tokens: UsageTokenBreakdown::default(),
             cost: 0.0,
             session_count: 1,
         });
@@ -1273,7 +1277,7 @@ mod tests {
             status_row_line(&app).spans[0].style.fg,
             Some(app.theme.status.info)
         );
-        app.set_local_report_status("Local informational status");
+        app.set_generation_status("Local informational status");
         assert_eq!(
             status_row_line(&app).spans[0].style.fg,
             Some(app.theme.status.info)
@@ -1436,14 +1440,18 @@ mod tests {
 
         app.set_background_loading(false);
         app.set_error(Some("injected cold failure".to_string()));
-        app.set_local_report_status("Error: injected cold failure");
+        app.set_generation_status("Error: injected cold failure");
         assert_eq!(line_text(status_row_line(&app)), "");
     }
 
     #[test]
     fn empty_installed_generation_uses_the_warm_refresh_status() {
         let mut app = make_app_on(Tab::Overview);
-        app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
+        app.install_generation_fixture(
+            tokscale_core::UsageIndex::new(),
+            Vec::new(),
+            Default::default(),
+        );
         app.set_background_loading(true);
 
         assert_eq!(
@@ -1472,7 +1480,7 @@ mod tests {
         let mut app = make_app_on(Tab::Overview);
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
-        app.set_local_report_status("Loaded from cache");
+        app.set_generation_status("Loaded from cache");
 
         let text = line_text(subscription_status_row_line(&app));
 
@@ -1484,7 +1492,7 @@ mod tests {
         let mut app = make_app_on(Tab::Overview);
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(vec![UsageProviderId::Codex]);
-        app.set_local_report_status("Local report refreshed");
+        app.set_generation_status("Data refreshed");
 
         let text = line_text(subscription_status_row_line(&app));
 
@@ -1504,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn local_report_warnings_do_not_cross_into_usage_status() {
+    fn generation_warnings_do_not_cross_into_usage_status() {
         let mut app = make_app_on(Tab::Models);
         app.status_message = None;
         app.status_message_time = None;

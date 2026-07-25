@@ -2,18 +2,29 @@ mod claude_diagnostics;
 mod cli;
 mod commands;
 mod failure;
+mod generation;
 mod paths;
 mod tui;
 
 use anyhow::Result;
 use cli::{Cli, ExecutionPlan, PricingSource, PricingSubcommand, TerminalState, WrappedPlan};
 use commands::cache::{run_input_cache_prune, run_warm_tui_cache};
-use commands::models::run_models_report;
+use commands::models::run_models;
 use commands::pricing::{run_pricing_list_overrides, run_pricing_lookup};
 use failure::{CliFailure, FailureClass};
 
 fn main() {
-    match run() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Error: failed to initialize async runtime: {error}");
+            std::process::exit(1);
+        }
+    };
+    match run(&runtime) {
         Ok(ExecutionOutcome::Completed) => {}
         Ok(ExecutionOutcome::Interrupted) => std::process::exit(130),
         Err(error) => {
@@ -27,10 +38,10 @@ fn main() {
     }
 }
 
-fn run() -> std::result::Result<ExecutionOutcome, CliFailure> {
+fn run(runtime: &tokio::runtime::Runtime) -> std::result::Result<ExecutionOutcome, CliFailure> {
     let cli = Cli::parse_from_env();
     let plan = ExecutionPlan::resolve(cli, TerminalState::detect())?;
-    execute(plan)
+    execute(plan, runtime)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,41 +59,19 @@ impl From<tui::TuiExit> for ExecutionOutcome {
     }
 }
 
-fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFailure> {
+fn execute(
+    plan: ExecutionPlan,
+    runtime: &tokio::runtime::Runtime,
+) -> std::result::Result<ExecutionOutcome, CliFailure> {
     match plan {
         ExecutionPlan::Tui(plan) => {
-            return tui::run(
-                plan.theme.as_deref(),
-                plan.refresh,
-                plan.no_refresh,
-                plan.debug,
-                plan.input.home,
-                plan.input.clients,
-                plan.date.since,
-                plan.date.until,
-                plan.date.year,
-                plan.initial_tab,
-            )
-            .map(ExecutionOutcome::from)
-            .map_err(CliFailure::from);
+            return tui::run(runtime.handle().clone(), plan)
+                .map(ExecutionOutcome::from)
+                .map_err(CliFailure::from);
         }
         ExecutionPlan::Models(plan) => {
-            let report = plan.report;
-            let no_spinner = effective_no_spinner(report.json, report.no_spinner);
-            run_models_report(
-                report.json,
-                report.input.home,
-                report.input.clients,
-                report.date.since,
-                report.date.until,
-                report.date.year,
-                report.benchmark,
-                no_spinner,
-                report.date.today,
-                report.date.week,
-                report.date.month,
-                plan.group_by,
-            )
+            let no_spinner = effective_no_spinner(plan.json, plan.no_spinner);
+            runtime.block_on(run_models(plan, no_spinner))
         }
         ExecutionPlan::Pricing(subcommand) => match subcommand {
             PricingSubcommand::Lookup {
@@ -90,17 +79,19 @@ fn execute(plan: ExecutionPlan) -> std::result::Result<ExecutionOutcome, CliFail
                 json,
                 pricing_source,
                 no_spinner,
-            } => run_pricing_lookup(
+            } => runtime.block_on(run_pricing_lookup(
                 &model_id,
                 json,
                 pricing_source.map(PricingSource::as_str),
                 effective_no_spinner(json, no_spinner),
-            ),
+            )),
             PricingSubcommand::Overrides { json } => run_pricing_list_overrides(json),
         },
-        ExecutionPlan::Wrapped(plan) => run_wrapped_command(plan),
+        ExecutionPlan::Wrapped(plan) => runtime.block_on(run_wrapped_command(plan)),
         ExecutionPlan::CachePrune => run_input_cache_prune(),
-        ExecutionPlan::CacheWarm(input) => run_warm_tui_cache(input.home, input.clients),
+        ExecutionPlan::CacheWarm(input) => {
+            runtime.block_on(run_warm_tui_cache(input.home, input.clients))
+        }
     }?;
 
     Ok(ExecutionOutcome::Completed)
@@ -110,7 +101,7 @@ const fn effective_no_spinner(json: bool, explicit_no_spinner: bool) -> bool {
     json || explicit_no_spinner
 }
 
-fn run_wrapped_command(plan: WrappedPlan) -> Result<()> {
+async fn run_wrapped_command(plan: WrappedPlan) -> Result<()> {
     use colored::Colorize;
 
     if !plan.no_spinner {
@@ -125,7 +116,7 @@ fn run_wrapped_command(plan: WrappedPlan) -> Result<()> {
         short: plan.short,
     };
 
-    let output_path = commands::wrapped::run(wrapped_options)?;
+    let output_path = commands::wrapped::run(wrapped_options).await?;
     println!("{output_path}");
     Ok(())
 }

@@ -3,7 +3,6 @@ use crate::commands::render::*;
 use crate::commands::shared::*;
 use crate::tui::Tab;
 use clap::Parser;
-use std::path::PathBuf;
 use tokscale_core::ClientId;
 
 #[test]
@@ -57,11 +56,7 @@ fn test_build_client_filter_canonical_clients_preserve_user_order() {
     };
     assert_eq!(
         build_client_filter_with_defaults(flags, &[]).unwrap(),
-        Some(vec![
-            "claude".to_string(),
-            "opencode".to_string(),
-            "pi".to_string(),
-        ])
+        Some(vec![ClientId::Claude, ClientId::OpenCode, ClientId::Pi,])
     );
 }
 
@@ -72,7 +67,7 @@ fn test_build_client_filter_canonical_dedups_repeats() {
     };
     assert_eq!(
         build_client_filter_with_defaults(flags, &[]).unwrap(),
-        Some(vec!["claude".to_string(), "opencode".to_string()])
+        Some(vec![ClientId::Claude, ClientId::OpenCode])
     );
 }
 
@@ -83,7 +78,7 @@ fn test_build_client_filter_with_defaults_when_no_flags() {
     let defaults = vec!["opencode".to_string(), "claude".to_string()];
     assert_eq!(
         build_client_filter_with_defaults(flags, &defaults).unwrap(),
-        Some(vec!["opencode".to_string(), "claude".to_string()])
+        Some(vec![ClientId::OpenCode, ClientId::Claude])
     );
 }
 
@@ -98,7 +93,7 @@ fn test_build_client_filter_cli_overrides_defaults_completely() {
     let defaults = vec!["opencode".to_string(), "claude".to_string()];
     assert_eq!(
         build_client_filter_with_defaults(flags, &defaults).unwrap(),
-        Some(vec!["codex".to_string()])
+        Some(vec![ClientId::Codex])
     );
 }
 
@@ -123,7 +118,7 @@ fn test_build_client_filter_defaults_dedup_preserves_order() {
     ];
     assert_eq!(
         build_client_filter_with_defaults(flags, &defaults).unwrap(),
-        Some(vec!["claude".to_string(), "opencode".to_string()])
+        Some(vec![ClientId::Claude, ClientId::OpenCode])
     );
 }
 
@@ -137,7 +132,7 @@ fn test_client_flags_parses_canonical_form() {
         panic!("expected models command");
     };
     assert_eq!(
-        args.report.input.clients.clients,
+        args.input.clients.clients,
         vec![ClientId::OpenCode, ClientId::Claude]
     );
 
@@ -159,7 +154,7 @@ fn test_client_flag_accepts_uppercase() {
     let Some(Commands::Models(args)) = cli.command else {
         panic!("expected models command");
     };
-    assert_eq!(args.report.input.clients.clients, vec![ClientId::OpenCode]);
+    assert_eq!(args.input.clients.clients, vec![ClientId::OpenCode]);
 
     let cli = Cli::try_parse_from(["tokscale", "models", "-c", "Codebuff,Antigravity"])
         .expect("mixed-case parses");
@@ -167,7 +162,7 @@ fn test_client_flag_accepts_uppercase() {
         panic!("expected models command");
     };
     assert_eq!(
-        args.report.input.clients.clients,
+        args.input.clients.clients,
         vec![ClientId::Codebuff, ClientId::Antigravity]
     );
 }
@@ -505,7 +500,7 @@ fn misplaced_and_equals_form_options_remain_parse_errors() {
 }
 
 #[test]
-fn report_execution_plan_does_not_depend_on_terminal_state() {
+fn models_execution_plan_does_not_depend_on_terminal_state() {
     for terminal in [
         TerminalState {
             stdin: true,
@@ -522,16 +517,13 @@ fn report_execution_plan_does_not_depend_on_terminal_state() {
         let ExecutionPlan::Models(plan) = plan else {
             panic!("models must never resolve to a TUI plan");
         };
-        assert!(plan.report.json);
-        assert_eq!(
-            plan.report.input.clients,
-            Some(vec!["opencode".to_string()])
-        );
+        assert!(plan.json);
+        assert_eq!(plan.input.clients, Some(vec![ClientId::OpenCode]));
     }
 }
 
 #[test]
-fn json_report_plan_preserves_explicit_no_spinner() {
+fn json_models_plan_preserves_explicit_no_spinner() {
     let home = tempfile::TempDir::new().unwrap();
     let home = home.path().to_str().unwrap();
     let resolve = |explicit_no_spinner: bool| {
@@ -551,7 +543,7 @@ fn json_report_plan_preserves_explicit_no_spinner() {
         let ExecutionPlan::Models(plan) = plan else {
             panic!("expected models plan");
         };
-        plan.report
+        plan
     };
 
     let implicit = resolve(false);
@@ -692,13 +684,4 @@ fn client_id_parses_warp() {
 fn client_id_parses_grok() {
     assert_eq!(ClientId::from_str("grok"), Some(ClientId::Grok));
     assert_eq!(ClientId::Grok.as_str(), "grok");
-}
-
-#[test]
-fn antigravity_local_input_uses_standard_home_path() {
-    let def = ClientId::Antigravity.local_def().unwrap();
-    assert_eq!(
-        def.resolve_path("/tmp/home"),
-        PathBuf::from("/tmp/home/.gemini/antigravity-cli/conversations")
-    );
 }

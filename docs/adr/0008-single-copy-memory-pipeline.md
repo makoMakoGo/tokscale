@@ -1,10 +1,10 @@
 # ADR 0008: Prepared input, single-copy fold, and cache storage
 
-Status: Accepted
+Status: Accepted; application boundary and generation storage revised by ADR 0030
 
 ## Context
 
-Tokscale processes large transcript collections. Materializing one adapter's
+Tokscale processes large transcript collections. Materializing one integration's
 complete output, cloning cache hits into another collection, and rebuilding a
 monolithic cache can keep several copies of the same messages alive. Discovery
 performed separately from freshness checks or execution can also make one load
@@ -19,17 +19,17 @@ current formats, and ADR 0028 owns the TUI lifecycle built on this pipeline.
 
 ### Acquisition authority
 
-Selected registry `AdapterBinding` values own client attribution, while their
-adapters own input discovery, input identity, parsing, and error attribution.
-Public report paths do not use a central `ScanResult`,
+Selected `ClientIntegration` values own client attribution, input discovery,
+input identity, parsing, and error attribution. Public projection paths do not
+use a central `ScanResult`,
 `scan_all_clients*`, generic scanner error, or dead per-client database slots.
-`ScannerSettings` and focused scanner primitives remain adapter and test seams;
+`ScannerSettings` and focused scanner primitives remain integration and test seams;
 they do not define another product command or discovery authority.
 
-Discovery produces one consumptive `PreparedLocalInputs` inventory. It records:
+Discovery produces one consumptive `PreparedInventory`. It records:
 
 - requested clients in canonical order;
-- selected-adapter and per-adapter unit order;
+- selected-integration and per-integration unit order;
 - decoder and unit identity;
 - one `InputPolicy` per unit, including its primary and decoder-relevant related
   inputs; and
@@ -38,11 +38,11 @@ Discovery produces one consumptive `PreparedLocalInputs` inventory. It records:
 `InputUnit` is source-neutral. Its `DecoderSpec` atomically binds decoder ID,
 semantic revision, and decode route; decoder selection is never reconstructed
 from a client default. Session decoders produce `UsageRecord`, and message-cache
-bodies persist that same source-neutral type. Each adapter's fold owns its cache
+bodies persist that same source-neutral type. Each integration's fold owns its cache
 and enrichment order, then applies filtering and deduplication before sending
-accepted records through the binding's `BoundMessageSink`. The sink alone
+accepted records through the integration's `BoundMessageSink`. The sink alone
 combines its typed `ClientId` with the record and emits a `UnifiedMessage`. No
-production pipeline path lets an input, decoder, adapter fold, or cache shard
+production pipeline path lets an input, decoder, integration fold, or cache shard
 override that attribution.
 
 Freshness probing and execution consume the same inventory and never rediscover
@@ -74,7 +74,7 @@ matches the prepared snapshot.
 
 Each inventory has two freshness keys:
 
-- a versioned SHA-256 `InputInventorySignature` over canonical clients, adapter
+- a versioned SHA-256 `SourceFingerprint` over canonical clients, integration
   and unit order, decoder/unit identity, and every declared input's native path,
   label, presence, size, mtime, and native identity; and
 - a process-local `u64` digest over those stable signature bytes, which is never
@@ -99,7 +99,7 @@ input-space accounting, and session projection from one bounded message stream.
 A full `Vec<UnifiedMessage>` is not part of that path. APIs whose explicit
 contract returns all messages still materialize the final vector.
 
-Prepared adapter groups execute in ordered batches:
+Prepared integration groups execute in ordered batches:
 
 - batch width is `rayon::current_num_threads()`, with a minimum of one;
 - generic cache users first perform one indexed parallel header/stamp planning
@@ -115,13 +115,13 @@ Prepared adapter groups execute in ordered batches:
 A one-shot definitive-miss marker prevents a duplicate header lookup while
 retaining the same snapshot, fingerprint, parse, and post-parse race checks.
 Indeterminate misses recheck. Deduplication and merge state is created once per
-adapter group and survives all batches.
+integration group and survives all batches.
 
 OpenCode keeps one deduplication set across all current SQLite databases and
 batches. OMP builds one parent-task index from all miss paths, consumes planned
 hit bodies before that index is built, and then folds hits and misses in bounded
 order. Codex retains its dedicated exact-hit, stale, append, and recovery path
-because its incremental parse state is not the generic adapter contract.
+because its incremental parse state is not the generic integration contract.
 
 Codex cold parses, append merges, and race reparses own one raw `UsageRecord`
 vector.
@@ -138,7 +138,7 @@ instead of becoming empty usage.
 ### Message representation and aggregation
 
 `UsageRecord` is the single source-neutral decoder, shard, and enrichment
-representation. `UnifiedMessage` composes a typed adapter-attributed `ClientId`
+representation. `UnifiedMessage` composes a typed integration-attributed `ClientId`
 with one `UsageRecord` for public aggregation; it does not repeat the record's
 fields or accept an untyped client string. The record otherwise stores no
 redundant derivable value:
@@ -162,11 +162,11 @@ with a distinct unknown-workspace tag.
 
 `InputFootprint` is the sole input-space fact. It maps typed `ClientId` values to
 the byte size of snapshots confirmed at the final cache-decision/fold boundary,
-deduplicated within each binding's inventory. Overview derives Data Size as its
+deduplicated within each integration's inventory. Overview derives Data Size as its
 checked sum; there is no separately stored total. Data Health does not store
-input bytes. The TUI generation persists the footprint map (`clientSpace`) once,
-and Sessions and Overview project their values from it. Headless local reports
-expose the same confirmed map as `metadata.inputFootprint`. Usage, Sessions,
+input bytes. The generation persists the footprint map (`inputFootprint`) once,
+and Sessions and Overview project their values from it. The headless Models
+projection exposes the same confirmed map as `metadata.inputFootprint`. Usage, Sessions,
 Data Health, input footprint, and the inventory signature all derive from the
 same confirmed snapshots.
 
@@ -179,7 +179,7 @@ message count matches the header.
 
 Body failures retain the input, decoder revision, shard path, and root cause.
 The CLI emits an explicit diagnostic and reparses the authoritative current
-input through its registered adapter. A successful cacheable reparse atomically
+input through its registered integration. A successful cacheable reparse atomically
 replaces the shard.
 
 A definitively missing, malformed, undecodable, or identity-invalid shard is
@@ -200,7 +200,7 @@ bincode message body. Ordinary reads and explicit pruning accept only the
 format version supported by the running binary.
 
 `tokscale cache prune` is an explicit full traversal of current shard files;
-ordinary report and TUI loads never invoke it. Pruning first validates and
+ordinary generation loads never invoke it. Pruning first validates and
 classifies the complete traversal. An unsupported version, unknown magic,
 truncated envelope, malformed header, undecodable header, oversized shard, or
 filesystem inspection failure aborts the operation before deletion begins.
@@ -212,41 +212,22 @@ reported explicitly; already completed removals are not rolled back.
 
 ### Atomic TUI generation storage
 
-One local fold produces health data, one `InputFootprint`, sessions,
-client-aware canonical accumulator, one group-agnostic Common projection, and
-four full-universe Grouped projections. The current TUI cache schema stores them
-in one atomic JSON bundle. It stores only the per-client footprint map for input
-space; Overview derives its total and Health carries no duplicate byte count.
+One local fold produces one immutable `Generation`: scope, Client universe,
+confirmed source fingerprint, canonical `UsageIndex`, sessions,
+`InputFootprint`, Data Health, and pricing diagnostics. The cache serializes
+that value once behind a versioned binary envelope and atomic rename.
 
-Common stores Agents, daily and hourly totals with Client membership, the
-contribution graph, report totals, and streaks exactly once. Each Grouped
-projection stores only Models plus daily and hourly model buckets for one
-Group By value. The canonical accumulator records token and cost totals per
-Client so a proper Client subset can reproduce Common without deriving totals
-from a Grouped model projection.
+Common/Grouped bundles and renderer projections are not cache state. Every
+usage view is projected from the installed `UsageIndex`, and Sessions filters
+the installed session snapshot. Cache decoding validates the complete
+`Generation`, including exact universe membership for footprint, sessions, and
+health. A schema mismatch, malformed envelope, trailing bytes, or invalid
+generation is a complete cache miss.
 
-- borrowed canonical, Common, Grouped, session, and metadata views are streamed
-  through a buffered temporary file;
-- one rename publishes the complete bundle;
-- a SHA-256 digest protects the canonical accumulator;
-- startup verifies the digest and decodes all four Grouped projections,
-  including inactive ones;
-- acceptance requires every projection's fields and model Client attribution
-  to belong to the immutable Client universe and requires Common/Grouped daily
-  and hourly shapes to agree; and
-- a reader pins the opened inode so Common and Grouped data cannot cross
-  generations during replacement.
-
-Failure of any schema, digest, projection, Client-membership, or shape check
-invalidates the complete bundle. For the full Client universe, the active view
-is assembled from Common plus one Grouped projection from the same pinned
-inode. The canonical accumulator is loaded lazily only for a proper Client
-subset and then retained for subsequent subset projections.
-
-Generation persistence failure is explicit. The running TUI may retain the
-same in-memory accumulator as a degraded projection backend, but it must not
-claim that persistence succeeded. ADR 0028 defines current schema acceptance,
-refresh installation, and projection behavior.
+Generation persistence failure is explicit. A warm TUI may retain the same
+in-memory `Generation` and expose a degraded diagnostic, but it must not claim
+that persistence succeeded. ADR 0030 owns the canonical generation boundary;
+ADR 0028 owns refresh installation and projection behavior.
 
 ### Resident-memory behavior
 
@@ -258,7 +239,7 @@ Other platforms retain native allocator behavior.
 ## Consequences
 
 Peak intermediate memory is bounded by one miss batch, persistent cross-batch
-indexes, and the consumer's required aggregate rather than an adapter-wide
+indexes, and the consumer's required aggregate rather than an integration-wide
 message collection. Exact warm hits read no authoritative input bytes, while
 native file identity prevents same-size/same-mtime path replacement from
 reusing stale data. Cache faults remain visible and recover from authoritative

@@ -1,6 +1,6 @@
 # ADR 0007: Client identity catalog and local input authority
 
-Status: Accepted
+Status: Accepted; integration ownership revised by ADR 0030
 
 ## Context
 
@@ -10,7 +10,7 @@ parsing provider artifacts. Identity, acquisition, usage attribution, and
 diagnostics are separate concerns:
 
 - a **Client** identifies the application that produced a usage record;
-- an **Input** is one filesystem or database unit acquired by an adapter;
+- an **Input** is one filesystem or database unit acquired by an integration;
 - a **Provider** is optional model-usage attribution;
 - **Data Health** describes input availability and record rejection; and
 - a **Pricing Source** identifies pricing provenance.
@@ -40,19 +40,20 @@ model names, providers, or display labels.
 
 ### Local-input authority
 
-Every catalog entry has exactly one registry `AdapterBinding` and one scan
-definition. These three sets must have exact parity and no duplicate entries.
+Every catalog entry is exhaustively dispatched to exactly one
+`ClientIntegration`. The dispatch is a wildcard-free `match` on `ClientId`, so
+adding a catalog variant without selecting an integration is a compile error.
 
-The adapter registry stores an `AdapterBinding` containing one typed `ClientId`
-and one adapter. This binding is the sole authority associating discovered
-inputs and emitted usage with a client. The scan definition and adapter
-discovery implementation remain authoritative for fixed default roots beneath
-the selected home, filename selection, companion files, database sidecars, and
-custom-root support. Additional roots come only from
+Each vertical integration owns one typed `ClientId`, its source definition,
+discovery, decoder route, and fold. Its identity is the sole authority
+associating discovered inputs and emitted usage with a client. Discovery
+remains authoritative for fixed default roots beneath the selected home,
+filename selection, companion files, database sidecars, and custom-root
+support. Additional roots come only from
 `scanner.extraScanPaths`; OpenCode database files come only from
 `scanner.opencodeDbPaths`.
 
-The adapter's session decoder and schema are the sole authority for accepted
+The integration's decoder and schema are the sole authority for accepted
 envelopes, database schemas, required fields, record semantics, deduplication,
 and token interpretation, but not source identity. Each source-neutral
 `InputUnit` contains a `DecoderSpec` that atomically binds decoder ID, semantic
@@ -61,11 +62,11 @@ can drift from the selected route.
 
 Decoders produce one source-neutral `UsageRecord` representation. Derived
 message-cache shards store that same type. The runner constructs a
-`BoundMessageSink` from the registry binding; the sink accepts only
-`UsageRecord` and attaches the binding's typed `ClientId` to construct a
+`BoundMessageSink` from the selected integration; the sink accepts only
+`UsageRecord` and attaches the integration's typed `ClientId` to construct a
 `UnifiedMessage`. `UnifiedMessage` composes client attribution with a
 `UsageRecord` instead of duplicating the usage fields. Neither an input,
-decoder, adapter fold, nor cache shard can supply a competing client identity,
+decoder, integration fold, nor cache shard can supply a competing client identity,
 so mismatched source attribution is not representable.
 
 `docs/clients.md` is the user-facing discovery map generated from that contract.
@@ -73,7 +74,7 @@ It does not create a second path or schema authority.
 
 ### Input semantics
 
-Adapters acquire current provider-written local artifacts directly. Acquisition
+Integrations acquire current provider-written local artifacts directly. Acquisition
 does not invoke provider CLIs, inspect provider processes, call private remote
 interfaces, or manufacture usage records.
 
@@ -89,7 +90,7 @@ identity. Provider attribution may be inferred centrally from a valid model ID;
 when it cannot be inferred, the provider is `unknown`. Provider attribution by
 itself never determines record eligibility.
 
-SQLite adapters that declare WAL-aware acquisition fingerprint and read the
+SQLite integrations that declare WAL-aware acquisition fingerprint and read the
 database with its committed WAL state. Derived message shards and aggregate
 caches are reproducible acceleration artifacts, not local usage authorities.
 
@@ -109,24 +110,24 @@ Adding a client requires one atomic contract change containing:
 
 1. one catalog identity;
 2. one scan definition;
-3. one registered `AdapterBinding`;
+3. one vertical `ClientIntegration` selected by the exhaustive dispatch;
 4. one current source-neutral decoder specification and session schema;
 5. focused discovery, decoder, and health tests;
-6. catalog/scan/adapter parity checks; and
+6. a catalog/integration identity check; and
 7. a current discovery row in `docs/clients.md`.
 
 Changing a root, filename rule, companion dependency, database schema, or record
-envelope requires an adapter/schema change with focused tests and a matching
+envelope requires an integration/schema change with focused tests and a matching
 documentation update. A decoder behavior change that affects cached output also
 requires a decoder revision change.
 
 ## Consequences
 
 Each accepted local integration has one public identity and one executable
-input contract. Reports, filters, scanner configuration, caches, and TUI views
+input contract. Projections, filters, scanner configuration, caches, and TUI views
 therefore share the same client namespace. The production pipeline gives only
-the registry binding authority to attach `ClientId`; the source-neutral input,
+the selected integration authority to attach `ClientId`; the source-neutral input,
 decoder output, persisted shard, and diagnostic errors carry no competing
 client field. Decoder identity, revision, and route cannot disagree because
-they are one `DecoderSpec`; path and format evolution stays owned by the adapter
+they are one `DecoderSpec`; path and format evolution stays owned by the integration
 and schema that can validate it.

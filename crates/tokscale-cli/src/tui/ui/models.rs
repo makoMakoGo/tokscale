@@ -12,15 +12,16 @@ use super::table_layout::{
 };
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_display_width,
-    truncate_model_display_name_to, viewport_scrollbar_state, workspace_label_or_unknown,
+    get_client_display_name, get_client_display_names, get_provider_display_name,
+    total_tokens_cell, truncate_display_width, truncate_model_display_name_to,
+    viewport_scrollbar_state, workspace_label_or_unknown,
 };
 use crate::tui::actions::ActionSet;
 use crate::tui::app::{App, ModelDetailSelection, SortDirection, SortField};
 use crate::tui::presentation::EmptySubject;
 use tokscale_core::GroupBy;
 
-fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
+fn workspace_label(model: &crate::tui::data::UsageModelEntry) -> &str {
     workspace_label_or_unknown(
         model
             .workspace_label
@@ -32,11 +33,11 @@ fn workspace_label(model: &crate::tui::data::ModelUsage) -> &str {
 /// The Model column always shows the bare canonical model; under
 /// `GroupBy::WorkspaceModel` the workspace dimension lives in its own column
 /// instead of a "workspace / model" prefix (ADR 0010).
-fn model_display_name(model: &crate::tui::data::ModelUsage) -> &str {
+fn model_display_name(model: &crate::tui::data::UsageModelEntry) -> &str {
     &model.display_name
 }
 
-fn model_content_width(models: &[&crate::tui::data::ModelUsage]) -> u16 {
+fn model_content_width(models: &[&crate::tui::data::UsageModelEntry]) -> u16 {
     models
         .iter()
         .map(|model| display_width(model_display_name(model)))
@@ -44,7 +45,7 @@ fn model_content_width(models: &[&crate::tui::data::ModelUsage]) -> u16 {
         .unwrap_or(MODEL_MIN_WIDTH)
 }
 
-fn workspace_content_width(models: &[&crate::tui::data::ModelUsage]) -> u16 {
+fn workspace_content_width(models: &[&crate::tui::data::UsageModelEntry]) -> u16 {
     models
         .iter()
         .map(|model| display_width(workspace_label(model)))
@@ -122,7 +123,7 @@ pub fn render(
     actions: &ActionSet,
 ) {
     let title = match &app.selected_model_detail {
-        Some(selection) => match selection.client.as_deref() {
+        Some(selection) => match selection.client {
             Some(client) => format!(
                 " Model Details · {} · {} ",
                 get_client_display_name(client),
@@ -157,7 +158,7 @@ pub fn render(
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
-    let group_by = app.group_by.borrow().clone();
+    let group_by = *app.group_by.borrow();
     let theme_heading = app.theme.chrome.heading;
     let theme_secondary = app.theme.text.secondary;
     let theme_selection_style = app.theme.selection_style();
@@ -196,7 +197,7 @@ pub fn render(
         .unwrap_or(DETAIL_PROVIDER_WIDTH);
     let client_content_width = models
         .iter()
-        .map(|model| display_width(&get_client_display_name(&model.client)))
+        .map(|model| display_width(&get_client_display_names(&model.clients)))
         .max()
         .unwrap_or(DETAIL_CLIENT_WIDTH);
     let workspace_content_width = if group_by == GroupBy::WorkspaceModel {
@@ -271,7 +272,7 @@ pub fn render(
                     // models_table_layout never includes Messages; panic if renderer and layout diverge.
                     ModelsColumn::Messages => unreachable!("models rows do not have message data"),
                     ModelsColumn::Client => Cell::from(truncate_display_width(
-                        &get_client_display_name(&model.client),
+                        &get_client_display_names(&model.clients),
                         table_layout.width_for(ModelsColumn::Client),
                     ))
                     .style(Style::default().fg(theme_secondary)),
@@ -445,7 +446,7 @@ mod tests {
         };
         let client_model_detail = ModelDetailSelection {
             model: "shared-model".to_string(),
-            client: Some("claude".to_string()),
+            client: Some(tokscale_core::ClientId::Claude),
         };
 
         let by_model =
@@ -561,14 +562,14 @@ mod tests {
 
     #[test]
     fn workspace_model_widths_split_workspace_from_bare_model() {
-        let model = crate::tui::data::ModelUsage {
+        let model = crate::tui::data::UsageModelEntry {
             model_id: "gpt-5".to_string(),
             display_name: "gpt-5".to_string(),
             provider: "openai".to_string(),
-            client: "opencode".to_string(),
+            clients: vec![tokscale_core::ClientId::OpenCode],
             workspace_key: Some("/work/project".to_string()),
             workspace_label: Some("project-with-long-name".to_string()),
-            tokens: crate::tui::data::TokenBreakdown {
+            tokens: crate::tui::data::UsageTokenBreakdown {
                 input: 0,
                 output: 0,
                 cache_read: 0,
@@ -590,14 +591,14 @@ mod tests {
 
     #[test]
     fn workspace_column_falls_back_to_key_when_label_missing() {
-        let model = crate::tui::data::ModelUsage {
+        let model = crate::tui::data::UsageModelEntry {
             model_id: "gpt-5".to_string(),
             display_name: "gpt-5".to_string(),
             provider: "openai".to_string(),
-            client: "opencode".to_string(),
+            clients: vec![tokscale_core::ClientId::OpenCode],
             workspace_key: Some("/work/project".to_string()),
             workspace_label: None,
-            tokens: crate::tui::data::TokenBreakdown::default(),
+            tokens: crate::tui::data::UsageTokenBreakdown::default(),
             cost: 0.0,
             session_count: 0,
         };
@@ -631,7 +632,7 @@ mod tests {
             refresh: 0,
             no_refresh: false,
             home_dir: None,
-            clients: None,
+            client_universe: tokscale_core::ClientUniverse::all(),
             since: None,
             until: None,
             year: None,
@@ -672,11 +673,10 @@ mod tests {
             ),
         ];
         let accumulator =
-            tokscale_core::build_tui_accumulator(&messages, tokscale_core::DateRange::none());
-        let mut app = make_models_app(180, group_by.clone());
-        app.data = accumulator.project(&group_by);
-        app.data_group_by = group_by;
-        app.projection_backend = Some(crate::tui::app::ProjectionBackend::Memory(accumulator));
+            tokscale_core::build_usage_index(&messages, tokscale_core::DateRange::none());
+        let mut app = make_models_app(180, group_by);
+        *app.group_by.borrow_mut() = group_by;
+        app.install_generation_fixture(accumulator, Vec::new(), Default::default());
         app
     }
 
@@ -684,15 +684,15 @@ mod tests {
         model: &str,
         workspace: &str,
         cost: f64,
-    ) -> crate::tui::data::ModelUsage {
-        crate::tui::data::ModelUsage {
+    ) -> crate::tui::data::UsageModelEntry {
+        crate::tui::data::UsageModelEntry {
             model_id: model.to_string(),
             display_name: model.to_string(),
             provider: "openai".to_string(),
-            client: "opencode".to_string(),
+            clients: vec![tokscale_core::ClientId::OpenCode],
             workspace_key: Some(format!("/work/{workspace}")),
             workspace_label: Some(workspace.to_string()),
-            tokens: crate::tui::data::TokenBreakdown::default(),
+            tokens: crate::tui::data::UsageTokenBreakdown::default(),
             cost,
             session_count: 1,
         }

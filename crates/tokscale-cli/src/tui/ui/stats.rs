@@ -8,6 +8,7 @@ use crate::tui::actions::ActionSet;
 use crate::tui::app::{App, ClickAction};
 use crate::tui::data::{ContributionDay, ContributionGrade, DailyClientInfo, DailyUsage};
 use crate::tui::presentation::EmptySubject;
+use tokscale_core::ClientId;
 
 use super::empty_state;
 use super::radar::{render_radar, RadarAxis};
@@ -264,7 +265,7 @@ fn render_graph_metrics(
     app: &App,
     content: Rect,
     last_grid_row: u16,
-    graph: &crate::tui::data::GraphData,
+    graph: &crate::tui::data::UsageGraphData,
 ) {
     let active_days = graph
         .weeks
@@ -392,7 +393,7 @@ fn rank_canonical_models(daily: &DailyUsage) -> Vec<RankedModel> {
     ranked
 }
 
-fn top_client(daily: &DailyUsage) -> Option<(&str, &DailyClientInfo)> {
+fn top_client(daily: &DailyUsage) -> Option<(ClientId, &DailyClientInfo)> {
     let mut clients = daily.client_breakdown.iter().collect::<Vec<_>>();
     clients.sort_by(|(left_name, left), (right_name, right)| {
         right
@@ -405,7 +406,7 @@ fn top_client(daily: &DailyUsage) -> Option<(&str, &DailyClientInfo)> {
     clients
         .into_iter()
         .next()
-        .map(|(name, client_info)| (name.as_str(), client_info))
+        .map(|(client, client_info)| (*client, client_info))
 }
 
 fn selected_graph_day(app: &App) -> Option<&ContributionDay> {
@@ -782,7 +783,8 @@ mod tests {
     use super::*;
     use crate::tui::app::TuiConfig;
     use crate::tui::data::{
-        DailyClientInfo, DailyModelInfo, DailyUsage, GraphData, HourlyUsage, TokenBreakdown,
+        DailyClientInfo, DailyModelInfo, DailyUsage, HourlyUsage, UsageGraphData,
+        UsageTokenBreakdown,
     };
     use crate::tui::themes::{Theme, ThemeName};
     use chrono::NaiveDate;
@@ -796,7 +798,7 @@ mod tests {
                 refresh: 0,
                 no_refresh: false,
                 home_dir: None,
-                clients: None,
+                client_universe: tokscale_core::ClientUniverse::all(),
                 since: None,
                 until: None,
                 year: None,
@@ -809,9 +811,9 @@ mod tests {
         app
     }
 
-    fn sample_week_graph() -> GraphData {
+    fn sample_week_graph() -> UsageGraphData {
         let sunday = NaiveDate::from_ymd_opt(2026, 7, 12).unwrap();
-        GraphData {
+        UsageGraphData {
             weeks: vec![(0..7usize)
                 .map(|day_idx| {
                     Some(ContributionDay {
@@ -829,8 +831,8 @@ mod tests {
         }
     }
 
-    fn token_breakdown(total: u64) -> TokenBreakdown {
-        TokenBreakdown {
+    fn token_breakdown(total: u64) -> UsageTokenBreakdown {
+        UsageTokenBreakdown {
             input: total,
             ..Default::default()
         }
@@ -878,7 +880,12 @@ mod tests {
             cost,
             client_breakdown: clients
                 .into_iter()
-                .map(|(client, client_info)| (client.to_string(), client_info))
+                .map(|(client, client_info)| {
+                    (
+                        ClientId::from_str(client).expect("test client must be accepted"),
+                        client_info,
+                    )
+                })
                 .collect(),
             message_count: 0,
             turn_count: 0,
@@ -900,7 +907,7 @@ mod tests {
     fn select_day(app: &mut App, date: NaiveDate, tokens: u64, cost: f64) {
         let sunday = date - chrono::Duration::days(date.weekday().num_days_from_sunday() as i64);
         let selected_day = date.weekday().num_days_from_sunday() as usize;
-        app.data.graph = GraphData {
+        app.data.graph = UsageGraphData {
             weeks: vec![(0..7usize)
                 .map(|day_idx| {
                     Some(ContributionDay {
@@ -949,7 +956,7 @@ mod tests {
             11_000,
             2.0,
             vec![(
-                "clientfoo",
+                "codex",
                 client_info(
                     11_000,
                     2.0,
@@ -1003,7 +1010,7 @@ mod tests {
     #[test]
     fn graph_registers_click_areas_only_for_real_days() {
         let mut app = make_app(30);
-        app.data.graph = GraphData {
+        app.data.graph = UsageGraphData {
             weeks: vec![vec![
                 None,
                 Some(ContributionDay {
@@ -1148,7 +1155,7 @@ mod tests {
     #[test]
     fn out_of_range_cells_remain_blank() {
         let mut app = make_app(120);
-        app.data.graph = GraphData {
+        app.data.graph = UsageGraphData {
             weeks: vec![vec![
                 None,
                 Some(ContributionDay {
@@ -1194,7 +1201,7 @@ mod tests {
             ContributionGrade::Empty,
             ContributionGrade::Empty,
         ];
-        app.data.graph = GraphData {
+        app.data.graph = UsageGraphData {
             weeks: vec![(0..7usize)
                 .map(|day_idx| {
                     Some(ContributionDay {
@@ -1233,7 +1240,7 @@ mod tests {
         // One in-range day per week, each week starting a new month, so label
         // candidates land one week column (2 cells) apart and would collide
         // without suppression.
-        app.data.graph = GraphData {
+        app.data.graph = UsageGraphData {
             weeks: (0..52usize)
                 .map(|week_idx| {
                     (0..7usize)
@@ -1372,7 +1379,7 @@ mod tests {
             6.0,
             vec![
                 (
-                    "client-a",
+                    "codex",
                     client_info(
                         80,
                         3.0,
@@ -1395,7 +1402,7 @@ mod tests {
                     ),
                 ),
                 (
-                    "client-b",
+                    "claude",
                     client_info(
                         80,
                         3.0,
@@ -1446,7 +1453,7 @@ mod tests {
             30,
             0.0,
             vec![(
-                "client",
+                "codex",
                 client_info(
                     30,
                     0.0,
@@ -1478,7 +1485,7 @@ mod tests {
             100,
             2.0,
             vec![(
-                "client",
+                "codex",
                 client_info(
                     100,
                     2.0,
@@ -1494,7 +1501,7 @@ mod tests {
             100,
             2.0,
             vec![(
-                "client",
+                "codex",
                 client_info(
                     100,
                     2.0,
@@ -1526,7 +1533,7 @@ mod tests {
             100,
             2.0,
             vec![(
-                "client",
+                "codex",
                 client_info(
                     100,
                     2.0,
@@ -1596,7 +1603,7 @@ mod tests {
             2.5,
             vec![
                 (
-                    "clientfoo",
+                    "codex",
                     client_info(
                         8_000,
                         1.5,
@@ -1610,7 +1617,7 @@ mod tests {
                     ),
                 ),
                 (
-                    "clientbar",
+                    "claude",
                     client_info(
                         4_000,
                         1.0,
@@ -1630,7 +1637,7 @@ mod tests {
 
         assert!(rendered.contains("Top model: gpt-5.4"));
         assert!(!rendered.contains("project-a / gpt-5.4"));
-        assert!(rendered.contains("Top client: clientfoo"));
+        assert!(rendered.contains("Top client: Codex"));
         assert!(rendered.contains("Hours: 3 active"));
         assert!(rendered.contains("······ ···█·· ··█··· ·····█"));
         let top_model_row = rendered
@@ -1715,7 +1722,7 @@ mod tests {
             5_000,
             0.0,
             vec![(
-                "clientfoo",
+                "codex",
                 client_info(
                     5_000,
                     0.0,
@@ -1770,7 +1777,7 @@ mod tests {
             )],
         )];
         select_day(&mut app, date, 5_000, 0.0);
-        let expected = app.client_color("codex");
+        let expected = app.client_color(ClientId::Codex);
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         let actions = actions_for(&app);

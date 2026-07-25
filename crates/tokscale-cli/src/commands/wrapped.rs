@@ -7,11 +7,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tokio::runtime::Runtime;
-use tokscale_core::{
-    inferred_provider_from_model, load_aggregated_views_with_pricing, ClientId, GroupBy,
-    ReportOptions, ViewSet,
-};
+use tokscale_core::{inferred_provider_from_model, ClientId, GroupBy, UsageQuery};
 
 const SCALE: i32 = 2;
 const IMAGE_WIDTH: i32 = 1200 * SCALE;
@@ -54,14 +50,14 @@ const COLOR_GRADE4: Rgba<u8> = Rgba([0x00, 0xB2, 0xFF, 0xFF]);
 pub struct WrappedOptions {
     pub output: Option<String>,
     pub year: Option<String>,
-    pub home_dir: Option<String>,
-    pub clients: Option<Vec<String>>,
+    pub home_dir: Option<PathBuf>,
+    pub clients: Option<Vec<ClientId>>,
     pub short: bool,
 }
 
 #[derive(Debug, Clone)]
 struct WrappedData {
-    health: tokscale_core::input_health::HealthReport,
+    health: tokscale_core::input_health::HealthSummary,
     year: String,
     active_days: i32,
     total_tokens: i64,
@@ -105,9 +101,8 @@ struct RenderOptions {
     short: bool,
 }
 
-pub fn run(options: WrappedOptions) -> Result<String> {
-    let rt = Runtime::new()?;
-    rt.block_on(async move { generate_wrapped(options).await })
+pub async fn run(options: WrappedOptions) -> Result<String> {
+    generate_wrapped(options).await
 }
 
 async fn generate_wrapped(options: WrappedOptions) -> Result<String> {
@@ -154,28 +149,16 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     let since = format!("{}-01-01", year);
     let until = format!("{}-12-31", year);
 
-    let pricing = tokscale_core::pricing::PricingService::get_or_init()
-        .await
-        .map_err(anyhow::Error::msg)?;
-    let mut aggregated = load_aggregated_views_with_pricing(
-        &ReportOptions {
-            home_dir: options.home_dir.clone(),
-            clients: Some(clients),
-            since: Some(since),
-            until: Some(until),
-            year: Some(year.clone()),
-            group_by: GroupBy::default(),
-            scanner_settings: crate::tui::settings::load_scanner_settings_for_home(
-                &options.home_dir,
-            )?,
-        },
-        ViewSet::TUI,
-        Some(pricing.as_ref()),
-    )
-    .map_err(anyhow::Error::new)?;
-    let health = aggregated.health.to_report();
-    let mut data = aggregated.tui_usage.take().expect("tui view requested");
-    data.health = health.clone();
+    let loader = crate::generation::GenerationLoader::with_filters(
+        options.home_dir.clone(),
+        Some(since),
+        Some(until),
+        Some(year.clone()),
+    );
+    let prepared = loader.prepare(&clients)?;
+    let generation = loader.build(prepared).await?;
+    let data = generation.project(&UsageQuery::full(generation.universe(), GroupBy::Model))?;
+    let health = data.health.clone();
 
     let mut client_map: HashMap<String, WrappedRankedEntry> = HashMap::new();
     let mut total_messages = 0i32;
@@ -187,13 +170,15 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
                 .expect("wrapped daily message count exceeds i32::MAX"),
         );
         for (client, client_usage) in &day.client_breakdown {
-            let client_name = client_display_name(client).unwrap_or(client).to_string();
+            let client_name = client_display_name(client.as_str())
+                .unwrap_or(client.as_str())
+                .to_string();
             let client_entry =
                 client_map
-                    .entry(client.clone())
+                    .entry(client.to_string())
                     .or_insert_with(|| WrappedRankedEntry {
                         name: client_name,
-                        client_id: Some(client.clone()),
+                        client_id: Some(client.to_string()),
                         provider: None,
                         cost: 0.0,
                         tokens: 0,
@@ -1365,10 +1350,8 @@ fn capitalize_word(word: &str) -> String {
     result
 }
 
-fn default_clients() -> Vec<String> {
-    ClientId::iter()
-        .map(|client| client.as_str().to_string())
-        .collect()
+fn default_clients() -> Vec<ClientId> {
+    ClientId::iter().collect()
 }
 
 #[cfg(test)]
@@ -1773,14 +1756,12 @@ mod tests {
     #[test]
     fn default_clients_use_the_complete_catalog() {
         let clients = default_clients();
-        let expected = ClientId::iter()
-            .map(|client| client.as_str().to_string())
-            .collect::<Vec<_>>();
+        let expected = ClientId::iter().collect::<Vec<_>>();
 
         assert_eq!(clients, expected);
-        assert!(clients.iter().any(|client| client == "grok"));
-        assert!(clients.iter().any(|client| client == "kiro"));
-        assert!(clients.iter().any(|client| client == "warp"));
+        assert!(clients.contains(&ClientId::Grok));
+        assert!(clients.contains(&ClientId::Kiro));
+        assert!(clients.contains(&ClientId::Warp));
     }
 
     #[test]

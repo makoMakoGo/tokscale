@@ -298,7 +298,7 @@ fn truncate_string(value: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::tui::app::TuiConfig;
-    use crate::tui::data::{DailyClientInfo, DailyModelInfo, DailyUsage, TokenBreakdown};
+    use crate::tui::data::{DailyClientInfo, DailyModelInfo, DailyUsage, UsageTokenBreakdown};
     use chrono::NaiveDate;
     use ratatui::{backend::TestBackend, Terminal};
 
@@ -308,7 +308,7 @@ mod tests {
             refresh: 0,
             no_refresh: false,
             home_dir: None,
-            clients: None,
+            client_universe: tokscale_core::ClientUniverse::all(),
             since: None,
             until: None,
             year: None,
@@ -331,7 +331,7 @@ mod tests {
                     display_name: name.to_string(),
                     workspace_key: None,
                     workspace_label: None,
-                    tokens: TokenBreakdown {
+                    tokens: UsageTokenBreakdown {
                         input: 100,
                         output: 10,
                         cache_read: 0,
@@ -345,16 +345,16 @@ mod tests {
         }
         let mut client_breakdown = BTreeMap::new();
         client_breakdown.insert(
-            "claude".to_string(),
+            tokscale_core::ClientId::Claude,
             DailyClientInfo {
-                tokens: TokenBreakdown::default(),
+                tokens: UsageTokenBreakdown::default(),
                 cost: 1.0,
                 models,
             },
         );
         app.data.daily = vec![DailyUsage {
             date: NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
-            tokens: TokenBreakdown::default(),
+            tokens: UsageTokenBreakdown::default(),
             cost: 1.0,
             client_breakdown,
             message_count: 1,

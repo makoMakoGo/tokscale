@@ -25,7 +25,7 @@ pub const DIAGNOSTIC_USING_CACHED_PRICING: &str =
 pub const DIAGNOSTIC_PRICING_UNAVAILABLE: &str =
     "[tokscale] pricing unavailable; costs may be missing";
 
-/// Pricing availability for a usage report.
+/// Pricing availability for one usage generation.
 ///
 /// This describes catalog resolution, not usage completeness. Tokens remain
 /// authoritative even when pricing is unavailable.

@@ -12,9 +12,9 @@ This fork focuses on local AI coding-client usage accounting:
 - read provider-owned local transcripts, databases, and current-format
   artifacts;
 - keep stable client ids and display facts in one catalog;
-- expose the TUI as the complete local-report product and Models as its shared
+- expose the TUI as the complete local-usage product and Models as its shared
   headless projection;
-- derive local report cost from token pricing, not from vendor invoice fields;
+- derive local usage cost from token pricing, not from vendor invoice fields;
 - keep parser, scanner, pricing, and aggregation failures visible.
 
 The maintainer context in [CONTEXT.md](../CONTEXT.md) is the short-form map of
@@ -25,9 +25,9 @@ branch vocabulary and active architecture direction. Longer decisions live in
 
 The most important behavioral differences are:
 
-- Local report cost is token-derived. App fields such as `cost`,
+- Local usage cost is token-derived. App fields such as `cost`,
   `actual_cost_usd`, `credits`, `dollar_float`, and balance counters are ignored
-  for normal local reports.
+  for local usage.
 - Rows without positive token buckets are not treated as usage rows.
 - `Pi` and `OMP` are separate clients.
 - Claude placeholder cleanup is not represented as a synthetic client.

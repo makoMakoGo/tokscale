@@ -203,7 +203,7 @@ fn render_clients(
     let selected = state.client_selected();
     let client_content_width = rows
         .iter()
-        .map(|row| display_width(&get_client_display_name(&row.client)))
+        .map(|row| display_width(&get_client_display_name(row.client)))
         .max()
         .unwrap_or(CLIENT_MIN_WIDTH);
     let layout = client_table_layout(table_area.width, client_content_width);
@@ -227,7 +227,7 @@ fn render_clients(
                         ClientColumn::Client => {
                             let marker = if is_selected { "▶" } else { " " };
                             let client = truncate_display_width(
-                                &get_client_display_name(&row.client),
+                                &get_client_display_name(row.client),
                                 width.saturating_sub(2),
                             );
                             Cell::from(format!("{marker} {client}"))

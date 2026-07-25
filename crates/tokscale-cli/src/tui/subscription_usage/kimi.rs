@@ -320,31 +320,21 @@ async fn fetch_with_credential(client: &reqwest::Client) -> Result<UsageResponse
     fetch_usage(client, access_token, CREDENTIAL_PROVIDER).await
 }
 
-fn fetch_with_token(token: &str, provider: &str) -> Result<UsageOutput> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let client = reqwest::Client::new();
-        let resp = fetch_usage(&client, token, provider).await?;
-        Ok(usage_output_from_response(resp, provider))
-    })
+async fn fetch_with_token(token: &str, provider: &str) -> Result<UsageOutput> {
+    let client = reqwest::Client::new();
+    let resp = fetch_usage(&client, token, provider).await?;
+    Ok(usage_output_from_response(resp, provider))
 }
 
-pub fn fetch_key() -> Result<UsageOutput> {
+pub async fn fetch_key() -> Result<UsageOutput> {
     let api_key = read_api_key()
         .ok_or_else(|| anyhow::anyhow!("{API_KEY_ENV} is required for {KEY_PROVIDER}"))?;
-    fetch_with_token(&api_key, KEY_PROVIDER)
+    fetch_with_token(&api_key, KEY_PROVIDER).await
 }
 
-pub fn fetch_credential() -> Result<UsageOutput> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let response = fetch_with_credential(&reqwest::Client::new()).await?;
-        Ok(usage_output_from_response(response, CREDENTIAL_PROVIDER))
-    })
+pub async fn fetch_credential() -> Result<UsageOutput> {
+    let response = fetch_with_credential(&reqwest::Client::new()).await?;
+    Ok(usage_output_from_response(response, CREDENTIAL_PROVIDER))
 }
 
 #[cfg(test)]

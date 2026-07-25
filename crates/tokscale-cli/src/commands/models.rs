@@ -1,16 +1,33 @@
 use crate::claude_diagnostics;
+use crate::cli::{ModelsPlan, ResolvedDateRange, ResolvedInputScope};
 use crate::commands::render::{dim_borders, format_currency, LightSpinner, TABLE_PRESET};
 use crate::commands::shared::{
-    emit_client_diagnostics, get_date_range_label, resolve_effective_home_dir, ReportEnvelope,
+    emit_client_diagnostics, get_date_range_label, resolve_effective_home_dir,
 };
+use crate::generation::GenerationLoader;
 use crate::tui::{
     self, format_cache_hit_rate, format_cost_per_million, format_usage_tokens_with_commas,
-    get_client_display_name, get_provider_display_name, truncate_model_display_name,
+    get_client_display_names, get_provider_display_name, truncate_model_display_name,
 };
 use anyhow::Result;
 use std::io::{self, IsTerminal, Write};
-use tokscale_core::usage_views::{UsageData, UsageModelEntry, UsageTokenBreakdown};
-use tokscale_core::{GroupBy, ReportOptions};
+use tokscale_core::usage_views::{UsageModelEntry, UsageTokenBreakdown, UsageView};
+use tokscale_core::{ClientId, GroupBy, UsageQuery};
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelsJson {
+    data: serde_json::Value,
+    health: tokscale_core::input_health::HealthSummary,
+    metadata: ModelsMetadata,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelsMetadata {
+    input_footprint: tokscale_core::InputFootprint,
+    processing_time_ms: u64,
+}
 
 fn checked_add_tokens(
     total: &UsageTokenBreakdown,
@@ -29,50 +46,49 @@ fn model_totals(models: &[UsageModelEntry]) -> UsageTokenBreakdown {
         })
 }
 
-fn model_clients_include(model: &UsageModelEntry, client: &str) -> bool {
-    model.client_keys().any(|candidate| candidate == client)
+fn model_clients_include(model: &UsageModelEntry, client: ClientId) -> bool {
+    model.clients.contains(&client)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_models_report(
-    json: bool,
-    home_dir: Option<String>,
-    clients: Option<Vec<String>>,
-    since: Option<String>,
-    until: Option<String>,
-    year: Option<String>,
-    benchmark: bool,
-    no_spinner: bool,
-    today: bool,
-    week: bool,
-    month_flag: bool,
-    group_by: GroupBy,
-) -> Result<()> {
+pub(crate) async fn run_models(plan: ModelsPlan, no_spinner: bool) -> Result<()> {
     use std::time::Instant;
-    use tokio::runtime::Runtime;
+
+    let ModelsPlan {
+        json,
+        input: ResolvedInputScope {
+            home: home_dir,
+            clients,
+        },
+        date:
+            ResolvedDateRange {
+                today,
+                week,
+                month: month_flag,
+                since,
+                until,
+                year,
+            },
+        benchmark,
+        no_spinner: _,
+        group_by,
+    } = plan;
 
     if !json {
         tui::config::TokscaleConfig::initialize()?;
     }
     let date_range = get_date_range_label(today, week, month_flag, &since, &until, &year);
-    let effective_home_dir = resolve_effective_home_dir(&home_dir);
+    let effective_home_dir = resolve_effective_home_dir(home_dir.as_deref());
     let spinner = (!no_spinner).then(|| LightSpinner::start("Scanning session data..."));
-    let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let start = Instant::now();
-    let rt = Runtime::new()?;
-    let report = rt
-        .block_on(tokscale_core::get_usage_report(ReportOptions {
-            home_dir: home_dir.clone(),
-            clients: clients.clone(),
-            since,
-            until,
-            year,
-            group_by: group_by.clone(),
-            scanner_settings,
-        }))
-        .map_err(anyhow::Error::new)?;
-    let data = report.data;
-    let input_footprint = report.metadata.input_footprint;
+    let mut enabled_clients = clients
+        .clone()
+        .unwrap_or_else(|| ClientId::iter().collect());
+    enabled_clients.sort_by_key(|client| *client as usize);
+    let loader = GenerationLoader::with_filters(home_dir, since, until, year);
+    let prepared = loader.prepare(&enabled_clients)?;
+    let generation = loader.build(prepared).await?;
+    let data = generation.project(&UsageQuery::full(generation.universe(), group_by))?;
+    let input_footprint = generation.input_footprint().clone();
 
     if let Some(spinner) = spinner {
         spinner.stop();
@@ -82,11 +98,11 @@ pub(crate) fn run_models_report(
     let claude_has_usage = data
         .models
         .iter()
-        .any(|model| model_clients_include(model, "claude"));
+        .any(|model| model_clients_include(model, ClientId::Claude));
     let diagnostics = effective_home_dir
         .as_deref()
         .map(|home| {
-            claude_diagnostics::diagnostics_for_empty_explicit_report(
+            claude_diagnostics::diagnostics_for_empty_explicit_models(
                 home,
                 &clients,
                 if claude_has_usage { 1 } else { 0 },
@@ -96,14 +112,14 @@ pub(crate) fn run_models_report(
     emit_client_diagnostics(&diagnostics);
 
     if json {
-        let health = data.health.clone();
-        let report_data = crate::tui::build_models_export_value(&data, &group_by);
-        let output = ReportEnvelope::new(
-            report_data,
-            health,
-            input_footprint,
-            processing_time_ms as u64,
-        );
+        let output = ModelsJson {
+            data: crate::tui::build_models_export_value(&data, &group_by),
+            health: data.health.clone(),
+            metadata: ModelsMetadata {
+                input_footprint,
+                processing_time_ms: processing_time_ms as u64,
+            },
+        };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         render_models_table(&data, &group_by, date_range.as_deref())?;
@@ -121,7 +137,7 @@ pub(crate) fn run_models_report(
 }
 
 fn render_models_table(
-    data: &UsageData,
+    data: &UsageView,
     group_by: &GroupBy,
     date_range: Option<&str>,
 ) -> Result<()> {
@@ -169,7 +185,7 @@ fn render_models_table(
         }
         row.extend([
             Cell::new(truncate_model_display_name(&model.display_name)),
-            Cell::new(get_client_display_name(&model.client)),
+            Cell::new(get_client_display_names(&model.clients)),
             Cell::new(get_provider_display_name(&model.provider)),
             numeric_cell(format_usage_tokens_with_commas(model.tokens.input)),
             numeric_cell(format_usage_tokens_with_commas(
@@ -217,8 +233,8 @@ fn render_models_table(
     table.add_row(total_row);
 
     let title = date_range.map_or_else(
-        || "Token Usage Report by Model".to_string(),
-        |range| format!("Token Usage Report by Model ({range})"),
+        || "Token Usage by Model".to_string(),
+        |range| format!("Token Usage by Model ({range})"),
     );
     println!("\n  \x1b[36m{title}\x1b[0m\n");
     println!("{}", dim_borders(&table.to_string()));

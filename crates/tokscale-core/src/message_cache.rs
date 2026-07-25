@@ -1,4 +1,5 @@
-use crate::sessions::{codex::CodexParseState, ParsedMessage};
+use crate::integrations::codex::decode::CodexParseState;
+use crate::records::ParsedMessage;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -86,6 +87,7 @@ pub struct InputCachePruneStats {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum InputCacheError {
+    #[cfg(test)]
     #[error("input cache directory is unavailable: {source}")]
     CacheDirectoryUnavailable {
         #[source]
@@ -1479,15 +1481,20 @@ impl Default for InputMessageCache {
 }
 
 impl InputMessageCache {
+    #[cfg(test)]
     pub(crate) fn load() -> Result<Self, InputCacheError> {
         let cache_dir =
             cache_dir().map_err(|source| InputCacheError::CacheDirectoryUnavailable { source })?;
-        initialize_input_shards(&cache_dir).map_err(|source| {
-            InputCacheError::io("initialize input cache directory", &cache_dir, source)
+        Self::open(&cache_dir)
+    }
+
+    pub(crate) fn open(cache_dir: &Path) -> Result<Self, InputCacheError> {
+        initialize_input_shards(cache_dir).map_err(|source| {
+            InputCacheError::io("initialize input cache directory", cache_dir, source)
         })?;
 
         Ok(Self {
-            cache_dir,
+            cache_dir: cache_dir.to_path_buf(),
             dirty_entries: HashMap::new(),
             deleted_paths: HashSet::new(),
             invalidated_read_paths: HashSet::new(),
@@ -1499,16 +1506,7 @@ impl InputMessageCache {
 
     #[cfg(test)]
     pub(crate) fn with_cache_dir(cache_dir: &Path) -> Self {
-        initialize_input_shards(cache_dir).expect("test input cache directory must be usable");
-        Self {
-            cache_dir: cache_dir.to_path_buf(),
-            dirty_entries: HashMap::new(),
-            deleted_paths: HashSet::new(),
-            invalidated_read_paths: HashSet::new(),
-            taken_paths: HashSet::new(),
-            protected_paths: Mutex::new(HashSet::new()),
-            dirty: false,
-        }
+        Self::open(cache_dir).expect("test input cache directory must be usable")
     }
 
     #[cfg(test)]
@@ -1739,7 +1737,7 @@ struct PrunableShard {
 
 /// Explicitly garbage-collect input-message cache shards.
 ///
-/// Ordinary report and TUI loads intentionally do not call this function. The
+/// Ordinary generation loads intentionally do not call this function. The
 /// caller is responsible for exposing this potentially expensive full-cache
 /// traversal as an explicit maintenance operation. Classification completes
 /// before deletion, so unknown, future, or malformed-current envelopes cause
@@ -3585,7 +3583,7 @@ mod tests {
 
         assert!(
             shard.exists(),
-            "ordinary report loads must not perform input-cache garbage collection"
+            "ordinary generation loads must not perform input-cache garbage collection"
         );
 
         restore_cache_env(prev_env);

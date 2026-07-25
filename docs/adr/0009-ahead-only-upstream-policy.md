@@ -18,7 +18,7 @@ upstream ancestry, selective ports, npm identity, and release-note authority.
 ### Maintained product surface
 
 The product surface is the local Rust CLI and TUI plus the npm launcher needed
-to install them. This includes local reports, the TUI, Wrapped output, scanner
+to install them. This includes local usage, the TUI, Wrapped output, scanner
 settings, current client adapters, pricing, and explicitly bounded Subscription
 Usage.
 

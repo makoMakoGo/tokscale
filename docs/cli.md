@@ -1,8 +1,8 @@
 # CLI usage
 
-Tokscale treats the TUI as the canonical local-report product. The CLI exposes
-one headless projection of that product, `models`, plus commands whose jobs are
-not TUI report tabs. Command meaning is determined entirely by argv; piping or
+Tokscale treats the TUI as the complete interactive local-usage product. The
+CLI exposes one headless projection, `models`, plus commands whose jobs are
+not TUI tabs. Command meaning is determined entirely by argv; piping or
 redirecting output never selects another feature.
 
 Run commands from a built checkout with `bun run cli --`, or use `tokscale`
@@ -46,7 +46,7 @@ Overview. The TUI requires interactive stdin and stdout; for example,
 
 Monthly, Weekly, Daily, Hourly, Stats, Agents, and Sessions are intentionally
 TUI-only. Their richer interactions and cross-tab state are not duplicated in
-parallel CLI report implementations.
+parallel CLI projection implementations.
 
 The Usage tab is the interactive subscription-plan and quota surface. Open it
 with `tokscale tui --tab usage`.
@@ -55,7 +55,7 @@ CLI options override settings for the current TUI process and do not rewrite
 `settings.json`. The TUI captures normal mouse input; use the terminal's
 modified selection gesture, usually `Shift+drag`, to select terminal text.
 
-## Models report
+## Models output
 
 ```bash
 tokscale models --no-spinner
@@ -122,12 +122,12 @@ All local Models JSON uses this top-level envelope:
 ```
 
 `metadata.inputFootprint` is the confirmed byte count keyed by canonical Client
-ID. Its checked sum is the report's Data Size; the report does not persist a
+ID. Its checked sum is the output's Data Size; the application does not persist a
 second total.
 
 Stdout contains only the table or JSON document. Progress, `--benchmark`
-timing, Data Health summaries, warnings, and errors go to stderr. A degraded
-report still exits `0` when its payload was produced; inspect `health` when
+timing, Data Health summaries, warnings, and errors go to stderr. Degraded
+output still exits `0` when its payload was produced; inspect `health` when
 automation must react to rejected records or unavailable Inputs.
 
 ## Client and date scope
@@ -228,7 +228,7 @@ normalization.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | The command produced its result, including an incomplete local report. |
+| `0` | The command produced its result, including incomplete local usage with explicit Data Health. |
 | `1` | Internal, I/O, network, or authentication failure. |
 | `2` | Invalid CLI arguments, option combinations, or runtime environment. |
 | `130` | User interruption where supplied by the terminal or child process. |

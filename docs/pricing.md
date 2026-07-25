@@ -3,9 +3,9 @@
 Tokscale pricing estimates what parsed token buckets would cost under the
 configured pricing catalog. It is not an invoice reconciler.
 
-## Local report cost
+## Local usage cost
 
-For normal local reports, parsers emit token usage. App or vendor fields such as
+For local usage, parsers emit token usage. App or vendor fields such as
 `cost`, `credits`, `cost_usd`, `dollar_float`, `spendCents`,
 `estimated_cost_usd`, `actual_cost_usd`, and `usage.cost.total` are ignored.
 
@@ -45,19 +45,19 @@ Prefix, substring, fuzzy/edit-distance, arbitrary separator, and private alias
 matching are not pricing strategies.
 
 Global private aliases are not a substitute for input parsing. Client-specific
-model decoding may happen in the parser, but local report finalization,
+model decoding may happen in the parser, but local usage finalization,
 grouping, and pricing all use the core `canonicalize_model_id` path before
 pricing lookup.
 
 ### Model identity before pricing
 
-Local reports canonicalize parsed model ids before pricing lookup. Parsers may
-clean obvious observed model labels early, but the report finalization path still
+Tokscale canonicalizes parsed model ids before pricing lookup. Parsers may
+clean obvious observed model labels early, but the usage finalization path still
 normalizes every `UnifiedMessage.model_id` through the core model canonicalizer
 before aggregation and `PricingService::calculate_cost_with_provider`.
 
 The pricing resolver is therefore not a route cleanup layer. It receives the
-final canonical report model id and matches that id against custom overrides
+final canonical usage model id and matches that id against custom overrides
 and public catalog rows.
 
 If no pricing match exists, derived cost stays `$0.00`. The unresolved model id
@@ -78,7 +78,7 @@ Create `custom-pricing.json` in the Tokscale config directory:
       "output_cost_per_million_tokens": 8.0,
       "cache_read_input_token_cost_per_million_tokens": 0.3,
       "pricingSource": "https://docs.fireworks.ai/serverless/pricing",
-      "notes": "Kimi K2.6 local report override"
+      "notes": "Kimi K2.6 local usage override"
     }
   }
 }
@@ -90,9 +90,9 @@ present and positive. Cache-read and cache-creation prices are optional.
 
 Overrides are exact-only and case-insensitive:
 
-- Local reports match the canonical model id after model canonicalization, not
+- Local usage matches the canonical model id after model canonicalization, not
   necessarily the raw observed label emitted by a client or parser.
-- Key each local report override by that final canonical id.
+- Key each local usage override by that final canonical id.
 - `tokscale pricing lookup <model>` matches the command argument as a catalog query.
 
 Restart the command after editing the file because overrides are loaded at
@@ -107,7 +107,7 @@ Pricing data is cached under `${TOKSCALE_CONFIG_DIR}/cache/`:
 - `pricing-models-dev.json`
 
 Deleting these files forces Tokscale to fetch pricing data again on the next
-lookup or report that needs pricing.
+lookup or usage load that needs pricing.
 
 ## Standalone lookup
 

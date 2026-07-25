@@ -6,13 +6,14 @@ use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use super::app::{App, SortDirection, SortField, Tab};
 use super::interaction::{ListInteraction, MoveCommand, TextViewport, WrapMode};
 use super::session_data::{ClientSummary, SessionEntry};
+use tokscale_core::ClientId;
 
 #[derive(Debug, Default)]
 pub(crate) struct ViewState {
     daily_profile: bool,
     daily_profile_viewport: TextViewport,
     daily_profile_total_lines: usize,
-    selected_session_client: Option<String>,
+    selected_session_client: Option<ClientId>,
     session_clients: ListInteraction,
     session_details: ListInteraction,
 }
@@ -51,7 +52,7 @@ impl ViewState {
 
         match key.code {
             KeyCode::Enter if !self.session_detail_active() => {
-                if let Some(client) = self.selected_client_row(app).map(|row| row.client.clone()) {
+                if let Some(client) = self.selected_client_row(app).map(|row| row.client) {
                     self.selected_session_client = Some(client);
                     self.session_details = ListInteraction::default();
                 }
@@ -130,31 +131,31 @@ impl ViewState {
         self.selected_session_client.is_some()
     }
 
-    pub(crate) fn selected_session_client(&self) -> Option<&str> {
-        self.selected_session_client.as_deref()
+    pub(crate) fn selected_session_client(&self) -> Option<ClientId> {
+        self.selected_session_client
     }
 
     #[cfg(test)]
-    pub(crate) fn select_session_client_for_test(&mut self, client: &str) {
-        self.selected_session_client = Some(client.to_string());
+    pub(crate) fn select_session_client_for_test(&mut self, client: ClientId) {
+        self.selected_session_client = Some(client);
     }
 
     pub(crate) fn client_count(&self, app: &App) -> usize {
         app.session_snapshot
             .client_summaries()
             .iter()
-            .filter(|summary| app.is_client_selected(&summary.client))
+            .filter(|summary| app.is_client_selected(summary.client))
             .count()
     }
 
     pub(crate) fn session_count(&self, app: &App) -> usize {
         let snapshot = &app.session_snapshot;
-        self.selected_session_client.as_deref().map_or_else(
+        self.selected_session_client.map_or_else(
             || {
                 snapshot
                     .client_summaries()
                     .iter()
-                    .filter(|summary| app.is_client_selected(&summary.client))
+                    .filter(|summary| app.is_client_selected(summary.client))
                     .map(|summary| summary.session_count)
                     .sum()
             },
@@ -191,12 +192,12 @@ impl ViewState {
         app.session_snapshot
             .client_summaries()
             .iter()
-            .filter(|summary| app.is_client_selected(&summary.client))
+            .filter(|summary| app.is_client_selected(summary.client))
             .collect()
     }
 
     pub(crate) fn session_rows<'a>(&self, app: &'a App) -> Vec<&'a SessionEntry> {
-        let Some(client) = self.selected_session_client.as_deref() else {
+        let Some(client) = self.selected_session_client else {
             return Vec::new();
         };
         if !app.is_client_selected(client) {
@@ -219,18 +220,14 @@ impl ViewState {
     }
 
     pub(crate) fn reconcile_session_snapshot(&mut self, app: &App) {
-        if self
-            .selected_session_client
-            .as_deref()
-            .is_some_and(|selected| {
-                !app.session_snapshot
-                    .client_summaries()
-                    .iter()
-                    .any(|summary| summary.client == selected)
-                    || !app.is_client_selected(selected)
-                    || app.session_snapshot.session_count_for_client(selected) == 0
-            })
-        {
+        if self.selected_session_client.is_some_and(|selected| {
+            !app.session_snapshot
+                .client_summaries()
+                .iter()
+                .any(|summary| summary.client == selected)
+                || !app.is_client_selected(selected)
+                || app.session_snapshot.session_count_for_client(selected) == 0
+        }) {
             self.selected_session_client = None;
             self.session_details = ListInteraction::default();
         }

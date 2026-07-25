@@ -31,7 +31,7 @@ impl Cli {
 pub(crate) enum Commands {
     #[command(about = "Launch the interactive terminal interface")]
     Tui(TuiArgs),
-    #[command(about = "Show model usage report")]
+    #[command(about = "Show model usage")]
     Models(ModelsArgs),
     #[command(about = "Query model pricing")]
     Pricing {
@@ -78,19 +78,6 @@ pub(crate) struct TuiArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct ModelsArgs {
-    #[command(flatten)]
-    pub(crate) report: ReportArgs,
-    #[arg(
-        long,
-        value_name = "STRATEGY",
-        default_value = "model",
-        help = "Use the same grouping as the TUI Models view: model, client,model, client,provider,model, or workspace,model"
-    )]
-    pub(crate) group_by: GroupBy,
-}
-
-#[derive(Args, Debug)]
-pub(crate) struct ReportArgs {
     #[arg(long, help = "Output as JSON")]
     pub(crate) json: bool,
     #[command(flatten)]
@@ -101,6 +88,13 @@ pub(crate) struct ReportArgs {
     pub(crate) benchmark: bool,
     #[arg(long, help = "Disable progress animation")]
     pub(crate) no_spinner: bool,
+    #[arg(
+        long,
+        value_name = "STRATEGY",
+        default_value = "model",
+        help = "Use the same grouping as the TUI Models view: model, client,model, client,provider,model, or workspace,model"
+    )]
+    pub(crate) group_by: GroupBy,
 }
 
 #[derive(Args, Debug)]
@@ -259,8 +253,8 @@ impl TerminalState {
 
 #[derive(Debug)]
 pub(crate) struct ResolvedInputScope {
-    pub(crate) home: Option<String>,
-    pub(crate) clients: Option<Vec<String>>,
+    pub(crate) home: Option<PathBuf>,
+    pub(crate) clients: Option<Vec<ClientId>>,
 }
 
 #[derive(Debug)]
@@ -274,17 +268,12 @@ pub(crate) struct ResolvedDateRange {
 }
 
 #[derive(Debug)]
-pub(crate) struct LocalReportPlan {
+pub(crate) struct ModelsPlan {
     pub(crate) json: bool,
     pub(crate) input: ResolvedInputScope,
     pub(crate) date: ResolvedDateRange,
     pub(crate) benchmark: bool,
     pub(crate) no_spinner: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct ModelsPlan {
-    pub(crate) report: LocalReportPlan,
     pub(crate) group_by: GroupBy,
 }
 
@@ -322,10 +311,7 @@ impl ExecutionPlan {
     pub(crate) fn resolve(cli: Cli, terminal: TerminalState) -> Result<Self, CliFailure> {
         match cli.command.unwrap_or(Commands::Tui(TuiArgs::default())) {
             Commands::Tui(args) => resolve_tui(args, terminal).map(Self::Tui),
-            Commands::Models(args) => Ok(Self::Models(ModelsPlan {
-                report: resolve_report(args.report)?,
-                group_by: args.group_by,
-            })),
+            Commands::Models(args) => resolve_models(args).map(Self::Models),
             Commands::Pricing { subcommand } => Ok(Self::Pricing(subcommand)),
             Commands::Wrapped(args) => resolve_wrapped(args).map(Self::Wrapped),
             Commands::Cache { subcommand } => match subcommand {
@@ -380,19 +366,20 @@ fn resolve_tui(args: TuiArgs, terminal: TerminalState) -> Result<TuiPlan, CliFai
     })
 }
 
-fn resolve_report(args: ReportArgs) -> Result<LocalReportPlan, CliFailure> {
-    Ok(LocalReportPlan {
+fn resolve_models(args: ModelsArgs) -> Result<ModelsPlan, CliFailure> {
+    Ok(ModelsPlan {
         json: args.json,
         input: resolve_input(args.input)?,
         date: resolve_date(args.date)?,
         benchmark: args.benchmark,
         no_spinner: args.no_spinner,
+        group_by: args.group_by,
     })
 }
 
 fn resolve_input(args: InputScopeArgs) -> Result<ResolvedInputScope, CliFailure> {
-    let home = args.home.map(|path| path.to_string_lossy().into_owned());
-    let clients = build_client_filter(args.clients, &home)?;
+    let home = args.home;
+    let clients = build_client_filter(args.clients, home.as_deref())?;
     Ok(ResolvedInputScope { home, clients })
 }
 

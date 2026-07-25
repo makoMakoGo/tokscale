@@ -4,9 +4,9 @@ Status: Accepted
 
 ## Context
 
-Local reports account for provider-owned transcripts and databases.
+Local usage accounts for provider-owned transcripts and databases.
 Subscription Usage is a separate remote product surface for account plans,
-allowances, reset windows, and remaining quota. A local report refresh is not
+allowances, reset windows, and remaining quota. A local generation refresh is not
 consent to contact an account service, and Tokscale is an analytics client
 rather than an authentication authority.
 
@@ -18,7 +18,7 @@ Subscription Usage is owned by the optional TUI Usage tab. It consists of
 provider-specific quota adapters, a normalized short-lived cache, and one
 provider/account/plan/metric model consumed by that tab.
 
-Local reports and Subscription Usage have independent acquisition lifecycles.
+Local usage and Subscription Usage have independent acquisition lifecycles.
 Subscription data never enters local token totals, Group By, Sessions, or local
 Data Health.
 
@@ -62,7 +62,7 @@ The TUI lifecycle is:
 - `u` explicitly starts a Subscription Usage fetch;
 - Usage accepts only Subscription Usage actions plus shell navigation, theme,
   and quit actions;
-- local-report `r`, `R`, `+`, `-`, and `e` actions are unavailable while Usage
+- local-usage `r`, `R`, `+`, `-`, and `e` actions are unavailable while Usage
   is active; and
 - Subscription Usage is never polled in the background.
 

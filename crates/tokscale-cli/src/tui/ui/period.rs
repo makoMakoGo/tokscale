@@ -16,14 +16,16 @@ use super::table_layout::{
 };
 use super::widgets::{
     format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
-    get_client_display_name, get_provider_display_name, total_tokens_cell, truncate_display_width,
-    truncate_model_display_name_to, viewport_scrollbar_state, workspace_label_or_unknown,
-    MODEL_DISPLAY_MAX_WIDTH,
+    get_client_display_name, get_client_display_names, get_provider_display_name,
+    total_tokens_cell, truncate_display_width, truncate_model_display_name_to,
+    viewport_scrollbar_state, workspace_label_or_unknown, MODEL_DISPLAY_MAX_WIDTH,
 };
 use crate::tui::actions::ActionSet;
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{PeriodKind, PeriodUsage};
 use crate::tui::presentation::EmptySubject;
+#[cfg(test)]
+use tokscale_core::ClientId;
 use tokscale_core::GroupBy;
 
 const PERIOD_MIN_WIDTH: u16 = 6;
@@ -430,8 +432,8 @@ fn top_period_client(period: &PeriodUsage) -> Option<TopPeriodClient> {
         .filter_map(|(client, info)| {
             let tokens = info.tokens.total();
             (tokens > 0).then(|| TopPeriodClient {
-                key: client.clone(),
-                label: get_client_display_name(client),
+                key: client.to_string(),
+                label: get_client_display_name(*client),
                 tokens,
                 cost: info.cost,
             })
@@ -570,10 +572,10 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(DETAIL_PROVIDER_WIDTH);
     let client_content_width = rows_data
         .iter()
-        .map(|row| display_width(&get_client_display_name(&row.client)))
+        .map(|row| display_width(&get_client_display_names(&row.clients)))
         .max()
         .unwrap_or(DETAIL_CLIENT_WIDTH);
-    let group_by = app.group_by.borrow().clone();
+    let group_by = *app.group_by.borrow();
     let workspace_content_width = if group_by == GroupBy::WorkspaceModel {
         rows_data
             .iter()
@@ -651,7 +653,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     ))
                     .style(Style::default().fg(theme_secondary)),
                     PeriodDetailColumn::Client => Cell::from(truncate_display_width(
-                        &get_client_display_name(&row.client),
+                        &get_client_display_names(&row.clients),
                         table_layout.width_for(PeriodDetailColumn::Client),
                     ))
                     .style(Style::default().fg(theme_secondary)),
@@ -1079,14 +1081,14 @@ mod tests {
     }
 
     use crate::tui::app::{PeriodDetailSelection, Tab, TuiConfig};
-    use crate::tui::data::{DailyClientInfo, DailyModelInfo, DailyUsage, TokenBreakdown};
+    use crate::tui::data::{DailyClientInfo, DailyModelInfo, DailyUsage, UsageTokenBreakdown};
     use chrono::NaiveDate;
     use ratatui::{backend::TestBackend, Terminal};
 
-    fn token_breakdown(input: u64) -> TokenBreakdown {
-        TokenBreakdown {
+    fn token_breakdown(input: u64) -> UsageTokenBreakdown {
+        UsageTokenBreakdown {
             input,
-            ..TokenBreakdown::default()
+            ..UsageTokenBreakdown::default()
         }
     }
 
@@ -1132,7 +1134,7 @@ mod tests {
             tokens: token_breakdown(tokens),
             cost: 0.0,
             client_breakdown: BTreeMap::from([(
-                "codex".to_string(),
+                ClientId::Codex,
                 DailyClientInfo {
                     tokens: token_breakdown(tokens),
                     cost: 0.0,
@@ -1215,7 +1217,7 @@ mod tests {
             refresh: 0,
             no_refresh: false,
             home_dir: None,
-            clients: None,
+            client_universe: tokscale_core::ClientUniverse::all(),
             since: None,
             until: None,
             year: None,
@@ -1235,7 +1237,7 @@ mod tests {
             tokens: token_breakdown(300),
             cost: 3.0,
             client_breakdown: BTreeMap::from([(
-                "codex".to_string(),
+                ClientId::Codex,
                 DailyClientInfo {
                     tokens: token_breakdown(300),
                     cost: 3.0,

@@ -105,7 +105,7 @@ fn render_cold_failed(frame: &mut Frame, app: &App, area: Rect) {
         .data
         .error
         .as_deref()
-        .expect("cold report failure must carry its diagnostic");
+        .expect("cold generation failure must carry its diagnostic");
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.chrome.border))
@@ -119,7 +119,7 @@ fn render_cold_failed(frame: &mut Frame, app: &App, area: Rect) {
 
     let lines = vec![
         Line::from(Span::styled(
-            "Could not load local reports",
+            "Could not load local data",
             Style::default()
                 .fg(app.theme.status.danger)
                 .add_modifier(Modifier::BOLD),
@@ -212,11 +212,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::tui::app::{ProjectionBackend, TuiConfig};
-    use crate::tui::data::UsageData;
+    use crate::tui::app::TuiConfig;
+    use crate::tui::data::UsageView;
     use crate::tui::view_state::ViewState;
     use ratatui::{backend::TestBackend, Terminal};
-    use tokscale_core::{ClientId, GroupBy, TuiAcc};
+    use tokscale_core::{ClientId, UsageIndex};
 
     fn make_app() -> App {
         let config = TuiConfig {
@@ -224,7 +224,7 @@ mod tests {
             refresh: 0,
             no_refresh: false,
             home_dir: None,
-            clients: None,
+            client_universe: tokscale_core::ClientUniverse::all(),
             since: None,
             until: None,
             year: None,
@@ -273,7 +273,7 @@ mod tests {
     fn install_generation(
         app: &mut App,
         clients: &[ClientId],
-        data: UsageData,
+        data: UsageView,
         client_bytes: BTreeMap<String, u64>,
     ) {
         let input_footprint = tokscale_core::InputFootprint::from_client_bytes(
@@ -286,13 +286,8 @@ mod tests {
         )
         .unwrap();
         *app.selected_clients.borrow_mut() = clients.iter().copied().collect();
-        app.install_tui_snapshot(
-            data,
-            Vec::new(),
-            input_footprint,
-            ProjectionBackend::Memory(TuiAcc::default()),
-            GroupBy::Model,
-        );
+        app.install_generation_fixture(UsageIndex::default(), Vec::new(), input_footprint);
+        app.update_data(data);
     }
 
     #[test]
@@ -549,14 +544,14 @@ mod tests {
         let mut app = make_app();
         let diagnostic = "injected cold failure with a deliberately long message that must wrap onto multiple lines inside the content area";
         app.set_error(Some(diagnostic.to_string()));
-        app.set_local_report_status(&format!("Error: {diagnostic}"));
+        app.set_generation_status(&format!("Error: {diagnostic}"));
 
         let lines = render_screen(&mut app, 120, 32);
         let screen = lines.join("\n");
         let content = lines[3..lines.len() - footer::HEIGHT as usize].join("\n");
         let footer = lines[lines.len() - footer::HEIGHT as usize..].join("\n");
 
-        assert!(screen.contains("Could not load local reports"), "{screen}");
+        assert!(screen.contains("Could not load local data"), "{screen}");
         assert!(!content.contains("[r] Retry"), "{content}");
         assert!(!content.contains("[q] Quit"), "{content}");
         assert!(footer.contains("Scan failed"), "{footer}");
@@ -584,7 +579,7 @@ mod tests {
     fn cold_start_failure_keeps_usage_tab_untouched() {
         let mut app = make_app();
         app.set_error(Some("injected cold failure".to_string()));
-        app.set_local_report_status("Error: injected cold failure");
+        app.set_generation_status("Error: injected cold failure");
         app.current_tab = Tab::Usage;
 
         let lines = render_screen(&mut app, 120, 32);
@@ -592,8 +587,8 @@ mod tests {
         let footer = lines[lines.len() - footer::HEIGHT as usize..].join("\n");
 
         assert!(
-            !screen.contains("Could not load local reports"),
-            "Usage tab is not a local-report surface: {screen}"
+            !screen.contains("Could not load local data"),
+            "Usage tab is not a local-generation surface: {screen}"
         );
         assert!(screen.contains("subscription"), "{screen}");
         assert!(
@@ -639,16 +634,15 @@ mod tests {
     #[test]
     fn background_refresh_with_installed_generation_keeps_content_visible() {
         let mut app = make_app();
-        app.install_tui_snapshot(
-            crate::tui::data::UsageData {
-                total_tokens: 77,
-                ..Default::default()
-            },
+        app.install_generation_fixture(
+            tokscale_core::UsageIndex::new(),
             Vec::new(),
             Default::default(),
-            ProjectionBackend::Memory(tokscale_core::TuiAcc::new()),
-            tokscale_core::GroupBy::Model,
         );
+        app.update_data(crate::tui::data::UsageView {
+            total_tokens: 77,
+            ..Default::default()
+        });
         app.set_background_loading(true);
 
         let screen = render_screen(&mut app, 120, 32).join("\n");
@@ -685,7 +679,7 @@ mod tests {
             Tab::Stats,
         ] {
             let mut app = make_app();
-            install_generation(&mut app, &clients, UsageData::default(), BTreeMap::new());
+            install_generation(&mut app, &clients, UsageView::default(), BTreeMap::new());
             app.current_tab = tab;
 
             let screen = render_screen(&mut app, 120, 32).join("\n");
@@ -695,7 +689,7 @@ mod tests {
                 "{tab:?}: {screen}"
             );
             assert!(
-                screen.contains("Scope: 5 selected clients · Current report range"),
+                screen.contains("Scope: 5 selected clients · Current date range"),
                 "{tab:?}: {screen}"
             );
             assert!(screen.contains("[s:clients]"), "{tab:?}: {screen}");
@@ -717,7 +711,7 @@ mod tests {
         install_generation(
             &mut app,
             &[ClientId::Junie],
-            UsageData::default(),
+            UsageView::default(),
             BTreeMap::new(),
         );
         app.current_tab = Tab::Monthly;
@@ -725,7 +719,7 @@ mod tests {
         let screen = render_screen(&mut app, 100, 28).join("\n");
 
         assert!(
-            screen.contains("Scope: Junie · Current report range"),
+            screen.contains("Scope: Junie · Current date range"),
             "{screen}"
         );
         assert!(!screen.contains("selected clients"), "{screen}");
@@ -737,7 +731,7 @@ mod tests {
         install_generation(
             &mut app,
             &[ClientId::Junie],
-            UsageData::default(),
+            UsageView::default(),
             BTreeMap::new(),
         );
         app.current_tab = Tab::Overview;
@@ -756,7 +750,7 @@ mod tests {
         install_generation(
             &mut app,
             &[ClientId::Codex],
-            UsageData::default(),
+            UsageView::default(),
             BTreeMap::new(),
         );
         app.current_tab = Tab::Agents;
@@ -777,7 +771,7 @@ mod tests {
         install_generation(
             &mut app,
             &[ClientId::Junie],
-            UsageData::default(),
+            UsageView::default(),
             BTreeMap::from([(ClientId::Junie.as_str().to_string(), 0)]),
         );
         app.current_tab = Tab::Sessions;
@@ -799,7 +793,7 @@ mod tests {
         install_generation(
             &mut app,
             &[ClientId::Junie],
-            UsageData::default(),
+            UsageView::default(),
             BTreeMap::new(),
         );
         app.mark_snapshot_refresh_failed("database locked".to_string());
@@ -807,10 +801,7 @@ mod tests {
 
         let screen = render_screen(&mut app, 120, 30).join("\n");
 
-        assert!(
-            screen.contains("No sessions in the current view"),
-            "{screen}"
-        );
+        assert!(screen.contains("Junie"), "{screen}");
         assert!(screen.contains("Degraded"), "{screen}");
         assert!(screen.contains("database locked"), "{screen}");
     }

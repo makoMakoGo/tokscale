@@ -1,12 +1,11 @@
 use super::{
-    apply_token_pricing, finalize_token_priced_messages, load_aggregated_views_with_pricing,
-    load_cache_only_pricing_with_diagnostics, load_usage_data_with_pricing, message_cache,
-    normalize_model_for_grouping, parse_all_messages_with_health,
+    apply_token_pricing, finalize_token_priced_messages, load_cache_only_pricing_with_diagnostics,
+    load_test_usage, message_cache, normalize_model_for_grouping, parse_all_messages_with_health,
     parse_all_messages_with_health_with_settings, parse_all_messages_with_pricing,
     parse_all_messages_with_pricing_with_settings, positive_token_total, pricing, scanner,
-    select_local_parse_pricing, AggregatedViews, AggregationConfig, ClientId, DateRange, GroupBy,
-    LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage, ViewSet,
-    UNKNOWN_WORKSPACE_LABEL,
+    AcquisitionRequest, AggregationConfig, ClientId, ClientUniverse, DateRange, GenerationBuilder,
+    GroupBy, PreparedSources, TestAcquisitionRequest, TokenBreakdown, UnifiedMessage, UsageQuery,
+    ViewSet, UNKNOWN_WORKSPACE_LABEL,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -47,9 +46,9 @@ impl TestClientCounts {
 }
 
 fn load_local_messages_for_test(
-    options: LocalParseOptions,
-) -> Result<LocalMessagesForTest, super::LocalReportError> {
-    let prepared = super::prepare_local_inputs(options.clone())?;
+    options: TestAcquisitionRequest,
+) -> Result<LocalMessagesForTest, super::AcquisitionError> {
+    let prepared = super::prepare_test_inventory(options.clone())?;
     let mut messages = Vec::new();
     let health =
         super::fold_prepared_local_inputs_with_pricing(prepared, None, &mut messages)?.health;
@@ -63,34 +62,32 @@ fn load_local_messages_for_test(
 }
 
 fn input_cache_for_test_home(home: &Path) -> message_cache::InputMessageCache {
-    message_cache::InputMessageCache::with_cache_dir(&super::input_cache_dir_for_test_home(
-        home.to_str().unwrap(),
-    ))
+    message_cache::InputMessageCache::with_cache_dir(&super::input_cache_dir_for_test_home(home))
 }
 
-fn test_decoder(decoder_id: message_cache::DecoderId) -> crate::adapters::DecoderSpec {
-    crate::adapters::DecoderSpec::plain(decoder_id, 0)
+fn test_decoder(decoder_id: message_cache::DecoderId) -> crate::integrations::DecoderSpec {
+    crate::integrations::DecoderSpec::plain(decoder_id, 0)
 }
 
 fn plain_test_input(
     decoder_id: message_cache::DecoderId,
     path: PathBuf,
-) -> crate::adapters::InputUnit {
-    crate::adapters::InputUnit::plain_file(path, test_decoder(decoder_id))
+) -> crate::integrations::InputUnit {
+    crate::integrations::InputUnit::plain_file(path, test_decoder(decoder_id))
 }
 
 fn sqlite_test_input(
     decoder_id: message_cache::DecoderId,
     path: PathBuf,
-) -> crate::adapters::InputUnit {
-    crate::adapters::InputUnit::sqlite_with_wal(path, test_decoder(decoder_id))
+) -> crate::integrations::InputUnit {
+    crate::integrations::InputUnit::sqlite_with_wal(path, test_decoder(decoder_id))
 }
 
-fn opencode_test_input(path: PathBuf) -> crate::adapters::InputUnit {
-    crate::adapters::InputUnit::sqlite_with_wal(
+fn opencode_test_input(path: PathBuf) -> crate::integrations::InputUnit {
+    crate::integrations::InputUnit::sqlite_with_wal(
         path,
-        crate::adapters::DecoderSpec::opencode_sqlite(
-            crate::adapters::OPENCODE_CURRENT_SQLITE_REVISION,
+        crate::integrations::DecoderSpec::opencode_sqlite(
+            crate::integrations::OPENCODE_CURRENT_SQLITE_REVISION,
         ),
     )
 }
@@ -99,11 +96,15 @@ fn parse_all_messages_with_pricing_in_cache(
     home_dir: &str,
     clients: &[String],
     cache_dir: &Path,
-) -> Result<Vec<UnifiedMessage>, super::LocalReportError> {
-    let mut prepared = super::prepare_local_inputs(LocalParseOptions {
-        home_dir: Some(home_dir.to_string()),
-        clients: Some(clients.to_vec()),
-        ..LocalParseOptions::default()
+) -> Result<Vec<UnifiedMessage>, super::AcquisitionError> {
+    let clients = clients
+        .iter()
+        .map(|client| ClientId::from_str(client).unwrap())
+        .collect();
+    let mut prepared = super::prepare_test_inventory(TestAcquisitionRequest {
+        home_dir: Some(PathBuf::from(home_dir)),
+        clients: Some(clients),
+        ..TestAcquisitionRequest::default()
     })?;
     prepared.input_cache_dir = cache_dir.to_path_buf();
     let mut messages = Vec::new();
@@ -218,7 +219,7 @@ fn aggregate_finalized_model_usage_entries(
 ) -> Vec<crate::usage_views::UsageModelEntry> {
     for msg in &mut messages {
         let model = crate::model_aliases::canonicalize_model_id(&msg.model_id);
-        msg.model_id = crate::sessions::intern::intern(&model);
+        msg.model_id = crate::records::intern::intern(&model);
         msg.refresh_derived_fields();
     }
     aggregate_model_usage_entries(messages, group_by)
@@ -231,12 +232,12 @@ fn aggregate_model_usage_entries(
     let views = crate::aggregate_unified_messages(
         &messages,
         AggregationConfig {
-            group_by: group_by.clone(),
+            group_by: *group_by,
             date_range: DateRange::none(),
-            views: ViewSet::TUI,
+            views: ViewSet::USAGE,
         },
     );
-    views.tui_usage.expect("TUI view requested").models
+    views.usage.expect("TUI view requested").models
 }
 
 fn write_streaming_fold_fixture(home: &Path) {
@@ -266,41 +267,49 @@ fn write_streaming_fold_fixture(home: &Path) {
     .unwrap();
 }
 
-fn streaming_report_options(home: &Path, clients: Vec<&str>) -> ReportOptions {
-    ReportOptions {
-        home_dir: Some(home.to_string_lossy().into_owned()),
-        clients: Some(clients.into_iter().map(str::to_string).collect()),
+fn streaming_acquisition_options(home: &Path, clients: Vec<&str>) -> TestAcquisitionRequest {
+    TestAcquisitionRequest {
+        home_dir: Some(home.to_path_buf()),
+        clients: Some(
+            clients
+                .into_iter()
+                .map(|client| ClientId::from_str(client).unwrap())
+                .collect(),
+        ),
         since: None,
         until: None,
         year: None,
-        group_by: GroupBy::ClientModel,
         scanner_settings: scanner::ScannerSettings::default(),
     }
 }
 
-fn streaming_views(options: &ReportOptions, views: ViewSet) -> AggregatedViews {
-    load_aggregated_views_with_pricing(options, views, None).unwrap()
-}
-
-fn reference_views(options: &ReportOptions, views: ViewSet) -> AggregatedViews {
+fn reference_usage(options: &TestAcquisitionRequest) -> crate::usage_views::UsageView {
     let home_dir = options.home_dir.as_deref().unwrap();
     let clients = options.clients.clone().unwrap();
+    let client_names = clients
+        .iter()
+        .map(|client| client.as_str().to_string())
+        .collect::<Vec<_>>();
     let messages = parse_all_messages_with_pricing_with_settings(
-        home_dir,
-        &clients,
+        home_dir.to_str().unwrap(),
+        &client_names,
         None,
         &options.scanner_settings,
     )
     .unwrap();
     let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
-        group_by: options.group_by.clone(),
-        date_range: DateRange::from_options(options),
-        views,
+        group_by: GroupBy::ClientModel,
+        date_range: DateRange {
+            since: options.since.clone(),
+            until: options.until.clone(),
+            year: options.year.clone(),
+        },
+        views: ViewSet::USAGE,
     });
     for message in &messages {
         engine.push(message);
     }
-    engine.finish()
+    engine.finish().usage.expect("usage view requested")
 }
 
 #[test]
@@ -328,26 +337,22 @@ fn cache_only_pricing_diagnostics_append_missing_cache_in_order() {
 
 #[test]
 #[serial_test::serial]
-fn test_streaming_tui_usage_matches_reference_aggregation() {
+fn acquisition_usage_matches_direct_aggregation() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
     write_streaming_fold_fixture(input_home.path());
-    let options = LocalParseOptions {
-        home_dir: Some(input_home.path().to_string_lossy().into_owned()),
-        clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
+    let options = TestAcquisitionRequest {
+        home_dir: Some(input_home.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode, ClientId::Codex]),
         since: None,
         until: None,
         year: None,
         scanner_settings: scanner::ScannerSettings::default(),
     };
-    let report_options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
-
-    let mut streaming = load_usage_data_with_pricing(options, GroupBy::ClientModel, None).unwrap();
-    let mut reference = reference_views(&report_options, ViewSet::TUI)
-        .tui_usage
-        .unwrap();
+    let mut streaming = load_test_usage(options.clone(), GroupBy::ClientModel, None).unwrap();
+    let mut reference = reference_usage(&options);
 
     // The reference harness exercises aggregation from a bare message list,
     // which intentionally has no data-health envelope. Health propagation
@@ -361,52 +366,19 @@ fn test_streaming_tui_usage_matches_reference_aggregation() {
 
 #[test]
 #[serial_test::serial]
-fn prepared_tui_bundle_footprint_sums_the_two_client_fixture() {
+fn generation_footprint_sums_the_two_client_fixture() {
     let home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(home.path());
     let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
     write_streaming_fold_fixture(home.path());
 
-    let prepared =
-        super::prepare_local_inputs(inventory_options(home.path(), &["opencode", "codex"]))
-            .unwrap();
-    let result = tokio::runtime::Runtime::new()
+    let (builder, sources) = prepare_generation_sources(home.path(), &["opencode", "codex"]);
+    let generation = tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(super::load_prepared_tui_bundle_with_diagnostics(prepared))
+        .block_on(builder.build(sources))
         .unwrap();
 
-    let opencode_bytes = result.input_footprint.bytes_for(ClientId::OpenCode);
-    let codex_bytes = result.input_footprint.bytes_for(ClientId::Codex);
-    assert!(opencode_bytes > 0);
-    assert!(codex_bytes > 0);
-    assert_eq!(
-        result.input_footprint.total_bytes().unwrap(),
-        opencode_bytes.checked_add(codex_bytes).unwrap()
-    );
-}
-
-#[test]
-#[serial_test::serial]
-fn public_usage_report_carries_confirmed_input_footprint() {
-    let home = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(home.path());
-    let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
-    write_streaming_fold_fixture(home.path());
-
-    let report = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(super::get_usage_report(streaming_report_options(
-            home.path(),
-            vec!["opencode", "codex"],
-        )))
-        .unwrap();
-
-    assert_eq!(report.health, report.data.health);
-    assert_ne!(
-        report.metadata.input_inventory_signature.as_bytes(),
-        &[0_u8; 32]
-    );
-    let footprint = &report.metadata.input_footprint;
+    let footprint = generation.input_footprint();
     let opencode_bytes = footprint.bytes_for(ClientId::OpenCode);
     let codex_bytes = footprint.bytes_for(ClientId::Codex);
     assert!(opencode_bytes > 0);
@@ -419,17 +391,55 @@ fn public_usage_report_carries_confirmed_input_footprint() {
 
 #[test]
 #[serial_test::serial]
-fn test_streaming_tui_usage_applies_date_range() {
+fn generation_carries_confirmed_input_footprint() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(home.path());
+    let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
+    write_streaming_fold_fixture(home.path());
+
+    let generation = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(
+            super::GenerationBuilder::with_input_cache_dir(
+                scanner::ScannerSettings::default(),
+                super::input_cache_dir_for_test_home(home.path()),
+            )
+            .unwrap()
+            .acquire(super::AcquisitionRequest {
+                home_dir: home.path().to_path_buf(),
+                clients: super::ClientUniverse::new([ClientId::OpenCode, ClientId::Codex]).unwrap(),
+                since: None,
+                until: None,
+                year: None,
+            }),
+        )
+        .unwrap();
+
+    assert_ne!(generation.source_fingerprint().as_bytes(), &[0_u8; 32]);
+    let footprint = generation.input_footprint();
+    let opencode_bytes = footprint.bytes_for(ClientId::OpenCode);
+    let codex_bytes = footprint.bytes_for(ClientId::Codex);
+    assert!(opencode_bytes > 0);
+    assert!(codex_bytes > 0);
+    assert_eq!(
+        footprint.total_bytes().unwrap(),
+        opencode_bytes.checked_add(codex_bytes).unwrap()
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn acquisition_usage_applies_date_range() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
     write_streaming_fold_fixture(input_home.path());
 
-    let included = load_usage_data_with_pricing(
-        LocalParseOptions {
-            home_dir: Some(input_home.path().to_string_lossy().into_owned()),
-            clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
+    let included = load_test_usage(
+        TestAcquisitionRequest {
+            home_dir: Some(input_home.path().to_path_buf()),
+            clients: Some(vec![ClientId::OpenCode, ClientId::Codex]),
             since: Some("2024-12-01".to_string()),
             until: Some("2024-12-01".to_string()),
             year: None,
@@ -439,10 +449,10 @@ fn test_streaming_tui_usage_applies_date_range() {
         None,
     )
     .unwrap();
-    let excluded = load_usage_data_with_pricing(
-        LocalParseOptions {
-            home_dir: Some(input_home.path().to_string_lossy().into_owned()),
-            clients: Some(vec!["opencode".to_string(), "codex".to_string()]),
+    let excluded = load_test_usage(
+        TestAcquisitionRequest {
+            home_dir: Some(input_home.path().to_path_buf()),
+            clients: Some(vec![ClientId::OpenCode, ClientId::Codex]),
             since: Some("2024-12-02".to_string()),
             until: None,
             year: None,
@@ -463,34 +473,36 @@ fn test_streaming_tui_usage_applies_date_range() {
 
 #[test]
 #[serial_test::serial]
-fn test_streaming_requested_client_filter_matches_reference_aggregation() {
+fn acquisition_client_filter_matches_direct_aggregation() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
     write_streaming_fold_fixture(input_home.path());
-    let options = streaming_report_options(input_home.path(), vec!["codex"]);
+    let options = streaming_acquisition_options(input_home.path(), vec!["codex"]);
 
-    let streaming = streaming_views(&options, ViewSet::TUI).tui_usage.unwrap();
-    let reference = reference_views(&options, ViewSet::TUI).tui_usage.unwrap();
+    let mut streaming = load_test_usage(options.clone(), GroupBy::ClientModel, None).unwrap();
+    let mut reference = reference_usage(&options);
 
+    streaming.health = Default::default();
+    reference.health = Default::default();
     assert_eq!(format!("{streaming:?}"), format!("{reference:?}"));
     assert_eq!(streaming.models.len(), 1);
-    assert_eq!(streaming.models[0].client, "codex");
+    assert_eq!(streaming.models[0].clients, [ClientId::Codex]);
 }
 
 #[test]
 #[serial_test::serial]
-fn test_streaming_warm_cache_matches_cold_streaming_report() {
+fn warm_input_cache_matches_cold_acquisition() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let input_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
 
     write_streaming_fold_fixture(input_home.path());
-    let options = streaming_report_options(input_home.path(), vec!["opencode", "codex"]);
+    let options = streaming_acquisition_options(input_home.path(), vec!["opencode", "codex"]);
 
-    let cold = streaming_views(&options, ViewSet::TUI).tui_usage.unwrap();
-    let warm = streaming_views(&options, ViewSet::TUI).tui_usage.unwrap();
+    let cold = load_test_usage(options.clone(), GroupBy::ClientModel, None).unwrap();
+    let warm = load_test_usage(options, GroupBy::ClientModel, None).unwrap();
 
     assert_eq!(format!("{cold:?}"), format!("{warm:?}"));
 }
@@ -1162,7 +1174,7 @@ fn test_workspace_model_grouping_merges_same_workspace_and_model() {
     assert_eq!(entries[0].workspace_key.as_deref(), Some("/repo-a"));
     assert_eq!(entries[0].workspace_label.as_deref(), Some("repo-a"));
     assert_eq!(entries[0].cost, 4.0);
-    assert_eq!(entries[0].client, "claude, qwen");
+    assert_eq!(entries[0].clients, [ClientId::Claude, ClientId::Qwen]);
 }
 
 #[test]
@@ -1317,7 +1329,7 @@ fn test_client_provider_model_grouping_uses_finalized_provider_ids() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].client, "opencode");
+    assert_eq!(entries[0].clients, [ClientId::OpenCode]);
     assert_eq!(entries[0].provider, "xiaomi");
     assert_eq!(entries[0].model_id, "mimo-v2.5-pro");
     assert_eq!(entries[0].cost, 3.0);
@@ -1365,7 +1377,10 @@ fn test_model_grouping_orders_merged_clients_by_total_tokens() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].client, "pi, codex, opencode");
+    assert_eq!(
+        entries[0].clients,
+        [ClientId::Pi, ClientId::Codex, ClientId::OpenCode]
+    );
 }
 
 #[test]
@@ -1399,7 +1414,7 @@ fn test_model_grouping_ignores_negative_client_token_contribution() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].client, "codex, amp");
+    assert_eq!(entries[0].clients, [ClientId::Codex, ClientId::Amp]);
 }
 
 #[test]
@@ -1618,9 +1633,9 @@ fn test_local_message_loader_kimi_code_usage_records() {
     {
         write_kimi_code_usage_fixture(input_home.path());
 
-        let parsed = load_local_messages_for_test(LocalParseOptions {
-            home_dir: Some(input_home.path().to_str().unwrap().to_string()),
-            clients: Some(vec!["kimi".to_string()]),
+        let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+            home_dir: Some(input_home.path().to_path_buf()),
+            clients: Some(vec![ClientId::Kimi]),
             since: None,
             until: None,
             year: None,
@@ -1663,7 +1678,7 @@ fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_p
     write_kimi_code_usage_fixture(input_home.path());
 
     let options = inventory_options(input_home.path(), &["kimi"]);
-    let prepared = super::prepare_local_inputs(options.clone()).unwrap();
+    let prepared = super::prepare_test_inventory(options.clone()).unwrap();
     let wire_path = input_home
         .path()
         .join(".kimi-code/sessions/wd-project/session_1/agents/main/wire.jsonl");
@@ -1680,12 +1695,12 @@ fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_p
         .unwrap()
         .is_some());
 
-    let mut prepared = super::prepare_local_inputs(options).unwrap();
-    let regular_config_signature = prepared.input_inventory_signature();
+    let mut prepared = super::prepare_test_inventory(options).unwrap();
+    let regular_config_signature = prepared.source_fingerprint();
     let config_path = input_home.path().join(".kimi-code/config.toml");
     std::fs::remove_file(&config_path).unwrap();
     std::fs::create_dir(&config_path).unwrap();
-    let unavailable_config_signature = prepared.refresh_input_inventory_signature().unwrap();
+    let unavailable_config_signature = prepared.refresh_source_fingerprint();
     assert_ne!(regular_config_signature, unavailable_config_signature);
     assert_eq!(prepared.health.failed_inputs(), 0);
 
@@ -1752,7 +1767,7 @@ fn test_input_cache_refreshes_stale_provider_on_cache_hit() {
         // must re-run refresh_derived_fields (dates are derived from
         // timestamps since schema v24, so provider identity is the
         // remaining derived field).
-        let stale_message = crate::sessions::ParsedMessage::new(
+        let stale_message = crate::records::ParsedMessage::new(
             "gpt-5.5",
             "anthropic",
             "session-1",
@@ -1793,45 +1808,66 @@ fn test_input_cache_refreshes_stale_provider_on_cache_hit() {
     }
 }
 
-fn inventory_options(home: &Path, clients: &[&str]) -> LocalParseOptions {
-    LocalParseOptions {
-        home_dir: Some(home.to_string_lossy().into_owned()),
-        clients: Some(clients.iter().map(|client| (*client).to_string()).collect()),
+fn inventory_options(home: &Path, clients: &[&str]) -> TestAcquisitionRequest {
+    TestAcquisitionRequest {
+        home_dir: Some(home.to_path_buf()),
+        clients: Some(
+            clients
+                .iter()
+                .map(|client| ClientId::from_str(client).unwrap())
+                .collect(),
+        ),
         scanner_settings: scanner::ScannerSettings::default(),
-        ..LocalParseOptions::default()
+        ..TestAcquisitionRequest::default()
     }
 }
 
-#[test]
-fn local_parse_request_resolves_client_strings_once_at_the_boundary() {
-    let home = tempfile::TempDir::new().unwrap();
-    let (_, clients) = super::resolve_local_parse_request(&inventory_options(
-        home.path(),
-        &["opencode", "codex", "opencode"],
-    ))
+fn prepare_generation_sources(
+    home: &Path,
+    clients: &[&str],
+) -> (GenerationBuilder, PreparedSources) {
+    let builder = GenerationBuilder::with_input_cache_dir(
+        scanner::ScannerSettings::default(),
+        super::input_cache_dir_for_test_home(home),
+    )
     .unwrap();
-
-    assert_eq!(clients, vec![ClientId::Codex, ClientId::OpenCode]);
+    let universe = ClientUniverse::new(
+        clients
+            .iter()
+            .map(|client| ClientId::from_str(client).unwrap()),
+    )
+    .unwrap();
+    let sources = builder
+        .prepare(AcquisitionRequest {
+            home_dir: home.to_path_buf(),
+            clients: universe,
+            since: None,
+            until: None,
+            year: None,
+        })
+        .unwrap();
+    (builder, sources)
 }
 
 fn signature_for_test_units(
     requested_clients: &[ClientId],
     client: ClientId,
-    units: Vec<crate::adapters::InputUnit>,
-) -> super::InputInventorySignature {
+    units: Vec<crate::integrations::InputUnit>,
+) -> super::SourceFingerprint {
     let group = prepared_test_group(client, units);
-    super::input_inventory_signature(requested_clients, &[group])
+    let universe = ClientUniverse::new(requested_clients.iter().copied()).unwrap();
+    super::source_fingerprint(&universe, &[group])
 }
 
 fn prepared_test_group(
     client: ClientId,
-    units: Vec<crate::adapters::InputUnit>,
-) -> crate::adapters::PreparedAdapterInputs {
-    crate::adapters::PreparedAdapterInputs {
-        binding: crate::adapters::adapter_for(client).unwrap(),
+    units: Vec<crate::integrations::InputUnit>,
+) -> crate::integrations::PreparedIntegrationInputs {
+    crate::integrations::PreparedIntegrationInputs {
+        integration: crate::integrations::integration_for(client),
         units: units
             .into_iter()
-            .map(crate::adapters::InputUnit::prepare_snapshot)
+            .map(crate::integrations::InputUnit::prepare_snapshot)
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
     }
@@ -1854,7 +1890,8 @@ fn input_footprint_counts_related_inputs_once_by_file_identity() {
         .unwrap();
 
     let group = prepared_test_group(ClientId::Amp, vec![with_dependency, duplicate]);
-    let footprint = super::prepared_input_footprint(&[ClientId::Amp], std::slice::from_ref(&group));
+    let universe = ClientUniverse::new([ClientId::Amp]).unwrap();
+    let footprint = super::prepared_input_footprint(&universe, std::slice::from_ref(&group));
     assert_eq!(footprint.bytes_for(ClientId::Amp), 13);
 }
 
@@ -1867,11 +1904,11 @@ fn inventory_probe_refreshes_input_footprint_from_metadata() {
     std::fs::write(&input, b"12345678").unwrap();
 
     let mut prepared =
-        super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
+        super::prepare_test_inventory(inventory_options(home.path(), &["amp"])).unwrap();
     assert_eq!(prepared.input_footprint().bytes_for(ClientId::Amp), 8);
 
     std::fs::write(&input, b"1234567890123").unwrap();
-    prepared.refresh_input_inventory_signature().unwrap();
+    prepared.refresh_source_fingerprint();
     assert_eq!(prepared.input_footprint().bytes_for(ClientId::Amp), 13);
 }
 
@@ -1885,11 +1922,11 @@ fn prepared_inventory_is_stable_sensitive_and_reads_no_input_bytes() {
     message_cache::reset_input_read_stats(&first);
 
     let first_inventory =
-        super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
-    let first_signature = first_inventory.input_inventory_signature();
-    let second_signature = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
+        super::prepare_test_inventory(inventory_options(home.path(), &["amp"])).unwrap();
+    let first_signature = first_inventory.source_fingerprint();
+    let second_signature = super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
         .unwrap()
-        .input_inventory_signature();
+        .source_fingerprint();
     assert_eq!(first_signature, second_signature);
     assert_eq!(
         message_cache::get_input_read_stats(&first),
@@ -1898,20 +1935,20 @@ fn prepared_inventory_is_stable_sensitive_and_reads_no_input_bytes() {
     );
 
     std::fs::write(&first, r#"{"id":"amp-first","grew":true}"#).unwrap();
-    let changed = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
+    let changed = super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
         .unwrap()
-        .input_inventory_signature();
+        .source_fingerprint();
     assert_ne!(first_signature, changed);
 
     std::fs::write(amp_dir.join("T-second.json"), r#"{"id":"amp-second"}"#).unwrap();
-    let added = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
+    let added = super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
         .unwrap()
-        .input_inventory_signature();
+        .source_fingerprint();
     assert_ne!(changed, added);
 
-    let other_client = super::prepare_local_inputs(inventory_options(home.path(), &["claude"]))
+    let other_client = super::prepare_test_inventory(inventory_options(home.path(), &["claude"]))
         .unwrap()
-        .input_inventory_signature();
+        .source_fingerprint();
     assert_ne!(added, other_client);
 }
 
@@ -1924,9 +1961,9 @@ fn inventory_signature_changes_for_same_size_same_mtime_atomic_replacement() {
     let replacement = amp_dir.join("replacement.json");
     std::fs::write(&input, b"aaaaaaaa").unwrap();
     let original_mtime = std::fs::metadata(&input).unwrap().modified().unwrap();
-    let before = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
+    let before = super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
         .unwrap()
-        .input_inventory_signature();
+        .source_fingerprint();
 
     std::fs::write(&replacement, b"bbbbbbbb").unwrap();
     std::fs::File::open(&replacement)
@@ -1937,9 +1974,9 @@ fn inventory_signature_changes_for_same_size_same_mtime_atomic_replacement() {
     std::fs::remove_file(&input).unwrap();
     std::fs::rename(&replacement, &input).unwrap();
 
-    let after = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
+    let after = super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
         .unwrap()
-        .input_inventory_signature();
+        .source_fingerprint();
     assert_ne!(before, after);
 }
 
@@ -1955,8 +1992,8 @@ fn inventory_probe_revalidates_identity_without_rediscovery_or_input_reads() {
 
     super::reset_prepare_discovery_count();
     let mut prepared =
-        super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
-    let stale = prepared.input_inventory_signature();
+        super::prepare_test_inventory(inventory_options(home.path(), &["amp"])).unwrap();
+    let stale = prepared.source_fingerprint();
     assert_eq!(super::prepare_discovery_count(), 1);
     message_cache::reset_input_read_stats(&input);
 
@@ -1969,7 +2006,7 @@ fn inventory_probe_revalidates_identity_without_rediscovery_or_input_reads() {
     std::fs::remove_file(&input).unwrap();
     std::fs::rename(&replacement, &input).unwrap();
 
-    let refreshed = prepared.refresh_input_inventory_signature().unwrap();
+    let refreshed = prepared.refresh_source_fingerprint();
     assert_ne!(stale, refreshed);
     assert_eq!(super::prepare_discovery_count(), 1);
     assert_eq!(
@@ -1996,26 +2033,30 @@ fn inventory_probe_isolates_an_input_that_disappears_after_prepare() {
     std::fs::write(&retained, input("retained", 10)).unwrap();
     std::fs::write(&removed, input("removed", 20)).unwrap();
 
-    let mut prepared =
-        super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
+    let (builder, mut sources) = prepare_generation_sources(home.path(), &["amp"]);
     std::fs::remove_file(&removed).unwrap();
 
-    prepared
-        .refresh_input_inventory_signature()
-        .expect("a vanished third-party input must not abort the inventory probe");
-    let result = tokio::runtime::Runtime::new()
+    sources.refresh_source_fingerprint();
+    let generation = tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(super::load_prepared_tui_bundle_with_diagnostics(prepared))
+        .block_on(builder.build(sources))
         .unwrap();
 
-    assert_eq!(result.accumulator.project(&GroupBy::Model).total_tokens, 12);
-    assert_eq!(result.health.failed_inputs(), 1);
-    assert_eq!(result.health.inputs()[0].path, removed);
+    assert_eq!(
+        generation
+            .project(&UsageQuery::full(generation.universe(), GroupBy::Model,))
+            .unwrap()
+            .total_tokens,
+        12
+    );
+    assert_eq!(generation.health().failed_inputs, 1);
+    assert_eq!(generation.health().issues[0].client, ClientId::Amp);
+    assert_eq!(generation.health().issues[0].affected_inputs, 1);
 }
 
 #[test]
 #[serial_test::serial]
-fn prepared_diagnostics_returns_signature_revalidated_after_pricing_boundary() {
+fn generation_uses_signature_revalidated_after_pricing_boundary() {
     let home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(home.path());
     let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
@@ -2030,8 +2071,8 @@ fn prepared_diagnostics_returns_signature_revalidated_after_pricing_boundary() {
     assert_eq!(original.len(), changed.len());
     std::fs::write(&input, original).unwrap();
     let original_mtime = std::fs::metadata(&input).unwrap().modified().unwrap();
-    let prepared = super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
-    let stale_signature = prepared.input_inventory_signature();
+    let (builder, sources) = prepare_generation_sources(home.path(), &["amp"]);
+    let stale_signature = sources.source_fingerprint();
 
     std::fs::write(&replacement, changed).unwrap();
     std::fs::File::open(&replacement)
@@ -2042,21 +2083,28 @@ fn prepared_diagnostics_returns_signature_revalidated_after_pricing_boundary() {
     std::fs::remove_file(&input).unwrap();
     std::fs::rename(&replacement, &input).unwrap();
 
-    let result = tokio::runtime::Runtime::new()
+    let generation = tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(super::load_prepared_tui_bundle_with_diagnostics(prepared))
+        .block_on(builder.build(sources))
         .unwrap();
-    let confirmed_signature = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
-        .unwrap()
-        .input_inventory_signature();
-    assert_ne!(stale_signature, result.input_inventory_signature);
-    assert_eq!(confirmed_signature, result.input_inventory_signature);
-    assert_eq!(result.accumulator.project(&GroupBy::Model).total_tokens, 13);
+    let confirmed_signature =
+        super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
+            .unwrap()
+            .source_fingerprint();
+    assert_ne!(stale_signature, generation.source_fingerprint());
+    assert_eq!(confirmed_signature, generation.source_fingerprint());
+    assert_eq!(
+        generation
+            .project(&UsageQuery::full(generation.universe(), GroupBy::Model,))
+            .unwrap()
+            .total_tokens,
+        13
+    );
 }
 
 #[test]
 #[serial_test::serial]
-fn prepared_tui_bundle_input_footprint_uses_confirmed_inventory() {
+fn generation_footprint_uses_confirmed_inventory() {
     let home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(home.path());
     let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
@@ -2069,8 +2117,8 @@ fn prepared_tui_bundle_input_footprint_uses_confirmed_inventory() {
     assert!(changed.len() > original.len());
     std::fs::write(&input, original).unwrap();
     let original_mtime = std::fs::metadata(&input).unwrap().modified().unwrap();
-    let prepared = super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
-    let stale_signature = prepared.input_inventory_signature();
+    let (builder, sources) = prepare_generation_sources(home.path(), &["amp"]);
+    let stale_signature = sources.source_fingerprint();
 
     std::fs::write(&replacement, changed).unwrap();
     std::fs::File::open(&replacement)
@@ -2082,29 +2130,31 @@ fn prepared_tui_bundle_input_footprint_uses_confirmed_inventory() {
     std::fs::rename(&replacement, &input).unwrap();
     let confirmed_bytes = std::fs::metadata(&input).unwrap().len();
 
-    let result = tokio::runtime::Runtime::new()
+    let generation = tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(super::load_prepared_tui_bundle_with_diagnostics(prepared))
+        .block_on(builder.build(sources))
         .unwrap();
-    let confirmed_signature = super::prepare_local_inputs(inventory_options(home.path(), &["amp"]))
-        .unwrap()
-        .input_inventory_signature();
+    let confirmed_signature =
+        super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
+            .unwrap()
+            .source_fingerprint();
 
-    assert_ne!(stale_signature, result.input_inventory_signature);
-    assert_eq!(confirmed_signature, result.input_inventory_signature);
+    assert_ne!(stale_signature, generation.source_fingerprint());
+    assert_eq!(confirmed_signature, generation.source_fingerprint());
     assert_eq!(
-        result.input_footprint.bytes_for(ClientId::Amp),
+        generation.input_footprint().bytes_for(ClientId::Amp),
         confirmed_bytes
     );
     assert_eq!(
-        result.accumulator.project(&GroupBy::Model).total_tokens,
+        generation
+            .project(&UsageQuery::full(generation.universe(), GroupBy::Model,))
+            .unwrap()
+            .total_tokens,
         113
     );
-    assert_eq!(result.sessions.len(), 1);
-    assert_eq!(
-        result.sessions[0].session_id,
-        "session-confirmed-after-prepare"
-    );
+    let sessions = generation.sessions();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, "session-confirmed-after-prepare");
 }
 
 #[test]
@@ -2179,9 +2229,9 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     let decoder_changed = signature_for_test_units(
         &[ClientId::Amp],
         ClientId::Amp,
-        vec![crate::adapters::InputUnit::plain_file(
+        vec![crate::integrations::InputUnit::plain_file(
             first,
-            crate::adapters::DecoderSpec::plain(message_cache::DecoderId::Amp, 999),
+            crate::integrations::DecoderSpec::plain(message_cache::DecoderId::Amp, 999),
         )],
     );
     assert_ne!(canonical_clients, decoder_changed);
@@ -2191,19 +2241,19 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     let jsonl_decoder = signature_for_test_units(
         &[ClientId::CodeBuddy],
         ClientId::CodeBuddy,
-        vec![crate::adapters::InputUnit::plain_file(
+        vec![crate::integrations::InputUnit::plain_file(
             codebuddy_path.clone(),
-            crate::adapters::DecoderSpec::codebuddy_jsonl(0),
+            crate::integrations::DecoderSpec::codebuddy_jsonl(0),
         )],
     );
     let extension_decoder = signature_for_test_units(
         &[ClientId::CodeBuddy],
         ClientId::CodeBuddy,
-        vec![crate::adapters::InputUnit::plain_file(
+        vec![crate::integrations::InputUnit::plain_file(
             codebuddy_path.clone(),
-            crate::adapters::DecoderSpec::codebuddy_extension_log(
+            crate::integrations::DecoderSpec::codebuddy_extension_log(
                 0,
-                crate::adapters::CodeBuddyLogOrigin::Extension,
+                crate::integrations::CodeBuddyLogOrigin::Extension,
             ),
         )],
     );
@@ -2215,17 +2265,17 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     let plain_policy = signature_for_test_units(
         &[ClientId::CodeBuddy],
         ClientId::CodeBuddy,
-        vec![crate::adapters::InputUnit::plain_file(
+        vec![crate::integrations::InputUnit::plain_file(
             codebuddy_path.clone(),
-            crate::adapters::DecoderSpec::codebuddy_jsonl(0),
+            crate::integrations::DecoderSpec::codebuddy_jsonl(0),
         )],
     );
     let no_cache_policy = signature_for_test_units(
         &[ClientId::CodeBuddy],
         ClientId::CodeBuddy,
-        vec![crate::adapters::InputUnit::no_message_cache(
+        vec![crate::integrations::InputUnit::no_message_cache(
             codebuddy_path,
-            crate::adapters::DecoderSpec::codebuddy_jsonl(0),
+            crate::integrations::DecoderSpec::codebuddy_jsonl(0),
         )],
     );
     assert_ne!(plain_policy, no_cache_policy, "input policy is significant");
@@ -2246,23 +2296,19 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     let codebuddy_group = || {
         prepared_test_group(
             ClientId::CodeBuddy,
-            vec![crate::adapters::InputUnit::plain_file(
+            vec![crate::integrations::InputUnit::plain_file(
                 codebuddy_group_path.clone(),
-                crate::adapters::DecoderSpec::codebuddy_jsonl(0),
+                crate::integrations::DecoderSpec::codebuddy_jsonl(0),
             )],
         )
     };
-    let group_order = super::input_inventory_signature(
-        &[ClientId::Amp, ClientId::CodeBuddy],
-        &[amp_group(), codebuddy_group()],
-    );
-    let reversed_group_order = super::input_inventory_signature(
-        &[ClientId::Amp, ClientId::CodeBuddy],
-        &[codebuddy_group(), amp_group()],
-    );
+    let universe = ClientUniverse::new([ClientId::Amp, ClientId::CodeBuddy]).unwrap();
+    let group_order = super::source_fingerprint(&universe, &[amp_group(), codebuddy_group()]);
+    let reversed_group_order =
+        super::source_fingerprint(&universe, &[codebuddy_group(), amp_group()]);
     assert_ne!(
         group_order, reversed_group_order,
-        "adapter order is significant"
+        "integration order is significant"
     );
 }
 
@@ -2312,7 +2358,7 @@ fn prepare_discovers_once_and_execute_consumes_the_same_inventory() {
     std::fs::create_dir_all(&amp_dir).unwrap();
     super::reset_prepare_discovery_count();
 
-    let prepared = super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
+    let prepared = super::prepare_test_inventory(inventory_options(home.path(), &["amp"])).unwrap();
     assert_eq!(super::prepare_discovery_count(), 1);
 
     std::fs::write(
@@ -2334,33 +2380,17 @@ fn prepare_discovers_once_and_execute_consumes_the_same_inventory() {
     )
     .unwrap();
 
-    let frozen =
-        super::load_prepared_usage_data_with_pricing(prepared, GroupBy::Model, None).unwrap();
+    let frozen = super::load_prepared_test_usage(prepared, GroupBy::Model, None).unwrap();
     assert_eq!(super::prepare_discovery_count(), 1);
     assert_eq!(frozen.total_tokens, 0);
 
-    let ordinary = super::load_usage_data_with_pricing(
+    let ordinary = super::load_test_usage(
         inventory_options(home.path(), &["amp"]),
         GroupBy::Model,
         None,
     )
     .unwrap();
     assert_eq!(ordinary.total_tokens, 12);
-}
-
-#[test]
-fn ordinary_and_explicit_prepare_usage_loads_match() {
-    let home = tempfile::TempDir::new().unwrap();
-    let options = inventory_options(home.path(), &["amp"]);
-    let ordinary =
-        super::load_usage_data_with_pricing(options.clone(), GroupBy::Model, None).unwrap();
-    let prepared = super::prepare_local_inputs(options).unwrap();
-    let explicit =
-        super::load_prepared_usage_data_with_pricing(prepared, GroupBy::Model, None).unwrap();
-
-    assert_eq!(ordinary.total_tokens, explicit.total_tokens);
-    assert_eq!(ordinary.total_cost, explicit.total_cost);
-    assert_eq!(ordinary.models.len(), explicit.models.len());
 }
 
 #[test]
@@ -2391,23 +2421,22 @@ fn prepared_aggregation_reclaims_dead_interner_indices_after_materialization() {
     )
     .unwrap();
 
-    let externally_live = crate::sessions::intern::intern("c5-production-lifecycle-live");
-    let prune_before = crate::sessions::intern::prune_count();
-    let prepared = super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
-    let usage =
-        super::load_prepared_usage_data_with_pricing(prepared, GroupBy::Model, None).unwrap();
+    let externally_live = crate::records::intern::intern("c5-production-lifecycle-live");
+    let prune_before = crate::records::intern::prune_count();
+    let prepared = super::prepare_test_inventory(inventory_options(home.path(), &["amp"])).unwrap();
+    let usage = super::load_prepared_test_usage(prepared, GroupBy::Model, None).unwrap();
 
     assert_eq!(usage.models[0].model_id, model);
     assert_eq!(usage.models[0].display_name, model);
-    assert_eq!(crate::sessions::intern::prune_count(), prune_before + 1);
-    assert_eq!(crate::sessions::intern::indexed_live_count(model), 0);
+    assert_eq!(crate::records::intern::prune_count(), prune_before + 1);
+    assert_eq!(crate::records::intern::indexed_live_count(model), 0);
     assert_eq!(
-        crate::sessions::intern::indexed_live_count(&externally_live),
+        crate::records::intern::indexed_live_count(&externally_live),
         1
     );
     assert!(Arc::ptr_eq(
         &externally_live,
-        &crate::sessions::intern::intern(&externally_live)
+        &crate::records::intern::intern(&externally_live)
     ));
 }
 
@@ -2774,7 +2803,7 @@ fn test_parse_all_messages_dedups_across_channel_suffixed_opencode_dbs() {
         ids.sort_unstable();
         let mut expected: Vec<u64> = ["latest-only", "shared-msg", "stable-only"]
             .iter()
-            .map(|key| crate::sessions::dedup_hash_str(key))
+            .map(|key| crate::records::dedup_hash_str(key))
             .collect();
         expected.sort_unstable();
         assert_eq!(ids, expected);
@@ -2937,9 +2966,9 @@ fn test_local_message_loader_opencode_sqlite_counts_deduplicated_forked_history(
         }
         drop(conn);
 
-        let parsed = load_local_messages_for_test(LocalParseOptions {
-            home_dir: Some(input_home.path().to_str().unwrap().to_string()),
-            clients: Some(vec!["opencode".to_string()]),
+        let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+            home_dir: Some(input_home.path().to_path_buf()),
+            clients: Some(vec![ClientId::OpenCode]),
             since: None,
             until: None,
             year: None,
@@ -3238,9 +3267,9 @@ fn test_local_message_loader_codex_counts_deduplicated_forked_history() {
     {
         write_codex_forked_history_fixture(input_home.path());
 
-        let parsed = load_local_messages_for_test(LocalParseOptions {
-            home_dir: Some(input_home.path().to_str().unwrap().to_string()),
-            clients: Some(vec!["codex".to_string()]),
+        let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+            home_dir: Some(input_home.path().to_path_buf()),
+            clients: Some(vec![ClientId::Codex]),
             since: None,
             until: None,
             year: None,
@@ -3316,7 +3345,7 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
                 &path,
                 message_cache::DecoderVersion::new(
                     message_cache::DecoderId::Codex,
-                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
+                    crate::integrations::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()
@@ -3413,7 +3442,7 @@ fn test_codex_untimestamped_token_row_is_partial_without_cache_shard() {
                 &path,
                 message_cache::DecoderVersion::new(
                     message_cache::DecoderId::Codex,
-                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
+                    crate::integrations::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()
@@ -3481,7 +3510,7 @@ fn test_codex_malformed_json_suffix_keeps_prefix_without_cache_shard() {
                 &path,
                 message_cache::DecoderVersion::new(
                     message_cache::DecoderId::Codex,
-                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
+                    crate::integrations::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()
@@ -3549,7 +3578,7 @@ fn test_codex_invalid_utf8_suffix_keeps_prefix_without_cache_shard() {
                 &path,
                 message_cache::DecoderVersion::new(
                     message_cache::DecoderId::Codex,
-                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
+                    crate::integrations::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()
@@ -3614,7 +3643,7 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
                 &path,
                 message_cache::DecoderVersion::new(
                     message_cache::DecoderId::Codex,
-                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
+                    crate::integrations::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()
@@ -3657,7 +3686,7 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
                 &path,
                 message_cache::DecoderVersion::new(
                     message_cache::DecoderId::Codex,
-                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
+                    crate::integrations::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()
@@ -3701,7 +3730,7 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
                 &path,
                 message_cache::DecoderVersion::new(
                     message_cache::DecoderId::Codex,
-                    crate::adapters::CODEX_EXEC_IDENTITY_REVISION
+                    crate::integrations::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
             .unwrap()
@@ -4374,7 +4403,7 @@ fn test_apply_token_pricing_uses_same_price_for_zed_and_other_clients() {
     let mut zed_msg = UnifiedMessage::new(
         ClientId::Zed,
         "claude-sonnet-4-5",
-        crate::sessions::zed::ZED_HOSTED_PROVIDER,
+        crate::integrations::zed::decode::ZED_HOSTED_PROVIDER,
         "session-1",
         1_733_011_200_000,
         tokens.clone(),
@@ -4383,7 +4412,7 @@ fn test_apply_token_pricing_uses_same_price_for_zed_and_other_clients() {
     let mut claude_msg = UnifiedMessage::new(
         ClientId::Claude,
         "claude-sonnet-4-5",
-        crate::sessions::zed::ZED_HOSTED_PROVIDER,
+        crate::integrations::zed::decode::ZED_HOSTED_PROVIDER,
         "session-1",
         1_733_011_200_000,
         tokens,
@@ -4417,7 +4446,7 @@ fn test_apply_token_pricing_custom_zed_price_is_final_price() {
     let mut msg = UnifiedMessage::new(
         ClientId::Zed,
         "claude-sonnet-4-5",
-        crate::sessions::zed::ZED_HOSTED_PROVIDER,
+        crate::integrations::zed::decode::ZED_HOSTED_PROVIDER,
         "session-1",
         1_733_011_200_000,
         TokenBreakdown {
@@ -5127,78 +5156,6 @@ fn test_apply_token_pricing_prices_canonical_kimi_k2_6() {
 }
 
 #[test]
-fn test_select_local_parse_pricing_prefers_fresh_service_for_new_models() {
-    let mut fresh_litellm = HashMap::new();
-    fresh_litellm.insert(
-        "gpt-5.4".into(),
-        pricing::ModelPricing {
-            input_cost_per_token: Some(0.000002),
-            output_cost_per_token: Some(0.00001),
-            ..Default::default()
-        },
-    );
-    let fresh = Arc::new(pricing::PricingService::new(fresh_litellm, HashMap::new()));
-    let stale = pricing::PricingService::new(HashMap::new(), HashMap::new());
-    let selected = select_local_parse_pricing(Ok(Arc::clone(&fresh)), || Some(stale)).unwrap();
-
-    let mut msg = UnifiedMessage::new(
-        ClientId::OpenCode,
-        "gpt-5.4",
-        "openai",
-        "session-1",
-        1_733_011_200_000,
-        TokenBreakdown {
-            input: 10,
-            output: 5,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-        },
-        0.0,
-    );
-
-    apply_token_pricing(&mut msg, Some(selected.as_ref()));
-
-    assert!(msg.cost > 0.0);
-}
-
-#[test]
-fn test_select_local_parse_pricing_falls_back_to_stale_cache_on_fetch_error() {
-    let mut stale_litellm = HashMap::new();
-    stale_litellm.insert(
-        "gpt-5.2".into(),
-        pricing::ModelPricing {
-            input_cost_per_token: Some(0.00000175),
-            output_cost_per_token: Some(0.000014),
-            ..Default::default()
-        },
-    );
-    let stale = pricing::PricingService::new(stale_litellm, HashMap::new());
-
-    let selected =
-        select_local_parse_pricing(Err("network failed".to_string()), || Some(stale)).unwrap();
-
-    assert!(selected
-        .lookup_with_pricing_source("gpt-5.2", None)
-        .is_some());
-}
-
-#[test]
-fn test_select_local_parse_pricing_does_not_evaluate_stale_fallback_on_fresh_success() {
-    let fresh = Arc::new(pricing::PricingService::new(HashMap::new(), HashMap::new()));
-    let mut stale_called = false;
-
-    let selected = select_local_parse_pricing(Ok(Arc::clone(&fresh)), || {
-        stale_called = true;
-        None
-    })
-    .unwrap();
-
-    assert!(Arc::ptr_eq(&selected, &fresh));
-    assert!(!stale_called);
-}
-
-#[test]
 #[serial_test::serial]
 fn test_parse_all_messages_with_pricing_keeps_gateway_message_under_real_client_filter() {
     let temp_dir = tempfile::TempDir::new().unwrap();
@@ -5240,9 +5197,9 @@ fn test_local_message_loader_preserves_gateway_message_client_counts() {
         r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
     );
 
-    let parsed = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["opencode".to_string()]),
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode]),
         since: None,
         until: None,
         year: None,
@@ -5263,7 +5220,7 @@ fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
     // Regression guard: local message loading must forward
     // `options.scanner_settings` into OpenCode adapter discovery. A configured
     // database outside the fixed default directory must reach the Wrapped path
-    // exactly as it reaches the Models report.
+    // exactly as it reaches the Models projection.
     let temp_dir = tempfile::TempDir::new().unwrap();
     // Deliberately do not create ~/.local/share/opencode so nothing
     // is auto-discoverable; the only db the scanner can find must
@@ -5301,9 +5258,9 @@ fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
     drop(conn);
 
     // Without scanner_settings: no rows (nothing auto-discoverable).
-    let parsed_default = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["opencode".to_string()]),
+    let parsed_default = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode]),
         since: None,
         until: None,
         year: None,
@@ -5315,9 +5272,9 @@ fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
 
     // With scanner_settings pointing at the external db: the user
     // row must show up.
-    let parsed_with_settings = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["opencode".to_string()]),
+    let parsed_with_settings = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode]),
         since: None,
         until: None,
         year: None,
@@ -5347,14 +5304,14 @@ fn test_missing_configured_opencode_database_is_an_explicit_error() {
     let _home_guard = HomeEnvGuard::set(temp_dir.path());
     let missing_db = temp_dir.path().join("missing/custom-current.db");
 
-    let loaded = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
-        clients: Some(vec!["opencode".to_string()]),
+    let loaded = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode]),
         scanner_settings: scanner::ScannerSettings {
             opencode_db_paths: vec![missing_db.clone()],
             ..Default::default()
         },
-        ..LocalParseOptions::default()
+        ..TestAcquisitionRequest::default()
     })
     .unwrap();
 
@@ -5384,68 +5341,31 @@ fn test_missing_configured_opencode_database_is_an_explicit_error() {
 
 #[test]
 #[serial_test::serial]
-fn usage_data_report_preserves_input_health() {
+fn usage_projection_preserves_input_health() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(temp_dir.path());
     let missing_db = temp_dir.path().join("missing/custom-current.db");
 
-    let report = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(super::get_usage_data(ReportOptions {
-            home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
-            clients: Some(vec!["opencode".to_string()]),
+    let usage = load_test_usage(
+        TestAcquisitionRequest {
+            home_dir: Some(temp_dir.path().to_path_buf()),
+            clients: Some(vec![ClientId::OpenCode]),
             scanner_settings: scanner::ScannerSettings {
                 opencode_db_paths: vec![missing_db.clone()],
                 ..Default::default()
             },
-            ..ReportOptions::default()
-        }))
-        .expect("a broken third-party input must not abort the usage projection");
+            ..TestAcquisitionRequest::default()
+        },
+        GroupBy::default(),
+        None,
+    )
+    .expect("a broken third-party input must not abort the usage projection");
 
-    assert_eq!(report.total_tokens, 0);
-    assert!(!report.health.complete);
-    assert_eq!(report.health.failed_inputs, 1);
-    assert_eq!(report.health.issues[0].client, "opencode");
-    assert_eq!(report.health.issues[0].issue, "input-unavailable");
-}
-
-#[test]
-#[serial_test::serial]
-fn public_raw_message_report_preserves_input_health_and_metadata() {
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(temp_dir.path());
-    let missing_db = temp_dir.path().join("missing/raw-report.db");
-
-    let report = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(super::parse_local_unified_messages_with_pricing(
-            LocalParseOptions {
-                home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
-                clients: Some(vec!["opencode".to_string()]),
-                scanner_settings: scanner::ScannerSettings {
-                    opencode_db_paths: vec![missing_db.clone()],
-                    ..Default::default()
-                },
-                ..LocalParseOptions::default()
-            },
-            None,
-        ))
-        .expect("a broken input must produce a degraded raw-message report");
-
-    assert!(report.data.is_empty());
-    assert!(!report.health.complete);
-    assert_eq!(report.health.failed_inputs, 1);
-    assert_eq!(report.health.issues[0].client, "opencode");
-    assert_eq!(report.health.issues[0].issue, "input-unavailable");
-    assert_ne!(
-        report.metadata.input_inventory_signature.as_bytes(),
-        &[0_u8; 32]
-    );
-    assert!(report
-        .metadata
-        .input_footprint
-        .contains_client(ClientId::OpenCode));
-    assert_eq!(report.metadata.input_footprint.total_bytes().unwrap(), 0);
+    assert_eq!(usage.total_tokens, 0);
+    assert!(!usage.health.complete);
+    assert_eq!(usage.health.failed_inputs, 1);
+    assert_eq!(usage.health.issues[0].client, ClientId::OpenCode);
+    assert_eq!(usage.health.issues[0].issue, "input-unavailable");
 }
 
 #[test]
@@ -5456,10 +5376,10 @@ fn test_opencode_auto_discovery_error_reaches_public_loader() {
     std::fs::create_dir_all(data_root.parent().unwrap()).unwrap();
     std::fs::write(&data_root, "not a directory").unwrap();
 
-    let loaded = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_string_lossy().into_owned()),
-        clients: Some(vec!["opencode".to_string()]),
-        ..LocalParseOptions::default()
+    let loaded = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode]),
+        ..TestAcquisitionRequest::default()
     })
     .unwrap();
 
@@ -5499,9 +5419,9 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_hermes_profile_
     );
     drop(conn);
 
-    let parsed_default = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["hermes".to_string()]),
+    let parsed_default = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Hermes]),
         since: None,
         until: None,
         year: None,
@@ -5513,9 +5433,9 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_hermes_profile_
 
     let mut extra_scan_paths = std::collections::BTreeMap::new();
     extra_scan_paths.insert("hermes".to_string(), vec![profile_dir]);
-    let parsed_with_settings = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["hermes".to_string()]),
+    let parsed_with_settings = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Hermes]),
         since: None,
         until: None,
         year: None,
@@ -5556,9 +5476,9 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_zed_threads_db(
     insert_zed_thread(&conn, "zed-extra-thread", "claude-sonnet-4-5");
     drop(conn);
 
-    let parsed_default = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["zed".to_string()]),
+    let parsed_default = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Zed]),
         since: None,
         until: None,
         year: None,
@@ -5570,9 +5490,9 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_zed_threads_db(
 
     let mut extra_scan_paths = std::collections::BTreeMap::new();
     extra_scan_paths.insert("zed".to_string(), vec![windows_threads_dir]);
-    let parsed_with_settings = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["zed".to_string()]),
+    let parsed_with_settings = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Zed]),
         since: None,
         until: None,
         year: None,
@@ -5604,22 +5524,23 @@ fn test_default_usage_projection_includes_antigravity_database_rows() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     write_single_antigravity_fixture(temp_dir.path());
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let usage = rt
-        .block_on(super::get_usage_data(ReportOptions {
-            home_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+    let usage = load_test_usage(
+        TestAcquisitionRequest {
+            home_dir: Some(temp_dir.path().to_path_buf()),
             clients: None,
             since: None,
             until: None,
             year: None,
-            group_by: GroupBy::default(),
             scanner_settings: scanner::ScannerSettings::default(),
-        }))
-        .unwrap();
+        },
+        GroupBy::default(),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(usage.total_tokens, 19);
     assert_eq!(usage.models.len(), 1);
-    assert_eq!(usage.models[0].client, "antigravity");
+    assert_eq!(usage.models[0].clients, [ClientId::Antigravity]);
     assert_eq!(usage.models[0].model_id, "gemini-3.5-flash");
     assert_eq!(usage.models[0].display_name, "gemini-3.5-flash");
 }
@@ -5642,9 +5563,9 @@ fn test_local_message_loader_dedups_zed_threads_across_default_and_extra_dbs() {
     // the thread from appearing twice.
     let mut extra_scan_paths = std::collections::BTreeMap::new();
     extra_scan_paths.insert("zed".to_string(), vec![default_threads_dir.clone()]);
-    let parsed = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["zed".to_string()]),
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Zed]),
         since: None,
         until: None,
         year: None,
@@ -5671,9 +5592,9 @@ fn test_local_message_loader_zed_extra_scan_paths_nonexistent_dir_is_silent() {
         "zed".to_string(),
         vec![temp_dir.path().join("does/not/exist")],
     );
-    let parsed = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["zed".to_string()]),
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Zed]),
         since: None,
         until: None,
         year: None,
@@ -5690,7 +5611,7 @@ fn test_local_message_loader_zed_extra_scan_paths_nonexistent_dir_is_silent() {
 
 #[test]
 #[serial_test::serial]
-fn test_driver_uses_zed_adapter_when_only_zed_requested() {
+fn acquisition_runs_only_the_requested_zed_integration() {
     let temp_dir = tempfile::TempDir::new().unwrap();
 
     let zed_threads_dir = temp_dir.path().join("zed-fixture/threads");
@@ -5702,9 +5623,9 @@ fn test_driver_uses_zed_adapter_when_only_zed_requested() {
 
     write_single_opencode_sqlite_fixture(temp_dir.path());
 
-    let parsed = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["zed".to_string()]),
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Zed]),
         since: None,
         until: None,
         year: None,
@@ -5725,7 +5646,7 @@ fn test_driver_uses_zed_adapter_when_only_zed_requested() {
 
 #[test]
 #[serial_test::serial]
-fn test_driver_uses_simple_file_adapter_when_only_amp_requested() {
+fn acquisition_runs_only_the_requested_amp_integration() {
     let temp_dir = tempfile::TempDir::new().unwrap();
 
     let amp_dir = temp_dir.path().join(".local/share/amp/threads");
@@ -5753,9 +5674,9 @@ fn test_driver_uses_simple_file_adapter_when_only_amp_requested() {
 
     write_single_opencode_sqlite_fixture(temp_dir.path());
 
-    let parsed = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["amp".to_string()]),
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Amp]),
         since: None,
         until: None,
         year: None,
@@ -5776,7 +5697,7 @@ fn test_driver_uses_simple_file_adapter_when_only_amp_requested() {
 
 #[test]
 #[serial_test::serial]
-fn test_driver_uses_custom_file_adapter_when_only_codebuff_requested() {
+fn acquisition_runs_only_the_requested_codebuff_integration() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let cache_home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(cache_home.path());
@@ -5802,9 +5723,9 @@ fn test_driver_uses_custom_file_adapter_when_only_codebuff_requested() {
 
     write_single_opencode_sqlite_fixture(temp_dir.path());
 
-    let parsed = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["codebuff".to_string()]),
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Codebuff]),
         since: None,
         until: None,
         year: None,
@@ -5825,7 +5746,7 @@ fn test_driver_uses_custom_file_adapter_when_only_codebuff_requested() {
 
 #[test]
 #[serial_test::serial]
-fn test_driver_uses_pi_and_omp_adapters_when_requested() {
+fn acquisition_runs_independent_pi_and_omp_integrations() {
     let temp_dir = tempfile::TempDir::new().unwrap();
 
     let pi_path = temp_dir
@@ -5838,9 +5759,9 @@ fn test_driver_uses_pi_and_omp_adapters_when_requested() {
         .join(".omp/agent/sessions/project/root-session");
     write_omp_parent_child_fixture(&omp_session_root);
 
-    let parsed = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["pi".to_string(), "omp".to_string()]),
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Pi, ClientId::Omp]),
         since: None,
         until: None,
         year: None,
@@ -5862,7 +5783,7 @@ fn test_driver_uses_pi_and_omp_adapters_when_requested() {
 
 #[test]
 #[serial_test::serial]
-fn test_driver_all_clients_includes_each_adapter_without_duplicate() {
+fn complete_acquisition_runs_each_integration_once() {
     let temp_dir = tempfile::TempDir::new().unwrap();
 
     let zed_threads_dir = temp_dir.path().join("zed-fixture/threads");
@@ -5874,9 +5795,9 @@ fn test_driver_all_clients_includes_each_adapter_without_duplicate() {
 
     write_single_opencode_sqlite_fixture(temp_dir.path());
 
-    let parsed = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(Vec::new()),
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: None,
         since: None,
         until: None,
         year: None,
@@ -5933,9 +5854,9 @@ fn test_local_message_loader_dedups_hermes_sessions_across_default_and_extra_dbs
 
     let mut extra_scan_paths = std::collections::BTreeMap::new();
     extra_scan_paths.insert("hermes".to_string(), vec![profile_db]);
-    let parsed = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["hermes".to_string()]),
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Hermes]),
         since: None,
         until: None,
         year: None,
@@ -6014,9 +5935,9 @@ fn test_local_message_loader_claude_filter_ignores_scanner_settings_opencode_db_
     .unwrap();
     drop(conn);
 
-    let parsed = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["claude".to_string()]),
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Claude]),
         since: None,
         until: None,
         year: None,
@@ -6072,9 +5993,9 @@ fn test_local_message_loader_claude_transcripts_count_only_usage_metadata() {
     )
     .unwrap();
 
-    let parsed = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["claude".to_string()]),
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Claude]),
         since: None,
         until: None,
         year: None,
@@ -6123,9 +6044,9 @@ fn test_local_message_loader_amp_reads_current_thread_files() {
     )
     .unwrap();
 
-    let parsed = load_local_messages_for_test(LocalParseOptions {
-        home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
-        clients: Some(vec!["amp".to_string()]),
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Amp]),
         since: None,
         until: None,
         year: None,

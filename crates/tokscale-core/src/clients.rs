@@ -1,7 +1,4 @@
 pub use crate::client_catalog::{ClientId, ClientIdentity, CLIENT_IDENTITIES};
-pub use crate::local_clients::{
-    cline_session_data_dir, warp_sqlite_roots, LocalClientDef, PathRoot, LOCAL_CLIENTS,
-};
 
 #[cfg(test)]
 mod tests {

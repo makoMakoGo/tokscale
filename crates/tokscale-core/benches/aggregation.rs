@@ -4,8 +4,8 @@ use codspeed_criterion_compat::{
 use std::collections::HashSet;
 use std::sync::OnceLock;
 use tokscale_core::{
-    aggregate_unified_messages, build_tui_accumulator, AggregationConfig, ClientId, DateRange,
-    GroupBy, TokenBreakdown, UnifiedMessage, ViewSet,
+    aggregate_unified_messages, build_usage_index, AggregationConfig, ClientId, DateRange, GroupBy,
+    TokenBreakdown, UnifiedMessage, ViewSet,
 };
 
 const MESSAGE_COUNT: usize = 100_000;
@@ -221,7 +221,7 @@ fn push_and_finish(messages: &[UnifiedMessage], views: ViewSet, group_by: GroupB
 
     let mut rows = 0usize;
     rows += views
-        .tui_usage
+        .usage
         .as_ref()
         .map(|usage| {
             let graph_days = usage
@@ -248,32 +248,37 @@ fn bench_aggregation_engine(c: &mut Criterion) {
     let cases = [
         (
             "tui_client_model",
-            ViewSet::TUI,
+            ViewSet::USAGE,
             GroupBy::ClientModel,
             Cardinality::Low,
         ),
-        ("tui_model", ViewSet::TUI, GroupBy::Model, Cardinality::Low),
+        (
+            "tui_model",
+            ViewSet::USAGE,
+            GroupBy::Model,
+            Cardinality::Low,
+        ),
         (
             "tui_workspace_model",
-            ViewSet::TUI,
+            ViewSet::USAGE,
             GroupBy::WorkspaceModel,
             Cardinality::Low,
         ),
         (
             "tui_client_provider_model",
-            ViewSet::TUI,
+            ViewSet::USAGE,
             GroupBy::ClientProviderModel,
             Cardinality::Low,
         ),
         (
             "tui_model_high_session_cardinality",
-            ViewSet::TUI,
+            ViewSet::USAGE,
             GroupBy::Model,
             Cardinality::High,
         ),
         (
             "tui_workspace_high_cardinality",
-            ViewSet::TUI,
+            ViewSet::USAGE,
             GroupBy::WorkspaceModel,
             Cardinality::High,
         ),
@@ -285,7 +290,7 @@ fn bench_aggregation_engine(c: &mut Criterion) {
             &(views, group_by, cardinality),
             |b, (views, group_by, cardinality)| {
                 let messages = benchmark_messages(*cardinality);
-                b.iter(|| black_box(push_and_finish(messages, *views, group_by.clone())));
+                b.iter(|| black_box(push_and_finish(messages, *views, *group_by)));
             },
         );
     }
@@ -315,7 +320,7 @@ fn bench_tui_accumulator_build(c: &mut Criterion) {
             |b, messages| {
                 b.iter_batched(
                     || (),
-                    |_| build_tui_accumulator(black_box(*messages), DateRange::none()),
+                    |_| build_usage_index(black_box(*messages), DateRange::none()),
                     BatchSize::PerIteration,
                 );
             },
@@ -362,7 +367,7 @@ fn bench_tui_accumulator_project(c: &mut Criterion) {
             BenchmarkId::from_parameter(name),
             &(messages, group_by),
             |b, (messages, group_by)| {
-                let accumulator = build_tui_accumulator(messages, DateRange::none());
+                let accumulator = build_usage_index(messages, DateRange::none());
                 b.iter_batched(
                     || (),
                     |_| accumulator.project(black_box(group_by)),
@@ -392,7 +397,7 @@ fn bench_tui_accumulator_project_for_clients(c: &mut Criterion) {
             BenchmarkId::from_parameter(name),
             &selected,
             |b, selected| {
-                let accumulator = build_tui_accumulator(messages, DateRange::none());
+                let accumulator = build_usage_index(messages, DateRange::none());
                 b.iter_batched(
                     || (),
                     |_| accumulator.project_for_clients(&GroupBy::Model, black_box(selected)),
@@ -442,8 +447,7 @@ fn bench_tui_accumulator_lifecycle(c: &mut Criterion) {
                 b.iter_batched(
                     || (),
                     |_| {
-                        let accumulator =
-                            build_tui_accumulator(black_box(messages), DateRange::none());
+                        let accumulator = build_usage_index(black_box(messages), DateRange::none());
                         let mut projections = Vec::with_capacity(switches.len() + 1);
                         projections.push(accumulator.project(&GroupBy::Model));
                         for group_by in *switches {

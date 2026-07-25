@@ -120,7 +120,7 @@ pub(crate) fn bar_row(app: &App, row: &ProfileBarRow, width: usize) -> Line<'sta
 
 /// Builds the shared profile heading and all-data summary. View-specific
 /// renderers provide only their activity count and date projection; global
-/// token and cost totals always come from the authoritative `UsageData`.
+/// token and cost totals always come from the authoritative `UsageView`.
 pub(crate) fn summary_lines<I>(
     app: &App,
     dates: I,
@@ -236,7 +236,7 @@ mod tests {
             refresh: 0,
             no_refresh: false,
             home_dir: None,
-            clients: None,
+            client_universe: tokscale_core::ClientUniverse::all(),
             since: None,
             until: None,
             year: None,

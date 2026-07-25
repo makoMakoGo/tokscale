@@ -13,6 +13,7 @@ use crate::tui::app::App;
 use crate::tui::data::OverviewSummary;
 use crate::tui::model_family::ModelFamily;
 use crate::tui::presentation::EmptySubject;
+use tokscale_core::ClientId;
 
 const THREE_COLUMN_MIN_WIDTH: u16 = 110;
 const TWO_COLUMN_MIN_WIDTH: u16 = 80;
@@ -232,7 +233,7 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
         .map(|favorite| {
             favorite_client_block(
                 app,
-                &favorite.id,
+                favorite.client,
                 favorite.tokens,
                 favorite.cost,
                 total,
@@ -299,23 +300,23 @@ fn render_fun_things(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSu
 
 fn favorite_client_block(
     app: &App,
-    client_id: &str,
+    client: ClientId,
     tokens: u64,
     cost: f64,
     total: u64,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let color = app.client_color(client_id);
+    let color = app.client_color(client);
     vec![
         Line::default(),
         Line::from(Span::styled(
             "Favorite Client",
             Style::default().fg(app.theme.text.secondary),
         )),
-        centered_identity_slogan_line(client_slogan(client_id), color, width),
+        centered_identity_slogan_line(client_slogan(client), color, width),
         centered_identity_usage_line(
             app,
-            get_client_display_name(client_id),
+            get_client_display_name(client),
             tokens,
             cost,
             total,
@@ -427,27 +428,13 @@ fn center_line(line: Line<'static>, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Client slogans, keyed off the raw client id.
-fn client_slogan(client_id: &str) -> &'static str {
-    let key = client_id.to_ascii_lowercase();
-    if key == "pi" || key.contains("claude") {
-        "最一流的品味"
-    } else if key.contains("kimi")
-        || key.contains("codex")
-        || key.contains("omp")
-        || key.contains("droid")
-    {
-        "顶级玩家"
-    } else if key.contains("antigravity")
-        || key.contains("copilot")
-        || key.contains("kiro")
-        || key.contains("gemini")
-    {
-        "你拉完了"
-    } else if key.contains("warp") {
-        "口味人上人"
-    } else {
-        "无知的NPC"
+fn client_slogan(client: ClientId) -> &'static str {
+    match client {
+        ClientId::Pi | ClientId::Claude => "最一流的品味",
+        ClientId::Kimi | ClientId::Codex | ClientId::Omp | ClientId::Droid => "顶级玩家",
+        ClientId::Antigravity | ClientId::Copilot | ClientId::Kiro | ClientId::Gemini => "你拉完了",
+        ClientId::Warp => "口味人上人",
+        _ => "无知的NPC",
     }
 }
 
@@ -644,7 +631,7 @@ fn left_lines(
     let favorite_client = data
         .favorite_client
         .as_ref()
-        .map(|favorite| get_client_display_name(&favorite.id))
+        .map(|favorite| get_client_display_name(favorite.client))
         .unwrap_or_else(|| "—".to_string());
     let favorite_width = width.saturating_sub(METRIC_LABEL_WIDTH).clamp(1, 28);
 
@@ -720,7 +707,7 @@ fn left_lines(
                 truncate(&favorite_client, favorite_width),
                 data.favorite_client
                     .as_ref()
-                    .map(|favorite| app.client_color(&favorite.id))
+                    .map(|favorite| app.client_color(favorite.client))
                     .unwrap_or(app.theme.text.primary),
             ),
         ],
@@ -813,13 +800,13 @@ mod tests {
     use std::collections::{BTreeMap, HashSet};
 
     use super::*;
-    use crate::tui::app::{ProjectionBackend, TuiConfig};
+    use crate::tui::app::TuiConfig;
     use crate::tui::data::{
-        DailyClientInfo, DailyModelInfo, DailyUsage, TokenBreakdown, UsageData,
+        DailyClientInfo, DailyModelInfo, DailyUsage, UsageTokenBreakdown, UsageView,
     };
     use chrono::NaiveDate;
     use ratatui::{backend::TestBackend, Terminal};
-    use tokscale_core::{ClientId, TuiSessionEntry};
+    use tokscale_core::{ClientId, SessionUsage};
     use unicode_width::UnicodeWidthStr;
 
     fn make_app(width: u16) -> App {
@@ -832,7 +819,7 @@ mod tests {
             refresh: 0,
             no_refresh: false,
             home_dir: None,
-            clients: None,
+            client_universe: tokscale_core::ClientUniverse::all(),
             since: None,
             until: None,
             year: None,
@@ -843,10 +830,10 @@ mod tests {
         app
     }
 
-    fn install_favorite_client(app: &mut App, client_id: &str) {
-        let tokens = TokenBreakdown {
+    fn install_favorite_client(app: &mut App, client: ClientId) {
+        let tokens = UsageTokenBreakdown {
             input: 10_000,
-            ..TokenBreakdown::default()
+            ..UsageTokenBreakdown::default()
         };
         let model = DailyModelInfo {
             provider: "openai".to_string(),
@@ -858,7 +845,7 @@ mod tests {
             cost: 1.0,
             messages: 1,
         };
-        let client = DailyClientInfo {
+        let client_usage = DailyClientInfo {
             tokens: tokens.clone(),
             cost: 1.0,
             models: BTreeMap::from([("gpt-5.4".to_string(), model)]),
@@ -867,13 +854,13 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2026, 7, 16).unwrap(),
             tokens,
             cost: 1.0,
-            client_breakdown: BTreeMap::from([(client_id.to_string(), client)]),
+            client_breakdown: BTreeMap::from([(client, client_usage)]),
             message_count: 1,
             turn_count: 1,
         };
-        app.update_data(UsageData {
+        app.update_data(UsageView {
             daily: vec![day],
-            ..UsageData::default()
+            ..UsageView::default()
         });
     }
 
@@ -882,7 +869,7 @@ mod tests {
         let width = 60;
         let height = 30;
         let mut app = make_app(width);
-        install_favorite_client(&mut app, "omp");
+        install_favorite_client(&mut app, ClientId::Omp);
         let expected = portraits::family_color(&app, ModelFamily::Gpt);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
@@ -1052,8 +1039,8 @@ mod tests {
         let width = 60;
         let height = 30;
         let mut app = make_app(width);
-        install_favorite_client(&mut app, "omp");
-        let expected = app.client_color("omp");
+        install_favorite_client(&mut app, ClientId::Omp);
+        let expected = app.client_color(ClientId::Omp);
         assert_ne!(expected, app.theme.text.primary);
         assert_ne!(expected, app.theme.visualization.artwork);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -1080,8 +1067,8 @@ mod tests {
         let width = 30;
         let height = 50;
         let mut app = make_app(width);
-        install_favorite_client(&mut app, "codex");
-        let expected = app.client_color("codex");
+        install_favorite_client(&mut app, ClientId::Codex);
+        let expected = app.client_color(ClientId::Codex);
         assert_ne!(expected, app.theme.text.primary);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
@@ -1288,29 +1275,30 @@ mod tests {
     #[test]
     fn snapshot_session_count_follows_the_selected_clients() {
         let mut app = make_app(60);
-        let main_session = |client: &str, session_id: &str| TuiSessionEntry {
-            client: client.to_string(),
-            session_id: session_id.to_string(),
+        app.client_universe =
+            tokscale_core::ClientUniverse::new([ClientId::Claude, ClientId::Codex]).unwrap();
+        let clients = app.client_universe.as_hash_set();
+        *app.selected_clients.borrow_mut() = clients.clone();
+        app.data_clients = clients;
+        let main_session = |client: ClientId, session_id: &str| SessionUsage {
             is_main_session: true,
-            ..TuiSessionEntry::default()
+            ..SessionUsage::new(client, session_id)
         };
-        app.install_tui_snapshot(
-            crate::tui::data::UsageData::default(),
+        app.install_generation_fixture(
+            tokscale_core::UsageIndex::new(),
             vec![
-                main_session("claude", "claude-main"),
-                main_session("codex", "codex-main-1"),
-                main_session("codex", "codex-main-2"),
+                main_session(ClientId::Claude, "claude-main"),
+                main_session(ClientId::Codex, "codex-main-1"),
+                main_session(ClientId::Codex, "codex-main-2"),
             ],
             Default::default(),
-            ProjectionBackend::Memory(tokscale_core::TuiAcc::new()),
-            tokscale_core::GroupBy::ClientModel,
         );
 
         assert_eq!(app.session_snapshot.client_summaries().len(), 2);
         assert_eq!(app.overview_summary().main_session_count, 3);
 
         *app.selected_clients.borrow_mut() = HashSet::from([ClientId::Claude]);
-        app.update_data(crate::tui::data::UsageData::default());
+        app.update_data(crate::tui::data::UsageView::default());
 
         assert_eq!(app.session_snapshot.client_summaries().len(), 2);
         assert_eq!(app.overview_summary().main_session_count, 1);

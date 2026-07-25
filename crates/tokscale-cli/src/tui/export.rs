@@ -2,10 +2,10 @@ use anyhow::Result;
 use serde_json::json;
 use tokscale_core::GroupBy;
 
-use super::data::UsageData;
+use super::data::UsageView;
 
 /// Canonical headless representation of the TUI Models projection.
-pub(crate) fn build_models_export_value(data: &UsageData, group_by: &GroupBy) -> serde_json::Value {
+pub(crate) fn build_models_export_value(data: &UsageView, group_by: &GroupBy) -> serde_json::Value {
     json!({
         "groupBy": group_by.to_string(),
         "models": data.models.iter().map(|m| {
@@ -13,7 +13,7 @@ pub(crate) fn build_models_export_value(data: &UsageData, group_by: &GroupBy) ->
                 "modelId": m.model_id,
                 "displayName": m.display_name,
                 "provider": m.provider,
-                "client": m.client,
+                "clients": m.clients,
                 "tokens": {
                     "input": m.tokens.input,
                     "output": m.tokens.output,
@@ -45,10 +45,10 @@ pub(crate) fn build_models_export_value(data: &UsageData, group_by: &GroupBy) ->
     })
 }
 
-/// Serializes `UsageData` into the pretty-printed JSON payload used by the
+/// Serializes `UsageView` into the pretty-printed JSON payload used by the
 /// `e` export hotkey. Pure: callers are responsible for file I/O and any
 /// user-facing status messages.
-pub fn build_export_json(data: &UsageData, group_by: &GroupBy) -> Result<String> {
+pub fn build_export_json(data: &UsageView, group_by: &GroupBy) -> Result<String> {
     let mut export_data = build_models_export_value(data, group_by);
     let export = export_data
         .as_object_mut()
@@ -104,20 +104,20 @@ pub fn build_export_json(data: &UsageData, group_by: &GroupBy) -> Result<String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::data::{AgentUsage, DailyUsage, ModelUsage, TokenBreakdown};
+    use crate::tui::data::{AgentEntry, DailyUsage, UsageModelEntry, UsageTokenBreakdown};
     use chrono::NaiveDate;
     use std::collections::BTreeMap;
 
     #[test]
     fn exported_report_keeps_degraded_input_health() {
-        let mut data = UsageData::default();
+        let mut data = UsageView::default();
         data.health.complete = false;
         data.health.degraded_inputs = 1;
         data.health.rejected_records = 2;
         data.health.failed_inputs = 1;
-        data.health.issues = vec![tokscale_core::input_health::HealthIssueReport {
+        data.health.issues = vec![tokscale_core::input_health::HealthIssue {
             level: "warning".to_string(),
-            client: "zed".to_string(),
+            client: tokscale_core::ClientId::Zed,
             issue: "missing-model".to_string(),
             affected_inputs: 1,
             rejected_records: Some(2),
@@ -137,12 +137,12 @@ mod tests {
         assert!(json["health"].get("sources").is_none());
     }
 
-    fn model_entry(workspace_key: Option<&str>, workspace_label: Option<&str>) -> ModelUsage {
-        ModelUsage {
+    fn model_entry(workspace_key: Option<&str>, workspace_label: Option<&str>) -> UsageModelEntry {
+        UsageModelEntry {
             model_id: "claude-sonnet-4.5".to_string(),
             display_name: "Claude Sonnet 4.5".to_string(),
             provider: "anthropic".to_string(),
-            client: "claude".to_string(),
+            clients: vec![tokscale_core::ClientId::Claude],
             workspace_key: workspace_key.map(str::to_string),
             workspace_label: workspace_label.map(str::to_string),
             tokens: Default::default(),
@@ -153,12 +153,12 @@ mod tests {
 
     #[test]
     fn exported_report_carries_group_by_and_workspace_fields() {
-        let data = UsageData {
+        let data = UsageView {
             models: vec![
                 model_entry(Some("/repo-a"), Some("repo-a")),
                 model_entry(None, Some("Unknown workspace")),
             ],
-            ..UsageData::default()
+            ..UsageView::default()
         };
 
         let json: serde_json::Value =
@@ -177,9 +177,9 @@ mod tests {
 
     #[test]
     fn exported_report_omits_workspace_fields_outside_workspace_grouping() {
-        let data = UsageData {
+        let data = UsageView {
             models: vec![model_entry(Some("/repo-a"), Some("repo-a"))],
-            ..UsageData::default()
+            ..UsageView::default()
         };
 
         let json: serde_json::Value =
@@ -192,16 +192,16 @@ mod tests {
 
     #[test]
     fn exported_agent_and_daily_tokens_include_reasoning() {
-        let tokens = TokenBreakdown {
+        let tokens = UsageTokenBreakdown {
             input: 10,
             output: 5,
             reasoning: 3,
             ..Default::default()
         };
-        let data = UsageData {
-            agents: vec![AgentUsage {
+        let data = UsageView {
+            agents: vec![AgentEntry {
                 agent: "Builder".to_string(),
-                client: "opencode".to_string(),
+                client: tokscale_core::ClientId::OpenCode,
                 tokens: tokens.clone(),
                 cost: 0.0,
                 message_count: 1,
@@ -215,7 +215,7 @@ mod tests {
                 message_count: 1,
                 turn_count: 1,
             }],
-            ..UsageData::default()
+            ..UsageView::default()
         };
 
         let json: serde_json::Value =

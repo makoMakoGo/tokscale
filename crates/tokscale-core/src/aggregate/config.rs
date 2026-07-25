@@ -23,15 +23,6 @@ impl DateRange {
         self.year.is_none() && self.since.is_none() && self.until.is_none()
     }
 
-    /// Build from the raw `ReportOptions` date fields.
-    pub fn from_options(opts: &crate::ReportOptions) -> Self {
-        Self {
-            since: opts.since.clone(),
-            until: opts.until.clone(),
-            year: opts.year.clone(),
-        }
-    }
-
     /// True iff `date` (a `%Y-%m-%d` string from `date_string()`) passes the
     /// filter. Identical predicate to `retain_messages_in_date_range`.
     pub fn contains(&self, date: &str) -> bool {
@@ -59,8 +50,8 @@ impl DateRange {
 pub struct ViewSet(u8);
 
 impl ViewSet {
-    pub const TUI: ViewSet = ViewSet(0b0000_0001);
-    pub const TUI_SESSIONS: ViewSet = ViewSet(0b0000_0010);
+    pub const USAGE: ViewSet = ViewSet(0b0000_0001);
+    pub const SESSIONS: ViewSet = ViewSet(0b0000_0010);
 
     /// True iff every bit set in `other` is also set in `self`.
     pub fn contains(self, other: ViewSet) -> bool {

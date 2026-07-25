@@ -139,10 +139,10 @@ fn empty_subject(app: &App, state: &ViewState) -> Option<EmptySubject> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::{ProjectionBackend, TuiConfig};
+    use crate::tui::app::TuiConfig;
     use crate::tui::settings::Settings;
     use tokscale_core::{
-        build_tui_accumulator, ClientId, DateRange, GroupBy, TokenBreakdown, TuiAcc, UnifiedMessage,
+        build_usage_index, ClientId, DateRange, TokenBreakdown, UnifiedMessage, UsageIndex,
     };
 
     fn app(tab: Tab, installed: bool) -> App {
@@ -156,7 +156,7 @@ mod tests {
                 refresh: 0,
                 no_refresh: false,
                 home_dir: None,
-                clients: None,
+                client_universe: tokscale_core::ClientUniverse::all(),
                 since: None,
                 until: None,
                 year: None,
@@ -168,24 +168,17 @@ mod tests {
         .expect("test app initializes");
 
         if installed {
-            install_generation(&mut app, TuiAcc::default());
+            install_generation(&mut app, UsageIndex::default());
         }
         app
     }
 
-    fn install_generation(app: &mut App, accumulator: TuiAcc) {
-        let data = accumulator.project(&GroupBy::Model);
-        app.install_tui_snapshot(
-            data,
-            Vec::new(),
-            Default::default(),
-            ProjectionBackend::Memory(accumulator),
-            GroupBy::Model,
-        );
+    fn install_generation(app: &mut App, accumulator: UsageIndex) {
+        app.install_generation_fixture(accumulator, Vec::new(), Default::default());
     }
 
-    fn populated_accumulator() -> TuiAcc {
-        build_tui_accumulator(
+    fn populated_accumulator() -> UsageIndex {
+        build_usage_index(
             &[UnifiedMessage::new(
                 ClientId::Codex,
                 "gpt-5",

@@ -2,8 +2,9 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use super::{TokenBreakdown, UsageData};
+use super::{UsageTokenBreakdown, UsageView};
 use crate::tui::model_family::ModelFamily;
+use tokscale_core::ClientId;
 
 /// Cache-token share rounded to the one decimal place shown by Overview.
 ///
@@ -50,6 +51,13 @@ pub(crate) struct RankedUsage {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct RankedClientUsage {
+    pub(crate) client: ClientId,
+    pub(crate) tokens: u64,
+    pub(crate) cost: f64,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct RankedFamilyUsage {
     pub(crate) family: ModelFamily,
     pub(crate) tokens: u64,
@@ -58,11 +66,11 @@ pub(crate) struct RankedFamilyUsage {
 
 /// Stable, theme-independent data consumed by the Overview snapshot.
 ///
-/// The summary is rebuilt only when the installed report projection changes;
+/// The summary is rebuilt only when the installed usage projection changes;
 /// terminal ticks, resizes, and theme changes never need to fold daily usage.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OverviewSummary {
-    pub(crate) tokens: TokenBreakdown,
+    pub(crate) tokens: UsageTokenBreakdown,
     pub(crate) cache_rate: CacheRate,
     pub(crate) active_days: usize,
     pub(crate) peak_daily_tokens: u64,
@@ -71,18 +79,18 @@ pub(crate) struct OverviewSummary {
     pub(crate) client_count: usize,
     pub(crate) main_session_count: usize,
     pub(crate) favorite_model: Option<RankedUsage>,
-    pub(crate) favorite_client: Option<RankedUsage>,
+    pub(crate) favorite_client: Option<RankedClientUsage>,
     pub(crate) favorite_family: Option<RankedFamilyUsage>,
 }
 
 impl OverviewSummary {
-    pub(crate) fn derive(data: &UsageData, main_session_count: usize) -> Self {
+    pub(crate) fn derive(data: &UsageView, main_session_count: usize) -> Self {
         let mut summary = Self {
             main_session_count,
             ..Self::default()
         };
         let mut models = BTreeMap::<String, Aggregate>::new();
-        let mut clients = BTreeMap::<String, Aggregate>::new();
+        let mut clients = BTreeMap::<ClientId, Aggregate>::new();
         let mut families = BTreeMap::<ModelFamily, Aggregate>::new();
 
         for day in &data.daily {
@@ -101,7 +109,7 @@ impl OverviewSummary {
 
             for (client_id, client) in &day.client_breakdown {
                 clients
-                    .entry(client_id.clone())
+                    .entry(*client_id)
                     .or_default()
                     .add(client.tokens.total(), client.cost);
 
@@ -124,7 +132,7 @@ impl OverviewSummary {
         summary.cache_rate =
             CacheRate::from_tokens(summary.tokens.cache_read, summary.tokens.total());
         summary.favorite_model = favorite_named(models);
-        summary.favorite_client = favorite_named(clients);
+        summary.favorite_client = favorite_client(clients);
         summary.favorite_family = favorite_family(families);
         summary
     }
@@ -168,6 +176,17 @@ fn favorite_named(entries: BTreeMap<String, Aggregate>) -> Option<RankedUsage> {
         })
 }
 
+fn favorite_client(entries: BTreeMap<ClientId, Aggregate>) -> Option<RankedClientUsage> {
+    entries
+        .into_iter()
+        .max_by(|(left_id, left), (right_id, right)| compare_rank(left_id, left, right_id, right))
+        .map(|(client, aggregate)| RankedClientUsage {
+            client,
+            tokens: aggregate.tokens,
+            cost: aggregate.cost,
+        })
+}
+
 fn favorite_family(entries: BTreeMap<ModelFamily, Aggregate>) -> Option<RankedFamilyUsage> {
     entries
         .into_iter()
@@ -187,33 +206,33 @@ mod tests {
     use crate::tui::data::{DailyClientInfo, DailyModelInfo, DailyUsage};
     use chrono::NaiveDate;
 
-    type TestModel<'a> = (&'a str, TokenBreakdown, f64);
+    type TestModel<'a> = (&'a str, UsageTokenBreakdown, f64);
     type TestClient<'a> = (&'a str, Vec<TestModel<'a>>);
 
-    fn tokens(input: u64) -> TokenBreakdown {
-        TokenBreakdown {
+    fn tokens(input: u64) -> UsageTokenBreakdown {
+        UsageTokenBreakdown {
             input,
-            ..TokenBreakdown::default()
+            ..UsageTokenBreakdown::default()
         }
     }
 
-    fn cached_tokens(input: u64, cache_read: u64, cache_write: u64) -> TokenBreakdown {
-        TokenBreakdown {
+    fn cached_tokens(input: u64, cache_read: u64, cache_write: u64) -> UsageTokenBreakdown {
+        UsageTokenBreakdown {
             input,
             cache_read,
             cache_write,
-            ..TokenBreakdown::default()
+            ..UsageTokenBreakdown::default()
         }
     }
 
     fn day(date: &str, clients: Vec<TestClient<'_>>) -> DailyUsage {
         let mut client_breakdown = BTreeMap::new();
-        let mut day_tokens = TokenBreakdown::default();
+        let mut day_tokens = UsageTokenBreakdown::default();
         let mut day_cost = 0.0;
 
         for (client_id, models) in clients {
             let mut client_models = BTreeMap::new();
-            let mut client_tokens = TokenBreakdown::default();
+            let mut client_tokens = UsageTokenBreakdown::default();
             let mut client_cost = 0.0;
             for (model_id, model_tokens, cost) in models {
                 client_tokens = client_tokens
@@ -241,7 +260,7 @@ mod tests {
                 );
             }
             client_breakdown.insert(
-                client_id.to_string(),
+                ClientId::from_str(client_id).expect("test client must be accepted"),
                 DailyClientInfo {
                     tokens: client_tokens,
                     cost: client_cost,
@@ -262,7 +281,7 @@ mod tests {
 
     #[test]
     fn derives_stable_overview_metrics_and_rankings() {
-        let data = UsageData {
+        let data = UsageView {
             daily: vec![
                 day(
                     "2026-07-20",
@@ -280,7 +299,7 @@ mod tests {
                 ),
                 day("2026-07-22", Vec::new()),
             ],
-            ..UsageData::default()
+            ..UsageView::default()
         };
 
         let summary = OverviewSummary::derive(&data, 7);
@@ -300,7 +319,7 @@ mod tests {
         assert_eq!(model.cost, 5.0);
 
         let client = summary.favorite_client.unwrap();
-        assert_eq!(client.id, "codex");
+        assert_eq!(client.client, ClientId::Codex);
         assert_eq!(client.tokens, 200);
 
         let family = summary.favorite_family.unwrap();

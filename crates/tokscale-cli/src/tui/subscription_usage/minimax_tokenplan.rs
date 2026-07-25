@@ -180,24 +180,19 @@ fn output_from_response(site: &Site, resp: ApiResponse) -> Result<UsageOutput> {
     })
 }
 
-fn fetch_site(site: &Site) -> Result<UsageOutput> {
+async fn fetch_site(site: &Site) -> Result<UsageOutput> {
     let key = read_key(site).ok_or_else(|| anyhow::anyhow!("No {} set.", site.key_env))?;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let client = reqwest::Client::new();
-        let resp = fetch_site_api(&client, site, &key).await?;
-        output_from_response(site, resp)
-    })
+    let client = reqwest::Client::new();
+    let resp = fetch_site_api(&client, site, &key).await?;
+    output_from_response(site, resp)
 }
 
-pub fn fetch_cn() -> Result<UsageOutput> {
-    fetch_site(&CN_SITE)
+pub async fn fetch_cn() -> Result<UsageOutput> {
+    fetch_site(&CN_SITE).await
 }
 
-pub fn fetch_global() -> Result<UsageOutput> {
-    fetch_site(&GLOBAL_SITE)
+pub async fn fetch_global() -> Result<UsageOutput> {
+    fetch_site(&GLOBAL_SITE).await
 }
 
 #[cfg(test)]

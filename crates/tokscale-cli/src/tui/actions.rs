@@ -245,13 +245,13 @@ mod tests {
 
     use chrono::{NaiveDate, NaiveDateTime};
     use crossterm::event::KeyModifiers;
-    use tokscale_core::{ClientId, GroupBy, InputFootprint, TuiAcc, TuiSessionEntry};
+    use tokscale_core::{ClientId, InputFootprint, SessionUsage, UsageIndex};
 
     use super::*;
-    use crate::tui::app::{ProjectionBackend, SortDirection, TuiConfig};
+    use crate::tui::app::{SortDirection, TuiConfig};
     use crate::tui::data::{
-        ContributionDay, ContributionGrade, DailyClientInfo, DailyModelInfo, DailyUsage, GraphData,
-        HourlyModelInfo, HourlyUsage, TokenBreakdown,
+        ContributionDay, ContributionGrade, DailyClientInfo, DailyModelInfo, DailyUsage,
+        HourlyModelInfo, HourlyUsage, UsageGraphData, UsageTokenBreakdown,
     };
     use crate::tui::session_data::SessionSnapshot;
     use crate::tui::settings::Settings;
@@ -262,7 +262,7 @@ mod tests {
             refresh: 0,
             no_refresh: false,
             home_dir: None,
-            clients: None,
+            client_universe: tokscale_core::ClientUniverse::all(),
             since: None,
             until: None,
             year: None,
@@ -274,14 +274,10 @@ mod tests {
         };
         let mut app = App::new_with_cached_data_and_settings(config, None, settings).unwrap();
         if installed {
-            let accumulator = TuiAcc::default();
-            let data = accumulator.project(&GroupBy::Model);
-            app.install_tui_snapshot(
-                data,
+            app.install_generation_fixture(
+                UsageIndex::default(),
                 Vec::new(),
                 InputFootprint::default(),
-                ProjectionBackend::Memory(accumulator),
-                GroupBy::Model,
             );
         } else {
             app.data.error = Some("scan failed".to_string());
@@ -290,9 +286,9 @@ mod tests {
     }
 
     fn day() -> DailyUsage {
-        let tokens = TokenBreakdown {
+        let tokens = UsageTokenBreakdown {
             input: 1,
-            ..TokenBreakdown::default()
+            ..UsageTokenBreakdown::default()
         };
         let model = DailyModelInfo {
             provider: "openai".to_string(),
@@ -309,7 +305,7 @@ mod tests {
             tokens: tokens.clone(),
             cost: 0.0,
             client_breakdown: BTreeMap::from([(
-                "codex".to_string(),
+                ClientId::Codex,
                 DailyClientInfo {
                     tokens,
                     cost: 0.0,
@@ -322,9 +318,9 @@ mod tests {
     }
 
     fn hourly() -> HourlyUsage {
-        let tokens = TokenBreakdown {
+        let tokens = UsageTokenBreakdown {
             input: 1,
-            ..TokenBreakdown::default()
+            ..UsageTokenBreakdown::default()
         };
         HourlyUsage {
             datetime: NaiveDateTime::new(
@@ -333,7 +329,7 @@ mod tests {
             ),
             tokens: tokens.clone(),
             cost: 0.0,
-            clients: BTreeSet::from(["codex".to_string()]),
+            clients: BTreeSet::from([ClientId::Codex]),
             models: BTreeMap::from([(
                 "gpt-5".to_string(),
                 HourlyModelInfo {
@@ -393,9 +389,8 @@ mod tests {
     }
 
     #[test]
-    fn metadata_and_session_empty_views_keep_whole_report_export() {
+    fn empty_agent_metadata_keeps_generation_export() {
         assert_installed_empty_actions(Tab::Agents);
-        assert_installed_empty_actions(Tab::Sessions);
     }
 
     #[test]
@@ -475,7 +470,7 @@ mod tests {
         assert!(daily_set.contains(Action::OpenDetails));
         assert!(daily_set.contains(Action::Export));
 
-        daily.data.graph = GraphData {
+        daily.data.graph = UsageGraphData {
             weeks: vec![vec![Some(ContributionDay {
                 date: NaiveDate::from_ymd_opt(2026, 7, 22).unwrap(),
                 tokens: 0,
@@ -511,11 +506,7 @@ mod tests {
     fn sessions_with_rows_exposes_list_actions() {
         let mut app = make_app(Tab::Sessions, true);
         app.session_snapshot = SessionSnapshot::new(
-            vec![TuiSessionEntry {
-                client: "codex".to_string(),
-                session_id: "session-1".to_string(),
-                ..TuiSessionEntry::default()
-            }],
+            vec![SessionUsage::new(ClientId::Codex, "session-1")],
             tokscale_core::InputFootprint::default(),
         );
         let set = action_set(&app, &ViewState::default());
@@ -530,11 +521,7 @@ mod tests {
     fn session_detail_action_follows_the_selected_row_in_sort_order() {
         let mut app = make_app(Tab::Sessions, true);
         app.session_snapshot = SessionSnapshot::new(
-            vec![TuiSessionEntry {
-                client: "claude".to_string(),
-                session_id: "session-1".to_string(),
-                ..TuiSessionEntry::default()
-            }],
+            vec![SessionUsage::new(ClientId::Claude, "session-1")],
             tokscale_core::InputFootprint::from_client_bytes([(ClientId::Codex, 0)]).unwrap(),
         );
         app.sort_field = SortField::Tokens;

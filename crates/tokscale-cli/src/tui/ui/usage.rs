@@ -240,7 +240,7 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
 mod tests {
     use super::*;
     use crate::tui::app::{Tab, TuiConfig};
-    use crate::tui::data::UsageData;
+    use crate::tui::data::UsageView;
     use crate::tui::settings::Settings;
     use crate::tui::subscription_usage::{UsageAccount, UsageMetric, UsageProviderId};
     use crate::tui::themes::{Theme, ThemeName};
@@ -252,7 +252,7 @@ mod tests {
             refresh: 0,
             no_refresh: false,
             home_dir: None,
-            clients: None,
+            client_universe: tokscale_core::ClientUniverse::all(),
             since: None,
             until: None,
             year: None,
@@ -263,7 +263,7 @@ mod tests {
             ..Settings::default()
         };
         let mut app =
-            App::new_with_cached_data_and_settings(config, Some(UsageData::default()), settings)
+            App::new_with_cached_data_and_settings(config, Some(UsageView::default()), settings)
                 .unwrap();
         app.current_tab = Tab::Usage;
         app.set_subscription_provider_ids_for_test(Vec::new());

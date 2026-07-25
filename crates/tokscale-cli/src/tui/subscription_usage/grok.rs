@@ -299,18 +299,13 @@ fn usage_output(credentials: &Credentials, response: BillingConfigResponse) -> R
     })
 }
 
-pub fn fetch() -> Result<UsageOutput> {
+pub async fn fetch() -> Result<UsageOutput> {
     let credentials = read_credentials()?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
         .build()?;
-    runtime.block_on(async {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()?;
-        let response = fetch_billing(&client, &credentials).await?;
-        usage_output(&credentials, response)
-    })
+    let response = fetch_billing(&client, &credentials).await?;
+    usage_output(&credentials, response)
 }
 
 #[cfg(test)]

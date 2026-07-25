@@ -15,6 +15,7 @@ use super::widgets::{
 use crate::tui::actions::ActionSet;
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 use crate::tui::presentation::EmptySubject;
+use tokscale_core::ClientId;
 
 const HOUR_WIDTH: u16 = 7;
 const CLIENT_MIN_WIDTH: u16 = 8;
@@ -431,9 +432,9 @@ fn render_table(
     }
 }
 
-fn hourly_client_text<'a>(clients: impl Iterator<Item = &'a String>) -> String {
+fn hourly_client_text<'a>(clients: impl Iterator<Item = &'a ClientId>) -> String {
     let mut labels: Vec<String> = clients
-        .map(|client| get_client_display_name(client))
+        .map(|client| get_client_display_name(*client))
         .collect();
     labels.sort();
     labels.join(", ")
@@ -443,7 +444,7 @@ fn hourly_client_text<'a>(clients: impl Iterator<Item = &'a String>) -> String {
 mod tests {
     use super::*;
     use crate::tui::app::{Tab, TuiConfig};
-    use crate::tui::data::{HourlyModelInfo, HourlyUsage, TokenBreakdown};
+    use crate::tui::data::{HourlyModelInfo, HourlyUsage, UsageTokenBreakdown};
     use ratatui::{backend::TestBackend, Terminal};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -456,10 +457,10 @@ mod tests {
 
     fn hour(date: NaiveDate, h: u32) -> HourlyUsage {
         let mut clients = BTreeSet::new();
-        clients.insert("claude".to_string());
+        clients.insert(ClientId::Claude);
         HourlyUsage {
             datetime: date.and_hms_opt(h, 0, 0).unwrap(),
-            tokens: TokenBreakdown::default(),
+            tokens: UsageTokenBreakdown::default(),
             cost: 1.0,
             clients,
             models: BTreeMap::new(),
@@ -474,7 +475,7 @@ mod tests {
             refresh: 0,
             no_refresh: false,
             home_dir: None,
-            clients: None,
+            client_universe: tokscale_core::ClientUniverse::all(),
             since: None,
             until: None,
             year: None,
@@ -622,7 +623,7 @@ mod tests {
     fn rendered_output_includes_reasoning_once() {
         let mut app = make_hourly_app(180);
         app.data.hourly.truncate(1);
-        app.data.hourly[0].tokens = TokenBreakdown {
+        app.data.hourly[0].tokens = UsageTokenBreakdown {
             input: 100,
             output: 25,
             cache_read: 10,
@@ -672,9 +673,9 @@ mod tests {
             provider: provider.to_string(),
             model_id: model_id.to_string(),
             display_name: model_id.to_string(),
-            tokens: TokenBreakdown {
+            tokens: UsageTokenBreakdown {
                 input: tokens,
-                ..TokenBreakdown::default()
+                ..UsageTokenBreakdown::default()
             },
             cost: 1.0,
         }
@@ -682,9 +683,9 @@ mod tests {
 
     fn grouped_hour(models: Vec<(&str, HourlyModelInfo)>) -> HourlyUsage {
         let mut entry = hour(NaiveDate::from_ymd_opt(2026, 5, 29).unwrap(), 14);
-        entry.tokens = TokenBreakdown {
+        entry.tokens = UsageTokenBreakdown {
             input: 100,
-            ..TokenBreakdown::default()
+            ..UsageTokenBreakdown::default()
         };
         entry.models = models
             .into_iter()

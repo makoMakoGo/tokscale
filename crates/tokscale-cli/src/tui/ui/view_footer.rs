@@ -149,12 +149,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::tui::app::{ClickAction, ProjectionBackend, TuiConfig};
-    use crate::tui::data::{DailyUsage, TokenBreakdown, UsageData};
+    use crate::tui::app::{ClickAction, TuiConfig};
+    use crate::tui::data::{DailyUsage, UsageTokenBreakdown, UsageView};
     use chrono::NaiveDate;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{backend::TestBackend, Terminal};
-    use tokscale_core::{GroupBy, InputFootprint, TuiAcc, TuiSessionEntry};
+    use tokscale_core::{InputFootprint, SessionUsage, UsageIndex};
     use unicode_width::UnicodeWidthStr;
 
     fn make_app(width: u16) -> App {
@@ -163,34 +163,33 @@ mod tests {
             refresh: 0,
             no_refresh: false,
             home_dir: None,
-            clients: None,
+            client_universe: tokscale_core::ClientUniverse::new([tokscale_core::ClientId::Codex])
+                .unwrap(),
             since: None,
             until: None,
             year: None,
             initial_tab: None,
         };
         let mut app = App::new_with_cached_data(config, None).unwrap();
-        app.install_tui_snapshot(
-            UsageData {
-                daily: vec![DailyUsage {
-                    date: NaiveDate::from_ymd_opt(2026, 7, 22).unwrap(),
-                    tokens: TokenBreakdown::default(),
-                    cost: 0.0,
-                    client_breakdown: BTreeMap::new(),
-                    message_count: 0,
-                    turn_count: 0,
-                }],
-                ..UsageData::default()
-            },
-            vec![TuiSessionEntry {
-                client: "codex".to_string(),
-                session_id: "session-1".to_string(),
-                ..TuiSessionEntry::default()
-            }],
+        app.install_generation_fixture(
+            UsageIndex::default(),
+            vec![SessionUsage::new(
+                tokscale_core::ClientId::Codex,
+                "session-1",
+            )],
             InputFootprint::default(),
-            ProjectionBackend::Memory(TuiAcc::default()),
-            GroupBy::Model,
         );
+        app.update_data(UsageView {
+            daily: vec![DailyUsage {
+                date: NaiveDate::from_ymd_opt(2026, 7, 22).unwrap(),
+                tokens: UsageTokenBreakdown::default(),
+                cost: 0.0,
+                client_breakdown: BTreeMap::new(),
+                message_count: 0,
+                turn_count: 0,
+            }],
+            ..UsageView::default()
+        });
         app.current_tab = Tab::Sessions;
         app.terminal_width = width;
         app
@@ -285,7 +284,7 @@ mod tests {
         let height = footer::HEIGHT;
         let mut app = make_app(width);
         let mut state = ViewState::default();
-        state.select_session_client_for_test("codex");
+        state.select_session_client_for_test(tokscale_core::ClientId::Codex);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
         terminal
@@ -410,7 +409,7 @@ mod tests {
 
         assert!(!screen.contains("Sort:"));
         assert!(sort_clicks(&app).is_empty());
-        assert!(help.ends_with("…·q"), "{screen}");
+        assert!(help.ends_with('q'), "{screen}");
         assert!(help_row.ends_with(" │"), "{screen}");
     }
 
@@ -429,7 +428,7 @@ mod tests {
             .unwrap();
 
         let screen = screen_text(&terminal);
-        assert!(screen.contains("Scope: All clients"), "{screen}");
+        assert!(screen.contains("Scope: Codex"), "{screen}");
         assert!(screen.contains("[s:clients]"), "{screen}");
         assert!(screen.contains("[r:rescan]"), "{screen}");
         assert!(!screen.contains("Sort:"), "{screen}");

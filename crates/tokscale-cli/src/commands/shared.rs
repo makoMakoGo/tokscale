@@ -34,8 +34,8 @@ pub(crate) fn valid_client_ids() -> String {
 /// so the caller can scan all clients.
 pub(crate) fn build_client_filter(
     flags: ClientFlags,
-    home_dir: &Option<String>,
-) -> Result<Option<Vec<String>>> {
+    home_dir: Option<&std::path::Path>,
+) -> Result<Option<Vec<ClientId>>> {
     let defaults = tui::settings::load_default_clients_for_home(home_dir)?;
     build_client_filter_with_defaults(flags, &defaults)
 }
@@ -46,22 +46,20 @@ pub(crate) fn build_client_filter(
 pub(crate) fn build_client_filter_with_defaults(
     flags: ClientFlags,
     defaults: &[String],
-) -> Result<Option<Vec<String>>> {
-    let mut ordered: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+) -> Result<Option<Vec<ClientId>>> {
+    let mut ordered = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
     for client in &flags.clients {
-        let id = client.as_str().to_string();
-        if seen.insert(id.clone()) {
-            ordered.push(id);
+        if seen.insert(*client) {
+            ordered.push(*client);
         }
     }
 
     if ordered.is_empty() {
         for client in parse_default_client_filters(defaults)? {
-            let id = client.as_str().to_string();
-            if seen.insert(id.clone()) {
-                ordered.push(id);
+            if seen.insert(client) {
+                ordered.push(client);
             }
         }
     }
@@ -101,15 +99,10 @@ pub(crate) fn parse_persisted_default_client_id(raw: &str) -> Option<ClientId> {
     ClientId::from_str(&normalized)
 }
 
-pub(crate) fn parse_client_id_set(clients: &[String]) -> std::collections::HashSet<ClientId> {
-    clients
-        .iter()
-        .filter_map(|client| ClientId::from_str(&client.to_ascii_lowercase()))
-        .collect()
-}
-
-pub(crate) fn resolve_effective_home_dir(home_dir: &Option<String>) -> Option<PathBuf> {
-    home_dir.as_ref().map(PathBuf::from).or_else(dirs::home_dir)
+pub(crate) fn resolve_effective_home_dir(home_dir: Option<&std::path::Path>) -> Option<PathBuf> {
+    home_dir
+        .map(std::path::Path::to_path_buf)
+        .or_else(dirs::home_dir)
 }
 
 pub(crate) fn emit_client_diagnostics(diagnostics: &[claude_diagnostics::ClientDiagnostic]) {
@@ -245,9 +238,9 @@ pub(crate) fn get_date_range_label_for_date(
     }
 }
 
-/// Print the report's data-health summary to stderr. Data stays on stdout;
+/// Print the generation's data-health summary to stderr. Data stays on stdout;
 /// degraded inputs are warnings, never a failed exit.
-pub(crate) fn emit_health_summary(health: &tokscale_core::input_health::HealthReport) {
+pub(crate) fn emit_health_summary(health: &tokscale_core::input_health::HealthSummary) {
     use colored::Colorize;
     if health.complete {
         return;
@@ -263,38 +256,4 @@ pub(crate) fn emit_health_summary(health: &tokscale_core::input_health::HealthRe
         )
         .yellow()
     );
-}
-
-/// Stable JSON envelope shared by every local report command.
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ReportEnvelope<T> {
-    pub(crate) data: T,
-    pub(crate) health: tokscale_core::input_health::HealthReport,
-    pub(crate) metadata: ReportMetadata,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ReportMetadata {
-    pub(crate) input_footprint: tokscale_core::InputFootprint,
-    pub(crate) processing_time_ms: u64,
-}
-
-impl<T> ReportEnvelope<T> {
-    pub(crate) fn new(
-        data: T,
-        health: tokscale_core::input_health::HealthReport,
-        input_footprint: tokscale_core::InputFootprint,
-        processing_time_ms: impl Into<u64>,
-    ) -> Self {
-        Self {
-            data,
-            health,
-            metadata: ReportMetadata {
-                input_footprint,
-                processing_time_ms: processing_time_ms.into(),
-            },
-        }
-    }
 }

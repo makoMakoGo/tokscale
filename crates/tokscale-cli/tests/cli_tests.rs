@@ -617,7 +617,7 @@ fn test_models_command_help() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Show model usage report"))
+        .stdout(predicate::str::contains("Show model usage"))
         .stdout(predicate::str::contains("--group-by <STRATEGY>"))
         .stdout(predicate::str::contains("default: model"))
         .stdout(predicate::str::contains("client,provider,model"))
@@ -1090,7 +1090,7 @@ fn test_models_with_client_filter_opencode() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     for model in model_rows(&json) {
-        assert_eq!(model["client"].as_str().unwrap(), "opencode");
+        assert_eq!(model["clients"], serde_json::json!(["opencode"]));
     }
 }
 
@@ -1189,7 +1189,7 @@ fn test_models_json_output() {
     let models = model_rows(&json);
     assert!(!models.is_empty(), "Should have models from fixture data");
     let first = &models[0];
-    assert!(first.get("client").is_some());
+    assert!(first.get("clients").is_some());
     assert!(first.get("modelId").is_some());
     assert!(first.get("displayName").is_some());
     assert!(first.get("model").is_none());
@@ -1484,7 +1484,7 @@ fn test_models_group_by_client_provider_model() {
     );
 
     for entry in model_rows(&json) {
-        assert!(entry.get("client").is_some(), "Entry must have client");
+        assert!(entry.get("clients").is_some(), "Entry must have clients");
         assert!(entry.get("provider").is_some(), "Entry must have provider");
         assert!(entry.get("modelId").is_some(), "Entry must have modelId");
         assert!(
@@ -1514,7 +1514,7 @@ fn test_models_group_by_client_model() {
     assert_eq!(json["data"]["groupBy"], "client,model");
     assert!(model_rows(&json)
         .iter()
-        .all(|model| model["client"] == "opencode"));
+        .all(|model| model["clients"] == serde_json::json!(["opencode"])));
 }
 
 #[test]
@@ -1547,7 +1547,7 @@ fn test_models_json_with_group_by_model() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     for entry in model_rows(&json) {
-        assert!(entry.get("client").is_some());
+        assert!(entry.get("clients").is_some());
         assert!(
             entry.get("workspaceKey").is_none(),
             "group-by model entries should not expose workspaceKey"
@@ -1676,7 +1676,12 @@ fn test_models_group_by_workspace_model_merges_claude_project_path_with_codex_pi
     assert_eq!(entries[0]["tokens"]["output"].as_u64().unwrap(), 30);
     assert_eq!(entries[0]["sessionCount"].as_u64().unwrap(), 3);
 
-    let mut clients: Vec<_> = entries[0]["client"].as_str().unwrap().split(", ").collect();
+    let mut clients = entries[0]["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|client| client.as_str().unwrap())
+        .collect::<Vec<_>>();
     clients.sort_unstable();
     assert_eq!(clients, vec!["claude", "codex", "pi"]);
 }
@@ -1697,7 +1702,7 @@ fn test_models_client_filter_splits_pi_and_omp_sessions() {
     let pi_json: serde_json::Value = serde_json::from_slice(&pi_output.stdout).unwrap();
     let pi_entries = model_rows(&pi_json);
     assert_eq!(pi_entries.len(), 1);
-    assert_eq!(pi_entries[0]["client"].as_str().unwrap(), "pi");
+    assert_eq!(pi_entries[0]["clients"], serde_json::json!(["pi"]));
     assert_eq!(pi_entries[0]["tokens"]["input"].as_u64().unwrap(), 30);
     assert_eq!(pi_entries[0]["tokens"]["output"].as_u64().unwrap(), 15);
 
@@ -1713,7 +1718,7 @@ fn test_models_client_filter_splits_pi_and_omp_sessions() {
     let omp_json: serde_json::Value = serde_json::from_slice(&omp_output.stdout).unwrap();
     let omp_entries = model_rows(&omp_json);
     assert_eq!(omp_entries.len(), 1);
-    assert_eq!(omp_entries[0]["client"].as_str().unwrap(), "omp");
+    assert_eq!(omp_entries[0]["clients"], serde_json::json!(["omp"]));
     assert_eq!(omp_entries[0]["tokens"]["input"].as_u64().unwrap(), 40);
     assert_eq!(omp_entries[0]["tokens"]["output"].as_u64().unwrap(), 20);
 }
@@ -1953,7 +1958,7 @@ fn test_models_table_output() {
         .args(["models", "--client", "opencode", "--no-spinner"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Token Usage Report by Model"));
+        .stdout(predicate::str::contains("Token Usage by Model"));
 }
 
 #[test]
@@ -2051,7 +2056,7 @@ fn cache_warm_writes_to_canonical_path() {
         .stdout(predicate::str::contains("TUI cache warmed"));
 
     assert!(
-        config_dir.join("cache/tui-data-cache.json").exists(),
+        config_dir.join("cache/tui-generation.bin").exists(),
         "cache warm should populate the canonical cache path"
     );
 }

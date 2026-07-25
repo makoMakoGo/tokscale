@@ -104,51 +104,46 @@ fn window_metric(label: &str, w: &Window) -> UsageMetric {
     }
 }
 
-pub fn fetch() -> Result<UsageOutput> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let creds = read_credentials()?;
-        let oauth = creds.claude_ai_oauth.ok_or_else(|| {
-            anyhow::anyhow!("No Claude OAuth credentials. Run 'claude' to log in.")
-        })?;
-        let access_token = oauth
-            .access_token
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No Claude access token."))?;
-        let plan = oauth.subscription_type.as_ref().map(|s| {
-            let tier = oauth
-                .rate_limit_tier
-                .as_deref()
-                .and_then(|t| t.rsplit('_').next());
-            match tier {
-                Some(mult) => format!("{} {}", capitalize(s), mult),
-                None => capitalize(s),
-            }
-        });
-
-        let client = reqwest::Client::new();
-        let resp = fetch_usage(&client, &access_token).await?;
-
-        let mut metrics = Vec::new();
-        if let Some(ref w) = resp.five_hour {
-            metrics.push(window_metric("Session", w));
+pub async fn fetch() -> Result<UsageOutput> {
+    let creds = read_credentials()?;
+    let oauth = creds
+        .claude_ai_oauth
+        .ok_or_else(|| anyhow::anyhow!("No Claude OAuth credentials. Run 'claude' to log in."))?;
+    let access_token = oauth
+        .access_token
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("No Claude access token."))?;
+    let plan = oauth.subscription_type.as_ref().map(|s| {
+        let tier = oauth
+            .rate_limit_tier
+            .as_deref()
+            .and_then(|t| t.rsplit('_').next());
+        match tier {
+            Some(mult) => format!("{} {}", capitalize(s), mult),
+            None => capitalize(s),
         }
-        if let Some(ref w) = resp.seven_day {
-            metrics.push(window_metric("Weekly", w));
-        }
-        if let Some(ref w) = resp.seven_day_opus {
-            metrics.push(window_metric("Opus", w));
-        }
+    });
 
-        Ok(UsageOutput {
-            provider: "Claude".into(),
-            account: None,
-            plan,
-            email: None,
-            metrics,
-        })
+    let client = reqwest::Client::new();
+    let resp = fetch_usage(&client, &access_token).await?;
+
+    let mut metrics = Vec::new();
+    if let Some(ref w) = resp.five_hour {
+        metrics.push(window_metric("Session", w));
+    }
+    if let Some(ref w) = resp.seven_day {
+        metrics.push(window_metric("Weekly", w));
+    }
+    if let Some(ref w) = resp.seven_day_opus {
+        metrics.push(window_metric("Opus", w));
+    }
+
+    Ok(UsageOutput {
+        provider: "Claude".into(),
+        account: None,
+        plan,
+        email: None,
+        metrics,
     })
 }
 

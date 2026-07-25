@@ -255,14 +255,33 @@ fn load_cache_at(path: &std::path::Path, now: u64) -> Result<Option<Vec<UsageOut
 
 #[derive(Clone, Copy)]
 enum Fetch {
-    Single(fn() -> Result<UsageOutput>),
+    Claude,
+    Codex,
+    Zai,
+    Grok,
+    KimiKey,
+    KimiCredential,
+    MiniMaxCn,
+    MiniMaxGlobal,
+    #[cfg(test)]
+    Test(fn() -> Result<UsageOutput>),
 }
 
 impl Fetch {
-    fn call(self) -> Result<Vec<UsageOutput>> {
-        match self {
-            Fetch::Single(fetch) => fetch().map(|output| vec![output]),
-        }
+    async fn call(self) -> Result<Vec<UsageOutput>> {
+        let output = match self {
+            Self::Claude => claude::fetch().await,
+            Self::Codex => codex::fetch().await,
+            Self::Zai => zai::fetch().await,
+            Self::Grok => grok::fetch().await,
+            Self::KimiKey => kimi::fetch_key().await,
+            Self::KimiCredential => kimi::fetch_credential().await,
+            Self::MiniMaxCn => minimax_tokenplan::fetch_cn().await,
+            Self::MiniMaxGlobal => minimax_tokenplan::fetch_global().await,
+            #[cfg(test)]
+            Self::Test(fetch) => fetch(),
+        }?;
+        Ok(vec![output])
     }
 }
 
@@ -282,65 +301,65 @@ fn all_providers() -> Vec<UsageProvider> {
             label: "Claude",
             is_available: claude::has_credentials,
             unavailable_message: "enabled in usageProviders but no Claude Code OAuth credentials were found",
-            fetch: Fetch::Single(claude::fetch),
+            fetch: Fetch::Claude,
         },
         UsageProvider {
             id: UsageProviderId::Codex,
             label: "Codex",
             is_available: codex::has_credentials,
             unavailable_message: "enabled in usageProviders but no Codex OAuth credentials were found",
-            fetch: Fetch::Single(codex::fetch),
+            fetch: Fetch::Codex,
         },
         UsageProvider {
             id: UsageProviderId::Zai,
             label: "Z.ai GLM Coding Plan",
             is_available: zai::has_credentials,
             unavailable_message: "enabled in usageProviders but TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY is not set",
-            fetch: Fetch::Single(zai::fetch),
+            fetch: Fetch::Zai,
         },
         UsageProvider {
             id: UsageProviderId::Grok,
             label: "Grok",
             is_available: grok::has_credentials,
             unavailable_message: "enabled in usageProviders but no Grok Build credentials were found",
-            fetch: Fetch::Single(grok::fetch),
+            fetch: Fetch::Grok,
         },
         UsageProvider {
             id: UsageProviderId::KimiCodingPlanKey,
             label: "Kimi Coding Plan (key)",
             is_available: kimi::has_key_credentials,
             unavailable_message: "enabled in usageProviders but TOKSCALE_USAGE_KIMI_CODING_PLAN_API_KEY is not set",
-            fetch: Fetch::Single(kimi::fetch_key),
+            fetch: Fetch::KimiKey,
         },
         UsageProvider {
             id: UsageProviderId::KimiCodingPlanCredential,
             label: "Kimi Coding Plan (credential)",
             is_available: kimi::has_credential_credentials,
             unavailable_message: "enabled in usageProviders but ~/.kimi-code/credentials/kimi-code.json is unavailable",
-            fetch: Fetch::Single(kimi::fetch_credential),
+            fetch: Fetch::KimiCredential,
         },
         UsageProvider {
             id: UsageProviderId::MiniMaxTokenPlanCn,
             label: "MiniMax Token Plan CN",
             is_available: minimax_tokenplan::has_cn_credentials,
             unavailable_message: "enabled in usageProviders but TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_CN_KEY is not set",
-            fetch: Fetch::Single(minimax_tokenplan::fetch_cn),
+            fetch: Fetch::MiniMaxCn,
         },
         UsageProvider {
             id: UsageProviderId::MiniMaxTokenPlanGlobal,
             label: "MiniMax Token Plan Global",
             is_available: minimax_tokenplan::has_global_credentials,
             unavailable_message: "enabled in usageProviders but TOKSCALE_USAGE_MINIMAX_TOKEN_PLAN_GLOBAL_KEY is not set",
-            fetch: Fetch::Single(minimax_tokenplan::fetch_global),
+            fetch: Fetch::MiniMaxGlobal,
         },
     ]
 }
 
-pub fn fetch_enabled(enabled: &[UsageProviderId]) -> UsageFetchBatch {
+pub async fn fetch_enabled(enabled: &[UsageProviderId]) -> UsageFetchBatch {
     if enabled.is_empty() {
         return UsageFetchBatch::default();
     }
-    fetch_providers(enabled_providers(all_providers(), enabled))
+    fetch_providers(enabled_providers(all_providers(), enabled)).await
 }
 
 fn enabled_providers(
@@ -358,7 +377,7 @@ fn enabled_providers(
         .collect()
 }
 
-fn fetch_providers(providers: Vec<UsageProvider>) -> UsageFetchBatch {
+async fn fetch_providers(providers: Vec<UsageProvider>) -> UsageFetchBatch {
     let mut batch = UsageFetchBatch::default();
     let mut active = Vec::new();
     for provider in providers {
@@ -376,40 +395,33 @@ fn fetch_providers(providers: Vec<UsageProvider>) -> UsageFetchBatch {
         return batch;
     }
 
-    std::thread::scope(|s| {
-        let results = active
-            .into_iter()
-            .map(|provider| {
-                s.spawn(move || match provider.fetch.call() {
-                    Ok(outputs) => (outputs, None),
-                    Err(error) => (
-                        Vec::new(),
-                        Some(UsageProviderError::new(provider.label, error)),
-                    ),
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|handle| match handle.join() {
-                Ok(result) => result,
-                Err(_) => (
+    let mut tasks = tokio::task::JoinSet::new();
+    for provider in active {
+        tasks.spawn(async move {
+            match provider.fetch.call().await {
+                Ok(outputs) => (outputs, None),
+                Err(error) => (
                     Vec::new(),
-                    Some(UsageProviderError::new(
-                        "unknown",
-                        "provider fetch panicked",
-                    )),
+                    Some(UsageProviderError::new(provider.label, error)),
                 ),
-            })
-            .collect::<Vec<_>>();
-
-        for (outputs, error) in results {
-            batch.outputs.extend(outputs);
-            if let Some(error) = error {
-                batch.errors.push(error);
             }
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok((outputs, error)) => {
+                batch.outputs.extend(outputs);
+                if let Some(error) = error {
+                    batch.errors.push(error);
+                }
+            }
+            Err(_) => batch.errors.push(UsageProviderError::new(
+                "unknown",
+                "provider fetch panicked",
+            )),
         }
-        batch
-    })
+    }
+    batch
 }
 
 #[cfg(test)]
@@ -499,24 +511,25 @@ mod tests {
         Err(anyhow::anyhow!("token expired"))
     }
 
-    #[test]
-    fn fetch_providers_preserves_outputs_and_errors() {
+    #[tokio::test]
+    async fn fetch_providers_preserves_outputs_and_errors() {
         let batch = fetch_providers(vec![
             UsageProvider {
                 id: UsageProviderId::Claude,
                 label: "Ok",
                 is_available: test_has_credentials,
                 unavailable_message: "missing ok credentials",
-                fetch: Fetch::Single(test_fetch_ok),
+                fetch: Fetch::Test(test_fetch_ok),
             },
             UsageProvider {
                 id: UsageProviderId::Codex,
                 label: "Broken",
                 is_available: test_has_credentials,
                 unavailable_message: "missing broken credentials",
-                fetch: Fetch::Single(test_fetch_err),
+                fetch: Fetch::Test(test_fetch_err),
             },
-        ]);
+        ])
+        .await;
 
         assert_eq!(batch.outputs.len(), 1);
         assert_eq!(batch.outputs[0].provider, "Ok");
@@ -529,16 +542,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fetch_enabled_provider_reports_unavailable_provider() {
+    #[tokio::test]
+    async fn fetch_enabled_provider_reports_unavailable_provider() {
         let batch = fetch_providers(vec![UsageProvider {
             id: UsageProviderId::Zai,
             label: "Z.ai GLM Coding Plan",
             is_available: test_unavailable,
             unavailable_message:
                 "enabled in usageProviders but TOKSCALE_USAGE_ZAI_CODING_PLAN_API_KEY is not set",
-            fetch: Fetch::Single(test_fetch_ok),
-        }]);
+            fetch: Fetch::Test(test_fetch_ok),
+        }])
+        .await;
 
         assert!(batch.outputs.is_empty());
         assert_eq!(
@@ -558,8 +572,8 @@ mod tests {
         test_fetch_ok()
     }
 
-    #[test]
-    fn enabled_providers_dispatches_only_selected_provider() {
+    #[tokio::test]
+    async fn enabled_providers_dispatches_only_selected_provider() {
         DISPATCH_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
         let providers = enabled_providers(
             vec![
@@ -568,19 +582,19 @@ mod tests {
                     label: "Codex",
                     is_available: test_has_credentials,
                     unavailable_message: "missing codex credentials",
-                    fetch: Fetch::Single(test_fetch_counted),
+                    fetch: Fetch::Test(test_fetch_counted),
                 },
                 UsageProvider {
                     id: UsageProviderId::Zai,
                     label: "Z.ai GLM Coding Plan",
                     is_available: test_has_credentials,
                     unavailable_message: "missing zai credentials",
-                    fetch: Fetch::Single(test_fetch_counted),
+                    fetch: Fetch::Test(test_fetch_counted),
                 },
             ],
             &[UsageProviderId::Codex],
         );
-        let batch = fetch_providers(providers);
+        let batch = fetch_providers(providers).await;
 
         assert_eq!(batch.outputs.len(), 1);
         assert_eq!(DISPATCH_COUNT.load(std::sync::atomic::Ordering::SeqCst), 1);

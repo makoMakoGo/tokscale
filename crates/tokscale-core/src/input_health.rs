@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::clients::ClientId;
-use crate::sessions::error::SessionParseError;
-use crate::sessions::ParsedMessage;
+use crate::records::error::SessionParseError;
+use crate::records::ParsedMessage;
 
 /// Why a single record inside an otherwise readable input was rejected.
 ///
@@ -110,7 +110,7 @@ pub struct RejectionEntry<'a> {
 }
 
 /// A transient input-level failure used while a parser or adapter classifies
-/// an interrupted scan. It is deliberately absent from `HealthReport`.
+/// an interrupted scan. It is deliberately absent from `HealthSummary`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputFailure {
     pub operation: String,
@@ -135,7 +135,7 @@ impl From<&SessionParseError> for InputFailure {
     }
 }
 
-/// Availability of one input unit's data in the current report.
+/// Availability of one input unit's data in the current generation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum InputStatus {
     /// The input was scanned to the end. Its messages (possibly zero) and
@@ -174,7 +174,7 @@ impl InputHealth {
     }
 }
 
-/// Aggregated health for one report load. Clean inputs are not retained;
+/// Aggregated health for one acquisition. Clean inputs are not retained;
 /// their count is derivable from load metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DataHealth {
@@ -244,27 +244,25 @@ impl DataHealth {
         self.rejected_records() + (self.partial_inputs() + self.failed_inputs()) as u64
     }
 
-    /// Serializable summary for report payloads, exports, and the TUI cache.
+    /// Serializable summary for generation state, exports, and JSON output.
     ///
     /// Detailed parser failures and representative input paths stop at this
     /// boundary. User-visible health contains only stable issue classes and
     /// aggregate counts.
-    pub fn to_report(&self) -> HealthReport {
-        let mut grouped = BTreeMap::<(String, String, String, String), HealthIssueReport>::new();
+    pub fn summarize(&self) -> HealthSummary {
+        let mut grouped = BTreeMap::<(String, ClientId, String, String), HealthIssue>::new();
         for input in &self.inputs {
-            let client_name = input.client.as_str().to_string();
-
             for rejection in input.rejections.entries() {
                 let entry = grouped
                     .entry((
                         "warning".to_string(),
-                        client_name.clone(),
+                        input.client,
                         rejection.key.to_string(),
                         "record-skipped".to_string(),
                     ))
-                    .or_insert_with(|| HealthIssueReport {
+                    .or_insert_with(|| HealthIssue {
                         level: "warning".to_string(),
-                        client: client_name.clone(),
+                        client: input.client,
                         issue: rejection.key.to_string(),
                         affected_inputs: 0,
                         rejected_records: Some(0),
@@ -289,13 +287,13 @@ impl DataHealth {
                 let entry = grouped
                     .entry((
                         "error".to_string(),
-                        client_name.clone(),
+                        input.client,
                         issue.to_string(),
                         handling.to_string(),
                     ))
-                    .or_insert_with(|| HealthIssueReport {
+                    .or_insert_with(|| HealthIssue {
                         level: "error".to_string(),
-                        client: client_name.clone(),
+                        client: input.client,
                         issue: issue.to_string(),
                         affected_inputs: 0,
                         rejected_records: None,
@@ -305,7 +303,7 @@ impl DataHealth {
             }
         }
 
-        HealthReport {
+        HealthSummary {
             complete: self.is_empty(),
             clean_inputs: self.clean_inputs(),
             degraded_inputs: self.degraded_inputs(),
@@ -317,11 +315,11 @@ impl DataHealth {
     }
 }
 
-/// Serializable health summary carried by report payloads. `complete: true`
+/// Serializable health summary carried by a generation. `complete: true`
 /// with no issues means every scanned input was healthy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-pub struct HealthReport {
+pub struct HealthSummary {
     pub complete: bool,
     pub clean_inputs: usize,
     pub degraded_inputs: usize,
@@ -329,10 +327,10 @@ pub struct HealthReport {
     pub partial_inputs: usize,
     pub failed_inputs: usize,
     #[serde(default)]
-    pub issues: Vec<HealthIssueReport>,
+    pub issues: Vec<HealthIssue>,
 }
 
-impl Default for HealthReport {
+impl Default for HealthSummary {
     fn default() -> Self {
         Self {
             complete: true,
@@ -346,7 +344,7 @@ impl Default for HealthReport {
     }
 }
 
-impl HealthReport {
+impl HealthSummary {
     /// Total issue count: every rejected record plus every partial or
     /// unavailable input counts as one issue.
     pub fn issue_count(&self) -> u64 {
@@ -359,7 +357,7 @@ impl HealthReport {
         self.partial_inputs > 0 || self.failed_inputs > 0
     }
 
-    pub fn record_unavailable_input(&mut self, client: &str) {
+    pub fn record_unavailable_input(&mut self, client: ClientId) {
         self.complete = false;
         if self.issues.iter().any(|issue| {
             issue.client == client
@@ -369,9 +367,9 @@ impl HealthReport {
             return;
         }
         self.failed_inputs += 1;
-        self.issues.push(HealthIssueReport {
+        self.issues.push(HealthIssue {
             level: "error".to_string(),
-            client: client.to_string(),
+            client,
             issue: "input-unavailable".to_string(),
             affected_inputs: 1,
             rejected_records: None,
@@ -380,12 +378,12 @@ impl HealthReport {
     }
 }
 
-/// Stable, aggregate-only issue exposed by report JSON and the TUI.
+/// Stable, aggregate-only issue exposed by JSON and the TUI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct HealthIssueReport {
+pub struct HealthIssue {
     pub level: String,
-    pub client: String,
+    pub client: ClientId,
     pub issue: String,
     /// Number of input units represented by this issue class.
     pub affected_inputs: u64,
@@ -464,7 +462,7 @@ mod tests {
 
     #[test]
     fn default_health_report_represents_a_complete_load() {
-        let report = HealthReport::default();
+        let report = HealthSummary::default();
 
         assert!(report.complete);
         assert_eq!(report.clean_inputs, 0);
@@ -477,14 +475,14 @@ mod tests {
 
     #[test]
     fn empty_health_json_deserializes_as_a_complete_load() {
-        let report: HealthReport = serde_json::from_str("{}").unwrap();
+        let report: HealthSummary = serde_json::from_str("{}").unwrap();
 
-        assert_eq!(report, HealthReport::default());
+        assert_eq!(report, HealthSummary::default());
     }
 
     #[test]
     fn complete_health_json_keeps_a_stable_empty_issues_array() {
-        let value = serde_json::to_value(HealthReport::default()).unwrap();
+        let value = serde_json::to_value(HealthSummary::default()).unwrap();
 
         assert_eq!(value["complete"], true);
         assert_eq!(value["cleanInputs"], 0);
@@ -499,14 +497,14 @@ mod tests {
 
     #[test]
     fn health_report_rejects_unknown_fields() {
-        let error = serde_json::from_str::<HealthReport>(r#"{"unexpectedField":1}"#)
+        let error = serde_json::from_str::<HealthSummary>(r#"{"unexpectedField":1}"#)
             .expect_err("unknown health fields must not deserialize");
         assert!(error.to_string().contains("unknown field"));
     }
 
     #[test]
     fn health_report_issue_count_includes_records_and_input_failures() {
-        let report = HealthReport {
+        let report = HealthSummary {
             complete: false,
             clean_inputs: 4,
             degraded_inputs: 1,
@@ -521,10 +519,10 @@ mod tests {
 
     #[test]
     fn supplementary_unavailable_input_does_not_duplicate_existing_issue() {
-        let mut report = HealthReport::default();
+        let mut report = HealthSummary::default();
 
-        report.record_unavailable_input("claude");
-        report.record_unavailable_input("claude");
+        report.record_unavailable_input(ClientId::Claude);
+        report.record_unavailable_input(ClientId::Claude);
 
         assert_eq!(report.failed_inputs, 1);
         assert_eq!(report.issues.len(), 1);
@@ -613,7 +611,7 @@ mod tests {
             });
         }
 
-        let report = data_health.to_report();
+        let report = data_health.summarize();
 
         assert_eq!(report.clean_inputs, 0);
         assert_eq!(report.degraded_inputs, 2);
@@ -627,7 +625,7 @@ mod tests {
             .find(|issue| issue.issue == "malformed-record")
             .unwrap();
         assert_eq!(records.level, "warning");
-        assert_eq!(records.client, "codex");
+        assert_eq!(records.client, ClientId::Codex);
         assert_eq!(records.affected_inputs, 2);
         assert_eq!(records.rejected_records, Some(2));
         assert_eq!(records.handling, "record-skipped");
@@ -638,7 +636,7 @@ mod tests {
             .find(|issue| issue.issue == "input-unavailable")
             .unwrap();
         assert_eq!(failures.level, "error");
-        assert_eq!(failures.client, "codex");
+        assert_eq!(failures.client, ClientId::Codex);
         assert_eq!(failures.affected_inputs, 2);
         assert_eq!(failures.rejected_records, None);
         assert_eq!(failures.handling, "input-skipped");
@@ -664,7 +662,7 @@ mod tests {
             rejections: RejectionSummary::default(),
         });
 
-        let value = serde_json::to_value(data_health.to_report()).unwrap();
+        let value = serde_json::to_value(data_health.summarize()).unwrap();
         let encoded = serde_json::to_string(&value).unwrap();
 
         assert!(value.get("inputs").is_none());

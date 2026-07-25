@@ -1,22 +1,22 @@
-//! Streaming owner for the canonical TUI usage and Sessions projections.
+//! Streaming owner for canonical usage and session state.
 
-use crate::aggregate::{tui::TuiAcc, tui_sessions::TuiSessionAcc};
+use crate::aggregate::{session_usage::SessionUsageBuilder, usage_index::UsageIndex};
 use crate::{AggregatedViews, AggregationConfig, UnifiedMessage, ViewSet};
 
 pub struct AggregationEngine {
     config: AggregationConfig,
-    tui: Option<TuiAcc>,
-    tui_sessions: Option<TuiSessionAcc>,
+    usage: Option<UsageIndex>,
+    sessions: Option<SessionUsageBuilder>,
 }
 
 impl AggregationEngine {
     pub fn new(config: AggregationConfig) -> Self {
         let views = config.views;
         Self {
-            tui: views.contains(ViewSet::TUI).then(TuiAcc::new),
-            tui_sessions: views
-                .contains(ViewSet::TUI_SESSIONS)
-                .then(TuiSessionAcc::new),
+            usage: views.contains(ViewSet::USAGE).then(UsageIndex::new),
+            sessions: views
+                .contains(ViewSet::SESSIONS)
+                .then(SessionUsageBuilder::new),
             config,
         }
     }
@@ -28,25 +28,27 @@ impl AggregationEngine {
         {
             return;
         }
-        if let Some(tui) = &mut self.tui {
-            tui.push(msg);
+        if let Some(usage) = &mut self.usage {
+            usage.push(msg);
         }
-        if let Some(tui_sessions) = &mut self.tui_sessions {
-            tui_sessions.push(msg);
+        if let Some(sessions) = &mut self.sessions {
+            sessions.push(msg);
         }
     }
 
-    pub(crate) fn into_tui_accumulator(self) -> Option<TuiAcc> {
-        self.tui
+    pub(crate) fn into_usage_index(self) -> Option<UsageIndex> {
+        self.usage
     }
 
-    pub(crate) fn into_tui_bundle(self) -> (Option<TuiAcc>, Option<Vec<crate::TuiSessionEntry>>) {
-        (self.tui, self.tui_sessions.map(TuiSessionAcc::finish))
+    pub(crate) fn into_generation_parts(
+        self,
+    ) -> (Option<UsageIndex>, Option<Vec<crate::SessionUsage>>) {
+        (self.usage, self.sessions.map(SessionUsageBuilder::finish))
     }
 
     pub fn finish(self) -> AggregatedViews {
         AggregatedViews {
-            tui_usage: self.tui.map(|tui| tui.project(&self.config.group_by)),
+            usage: self.usage.map(|usage| usage.project(&self.config.group_by)),
             health: Default::default(),
         }
     }

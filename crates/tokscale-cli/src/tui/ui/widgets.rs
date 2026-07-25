@@ -152,26 +152,26 @@ pub(crate) fn truncate_model_display_name_to(model: &str, max_width: usize) -> S
     truncate_display_width(model, max_width)
 }
 
-pub(crate) fn get_client_display_name(client: &str) -> String {
-    display_comma_list(client, get_single_client_display_name)
+pub(crate) fn get_client_display_name(client: ClientId) -> String {
+    let config = TokscaleConfig::initialized();
+    config
+        .get_client_display_name(client.as_str())
+        .unwrap_or_else(|| client.short_name())
+        .to_string()
+}
+
+pub(crate) fn get_client_display_names(clients: &[ClientId]) -> String {
+    clients
+        .iter()
+        .map(|client| get_client_display_name(*client))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Fallback label for the Workspace column when a row carries no workspace
 /// dimension. Shared by the Models table and the Daily/Period detail tables.
 pub(crate) fn workspace_label_or_unknown(workspace: Option<&str>) -> &str {
     workspace.unwrap_or("Unknown workspace")
-}
-
-fn get_single_client_display_name(client: &str) -> String {
-    let config = TokscaleConfig::initialized();
-    if let Some(name) = config.get_client_display_name(client) {
-        return name.to_string();
-    }
-    let client_lower = client.to_lowercase();
-    if let Some(client_id) = ClientId::from_str(&client_lower) {
-        return client_id.short_name().to_string();
-    }
-    client.to_string()
 }
 
 pub(crate) fn get_provider_display_name(provider: &str) -> String {
@@ -443,12 +443,12 @@ mod tests {
     }
 
     #[test]
-    fn client_display_formats_each_segment_in_merged_list() {
+    fn client_display_uses_typed_catalog_identities() {
         TokscaleConfig::initialize_default_for_tests();
-        assert_eq!(get_client_display_name("openclaw"), "OpenClaw");
+        assert_eq!(get_client_display_name(ClientId::OpenClaw), "OpenClaw");
         assert_eq!(
-            get_client_display_name("opencode, codex, kiro, unknown-client"),
-            "OpenCode, Codex, Kiro, unknown-client"
+            get_client_display_names(&[ClientId::OpenCode, ClientId::Codex, ClientId::Kiro]),
+            "OpenCode, Codex, Kiro"
         );
     }
 }

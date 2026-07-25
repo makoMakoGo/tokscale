@@ -92,7 +92,7 @@ want a fresh local rebuild:
 - `images/`
 
 Scan-input message cache writes use the current shard envelope and stable
-explicit decoder keys. Ordinary reports and `tokscale cache prune` accept only
+explicit decoder keys. Ordinary generation loads and `tokscale cache prune` accept only
 shards in the format supported by the running binary. Pruning explicitly
 traverses the shard directory and removes current shards whose authoritative
 input is absent, whose path is not canonical for the input and decoder key, or
@@ -101,11 +101,12 @@ Traversal and classification complete before deletion; an unknown, future,
 truncated, malformed, undecodable, or oversized shard aborts pruning without
 deleting anything.
 
-The current TUI generation bundle is separate from scan-input message shards.
-It contains one canonical accumulator, one Common projection, four Grouped
-projections, Sessions, Data Health, and generation metadata. Models never writes
-it; use `tokscale cache warm` when you intentionally want to prebuild the
-complete all-date generation.
+The canonical generation cache is separate from scan-input message shards. It
+contains exactly one immutable `Generation`: acquisition scope, Client
+universe, source fingerprint, `UsageIndex`, Sessions, `InputFootprint`, Data
+Health, and pricing diagnostics. Models never writes it; use
+`tokscale cache warm` when you intentionally want to prebuild the complete
+all-date generation.
 
 ## Subscription providers
 

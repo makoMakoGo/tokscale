@@ -1,18 +1,18 @@
 # Local clients and inputs
 
 `crates/tokscale-core/client-catalog.json` is the canonical client-ID catalog.
-The registered adapter and session schema for each ID are authoritative for
+The registered vertical integration and decoder schema for each ID are authoritative for
 discovery and parsing. This page is the current user-facing map of that
 executable contract.
 
-Execute one registered adapter and inspect its Data Health with:
+Execute one registered integration and inspect its Data Health with:
 
 ```bash
 bun run cli -- models --client codex --json --no-spinner
 ```
 
 For an installed binary, replace `bun run cli --` with `tokscale`. The catalog,
-registered adapters, and table below define discovery; runtime input failures
+registered integrations, and table below define discovery; runtime input failures
 are reported by Models Data Health and the TUI rather than by a second path
 inventory.
 

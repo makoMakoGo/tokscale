@@ -82,8 +82,8 @@ pub enum ScannerSettingsError {
 }
 
 /// Resolve OpenCode's fixed data directory beneath the selected home.
-pub fn opencode_data_dir(home_dir: &str) -> PathBuf {
-    PathBuf::from(home_dir).join(".local/share/opencode")
+pub fn opencode_data_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(".local/share/opencode")
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -132,7 +132,7 @@ pub fn scan_directory(
             pattern != "gemini-session"
                 || entry.depth() != 1
                 || !entry.file_type().is_dir()
-                || crate::sessions::gemini::is_current_project_dir(entry.path())
+                || crate::integrations::gemini::decode::is_current_project_dir(entry.path())
         })
         .par_bridge()
         .map(|entry| {
@@ -165,9 +165,11 @@ pub fn scan_directory(
             match pattern {
                 "*.json" => file_name.ends_with(".json"),
                 "*.json|*.jsonl" => file_name.ends_with(".json") || file_name.ends_with(".jsonl"),
-                "gemini-session" => crate::sessions::gemini::is_current_project_session(path),
+                "gemini-session" => {
+                    crate::integrations::gemini::decode::is_current_project_session(path)
+                }
                 "commandcode-session" => {
-                    crate::sessions::commandcode::is_usage_transcript_file(path)
+                    crate::integrations::commandcode::decode::is_usage_transcript_file(path)
                 }
                 "*.jsonl" => file_name.ends_with(".jsonl"),
                 "*.log" => file_name.ends_with(".log"),
@@ -276,7 +278,7 @@ pub fn extra_scan_paths_for(
 pub fn built_in_extra_scan_paths_for(
     home_dir: &Path,
     enabled: &HashSet<ClientId>,
-) -> Result<Vec<(ClientId, PathBuf)>, crate::sessions::error::SessionParseError> {
+) -> Result<Vec<(ClientId, PathBuf)>, crate::records::error::SessionParseError> {
     let mut paths = Vec::new();
 
     if enabled.contains(&ClientId::Claude) {
@@ -525,7 +527,7 @@ mod tests {
     #[test]
     fn opencode_data_dir_is_fixed_beneath_home() {
         assert_eq!(
-            opencode_data_dir("/home/alice"),
+            opencode_data_dir(Path::new("/home/alice")),
             PathBuf::from("/home/alice/.local/share/opencode")
         );
     }

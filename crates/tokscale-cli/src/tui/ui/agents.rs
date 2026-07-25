@@ -112,7 +112,7 @@ pub fn render(
         .unwrap_or(AGENT_MIN_WIDTH);
     let client_content_width = agents
         .iter()
-        .map(|agent| display_width(&get_client_display_name(&agent.client)))
+        .map(|agent| display_width(&get_client_display_name(agent.client)))
         .max()
         .unwrap_or(CLIENT_MIN_WIDTH);
     let table_layout =
@@ -146,7 +146,7 @@ pub fn render(
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
 
-            let client_label = get_client_display_name(&agent.client);
+            let client_label = get_client_display_name(agent.client);
             let cell_for_column = |column: AgentColumn| -> Cell {
                 match column {
                     AgentColumn::Rank => Cell::from(format!("{}", idx + 1))

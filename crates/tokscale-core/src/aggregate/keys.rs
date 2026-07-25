@@ -1,10 +1,10 @@
-//! Collision-free internal identity keys used by report and TUI accumulators.
+//! Collision-free internal identity keys used by canonical usage accumulators.
 
 use std::{collections::HashSet, hash::Hash, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{sessions, ClientId, GroupBy, UnifiedMessage};
+use crate::{records, ClientId, GroupBy, UnifiedMessage};
 
 pub const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
 
@@ -315,7 +315,7 @@ pub(crate) fn workspace_fields(msg: &UnifiedMessage) -> (Option<Arc<str>>, Arc<s
         (Some(key), Some(label)) => (Some(Arc::clone(key)), Arc::clone(label)),
         (Some(key), None) => (
             Some(Arc::clone(key)),
-            sessions::workspace_label_from_key(key)
+            records::workspace_label_from_key(key)
                 .map(Arc::from)
                 .unwrap_or_else(|| Arc::from(UNKNOWN_WORKSPACE_LABEL)),
         ),
