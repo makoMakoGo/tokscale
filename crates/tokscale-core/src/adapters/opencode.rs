@@ -136,11 +136,12 @@ fn fold_opencode_unit(
         ctx.input_cache.remove(&path, unit.parser_version);
     }
     let cache_write_outcome = cache_write_outcome?;
-    sink.extend_messages(
+    adapter_cache::emit_messages(
+        unit.client,
         messages
             .into_iter()
-            .filter(|message| message.dedup_key.is_none_or(|key| seen.insert(key)))
-            .collect(),
+            .filter(|message| message.dedup_key.is_none_or(|key| seen.insert(key))),
+        sink,
     );
 
     if cache_write_outcome == adapter_cache::CacheWriteOutcome::NotPlanned && invalidate_cache {
@@ -156,7 +157,8 @@ mod tests {
     use super::*;
     use crate::adapters::{FoldContext, UnitMessagePayload};
     use crate::message_cache;
-    use crate::{TokenBreakdown, UnifiedMessage};
+    use crate::sessions::ParsedMessage;
+    use crate::TokenBreakdown;
     use rusqlite::Connection;
     use std::path::Path;
 
@@ -229,8 +231,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(index, name)| {
-                let message = UnifiedMessage::new_with_dedup(
-                    "opencode",
+                let message = ParsedMessage::new_with_dedup(
                     "gpt-5.5",
                     "openai",
                     format!("session-{index}"),
@@ -259,6 +260,7 @@ mod tests {
             .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut sink)
             .unwrap();
         assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].client.as_ref(), ClientId::OpenCode.as_str());
         assert_eq!(sink[0].session_id.as_ref(), "session-0");
     }
 
@@ -297,6 +299,7 @@ mod tests {
                 sink
             });
         assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client.as_ref(), ClientId::OpenCode.as_str());
     }
 
     #[test]
@@ -321,8 +324,7 @@ mod tests {
                 crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
             ),
             fingerprint,
-            vec![UnifiedMessage::new(
-                "opencode",
+            vec![ParsedMessage::new(
                 "stale-model",
                 "stale-provider",
                 "stale-session",

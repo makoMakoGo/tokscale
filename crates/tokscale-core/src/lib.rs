@@ -43,6 +43,8 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+use sessions::ParsedMessage;
+
 /// Canonicalize a raw model string for callers that do not already hold a
 /// finalized `UnifiedMessage`.
 ///
@@ -293,7 +295,7 @@ impl PreparedLocalInputs {
         let mut unavailable = Vec::new();
         for group in &mut self.groups {
             group.units.retain_mut(|unit| {
-                let client = unit.client;
+                let client = unit.client();
                 let path = unit.path.clone();
                 match unit.refresh_prepared_snapshot_for_inventory_probe() {
                     Ok(()) => true,
@@ -326,9 +328,10 @@ impl PreparedLocalInputs {
 }
 
 fn input_data_bytes<'a>(units: impl IntoIterator<Item = &'a adapters::InputUnit>) -> u64 {
-    let mut seen = HashSet::new();
+    let mut seen_by_client = HashMap::<ClientId, HashSet<_>>::new();
     let mut total = 0_u64;
     for unit in units {
+        let seen = seen_by_client.entry(unit.client()).or_default();
         let snapshot = unit
             .prepared_input_snapshot()
             .expect("prepared input unit must carry an inventory snapshot");
@@ -343,38 +346,35 @@ fn input_data_bytes<'a>(units: impl IntoIterator<Item = &'a adapters::InputUnit>
     total
 }
 
-fn confirmed_input_data_bytes(
+fn confirmed_client_space(
     clients: &[String],
     groups: &[adapters::ConfirmedAdapterInputs],
-) -> (BTreeMap<String, u64>, u64) {
+) -> BTreeMap<String, u64> {
     let mut totals = clients
         .iter()
         .cloned()
         .map(|client| (client, 0_u64))
         .collect::<BTreeMap<_, _>>();
-    let mut seen_by_client = HashMap::<String, HashSet<_>>::new();
-    let mut seen_globally = HashSet::new();
-    let mut global_total = 0_u64;
 
     for group in groups {
         let client = group.client.as_str().to_string();
-        let seen = seen_by_client.entry(client.clone()).or_default();
         let total = totals.entry(client).or_default();
-        for &(identity, size) in &group.present_files {
-            if seen.insert(identity) {
-                *total = total
-                    .checked_add(size)
-                    .expect("per-client input data size must fit in u64");
-            }
-            if seen_globally.insert(identity) {
-                global_total = global_total
-                    .checked_add(size)
-                    .expect("input data size must fit in u64");
-            }
+        for &(_, size) in &group.present_files {
+            *total = total
+                .checked_add(size)
+                .expect("per-client input data size must fit in u64");
         }
     }
 
-    (totals, global_total)
+    totals
+}
+
+fn client_space_total(client_space: &BTreeMap<String, u64>) -> u64 {
+    client_space.values().copied().fold(0_u64, |total, size| {
+        total
+            .checked_add(size)
+            .expect("input data size must fit in u64")
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -526,8 +526,8 @@ fn fold_prepared_local_inputs_with_pricing(
         .map(|confirmed| {
             let input_inventory_signature =
                 confirmed_input_inventory_signature(&clients, &confirmed);
-            let (client_space, input_data_bytes) = confirmed_input_data_bytes(&clients, &confirmed);
-            health.set_input_data_bytes(input_data_bytes);
+            let client_space = confirmed_client_space(&clients, &confirmed);
+            health.set_input_data_bytes(client_space_total(&client_space));
             FoldOutcome {
                 input_inventory_signature,
                 client_space,
@@ -611,10 +611,12 @@ pub fn prepare_local_inputs(
                     });
                 }
             };
+            adapters::validate_discovered_unit_sources(adapter, &units)
+                .map_err(LocalReportError::operational)?;
             let units = units
                 .into_iter()
                 .filter_map(|unit| {
-                    let client = unit.client;
+                    let client = unit.client();
                     let path = unit.path.clone();
                     match unit.prepare_snapshot() {
                         Ok(unit) => Some(unit),
@@ -919,40 +921,99 @@ pub async fn get_usage_data(
     Ok(data)
 }
 
-fn apply_token_pricing(message: &mut UnifiedMessage, pricing: Option<&pricing::PricingService>) {
-    message.cost = 0.0;
+trait FinalizableMessage {
+    fn model_id(&self) -> &Arc<str>;
+    fn set_model_id(&mut self, model_id: Arc<str>);
+    fn provider_id(&self) -> &Arc<str>;
+    fn set_provider_id(&mut self, provider_id: Arc<str>);
+    fn tokens(&self) -> &TokenBreakdown;
+    fn tokens_mut(&mut self) -> &mut TokenBreakdown;
+    fn set_cost(&mut self, cost: f64);
+}
+
+macro_rules! impl_finalizable_message {
+    ($message:ty) => {
+        impl FinalizableMessage for $message {
+            fn model_id(&self) -> &Arc<str> {
+                &self.model_id
+            }
+
+            fn set_model_id(&mut self, model_id: Arc<str>) {
+                self.model_id = model_id;
+            }
+
+            fn provider_id(&self) -> &Arc<str> {
+                &self.provider_id
+            }
+
+            fn set_provider_id(&mut self, provider_id: Arc<str>) {
+                self.provider_id = provider_id;
+            }
+
+            fn tokens(&self) -> &TokenBreakdown {
+                &self.tokens
+            }
+
+            fn tokens_mut(&mut self) -> &mut TokenBreakdown {
+                &mut self.tokens
+            }
+
+            fn set_cost(&mut self, cost: f64) {
+                self.cost = cost;
+            }
+        }
+    };
+}
+
+impl_finalizable_message!(ParsedMessage);
+impl_finalizable_message!(UnifiedMessage);
+
+fn apply_token_pricing<M: FinalizableMessage>(
+    message: &mut M,
+    pricing: Option<&pricing::PricingService>,
+) {
+    message.set_cost(0.0);
 
     let Some(pricing) = pricing else {
         return;
     };
 
     let calculated_cost = pricing.calculate_cost_with_provider(
-        &message.model_id,
-        Some(message.provider_id.as_ref()),
-        &message.tokens,
+        message.model_id(),
+        Some(message.provider_id().as_ref()),
+        message.tokens(),
     );
 
     if calculated_cost > 0.0 {
-        message.cost = calculated_cost;
+        message.set_cost(calculated_cost);
     }
 }
 
-fn canonicalize_message_provider(message: &mut UnifiedMessage) {
-    let provider =
-        provider_identity::finalized_provider_id(&message.provider_id, &message.model_id);
-    message.provider_id = sessions::intern::intern(&provider);
+fn refresh_derived_message_fields<M: FinalizableMessage>(message: &mut M) {
+    if let Some(provider) = provider_identity::provider_override_from_model_and_provider(
+        message.model_id(),
+        message.provider_id(),
+    ) {
+        message.set_provider_id(sessions::intern::intern(provider));
+    }
 }
 
-fn canonicalize_message_model(
-    message: &mut UnifiedMessage,
+fn canonicalize_message_provider<M: FinalizableMessage>(message: &mut M) {
+    let provider =
+        provider_identity::finalized_provider_id(message.provider_id(), message.model_id());
+    message.set_provider_id(sessions::intern::intern(&provider));
+}
+
+fn canonicalize_message_model<M: FinalizableMessage>(
+    message: &mut M,
     model_cache: &mut HashMap<Arc<str>, Arc<str>>,
 ) {
-    if let Some(canonical) = model_cache.get(&message.model_id) {
-        message.model_id = Arc::clone(canonical);
+    if let Some(canonical) = model_cache.get(message.model_id()) {
+        message.set_model_id(Arc::clone(canonical));
         return;
     }
 
-    let raw = Arc::clone(&message.model_id);
+    let raw = Arc::clone(message.model_id());
     let canonical = model_aliases::canonicalize_model_id(raw.as_ref());
     let canonical = if canonical == raw.as_ref() {
         Arc::clone(&raw)
@@ -961,21 +1022,21 @@ fn canonicalize_message_model(
     };
 
     model_cache.insert(raw, Arc::clone(&canonical));
-    message.model_id = canonical;
+    message.set_model_id(canonical);
 }
 
-pub(crate) fn finalize_token_priced_messages(
-    messages: &mut Vec<UnifiedMessage>,
+fn finalize_token_priced_messages<M: FinalizableMessage>(
+    messages: &mut Vec<M>,
     pricing: Option<&pricing::PricingService>,
 ) {
     let mut model_cache = HashMap::new();
 
     messages.retain_mut(|message| {
-        normalize_token_breakdown(&mut message.tokens);
+        normalize_token_breakdown(message.tokens_mut());
         canonicalize_message_model(message, &mut model_cache);
-        message.refresh_derived_fields();
+        refresh_derived_message_fields(message);
         canonicalize_message_provider(message);
-        if !has_positive_tokens(&message.tokens) {
+        if !has_positive_tokens(message.tokens()) {
             return false;
         }
         apply_token_pricing(message, pricing);
@@ -1204,7 +1265,7 @@ pub async fn load_prepared_tui_bundle_with_diagnostics(
     })
 }
 
-fn should_keep_deduped_message(seen_keys: &mut HashSet<u64>, message: &UnifiedMessage) -> bool {
+fn should_keep_deduped_message(seen_keys: &mut HashSet<u64>, message: &ParsedMessage) -> bool {
     message.dedup_key.is_none_or(|key| seen_keys.insert(key))
 }
 

@@ -3,7 +3,7 @@
 //! Parses JSON files from ~/.local/share/amp/threads/
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::UnifiedMessage;
+use super::ParsedMessage;
 use crate::input_health::{RecordRejectionReason, RejectionSummary, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -112,10 +112,9 @@ impl AmpUsageRecord {
         self.model == other.model && self.tokens == other.tokens
     }
 
-    fn into_unified(self, thread_id: &str) -> UnifiedMessage {
+    fn into_message(self, thread_id: &str) -> ParsedMessage {
         let provider = provider_identity::observed_provider_id("", &self.model);
-        UnifiedMessage::new(
-            "amp",
+        ParsedMessage::new(
             &self.model,
             provider,
             thread_id,
@@ -331,10 +330,10 @@ fn merge_amp_records(
     }
 }
 
-fn build_amp_messages(records: Vec<AmpUsageRecord>, thread_id: &str) -> Vec<UnifiedMessage> {
+fn build_amp_messages(records: Vec<AmpUsageRecord>, thread_id: &str) -> Vec<ParsedMessage> {
     records
         .into_iter()
-        .map(|record| record.into_unified(thread_id))
+        .map(|record| record.into_message(thread_id))
         .collect()
 }
 
@@ -401,7 +400,7 @@ mod tests {
     use super::parse_amp_file as parse_amp_file_result;
     use std::path::Path;
 
-    fn parse_amp_file(path: &Path) -> Vec<crate::UnifiedMessage> {
+    fn parse_amp_file(path: &Path) -> Vec<crate::sessions::ParsedMessage> {
         parse_amp_file_result(path).unwrap().messages
     }
 

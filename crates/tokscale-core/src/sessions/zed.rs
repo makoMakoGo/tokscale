@@ -11,7 +11,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{open_readonly_sqlite, parse_timestamp_str};
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{normalize_workspace_key, workspace_label_from_key, ParsedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::TokenBreakdown;
 use serde_json::Value;
@@ -34,7 +34,7 @@ struct ZedThreadRow {
 
 /// What one thread row contributed to the scan.
 enum ThreadOutcome {
-    Message(Box<UnifiedMessage>),
+    Message(Box<ParsedMessage>),
     /// Skipped by the input contract (imported, non-hosted, zero usage).
     Filtered,
     Rejected(RecordRejectionReason, String),
@@ -205,8 +205,7 @@ fn parse_thread_row(row: ZedThreadRow) -> ThreadOutcome {
         );
     };
 
-    let mut message = UnifiedMessage::new_with_dedup(
-        "zed",
+    let mut message = ParsedMessage::new_with_dedup(
         model_id,
         ZED_HOSTED_PROVIDER,
         row.id.clone(),
@@ -430,7 +429,7 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn parse_zed_sqlite(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_zed_sqlite(path: &Path) -> Vec<ParsedMessage> {
         let scanned = super::parse_zed_sqlite(path).unwrap();
         assert!(scanned.interrupted.is_none());
         assert!(scanned.rejections.is_empty());
@@ -569,7 +568,6 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let message = &messages[0];
-        assert_eq!(message.client.as_ref(), "zed");
         assert_eq!(message.provider_id.as_ref(), ZED_HOSTED_PROVIDER);
         assert_eq!(message.model_id.as_ref(), "claude-sonnet-4-5");
         assert_eq!(message.session_id.as_ref(), "thread-1");

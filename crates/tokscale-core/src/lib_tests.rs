@@ -336,6 +336,33 @@ fn test_streaming_tui_usage_matches_reference_aggregation() {
 
 #[test]
 #[serial_test::serial]
+fn prepared_tui_bundle_data_size_matches_real_client_inventory_sum() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(home.path());
+    let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
+    write_streaming_fold_fixture(home.path());
+
+    let prepared =
+        super::prepare_local_inputs(inventory_options(home.path(), &["opencode", "codex"]))
+            .unwrap();
+    let result = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(super::load_prepared_tui_bundle_with_diagnostics(prepared))
+        .unwrap();
+
+    assert!(result.client_space["opencode"] > 0);
+    assert!(result.client_space["codex"] > 0);
+    let client_space_total = result
+        .client_space
+        .values()
+        .copied()
+        .try_fold(0_u64, u64::checked_add)
+        .unwrap();
+    assert_eq!(result.health.input_data_bytes(), client_space_total);
+}
+
+#[test]
+#[serial_test::serial]
 fn test_streaming_tui_usage_applies_date_range() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let input_home = tempfile::TempDir::new().unwrap();
@@ -1661,8 +1688,7 @@ fn test_input_cache_refreshes_stale_provider_on_cache_hit() {
         // must re-run refresh_derived_fields (dates are derived from
         // timestamps since schema v24, so provider identity is the
         // remaining derived field).
-        let stale_message = UnifiedMessage::new(
-            "opencode",
+        let stale_message = crate::sessions::ParsedMessage::new(
             "gpt-5.5",
             "anthropic",
             "session-1",
@@ -1735,29 +1761,6 @@ fn prepared_test_group(
     }
 }
 
-fn confirmed_test_group(
-    client: ClientId,
-    units: Vec<crate::adapters::InputUnit>,
-) -> crate::adapters::ConfirmedAdapterInputs {
-    let prepared = prepared_test_group(client, units);
-    let mut present_files = Vec::new();
-    let unit_digests = prepared
-        .units
-        .iter()
-        .map(|unit| {
-            unit.prepared_input_snapshot()
-                .expect("test unit must carry a prepared snapshot")
-                .visit_present_files(|identity, size| present_files.push((identity, size)));
-            unit.inventory_signature_digest()
-        })
-        .collect();
-    crate::adapters::ConfirmedAdapterInputs {
-        client,
-        unit_digests,
-        present_files,
-    }
-}
-
 #[test]
 fn input_data_size_counts_related_inputs_once_by_file_identity() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -1775,47 +1778,6 @@ fn input_data_size_counts_related_inputs_once_by_file_identity() {
         .unwrap();
 
     assert_eq!(super::input_data_bytes([&with_dependency, &duplicate]), 13);
-}
-
-#[test]
-fn input_data_size_by_client_deduplicates_within_each_client() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let shared = dir.path().join("shared.jsonl");
-    let amp_only = dir.path().join("amp.jsonl");
-    std::fs::write(&shared, b"12345678").unwrap();
-    std::fs::write(&amp_only, b"12345").unwrap();
-
-    let amp = confirmed_test_group(
-        ClientId::Amp,
-        vec![
-            crate::adapters::InputUnit::plain_file(ClientId::Amp, shared.clone()),
-            crate::adapters::InputUnit::plain_file(ClientId::Amp, shared.clone()),
-            crate::adapters::InputUnit::plain_file(ClientId::Amp, amp_only),
-        ],
-    );
-    let codebuddy = confirmed_test_group(
-        ClientId::CodeBuddy,
-        vec![crate::adapters::InputUnit::plain_file(
-            ClientId::CodeBuddy,
-            shared,
-        )],
-    );
-    let requested = vec![
-        "amp".to_string(),
-        "codebuddy".to_string(),
-        "codex".to_string(),
-    ];
-
-    let (by_client, global) = super::confirmed_input_data_bytes(&requested, &[amp, codebuddy]);
-    assert_eq!(
-        by_client,
-        std::collections::BTreeMap::from([
-            ("amp".to_string(), 13),
-            ("codebuddy".to_string(), 8),
-            ("codex".to_string(), 0),
-        ])
-    );
-    assert_eq!(global, 13);
 }
 
 #[test]

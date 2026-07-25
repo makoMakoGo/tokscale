@@ -7,7 +7,7 @@
 //! Note: This parser has stateful logic to track model and delta calculations.
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{normalize_workspace_key, workspace_label_from_key, ParsedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary};
 use crate::{checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
@@ -187,7 +187,7 @@ pub(crate) struct CodexParseState {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedCodexFile {
-    pub messages: Vec<UnifiedMessage>,
+    pub messages: Vec<ParsedMessage>,
     pub rejections: RejectionSummary,
     pub interrupted: Option<InputFailure>,
     pub consumed_offset: u64,
@@ -214,9 +214,8 @@ struct PendingCodexMessage {
 }
 
 impl PendingCodexMessage {
-    fn into_message(self, model: &str) -> UnifiedMessage {
-        let mut message = UnifiedMessage::new_with_agent(
-            "codex",
+    fn into_message(self, model: &str) -> ParsedMessage {
+        let mut message = ParsedMessage::new_with_agent(
             model,
             self.provider,
             self.session_id,
@@ -867,7 +866,7 @@ fn parse_codex_entry_timestamp(timestamp: Option<&str>) -> SessionParseResult<Op
 }
 
 fn codex_token_count_dedup_key(
-    message: &UnifiedMessage,
+    message: &ParsedMessage,
     model: &str,
     upstream_session_id: &str,
     total_usage: CodexTotals,
@@ -888,7 +887,7 @@ fn codex_token_count_dedup_key(
 }
 
 fn set_codex_dedup_key(
-    message: &mut UnifiedMessage,
+    message: &mut ParsedMessage,
     model: &str,
     upstream_session_id: &str,
     total_usage: CodexTotals,
@@ -905,7 +904,7 @@ fn set_codex_dedup_key(
 
 fn flush_pending_model_messages(
     pending_model_messages: &mut Vec<PendingCodexMessage>,
-    messages: &mut Vec<UnifiedMessage>,
+    messages: &mut Vec<ParsedMessage>,
     model: &str,
 ) {
     for pending in pending_model_messages.drain(..) {
@@ -914,7 +913,7 @@ fn flush_pending_model_messages(
 }
 
 /// Parse a Codex JSONL file with stateful tracking
-pub fn parse_codex_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+pub fn parse_codex_file(path: &Path) -> SessionParseResult<Vec<ParsedMessage>> {
     let file = std::fs::File::open(path)
         .map_err(|source| SessionParseError::new("open Codex JSONL input", source))?;
 
@@ -1157,7 +1156,7 @@ mod tests {
         file
     }
 
-    fn parse_codex_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_codex_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_codex_file(path).expect("test fixture must be valid Codex JSONL")
     }
 

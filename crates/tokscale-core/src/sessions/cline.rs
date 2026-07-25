@@ -5,13 +5,12 @@
 //! part of this parser's input contract.
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
+use super::{workspace_metadata_from_key, ParsedMessage, WorkspaceMetadata};
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
-const CLIENT_ID: &str = "cline";
 const MESSAGES_SUFFIX: &str = ".messages.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,8 +317,7 @@ pub fn parse_cline_file(path: &Path) -> SessionParseResult<ScannedInput> {
             .and_then(|info| non_empty_string(info.get("provider")))
             .unwrap_or_default();
         let provider_id = provider_identity::observed_provider_id(raw_provider, model_id);
-        let mut message = UnifiedMessage::new_with_agent(
-            CLIENT_ID,
+        let mut message = ParsedMessage::new_with_agent(
             model_id,
             provider_id,
             &identity.session_id,
@@ -431,7 +429,6 @@ mod tests {
         assert!(scanned.rejections.is_empty());
         assert!(scanned.interrupted.is_none());
         let first = &scanned.messages[0];
-        assert_eq!(first.client.as_ref(), "cline");
         assert_eq!(first.model_id.as_ref(), "poolside/laguna-m.1:free");
         assert_eq!(first.provider_id.as_ref(), "cline");
         assert_eq!(first.session_id.as_ref(), "session-a");

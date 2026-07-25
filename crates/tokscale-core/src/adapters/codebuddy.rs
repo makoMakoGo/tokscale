@@ -12,8 +12,7 @@ use crate::adapters::{
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
-use crate::sessions;
-use crate::UnifiedMessage;
+use crate::sessions::{self, ParsedMessage};
 
 const MIRROR_DEDUP_WINDOW_MS: i64 = 1000;
 const CODEBUDDY_JSONL_RECORD_REJECTION_REVISION: u32 =
@@ -240,14 +239,14 @@ struct CodeBuddyDeduper {
 }
 
 impl CodeBuddyDeduper {
-    fn filter(&mut self, unit: &InputUnit, messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
+    fn filter(&mut self, unit: &InputUnit, messages: Vec<ParsedMessage>) -> Vec<ParsedMessage> {
         messages
             .into_iter()
             .filter(|message| self.keep(unit, message))
             .collect()
     }
 
-    fn keep(&mut self, unit: &InputUnit, message: &UnifiedMessage) -> bool {
+    fn keep(&mut self, unit: &InputUnit, message: &ParsedMessage) -> bool {
         if let Some(key) = message.dedup_key {
             return self.seen_keys.insert(key);
         }
@@ -284,7 +283,7 @@ struct MirrorSignature {
 }
 
 impl MirrorSignature {
-    fn from_message(message: &UnifiedMessage) -> Self {
+    fn from_message(message: &ParsedMessage) -> Self {
         Self {
             session_id: message.session_id.clone(),
             model_id: message.model_id.clone(),
@@ -328,8 +327,15 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
-    fn finalized(mut messages: Vec<crate::UnifiedMessage>) -> Vec<crate::UnifiedMessage> {
+    fn finalized(mut messages: Vec<ParsedMessage>) -> Vec<crate::UnifiedMessage> {
         crate::finalize_token_priced_messages(&mut messages, None);
+        let messages: Vec<_> = messages
+            .into_iter()
+            .map(|message| message.attribute(ClientId::CodeBuddy))
+            .collect();
+        assert!(messages
+            .iter()
+            .all(|message| message.client.as_ref() == ClientId::CodeBuddy.as_str()));
         messages
     }
 
@@ -340,6 +346,9 @@ mod tests {
         CODEBUDDY_ADAPTER
             .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut sink)
             .unwrap();
+        assert!(sink
+            .iter()
+            .all(|message| message.client.as_ref() == ClientId::CodeBuddy.as_str()));
         sink
     }
 

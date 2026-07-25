@@ -1118,7 +1118,10 @@ mod tests {
             &tokscale_core::TuiAcc::new(),
             &[session("amp", "cached-session")],
             &std::collections::BTreeMap::from([("amp".to_string(), 512)]),
-            &Default::default(),
+            &tokscale_core::input_health::HealthReport {
+                input_data_bytes: 512,
+                ..Default::default()
+            },
             &clients,
             &scope,
             signature,
@@ -1130,13 +1133,14 @@ mod tests {
     }
 
     fn loaded_snapshot(
-        data: UsageData,
+        mut data: UsageData,
         sessions: Vec<tokscale_core::TuiSessionEntry>,
         client_space: std::collections::BTreeMap<String, u64>,
         accumulator: tokscale_core::TuiAcc,
         group_by: tokscale_core::GroupBy,
         signature: tokscale_core::InputInventorySignature,
     ) -> BackgroundLoad {
+        data.health.input_data_bytes = client_space.values().copied().sum();
         BackgroundLoad::Loaded {
             data: Box::new(data),
             sessions,

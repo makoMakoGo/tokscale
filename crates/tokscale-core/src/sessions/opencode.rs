@@ -1,8 +1,7 @@
 //! OpenCode current-format SQLite session parser.
 
 use super::{
-    normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
-    UnifiedMessage,
+    normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key, ParsedMessage,
 };
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::TokenBreakdown;
@@ -304,13 +303,13 @@ fn workspace_from_root(root: Option<&str>) -> (Option<String>, Option<String>) {
     (workspace_key, workspace_label)
 }
 
-fn set_workspace_from_root(message: &mut UnifiedMessage, root: Option<&str>) {
+fn set_workspace_from_root(message: &mut ParsedMessage, root: Option<&str>) {
     let (workspace_key, workspace_label) = workspace_from_root(root);
     message.set_workspace(workspace_key, workspace_label);
 }
 
 fn merge_duplicate_workspace(
-    message: &mut UnifiedMessage,
+    message: &mut ParsedMessage,
     state: &mut OpenCodeSqliteDedupState,
     root: Option<&str>,
 ) {
@@ -615,8 +614,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedInput, OpenCodeSql
             cache_write,
             agent: agent.clone(),
         };
-        let mut unified = UnifiedMessage::new_with_agent(
-            "opencode",
+        let mut message = ParsedMessage::new_with_agent(
             model_id,
             provider_id,
             session_id.clone(),
@@ -625,15 +623,15 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedInput, OpenCodeSql
             0.0,
             agent,
         );
-        unified.dedup_key = Some(crate::sessions::dedup_hash_str(&dedup_key));
-        set_workspace_from_root(&mut unified, workspace_root.as_deref());
-        unified.is_main_session = parent_session_id.is_none();
+        message.dedup_key = Some(crate::sessions::dedup_hash_str(&dedup_key));
+        set_workspace_from_root(&mut message, workspace_root.as_deref());
+        message.is_main_session = parent_session_id.is_none();
 
         if let Some(index) = fingerprint_indices.get(&fingerprint).copied() {
             let state = &mut dedup_states[index];
             if message_id.is_some() && !state.has_embedded_message_id {
                 state.has_embedded_message_id = true;
-                scanned.messages[index].dedup_key = unified.dedup_key;
+                scanned.messages[index].dedup_key = message.dedup_key;
             }
             merge_duplicate_workspace(
                 &mut scanned.messages[index],
@@ -648,7 +646,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedInput, OpenCodeSql
             has_workspace_conflict: false,
         });
         fingerprint_indices.insert(fingerprint, scanned.messages.len());
-        scanned.messages.push(unified);
+        scanned.messages.push(message);
     }
 
     Ok(scanned)

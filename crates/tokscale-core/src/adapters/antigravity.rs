@@ -131,11 +131,12 @@ fn fold_antigravity_units(
             ctx.input_cache.remove(&path, unit.parser_version);
         }
         let cache_write_outcome = cache_write_outcome?;
-        sink.extend_messages(
+        adapter_cache::emit_messages(
+            unit.client,
             messages
                 .into_iter()
-                .filter(|message| crate::should_keep_deduped_message(seen, message))
-                .collect(),
+                .filter(|message| crate::should_keep_deduped_message(seen, message)),
+            sink,
         );
 
         if cache_write_outcome == adapter_cache::CacheWriteOutcome::NotPlanned && invalidate_cache {
@@ -188,7 +189,8 @@ mod tests {
     use super::*;
     use crate::adapters::UnitMessagePayload;
     use crate::scanner::ScannerSettings;
-    use crate::{message_cache, TokenBreakdown, UnifiedMessage};
+    use crate::sessions::ParsedMessage;
+    use crate::{message_cache, TokenBreakdown};
     use std::collections::BTreeMap;
     use std::path::Path;
 
@@ -278,7 +280,7 @@ mod tests {
         assert!(units.is_empty());
     }
 
-    fn parsed_unit(path: &Path, meta: InputUnitMeta, message: UnifiedMessage) -> ParsedUnit {
+    fn parsed_unit(path: &Path, meta: InputUnitMeta, message: ParsedMessage) -> ParsedUnit {
         ParsedUnit::healthy(
             InputUnit::plain_file(ClientId::Antigravity, path.to_path_buf()).with_meta(meta),
             UnitMessagePayload::Fresh(vec![message]),
@@ -287,9 +289,8 @@ mod tests {
         )
     }
 
-    fn antigravity_message(session_id: &str, dedup_key: Option<u64>) -> UnifiedMessage {
-        UnifiedMessage::new_with_dedup(
-            "antigravity",
+    fn antigravity_message(session_id: &str, dedup_key: Option<u64>) -> ParsedMessage {
+        ParsedMessage::new_with_dedup(
             "gemini-3.1-pro",
             "google",
             session_id,
@@ -332,6 +333,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client.as_ref(), ClientId::Antigravity.as_str());
         assert_eq!(messages[0].session_id.as_ref(), "first-session");
     }
 }

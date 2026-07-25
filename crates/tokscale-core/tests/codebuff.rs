@@ -72,7 +72,6 @@ fn test_parse_codebuff_emits_one_event_per_assistant_message_with_usage() {
     assert_eq!(msgs.len(), 2);
 
     let first = &msgs[0];
-    assert_eq!(first.client.as_ref(), "codebuff");
     assert_eq!(first.model_id.as_ref(), "claude-sonnet-4-20250514");
     assert_eq!(first.provider_id.as_ref(), "anthropic");
     assert_eq!(first.tokens.input, 500);

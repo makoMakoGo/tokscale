@@ -6,7 +6,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
-    LocalInputAdapter, MessageSink, ParseContext, ParsedBatchInput, ParsedUnit, UnitMessagePayload,
+    LocalInputAdapter, MessageSink, ParseContext, ParsedBatchInput, ParsedUnit,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -73,8 +73,7 @@ impl LocalInputAdapter for HermesAdapter {
         sink: &mut dyn MessageSink,
     ) -> Result<(), crate::adapters::InputPipelineError> {
         let mut seen = HashSet::new();
-        fold_hermes_units(parsed, ctx, sink, &mut seen);
-        Ok(())
+        fold_hermes_units(parsed, ctx, sink, &mut seen)
     }
 
     fn fold_batches(
@@ -85,7 +84,7 @@ impl LocalInputAdapter for HermesAdapter {
     ) -> Result<(), crate::adapters::InputPipelineError> {
         let mut seen = HashSet::new();
         while let Some(parsed) = batches.next(ctx)? {
-            fold_hermes_units(parsed, ctx, sink, &mut seen);
+            fold_hermes_units(parsed, ctx, sink, &mut seen)?;
         }
         Ok(())
     }
@@ -96,18 +95,13 @@ fn fold_hermes_units(
     ctx: &mut FoldContext<'_>,
     sink: &mut dyn MessageSink,
     seen: &mut HashSet<u64>,
-) {
-    for unit in parsed {
-        ctx.health.record(unit.input_health());
-        if let UnitMessagePayload::Fresh(messages) = unit.messages {
-            sink.extend_messages(
-                messages
-                    .into_iter()
-                    .filter(|message| crate::should_keep_deduped_message(seen, message))
-                    .collect(),
-            );
-        }
-    }
+) -> Result<(), crate::adapters::InputPipelineError> {
+    adapter_cache::fold_units_with_filter(parsed, ctx, sink, |_, messages| {
+        messages
+            .into_iter()
+            .filter(|message| crate::should_keep_deduped_message(seen, message))
+            .collect()
+    })
 }
 
 pub(crate) static HERMES_ADAPTER: HermesAdapter = HermesAdapter;
@@ -129,8 +123,7 @@ mod tests {
             &path,
             unit.parser_version,
             unit.input_policy().fingerprint().unwrap(),
-            vec![crate::UnifiedMessage::new(
-                "hermes",
+            vec![crate::sessions::ParsedMessage::new(
                 "model",
                 "provider",
                 "cached-session",

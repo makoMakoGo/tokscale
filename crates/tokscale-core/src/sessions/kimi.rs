@@ -5,15 +5,13 @@
 //! `~/.kimi-code/sessions/<WORKDIR_KEY>/<SESSION_ID>/agents/<AGENT_ID>/wire.jsonl`.
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
+use super::{workspace_metadata_from_key, ParsedMessage, WorkspaceMetadata};
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-
-const CLIENT_ID: &str = "kimi";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -189,8 +187,7 @@ pub fn parse_kimi_file(path: &Path) -> SessionParseResult<ScannedInput> {
             continue;
         };
         let (provider_id, model_id) = resolve_model(raw_model, &observed_aliases, &aliases);
-        let mut message = UnifiedMessage::new_with_agent(
-            CLIENT_ID,
+        let mut message = ParsedMessage::new_with_agent(
             model_id,
             provider_id,
             session_id.clone(),
@@ -398,7 +395,7 @@ fn workspace_from_initial_wire_config(path: &Path) -> Option<WorkspaceMetadata> 
 mod tests {
     use super::*;
 
-    fn parse_kimi_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_kimi_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_kimi_file(path).unwrap().messages
     }
     use std::io::Write;
@@ -458,7 +455,6 @@ model = "gpt-5.5"
         let messages = parse_kimi_file(&wire);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), "kimi");
         assert_eq!(messages[0].provider_id.as_ref(), "openai-pro");
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
         assert_eq!(messages[0].session_id.as_ref(), "session_123");

@@ -113,13 +113,24 @@ mod tests {
         units: Vec<InputUnit>,
         cache: &mut message_cache::InputMessageCache,
         pricing: Option<&PricingService>,
-    ) -> Vec<sessions::UnifiedMessage> {
+    ) -> Vec<crate::UnifiedMessage> {
         let parsed = JUNIE_ADAPTER.parse_checked(units, &ParseContext { pricing });
         let mut messages = Vec::new();
         JUNIE_ADAPTER
             .fold(parsed, &mut FoldContext::new(cache, pricing), &mut messages)
             .unwrap();
+        assert!(messages
+            .iter()
+            .all(|message| message.client.as_ref() == ClientId::Junie.as_str()));
         messages
+    }
+
+    fn finalized(mut messages: Vec<sessions::ParsedMessage>) -> Vec<crate::UnifiedMessage> {
+        crate::finalize_token_priced_messages(&mut messages, None);
+        messages
+            .into_iter()
+            .map(|message| message.attribute(ClientId::Junie))
+            .collect()
     }
 
     fn pricing_service() -> PricingService {
@@ -168,8 +179,11 @@ mod tests {
             &mut cache,
             None,
         );
-        let expected = sessions::junie::parse_junie_file(&path).unwrap().messages;
+        let expected = finalized(sessions::junie::parse_junie_file(&path).unwrap().messages);
 
+        assert!(actual
+            .iter()
+            .all(|message| message.client.as_ref() == ClientId::Junie.as_str()));
         assert_eq!(actual, expected);
     }
 
@@ -199,6 +213,9 @@ mod tests {
             .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut cached)
             .unwrap();
 
+        assert!(cached
+            .iter()
+            .all(|message| message.client.as_ref() == ClientId::Junie.as_str()));
         assert_eq!(cached, fresh);
         restore_env_var("TOKSCALE_CONFIG_DIR", previous_config_dir);
     }

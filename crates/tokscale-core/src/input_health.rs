@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::clients::ClientId;
 use crate::sessions::error::SessionParseError;
-use crate::UnifiedMessage;
+use crate::sessions::ParsedMessage;
 
 /// Why a single record inside an otherwise readable input was rejected.
 ///
@@ -342,8 +342,9 @@ pub struct HealthReport {
     pub rejected_records: u64,
     pub partial_inputs: usize,
     pub failed_inputs: usize,
-    /// Deduplicated on-disk size of scan inputs at the latest inventory
-    /// snapshot. Tokscale's own cache files are not included.
+    /// Sum of per-client input bytes at the latest inventory snapshot,
+    /// deduplicated within each client. Tokscale's own cache files are not
+    /// included.
     pub input_data_bytes: u64,
     #[serde(default)]
     pub issues: Vec<HealthIssueReport>,
@@ -421,13 +422,13 @@ pub struct HealthIssueReport {
 /// so far.
 #[derive(Debug, Default)]
 pub struct ScannedInput {
-    pub messages: Vec<UnifiedMessage>,
+    pub messages: Vec<ParsedMessage>,
     pub rejections: RejectionSummary,
     pub interrupted: Option<InputFailure>,
 }
 
 impl ScannedInput {
-    pub fn complete(messages: Vec<UnifiedMessage>) -> Self {
+    pub fn complete(messages: Vec<ParsedMessage>) -> Self {
         Self {
             messages,
             rejections: RejectionSummary::default(),

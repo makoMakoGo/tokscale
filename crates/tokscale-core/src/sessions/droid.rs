@@ -3,7 +3,7 @@
 //! Parses JSON files from ~/.factory/sessions/
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
+use super::{workspace_metadata_from_key, ParsedMessage, WorkspaceMetadata};
 use crate::input_health::{RecordRejectionReason, ScannedInput};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -202,7 +202,7 @@ fn read_session_start(path: &Path) -> Option<DroidSessionStart> {
 
 /// Factory records direct delegation on the settings file's transcript header.
 /// Missing legacy transcripts retain the constructor default of top-level.
-pub(crate) fn classify_droid_main_session(path: &Path, messages: &mut [UnifiedMessage]) {
+pub(crate) fn classify_droid_main_session(path: &Path, messages: &mut [ParsedMessage]) {
     let is_main_session =
         read_session_start(path).is_none_or(|start| start.parent_session_id().is_none());
     for message in messages {
@@ -474,9 +474,8 @@ pub fn parse_droid_file(path: &Path) -> SessionParseResult<ScannedInput> {
         return Ok(scanned);
     }
 
-    let message = UnifiedMessage::new_with_agent(
-        "droid", model, provider, session_id, timestamp, tokens, 0.0, agent,
-    );
+    let message =
+        ParsedMessage::new_with_agent(model, provider, session_id, timestamp, tokens, 0.0, agent);
     scanned.messages.push(message);
     classify_droid_main_session(path, &mut scanned.messages);
     Ok(scanned)
@@ -487,7 +486,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_droid_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_droid_file(path).unwrap().messages
     }
 

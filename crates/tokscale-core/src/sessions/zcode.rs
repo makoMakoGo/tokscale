@@ -6,14 +6,13 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
-use super::{dedup_hash_str, normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{dedup_hash_str, normalize_workspace_key, workspace_label_from_key, ParsedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-const CLIENT_ID: &str = "zcode";
 const PROVIDER_ID: &str = "zai";
 
 #[derive(Debug, Deserialize)]
@@ -365,8 +364,7 @@ pub fn parse_zcode_file(path: &Path) -> SessionParseResult<ScannedInput> {
                 let dedup_key =
                     dedup_hash_str(&format!("zcode:{resolved_session}:{assistant_index}"));
 
-                let mut message = UnifiedMessage::new_with_dedup(
-                    CLIENT_ID,
+                let mut message = ParsedMessage::new_with_dedup(
                     resolved_model,
                     PROVIDER_ID,
                     resolved_session,
@@ -445,7 +443,7 @@ fn workspace_key_from_path(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_zcode_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_zcode_file(path).unwrap().messages
     }
     use serde_json::json;
@@ -490,7 +488,6 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
-        assert_eq!(msg.client.as_ref(), "zcode");
         assert_eq!(msg.provider_id.as_ref(), "zai");
         assert_eq!(msg.model_id.as_ref(), "glm-5.2");
         assert_eq!(msg.session_id.as_ref(), "s1");

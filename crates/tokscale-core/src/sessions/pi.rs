@@ -4,7 +4,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::{
-    normalize_agent_name, normalize_workspace_key, workspace_label_from_key, UnifiedMessage,
+    normalize_agent_name, normalize_workspace_key, workspace_label_from_key, ParsedMessage,
 };
 use crate::input_health::{
     InputFailure, InputStatus, RecordRejectionReason, RejectionSummary, ScannedInput,
@@ -239,36 +239,51 @@ pub struct PiOrchestrationUsage {
     pub cache_read: Option<i64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PiFormat {
+    Pi,
+    Omp,
+}
+
+impl PiFormat {
+    const fn usage_validation_operation(self) -> &'static str {
+        match self {
+            Self::Pi => "validate Pi assistant message",
+            Self::Omp => "validate OMP assistant message",
+        }
+    }
+
+    const fn is_omp(self) -> bool {
+        matches!(self, Self::Omp)
+    }
+}
+
 /// Parse a Pi JSONL session file
 pub fn parse_pi_file(path: &Path) -> SessionParseResult<ScannedInput> {
-    parse_pi_format_file(path, "pi", None)
+    parse_pi_format_file(path, PiFormat::Pi, None)
 }
 
 /// Parse an OMP JSONL session file.
 pub fn parse_omp_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let parent_index = build_omp_parent_task_agent_index(&[path.to_path_buf()]);
-    parse_pi_format_file(path, "omp", Some(&parent_index))
+    parse_pi_format_file(path, PiFormat::Omp, Some(&parent_index))
 }
 
 pub fn parse_omp_file_with_parent_task_agent_index(
     path: &Path,
     parent_task_agent_index: &OmpParentTaskAgentIndex,
 ) -> SessionParseResult<ScannedInput> {
-    parse_pi_format_file(path, "omp", Some(parent_task_agent_index))
+    parse_pi_format_file(path, PiFormat::Omp, Some(parent_task_agent_index))
 }
 
-fn usage_validation_operation(client: &str) -> &'static str {
-    match client {
-        "pi" => "validate Pi assistant message",
-        "omp" => "validate OMP assistant message",
-        _ => unreachable!("Pi-format parser only supports Pi and OMP"),
-    }
-}
-
-fn required_usage_value(value: Option<i64>, field: &str, client: &str) -> SessionParseResult<i64> {
+fn required_usage_value(
+    value: Option<i64>,
+    field: &str,
+    pi_format: PiFormat,
+) -> SessionParseResult<i64> {
     value.ok_or_else(|| {
         SessionParseError::invalid(
-            usage_validation_operation(client),
+            pi_format.usage_validation_operation(),
             format!("current usage is missing `{field}`"),
         )
     })
@@ -277,11 +292,11 @@ fn required_usage_value(value: Option<i64>, field: &str, client: &str) -> Sessio
 fn validate_nonnegative_usage_value(
     field: &str,
     value: i64,
-    client: &str,
+    pi_format: PiFormat,
 ) -> SessionParseResult<()> {
     if value < 0 {
         return Err(SessionParseError::invalid(
-            usage_validation_operation(client),
+            pi_format.usage_validation_operation(),
             format!("token counts must not be negative: `{field}`"),
         ));
     }
@@ -291,12 +306,12 @@ fn validate_nonnegative_usage_value(
 fn checked_usage_sum(
     values: impl IntoIterator<Item = i64>,
     description: &str,
-    client: &str,
+    pi_format: PiFormat,
 ) -> SessionParseResult<i64> {
     values.into_iter().try_fold(0_i64, |total, value| {
         total.checked_add(value).ok_or_else(|| {
             SessionParseError::invalid(
-                usage_validation_operation(client),
+                pi_format.usage_validation_operation(),
                 format!("{description} exceeds i64::MAX"),
             )
         })
@@ -305,13 +320,13 @@ fn checked_usage_sum(
 
 fn token_breakdown_from_pi_usage(
     usage: &PiUsage,
-    client: &str,
+    pi_format: PiFormat,
 ) -> SessionParseResult<TokenBreakdown> {
-    let input = required_usage_value(usage.input, "input", client)?;
-    let raw_output = required_usage_value(usage.output, "output", client)?;
-    let cache_read = required_usage_value(usage.cache_read, "cacheRead", client)?;
-    let cache_write = required_usage_value(usage.cache_write, "cacheWrite", client)?;
-    let input_total = required_usage_value(usage.total_tokens, "totalTokens", client)?;
+    let input = required_usage_value(usage.input, "input", pi_format)?;
+    let raw_output = required_usage_value(usage.output, "output", pi_format)?;
+    let cache_read = required_usage_value(usage.cache_read, "cacheRead", pi_format)?;
+    let cache_write = required_usage_value(usage.cache_write, "cacheWrite", pi_format)?;
+    let input_total = required_usage_value(usage.total_tokens, "totalTokens", pi_format)?;
 
     let (
         reasoning_field,
@@ -319,26 +334,26 @@ fn token_breakdown_from_pi_usage(
         orchestration_input,
         orchestration_output,
         orchestration_cache_read,
-    ) = match client {
-        "pi" => {
+    ) = match pi_format {
+        PiFormat::Pi => {
             if usage.reasoning_tokens.is_some() {
                 return Err(SessionParseError::invalid(
-                    usage_validation_operation(client),
+                    pi_format.usage_validation_operation(),
                     "Pi usage must use `reasoning`, not OMP `reasoningTokens`",
                 ));
             }
             if usage.orchestration.is_some() {
                 return Err(SessionParseError::invalid(
-                    usage_validation_operation(client),
+                    pi_format.usage_validation_operation(),
                     "Pi usage must not contain OMP `orchestration` tokens",
                 ));
             }
             ("reasoning", usage.reasoning.unwrap_or(0), 0, 0, 0)
         }
-        "omp" => {
+        PiFormat::Omp => {
             if usage.reasoning.is_some() {
                 return Err(SessionParseError::invalid(
-                    usage_validation_operation(client),
+                    pi_format.usage_validation_operation(),
                     "OMP usage must use `reasoningTokens`, not Pi `reasoning`",
                 ));
             }
@@ -353,7 +368,6 @@ fn token_breakdown_from_pi_usage(
                     .unwrap_or(0),
             )
         }
-        _ => unreachable!("Pi-format parser only supports Pi and OMP"),
     };
 
     for (field, value) in [
@@ -367,7 +381,7 @@ fn token_breakdown_from_pi_usage(
         ("orchestration.output", orchestration_output),
         ("orchestration.cacheRead", orchestration_cache_read),
     ] {
-        validate_nonnegative_usage_value(field, value, client)?;
+        validate_nonnegative_usage_value(field, value, pi_format)?;
     }
 
     // Xiaomi MiMo token-plan has emitted a length-stopped response with
@@ -388,11 +402,11 @@ fn token_breakdown_from_pi_usage(
             orchestration_cache_read,
         ],
         "reported totalTokens",
-        client,
+        pi_format,
     )?;
     if input_total != expected_input_total {
         return Err(SessionParseError::invalid(
-            usage_validation_operation(client),
+            pi_format.usage_validation_operation(),
             format!(
                 "reported totalTokens is {input_total}, expected {expected_input_total} from usage buckets"
             ),
@@ -403,30 +417,30 @@ fn token_breakdown_from_pi_usage(
         input: checked_usage_sum(
             [input, orchestration_input],
             "normalized input token count",
-            client,
+            pi_format,
         )?,
         output: checked_usage_sum(
             [raw_output - reasoning, orchestration_output],
             "normalized output token count",
-            client,
+            pi_format,
         )?,
         cache_read: checked_usage_sum(
             [cache_read, orchestration_cache_read],
             "normalized cache-read token count",
-            client,
+            pi_format,
         )?,
         cache_write,
         reasoning,
     };
     let normalized_total = tokens.checked_total().ok_or_else(|| {
         SessionParseError::invalid(
-            usage_validation_operation(client),
+            pi_format.usage_validation_operation(),
             "normalized token total exceeds i64::MAX",
         )
     })?;
     if normalized_total != input_total {
         return Err(SessionParseError::invalid(
-            usage_validation_operation(client),
+            pi_format.usage_validation_operation(),
             format!(
                 "normalized token total is {normalized_total}, expected reported totalTokens {input_total}"
             ),
@@ -848,7 +862,7 @@ fn parse_pi_header_line(
 
 fn parse_pi_format_file(
     path: &Path,
-    client: &'static str,
+    pi_format: PiFormat,
     omp_parent_task_agent_index: Option<&OmpParentTaskAgentIndex>,
 ) -> SessionParseResult<ScannedInput> {
     let file = std::fs::File::open(path)
@@ -864,12 +878,12 @@ fn parse_pi_format_file(
         .file_stem()
         .and_then(|stem| stem.to_str())
         .map(str::to_string);
-    let omp_parent_scan = if client == "omp" {
+    let omp_parent_scan = if pi_format.is_omp() {
         omp_parent_task_agent_index.and_then(|index| index.parent_scan_for_child(path))
     } else {
         None
     };
-    let omp_subagent_label = if client == "omp" {
+    let omp_subagent_label = if pi_format.is_omp() {
         match child_stem.as_deref() {
             Some(stem) => {
                 if let Some(label) = normalize_omp_advisor_label(stem) {
@@ -895,7 +909,7 @@ fn parse_pi_format_file(
         None
     };
     let is_main_session =
-        client != "omp" || (omp_parent_scan.is_none() && omp_subagent_label.is_none());
+        !pi_format.is_omp() || (omp_parent_scan.is_none() && omp_subagent_label.is_none());
 
     let mut session_id: Option<String> = None;
     let mut workspace_key: Option<String> = None;
@@ -926,7 +940,7 @@ fn parse_pi_format_file(
             let parsed_header = match parse_pi_header_line(
                 trimmed,
                 &mut buffer,
-                client == "omp" && !saw_omp_title_slot,
+                pi_format.is_omp() && !saw_omp_title_slot,
             ) {
                 Ok(parsed) => parsed,
                 Err(_error) => {
@@ -980,7 +994,7 @@ fn parse_pi_format_file(
             None => continue,
         };
 
-        let tokens = match token_breakdown_from_pi_usage(&usage, client) {
+        let tokens = match token_breakdown_from_pi_usage(&usage, pi_format) {
             Ok(tokens) => tokens,
             Err(_) => {
                 record_pi_rejection(&mut scanned);
@@ -1021,8 +1035,7 @@ fn parse_pi_format_file(
             }
         };
 
-        let mut unified = UnifiedMessage::new(
-            client,
+        let mut parsed = ParsedMessage::new(
             model,
             provider,
             session_id.clone().expect(
@@ -1032,13 +1045,13 @@ fn parse_pi_format_file(
             tokens,
             0.0,
         );
-        unified.is_main_session = is_main_session;
-        unified.set_workspace(workspace_key.clone(), workspace_label.clone());
-        unified.agent = omp_subagent_label
+        parsed.is_main_session = is_main_session;
+        parsed.set_workspace(workspace_key.clone(), workspace_label.clone());
+        parsed.agent = omp_subagent_label
             .as_deref()
             .map(crate::sessions::intern::intern);
-        unified.set_agent_instance(child_stem.clone());
-        scanned.messages.push(unified);
+        parsed.set_agent_instance(child_stem.clone());
+        scanned.messages.push(parsed);
     }
 
     if session_id.is_none() {
@@ -1105,7 +1118,6 @@ mod tests {
 
         // then
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), "pi");
         assert_eq!(messages[0].session_id.as_ref(), "pi_ses_001");
         assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
@@ -1181,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_omp_jsonl_uses_omp_client() {
+    fn test_parse_omp_jsonl_uses_omp_format() {
         // given
         let content = r#"{"type":"session","id":"omp_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#;
@@ -1192,7 +1204,6 @@ mod tests {
 
         // then
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), "omp");
         assert_eq!(messages[0].session_id.as_ref(), "omp_ses_001");
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
         assert_eq!(messages[0].provider_id.as_ref(), "openai");
@@ -1209,7 +1220,6 @@ mod tests {
         let messages = parse_omp_file(file.path()).unwrap().messages;
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), "omp");
         assert_eq!(messages[0].session_id.as_ref(), "omp_ses_title");
         assert_eq!(messages[0].tokens.output, 8);
         assert_eq!(messages[0].tokens.reasoning, 2);

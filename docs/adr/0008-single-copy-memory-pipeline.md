@@ -34,6 +34,13 @@ Discovery produces one consumptive `PreparedLocalInputs` inventory. It records:
   inputs; and
 - compact pre-execution metadata snapshots.
 
+Each `InputUnit.client` is adapter-issued provenance from ADR 0007. Session
+parsers produce `ParsedMessage`, which intentionally has no source identity, and
+message-cache bodies persist that same source-neutral type. After cache writes,
+adapter-specific enrichment, filtering, and deduplication, the sequential fold
+combines each parsed message with the unit's `ClientId` and emits a
+`UnifiedMessage`. No parser or cache shard can override that attribution.
+
 Freshness probing and execution consume the same inventory and never rediscover
 inputs. A file added after preparation belongs to the next inventory. Related
 inputs include SQLite WAL files, Claude `.meta.json`, optional workspace
@@ -112,10 +119,12 @@ hit bodies before that index is built, and then folds hits and misses in bounded
 order. Codex retains its dedicated exact-hit, stale, append, and recovery path
 because its incremental parse state is not the generic adapter contract.
 
-Codex cold parses, append merges, and race reparses own one raw message vector.
+Codex cold parses, append merges, and race reparses own one raw
+`ParsedMessage` vector.
 When cacheable, the fold serializes a borrowed raw slice before applying
 timestamp completion, token normalization/filtering, canonical identity,
-pricing, and exec-session attribution in place.
+pricing, and exec-session attribution in place. Client attribution occurs only
+after those operations when the adapter emits the messages.
 
 OpenCode borrows potentially large message TEXT. It stream-validates the full
 JSON document and required role envelope, then fully decodes assistant payloads
@@ -124,7 +133,9 @@ instead of becoming empty usage.
 
 ### Message representation and aggregation
 
-`UnifiedMessage` stores no redundant derivable value:
+`ParsedMessage` is the source-neutral parser and shard representation.
+`UnifiedMessage` adds the adapter-attributed client for public aggregation and
+otherwise stores no redundant derivable value:
 
 - date is derived from timestamp;
 - `dedup_key` is a 64-bit hash rather than a formatted string; and
@@ -143,10 +154,16 @@ buckets. Composite identities never use delimiter-concatenated public keys.
 Persisted map keys are versioned, variant-tagged, byte-length-prefixed values
 with a distinct unknown-workspace tag.
 
-Session client-space accounting is the deduplicated byte size of the input
-snapshots confirmed at the final cache-decision/fold boundary. Usage, Sessions,
-Data Health, input space, and the inventory signature all derive from those
-same confirmed snapshots.
+Session client-space accounting is the byte size of the input snapshots
+confirmed at the final cache-decision/fold boundary, deduplicated within each
+client inventory. Overview Data Size is exactly the checked sum of that
+per-client map; it does not apply a second cross-client physical-file
+deduplication rule. The TUI generation schema changes with this accounting
+contract so an older generation cannot preserve the previous total alongside
+current per-client values. Current-schema cache writes and reads both reject a
+Data Size that differs from the checked sum of `clientSpace`. Usage, Sessions,
+Data Health, input space, and the inventory signature all derive from those same
+confirmed snapshots.
 
 ### Shard contract and recovery
 
@@ -167,9 +184,10 @@ bypassed, but a potentially valid replacement shard remains unless the reparse
 independently proves it invalid or non-cacheable. Partial and unavailable input
 never publishes a shard.
 
-Cache writes serialize borrowed message slices and do not clone messages merely
-to construct a cache representation. Parser-semantic changes bump the owning
-parser revision; serialization-layout changes bump the shard format.
+Cache writes serialize borrowed source-neutral `ParsedMessage` slices and do
+not clone messages merely to construct a cache representation.
+Parser-semantic changes bump the owning parser revision;
+serialization-layout changes bump the shard format.
 
 The message-shard envelope is the `TOKSHRD\0` magic, a little-endian format
 version, a little-endian `u64` header length, the bincode header, and the

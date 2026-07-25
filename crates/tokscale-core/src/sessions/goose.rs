@@ -8,7 +8,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;
-use super::UnifiedMessage;
+use super::ParsedMessage;
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -198,8 +198,7 @@ pub fn parse_goose_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
                 .record(RecordRejectionReason::MalformedRecord);
             continue;
         }
-        let mut msg = UnifiedMessage::new(
-            "goose",
+        let mut msg = ParsedMessage::new(
             model_id,
             provider,
             session_id,

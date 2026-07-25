@@ -1,6 +1,7 @@
 //! Session parsers for different AI coding assistant formats
 //!
-//! Each client has its own parser that converts to a unified message format.
+//! Parsers produce source-neutral messages. Local-input adapters attach the
+//! owning client only when emitting the final unified message stream.
 
 pub mod amp;
 pub mod antigravity_cli;
@@ -33,41 +34,60 @@ pub mod warp;
 pub mod zcode;
 pub mod zed;
 
-use crate::TokenBreakdown;
+use crate::{clients::ClientId, TokenBreakdown};
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct UnifiedMessage {
+macro_rules! define_message {
+    ($(#[$meta:meta])* $name:ident, $($source_field:tt)*) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct $name {
+            $($source_field)*
+            #[serde(deserialize_with = "intern::de_intern")]
+            pub model_id: std::sync::Arc<str>,
+            #[serde(deserialize_with = "intern::de_intern")]
+            pub provider_id: std::sync::Arc<str>,
+            #[serde(deserialize_with = "intern::de_intern")]
+            pub session_id: std::sync::Arc<str>,
+            /// Whether the input record directly identifies this usage as belonging to a
+            /// top-level session. `session_id` remains the legacy Total grouping key.
+            #[serde(default = "default_true")]
+            pub is_main_session: bool,
+            #[serde(default, deserialize_with = "intern::de_intern_opt")]
+            pub workspace_key: Option<std::sync::Arc<str>>,
+            #[serde(default, deserialize_with = "intern::de_intern_opt")]
+            pub workspace_label: Option<std::sync::Arc<str>>,
+            pub timestamp: i64,
+            pub tokens: TokenBreakdown,
+            pub cost: f64,
+            #[serde(default = "default_message_count")]
+            pub message_count: i32,
+            #[serde(default, deserialize_with = "intern::de_intern_opt")]
+            pub agent: Option<std::sync::Arc<str>>,
+            #[serde(default, deserialize_with = "intern::de_intern_opt")]
+            pub agent_instance: Option<std::sync::Arc<str>>,
+            pub dedup_key: Option<u64>,
+            /// True if this message is the first assistant response after a user turn.
+            /// Used to count user interaction turns (as opposed to API message count).
+            #[serde(default)]
+            pub is_turn_start: bool,
+        }
+    };
+}
+
+define_message!(
+    /// Source-neutral usage produced by a session parser.
+    ///
+    /// The local-input adapter owns source identity and attributes it only after
+    /// parsing, cache persistence, and adapter-specific filtering have completed.
+    ParsedMessage,
+);
+
+define_message!(
+    /// Usage attributed to a concrete client and ready for public aggregation.
+    UnifiedMessage,
     #[serde(deserialize_with = "intern::de_intern")]
     pub client: std::sync::Arc<str>,
-    #[serde(deserialize_with = "intern::de_intern")]
-    pub model_id: std::sync::Arc<str>,
-    #[serde(deserialize_with = "intern::de_intern")]
-    pub provider_id: std::sync::Arc<str>,
-    #[serde(deserialize_with = "intern::de_intern")]
-    pub session_id: std::sync::Arc<str>,
-    /// Whether the input record directly identifies this usage as belonging to a
-    /// top-level session. `session_id` remains the legacy Total grouping key.
-    #[serde(default = "default_true")]
-    pub is_main_session: bool,
-    #[serde(default, deserialize_with = "intern::de_intern_opt")]
-    pub workspace_key: Option<std::sync::Arc<str>>,
-    #[serde(default, deserialize_with = "intern::de_intern_opt")]
-    pub workspace_label: Option<std::sync::Arc<str>>,
-    pub timestamp: i64,
-    pub tokens: TokenBreakdown,
-    pub cost: f64,
-    #[serde(default = "default_message_count")]
-    pub message_count: i32,
-    #[serde(default, deserialize_with = "intern::de_intern_opt")]
-    pub agent: Option<std::sync::Arc<str>>,
-    #[serde(default, deserialize_with = "intern::de_intern_opt")]
-    pub agent_instance: Option<std::sync::Arc<str>>,
-    pub dedup_key: Option<u64>,
-    /// True if this message is the first assistant response after a user turn.
-    /// Used to count user interaction turns (as opposed to API message count).
-    #[serde(default)]
-    pub is_turn_start: bool,
-}
+);
 
 const fn default_message_count() -> i32 {
     1
@@ -240,9 +260,8 @@ fn titlecase_agent(name: &str) -> String {
         .join(" ")
 }
 
-impl UnifiedMessage {
+impl ParsedMessage {
     pub fn new(
-        client: impl AsRef<str>,
         model_id: impl AsRef<str>,
         provider_id: impl AsRef<str>,
         session_id: impl AsRef<str>,
@@ -251,7 +270,6 @@ impl UnifiedMessage {
         cost: f64,
     ) -> Self {
         Self::new_full(
-            client,
             model_id,
             provider_id,
             session_id,
@@ -265,7 +283,6 @@ impl UnifiedMessage {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_agent(
-        client: impl AsRef<str>,
         model_id: impl AsRef<str>,
         provider_id: impl AsRef<str>,
         session_id: impl AsRef<str>,
@@ -275,7 +292,6 @@ impl UnifiedMessage {
         agent: Option<String>,
     ) -> Self {
         Self::new_full(
-            client,
             model_id,
             provider_id,
             session_id,
@@ -289,7 +305,6 @@ impl UnifiedMessage {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_dedup(
-        client: impl AsRef<str>,
         model_id: impl AsRef<str>,
         provider_id: impl AsRef<str>,
         session_id: impl AsRef<str>,
@@ -299,7 +314,6 @@ impl UnifiedMessage {
         dedup_key: Option<u64>,
     ) -> Self {
         Self::new_full(
-            client,
             model_id,
             provider_id,
             session_id,
@@ -313,7 +327,6 @@ impl UnifiedMessage {
 
     #[allow(clippy::too_many_arguments)]
     fn new_full(
-        client: impl AsRef<str>,
         model_id: impl AsRef<str>,
         provider_id: impl AsRef<str>,
         session_id: impl AsRef<str>,
@@ -324,7 +337,6 @@ impl UnifiedMessage {
         dedup_key: Option<u64>,
     ) -> Self {
         Self {
-            client: intern::intern(client.as_ref()),
             model_id: intern::intern(model_id.as_ref()),
             provider_id: intern::intern(provider_id.as_ref()),
             session_id: intern::intern(session_id.as_ref()),
@@ -342,44 +354,159 @@ impl UnifiedMessage {
         }
     }
 
-    /// Local calendar date derived from `timestamp`; `None` when the
-    /// timestamp is outside the representable range.
-    pub fn local_date(&self) -> Option<chrono::NaiveDate> {
-        use chrono::TimeZone;
-        match chrono::Local.timestamp_millis_opt(self.timestamp) {
-            chrono::LocalResult::Single(dt) => Some(dt.date_naive()),
-            _ => None,
+    pub(crate) fn attribute(self, client: ClientId) -> UnifiedMessage {
+        self.with_client(client.as_str())
+    }
+
+    fn with_client(self, client: impl AsRef<str>) -> UnifiedMessage {
+        let Self {
+            model_id,
+            provider_id,
+            session_id,
+            is_main_session,
+            workspace_key,
+            workspace_label,
+            timestamp,
+            tokens,
+            cost,
+            message_count,
+            agent,
+            agent_instance,
+            dedup_key,
+            is_turn_start,
+        } = self;
+        UnifiedMessage {
+            client: intern::intern(client.as_ref()),
+            model_id,
+            provider_id,
+            session_id,
+            is_main_session,
+            workspace_key,
+            workspace_label,
+            timestamp,
+            tokens,
+            cost,
+            message_count,
+            agent,
+            agent_instance,
+            dedup_key,
+            is_turn_start,
         }
     }
+}
 
-    /// Local `YYYY-MM-DD` string derived from `timestamp` (empty when out of
-    /// range). Allocates; prefer [`Self::local_date`] in hot paths.
-    pub fn date_string(&self) -> String {
-        timestamp_to_date(self.timestamp)
+impl UnifiedMessage {
+    pub fn new(
+        client: impl AsRef<str>,
+        model_id: impl AsRef<str>,
+        provider_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+        timestamp: i64,
+        tokens: TokenBreakdown,
+        cost: f64,
+    ) -> Self {
+        ParsedMessage::new(model_id, provider_id, session_id, timestamp, tokens, cost)
+            .with_client(client)
     }
 
-    pub fn set_workspace(
-        &mut self,
-        workspace_key: Option<String>,
-        workspace_label: Option<String>,
-    ) {
-        self.workspace_key = workspace_key.as_deref().map(intern::intern);
-        self.workspace_label = workspace_label.as_deref().map(intern::intern);
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_agent(
+        client: impl AsRef<str>,
+        model_id: impl AsRef<str>,
+        provider_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+        timestamp: i64,
+        tokens: TokenBreakdown,
+        cost: f64,
+        agent: Option<String>,
+    ) -> Self {
+        ParsedMessage::new_with_agent(
+            model_id,
+            provider_id,
+            session_id,
+            timestamp,
+            tokens,
+            cost,
+            agent,
+        )
+        .with_client(client)
     }
 
-    pub fn set_agent_instance(&mut self, agent_instance: Option<String>) {
-        self.agent_instance = agent_instance.as_deref().map(intern::intern);
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_dedup(
+        client: impl AsRef<str>,
+        model_id: impl AsRef<str>,
+        provider_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+        timestamp: i64,
+        tokens: TokenBreakdown,
+        cost: f64,
+        dedup_key: Option<u64>,
+    ) -> Self {
+        ParsedMessage::new_with_dedup(
+            model_id,
+            provider_id,
+            session_id,
+            timestamp,
+            tokens,
+            cost,
+            dedup_key,
+        )
+        .with_client(client)
     }
+}
 
-    pub(crate) fn refresh_derived_fields(&mut self) {
-        if let Some(provider) = crate::provider_identity::provider_override_from_model_and_provider(
-            &self.model_id,
-            &self.provider_id,
-        ) {
-            self.provider_id = intern::intern(provider);
+macro_rules! impl_message_methods {
+    ($name:ident) => {
+        impl $name {
+            /// Local calendar date derived from `timestamp`; `None` when the
+            /// timestamp is outside the representable range.
+            pub fn local_date(&self) -> Option<chrono::NaiveDate> {
+                use chrono::TimeZone;
+                match chrono::Local.timestamp_millis_opt(self.timestamp) {
+                    chrono::LocalResult::Single(dt) => Some(dt.date_naive()),
+                    _ => None,
+                }
+            }
+
+            /// Local `YYYY-MM-DD` string derived from `timestamp` (empty when out of
+            /// range). Allocates; prefer [`Self::local_date`] in hot paths.
+            pub fn date_string(&self) -> String {
+                timestamp_to_date(self.timestamp)
+            }
+
+            pub fn set_workspace(
+                &mut self,
+                workspace_key: Option<String>,
+                workspace_label: Option<String>,
+            ) {
+                self.workspace_key = workspace_key.as_deref().map(intern::intern);
+                self.workspace_label = workspace_label.as_deref().map(intern::intern);
+            }
+
+            pub fn set_agent_instance(&mut self, agent_instance: Option<String>) {
+                self.agent_instance = agent_instance.as_deref().map(intern::intern);
+            }
+
+            #[cfg_attr(not(test), allow(dead_code))]
+            pub(crate) fn refresh_derived_fields(&mut self) {
+                if let Some(provider) =
+                    crate::provider_identity::provider_override_from_model_and_provider(
+                        &self.model_id,
+                        &self.provider_id,
+                    )
+                {
+                    self.provider_id = intern::intern(provider);
+                }
+            }
         }
-    }
+    };
+}
 
+impl_message_methods!(ParsedMessage);
+impl_message_methods!(UnifiedMessage);
+
+impl ParsedMessage {
     pub(crate) fn set_timestamp(&mut self, timestamp: i64) {
         self.timestamp = timestamp;
         self.refresh_derived_fields();
@@ -519,6 +646,29 @@ mod tests {
         assert_eq!(msg.agent, None);
         assert_eq!(msg.workspace_key, None);
         assert_eq!(msg.workspace_label, None);
+    }
+
+    #[test]
+    fn parsed_message_has_no_source_until_adapter_attribution() {
+        let parsed = ParsedMessage::new(
+            "gpt-5.5",
+            "openai",
+            "session",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 2,
+                ..Default::default()
+            },
+            0.0,
+        );
+
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        assert!(serialized.get("client").is_none());
+
+        let attributed = parsed.attribute(ClientId::Codex);
+        assert_eq!(attributed.client.as_ref(), ClientId::Codex.as_str());
+        assert_eq!(attributed.model_id.as_ref(), "gpt-5.5");
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{normalize_workspace_key, workspace_label_from_key, ParsedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{model_aliases, provider_identity, token_imputation};
 use chrono::TimeZone;
@@ -15,8 +15,6 @@ use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-
-const CLIENT_ID: &str = "warp";
 
 #[derive(Debug, Clone, Default)]
 struct ConversationMeta {
@@ -208,8 +206,7 @@ pub fn parse_warp_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
         .into_iter()
         .zip(token_rows)
         .map(|(pending, tokens)| {
-            let mut message = UnifiedMessage::new_with_dedup(
-                CLIENT_ID,
+            let mut message = ParsedMessage::new_with_dedup(
                 pending.model_id,
                 pending.provider_id,
                 pending.conversation_id,
@@ -495,7 +492,6 @@ mod tests {
         crate::finalize_token_priced_messages(&mut messages, None);
 
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].client.as_ref(), "warp");
         assert_eq!(messages[0].session_id.as_ref(), "conversation-1");
         assert_eq!(messages[0].model_id.as_ref(), "claude-opus-4.6");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");

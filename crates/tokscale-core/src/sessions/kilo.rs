@@ -7,7 +7,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;
-use super::{normalize_agent_name, UnifiedMessage};
+use super::{normalize_agent_name, ParsedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -237,8 +237,7 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
             .map(str::to_string)
             .unwrap_or_else(|| provider_identity::observed_provider_id("", &model_id));
 
-        let mut unified = UnifiedMessage::new_with_agent(
-            "kilo",
+        let mut message = ParsedMessage::new_with_agent(
             model_id,
             provider,
             session_id,
@@ -247,9 +246,9 @@ pub fn parse_kilo_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
             0.0,
             agent,
         );
-        unified.dedup_key = dedup_key;
+        message.dedup_key = dedup_key;
 
-        scanned.messages.push(unified);
+        scanned.messages.push(message);
     }
 
     Ok(scanned)
@@ -337,7 +336,6 @@ mod tests {
         assert_eq!(messages.len(), 1);
 
         let msg = &messages[0];
-        assert_eq!(msg.client.as_ref(), "kilo");
         assert_eq!(msg.session_id.as_ref(), "sess-1");
         assert_eq!(msg.model_id.as_ref(), "claude-sonnet-4");
         assert_eq!(msg.provider_id.as_ref(), "anthropic");
