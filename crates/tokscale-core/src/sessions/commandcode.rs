@@ -9,7 +9,7 @@
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
 use super::{
-    normalize_workspace_key, workspace_label_from_key, workspace_metadata_from_key, UnifiedMessage,
+    normalize_workspace_key, workspace_label_from_key, workspace_metadata_from_key, ParsedMessage,
     WorkspaceMetadata,
 };
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
@@ -18,8 +18,6 @@ use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-
-const CLIENT_ID: &str = "commandcode";
 
 #[derive(Debug, Deserialize)]
 struct CommandCodeEntry {
@@ -180,8 +178,7 @@ pub fn parse_commandcode_file(path: &Path) -> SessionParseResult<ScannedInput> {
                     "commandcode:{resolved_session}:{assistant_index}"
                 ));
                 session_id = Some(resolved_session.clone());
-                let mut message = UnifiedMessage::new_with_dedup(
-                    CLIENT_ID,
+                let mut message = ParsedMessage::new_with_dedup(
                     model_id.clone(),
                     &provider_id,
                     resolved_session,
@@ -406,7 +403,7 @@ mod tests {
     use serde_json::json;
     use std::io::Write;
 
-    fn parse_commandcode_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_commandcode_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_commandcode_file(path).unwrap().messages
     }
 
@@ -457,7 +454,6 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let message = &messages[0];
-        assert_eq!(message.client.as_ref(), "commandcode");
         assert_eq!(message.provider_id.as_ref(), "minimax");
         assert_eq!(message.model_id.as_ref(), "MiniMax-M3");
         assert_eq!(message.session_id.as_ref(), "sess-1");

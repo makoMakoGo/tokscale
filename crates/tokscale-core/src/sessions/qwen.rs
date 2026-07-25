@@ -5,7 +5,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{normalize_workspace_key, workspace_label_from_key, ParsedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::model_aliases;
 use crate::TokenBreakdown;
@@ -155,8 +155,7 @@ pub fn parse_qwen_file(path: &Path) -> SessionParseResult<ScannedInput> {
             crate::sessions::dedup_hash_str(&format!("qwen:{line_session_id}:{message_index}"));
         message_index += 1;
 
-        let mut unified = UnifiedMessage::new_with_dedup(
-            "qwen",
+        let mut message = ParsedMessage::new_with_dedup(
             model,
             DEFAULT_PROVIDER,
             line_session_id,
@@ -171,8 +170,8 @@ pub fn parse_qwen_file(path: &Path) -> SessionParseResult<ScannedInput> {
             0.0, // Cost calculated later by pricing resolver
             Some(dedup_key),
         );
-        unified.set_workspace(workspace_key.clone(), workspace_label.clone());
-        scanned.messages.push(unified);
+        message.set_workspace(workspace_key.clone(), workspace_label.clone());
+        scanned.messages.push(message);
     }
 
     Ok(scanned)
@@ -202,7 +201,7 @@ mod tests {
     use std::path::Path;
     use tempfile::{NamedTempFile, TempDir};
 
-    fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_qwen_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_qwen_file(path).unwrap().messages
     }
 
@@ -247,7 +246,6 @@ mod tests {
         let messages = parse_qwen_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), "qwen");
         assert_eq!(messages[0].model_id.as_ref(), "qwen3.5-plus");
         assert_eq!(messages[0].provider_id.as_ref(), "qwen");
         // Session ID comes from filename, not JSON content (temp file has random name)

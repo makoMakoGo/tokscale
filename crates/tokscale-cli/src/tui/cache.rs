@@ -29,7 +29,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 50;
+const CACHE_SCHEMA_VERSION: u32 = 51;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -124,6 +124,15 @@ mod bundle_tests {
 
     fn signature() -> InputInventorySignature {
         InputInventorySignature::from_bytes([0x39; 32])
+    }
+
+    fn health_for_client_space(
+        client_space: &BTreeMap<String, u64>,
+    ) -> tokscale_core::input_health::HealthReport {
+        tokscale_core::input_health::HealthReport {
+            input_data_bytes: client_space.values().copied().sum(),
+            ..Default::default()
+        }
     }
 
     fn nonempty_accumulator(home: &std::path::Path) -> TuiAcc {
@@ -285,6 +294,49 @@ mod bundle_tests {
 
     #[test]
     #[serial]
+    fn bundle_rejects_data_size_outside_client_space_invariant() {
+        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
+        let invalid_health = tokscale_core::input_health::HealthReport::default();
+
+        let error = save_tui_bundle_cache(
+            &TuiAcc::new(),
+            &sessions,
+            &client_space,
+            &invalid_health,
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("TUI Data Size 0 does not match client-space total 4096"));
+
+        save_tui_bundle_cache(
+            &TuiAcc::new(),
+            &sessions,
+            &client_space,
+            &health_for_client_space(&client_space),
+            &clients,
+            &scope,
+            signature(),
+        )
+        .unwrap();
+        let path = cache_file().unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        value["health"]["inputDataBytes"] = serde_json::Value::from(1_u64);
+        tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
+            .unwrap();
+
+        assert!(matches!(
+            load_cache(&clients, &GroupBy::Model, &scope),
+            CacheResult::Miss
+        ));
+    }
+
+    #[test]
+    #[serial]
     fn bundle_keeps_same_named_agents_separate_across_clients() {
         let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
         let accumulator = same_named_cross_client_agent_accumulator();
@@ -298,7 +350,7 @@ mod bundle_tests {
             &accumulator,
             &[],
             &client_space,
-            &Default::default(),
+            &health_for_client_space(&client_space),
             &clients,
             &scope,
             signature(),
@@ -340,7 +392,7 @@ mod bundle_tests {
                 &TuiAcc::new(),
                 &sessions,
                 &client_space,
-                &Default::default(),
+                &health_for_client_space(&client_space),
                 &clients,
                 &scope,
                 signature(),
@@ -584,7 +636,7 @@ mod bundle_tests {
                 &accumulator,
                 &[],
                 &client_space,
-                &Default::default(),
+                &health_for_client_space(&client_space),
                 &clients,
                 &scope,
                 signature(),
@@ -645,7 +697,7 @@ mod bundle_tests {
                 &accumulator,
                 &[],
                 &client_space,
-                &Default::default(),
+                &health_for_client_space(&client_space),
                 &clients,
                 &scope,
                 signature(),
@@ -684,7 +736,7 @@ mod bundle_tests {
                 &accumulator,
                 &[],
                 &client_space,
-                &Default::default(),
+                &health_for_client_space(&client_space),
                 &clients,
                 &scope,
                 signature(),
@@ -776,7 +828,7 @@ mod bundle_tests {
                 &accumulator,
                 &[],
                 &client_space,
-                &Default::default(),
+                &health_for_client_space(&client_space),
                 &clients,
                 &scope,
                 signature(),
@@ -813,7 +865,7 @@ mod bundle_tests {
             &accumulator,
             &[],
             &client_space,
-            &Default::default(),
+            &health_for_client_space(&client_space),
             &clients,
             &scope,
             signature(),
@@ -851,7 +903,7 @@ mod bundle_tests {
             &accumulator,
             &[],
             &client_space,
-            &Default::default(),
+            &health_for_client_space(&client_space),
             &clients,
             &scope,
             signature(),
@@ -878,7 +930,7 @@ mod bundle_tests {
             &TuiAcc::new(),
             &sessions,
             &client_space,
-            &Default::default(),
+            &health_for_client_space(&client_space),
             &clients,
             &scope,
             signature(),
@@ -909,7 +961,7 @@ mod bundle_tests {
                 &TuiAcc::new(),
                 &sessions,
                 &client_space,
-                &Default::default(),
+                &health_for_client_space(&client_space),
                 &clients,
                 &scope,
                 signature(),
@@ -936,7 +988,7 @@ mod bundle_tests {
             &TuiAcc::new(),
             &sessions,
             &client_space,
-            &Default::default(),
+            &health_for_client_space(&client_space),
             &clients,
             &scope,
             signature(),
@@ -964,7 +1016,7 @@ mod bundle_tests {
             &TuiAcc::new(),
             &sessions,
             &client_space,
-            &Default::default(),
+            &health_for_client_space(&client_space),
             &clients,
             &scope,
             signature(),
@@ -989,7 +1041,7 @@ mod bundle_tests {
             &TuiAcc::new(),
             &sessions,
             &client_space,
-            &Default::default(),
+            &health_for_client_space(&client_space),
             &clients,
             &scope,
             signature(),
@@ -1018,7 +1070,7 @@ mod bundle_tests {
             &TuiAcc::new(),
             &sessions,
             &client_space,
-            &Default::default(),
+            &health_for_client_space(&client_space),
             &clients,
             &scope,
             signature(),
@@ -1039,7 +1091,7 @@ mod bundle_tests {
             &TuiAcc::new(),
             &sessions,
             &client_space,
-            &Default::default(),
+            &health_for_client_space(&client_space),
             &clients,
             &scope,
             signature(),
@@ -1065,7 +1117,7 @@ mod bundle_tests {
             &TuiAcc::new(),
             &sessions,
             &client_space,
-            &Default::default(),
+            &health_for_client_space(&client_space),
             &clients,
             &scope,
             signature(),
@@ -1092,7 +1144,7 @@ mod bundle_tests {
             &TuiAcc::new(),
             &sessions,
             &client_space,
-            &Default::default(),
+            &health_for_client_space(&client_space),
             &clients,
             &scope,
             signature(),
@@ -2198,6 +2250,24 @@ fn cache_client_space_matches_exact(
             .all(|client| client_space.contains_key(client.as_str()))
 }
 
+fn validate_data_size_matches_client_space(
+    client_space: &BTreeMap<String, u64>,
+    health: &tokscale_core::input_health::HealthReport,
+) -> anyhow::Result<()> {
+    let total = client_space
+        .values()
+        .copied()
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or_else(|| anyhow::anyhow!("TUI client-space total exceeds u64::MAX"))?;
+    if health.input_data_bytes != total {
+        anyhow::bail!(
+            "TUI Data Size {} does not match client-space total {total}",
+            health.input_data_bytes
+        );
+    }
+    Ok(())
+}
+
 fn cache_session_clients_are_enabled(
     client_universe: &HashSet<ClientId>,
     sessions: &[TuiSessionEntry],
@@ -3067,6 +3137,7 @@ fn load_bundle_from_file(
     if !cache_client_space_matches_exact(client_universe, &parsed.client_space) {
         anyhow::bail!("cached TUI client-space keys do not match the client universe");
     }
+    validate_data_size_matches_client_space(&parsed.client_space, &parsed.health)?;
     if !cache_session_clients_are_enabled(client_universe, &parsed.sessions) {
         anyhow::bail!("cached TUI Sessions contain a client outside the client universe");
     }
@@ -3151,6 +3222,7 @@ pub fn save_tui_bundle_cache(
     if !cache_client_space_matches_exact(client_universe, client_space) {
         anyhow::bail!("TUI client-space keys do not match the client universe");
     }
+    validate_data_size_matches_client_space(client_space, health)?;
     if !cache_session_clients_are_enabled(client_universe, sessions) {
         anyhow::bail!("TUI Sessions contain a client outside the client universe");
     }

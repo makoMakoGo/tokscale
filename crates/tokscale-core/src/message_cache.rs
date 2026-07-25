@@ -1,5 +1,4 @@
-use crate::sessions::codex::CodexParseState;
-use crate::UnifiedMessage;
+use crate::sessions::{codex::CodexParseState, ParsedMessage};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,7 +18,7 @@ compile_error!("input-message cache requires stable Unix or Windows file identit
 // Input-message cache shards split serialization layout from parser/input
 // semantics. Bump this only when the shard bincode layout changes; parser-only
 // fixes should bump the relevant InputUnit parser revision instead.
-const CACHE_FORMAT_VERSION: u32 = 10;
+const CACHE_FORMAT_VERSION: u32 = 11;
 #[cfg(test)]
 const UNSUPPORTED_CACHE_FORMAT_VERSION: u32 = CACHE_FORMAT_VERSION - 1;
 const SHARD_MAGIC: [u8; 8] = *b"TOKSHRD\0";
@@ -1303,7 +1302,7 @@ pub(crate) struct CachedInputEntry {
     pub path: CachedPath,
     pub parser_version: ParserVersion,
     pub fingerprint: InputFingerprint,
-    pub messages: Vec<UnifiedMessage>,
+    pub messages: Vec<ParsedMessage>,
     pub codex_incremental: Option<CodexIncrementalCache>,
     pub rejections: crate::input_health::RejectionSummary,
 }
@@ -1313,7 +1312,7 @@ impl CachedInputEntry {
     pub(crate) fn new(
         path: &Path,
         fingerprint: InputFingerprint,
-        messages: Vec<UnifiedMessage>,
+        messages: Vec<ParsedMessage>,
         codex_incremental: Option<CodexIncrementalCache>,
     ) -> Self {
         Self::new_with_revision(path, 1, fingerprint, messages, codex_incremental)
@@ -1324,7 +1323,7 @@ impl CachedInputEntry {
         path: &Path,
         parser_revision: ParserRevision,
         fingerprint: InputFingerprint,
-        messages: Vec<UnifiedMessage>,
+        messages: Vec<ParsedMessage>,
         codex_incremental: Option<CodexIncrementalCache>,
     ) -> Self {
         Self::new_with_version(
@@ -1341,7 +1340,7 @@ impl CachedInputEntry {
         path: &Path,
         parser_version: ParserVersion,
         fingerprint: InputFingerprint,
-        messages: Vec<UnifiedMessage>,
+        messages: Vec<ParsedMessage>,
         codex_incremental: Option<CodexIncrementalCache>,
     ) -> Self {
         Self {
@@ -1428,12 +1427,12 @@ struct CachedShardHeader {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CachedShardBody {
-    messages: Vec<UnifiedMessage>,
+    messages: Vec<ParsedMessage>,
 }
 
 #[derive(Serialize)]
 struct BorrowedCachedShardBody<'a> {
-    messages: &'a [UnifiedMessage],
+    messages: &'a [ParsedMessage],
 }
 
 #[derive(Debug, Clone)]
@@ -1560,7 +1559,7 @@ impl InputMessageCache {
     pub(crate) fn write_messages(
         &mut self,
         plan: CacheWritePlan,
-        messages: &[UnifiedMessage],
+        messages: &[ParsedMessage],
     ) -> Result<(), InputCacheError> {
         let key = plan.key();
         ensure_cache_dir(&self.cache_dir).map_err(|source| {
@@ -1584,7 +1583,7 @@ impl InputMessageCache {
     pub(crate) fn take_messages(
         &mut self,
         plan: &CacheReadPlan,
-    ) -> Result<Vec<UnifiedMessage>, CacheReadFailure> {
+    ) -> Result<Vec<ParsedMessage>, CacheReadFailure> {
         let key = plan.key.clone();
         if self.deleted_paths.contains(&key) {
             return Err(CacheReadFailure::new(
@@ -2108,7 +2107,7 @@ fn write_shard_entry(cache_dir: &Path, entry: &CachedInputEntry) -> std::io::Res
 fn write_shard_borrowed(
     cache_dir: &Path,
     plan: &CacheWritePlan,
-    messages: &[UnifiedMessage],
+    messages: &[ParsedMessage],
 ) -> std::io::Result<()> {
     let final_path = shard_path_for_input_key(cache_dir, &plan.key());
     let parent = final_path
@@ -3181,8 +3180,7 @@ mod tests {
         let mut entry = CachedInputEntry::new(
             file.path(),
             fingerprint,
-            vec![UnifiedMessage::new(
-                "client",
+            vec![ParsedMessage::new(
                 "gpt-5",
                 "provider",
                 "session-1",
@@ -3236,6 +3234,13 @@ mod tests {
             .unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].session_id.as_ref(), "session-1");
+        assert!(
+            serde_json::to_value(&messages[0])
+                .unwrap()
+                .get("client")
+                .is_none(),
+            "cached parsed messages must remain source-neutral"
+        );
 
         restore_cache_env(prev_env);
     }
@@ -3254,8 +3259,7 @@ mod tests {
             fingerprint.clone(),
             None,
         );
-        let messages = vec![UnifiedMessage::new(
-            "client",
+        let messages = vec![ParsedMessage::new(
             "gpt-5",
             "provider",
             "session-1",
@@ -3315,8 +3319,7 @@ mod tests {
                 path,
                 revision,
                 InputFingerprint::from_path(path).unwrap(),
-                vec![UnifiedMessage::new(
-                    "client",
+                vec![ParsedMessage::new(
                     "gpt-5",
                     "provider",
                     format!("session-{revision}"),
@@ -3524,8 +3527,7 @@ mod tests {
         cache.insert(CachedInputEntry::new(
             &path,
             InputFingerprint::from_path(&path).unwrap(),
-            vec![UnifiedMessage::new(
-                "opencode",
+            vec![ParsedMessage::new(
                 "gpt-5",
                 "openai",
                 "session-1",
@@ -3698,8 +3700,7 @@ mod tests {
             input.path(),
             parser_version,
             fingerprint.clone(),
-            vec![UnifiedMessage::new(
-                "client",
+            vec![ParsedMessage::new(
                 "gpt-5",
                 "provider",
                 "cached-session",
@@ -3730,8 +3731,7 @@ mod tests {
             "a failed ordinary rebuild must retain the unsupported shard"
         );
 
-        let replacement = vec![UnifiedMessage::new(
-            "client",
+        let replacement = vec![ParsedMessage::new(
             "gpt-5",
             "provider",
             "current-session",
@@ -3820,8 +3820,7 @@ mod tests {
         let error = cache
             .write_messages(
                 CacheWritePlan::new(input.path(), parser_version, fingerprint, None),
-                &[UnifiedMessage::new(
-                    "client",
+                &[ParsedMessage::new(
                     "gpt-5",
                     "provider",
                     "session",
@@ -3882,8 +3881,7 @@ mod tests {
             input.path(),
             7,
             fingerprint,
-            vec![UnifiedMessage::new(
-                "client",
+            vec![ParsedMessage::new(
                 "gpt-5",
                 "provider",
                 "session-1",
@@ -3927,8 +3925,7 @@ mod tests {
             input.path(),
             ParserVersion::new(ParserId::Copilot, 1),
             fingerprint,
-            vec![UnifiedMessage::new(
-                "client",
+            vec![ParsedMessage::new(
                 "gpt-5",
                 "provider",
                 "session-1",
@@ -4049,8 +4046,7 @@ mod tests {
             input.path(),
             copilot_version,
             fingerprint.clone(),
-            vec![UnifiedMessage::new(
-                "copilot",
+            vec![ParsedMessage::new(
                 "gpt-5",
                 "openai",
                 "copilot-session",
@@ -4070,8 +4066,7 @@ mod tests {
             input.path(),
             gemini_version,
             fingerprint.clone(),
-            vec![UnifiedMessage::new(
-                "gemini",
+            vec![ParsedMessage::new(
                 "gpt-5",
                 "openai",
                 "gemini-session",
@@ -4138,8 +4133,7 @@ mod tests {
             input.path(),
             parser_version,
             initial_fingerprint.clone(),
-            vec![UnifiedMessage::new(
-                "copilot",
+            vec![ParsedMessage::new(
                 "gpt-5",
                 "openai",
                 "initial-session",
@@ -4171,8 +4165,7 @@ mod tests {
             input.path(),
             parser_version,
             replacement_fingerprint,
-            vec![UnifiedMessage::new(
-                "copilot",
+            vec![ParsedMessage::new(
                 "gpt-5",
                 "openai",
                 "replacement-session",

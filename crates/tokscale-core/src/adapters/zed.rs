@@ -175,9 +175,12 @@ mod tests {
         .unwrap();
     }
 
-    fn finalized(mut messages: Vec<crate::UnifiedMessage>) -> Vec<crate::UnifiedMessage> {
+    fn finalized(mut messages: Vec<crate::sessions::ParsedMessage>) -> Vec<crate::UnifiedMessage> {
         crate::finalize_token_priced_messages(&mut messages, None);
         messages
+            .into_iter()
+            .map(|message| message.attribute(ClientId::Zed))
+            .collect()
     }
 
     #[test]
@@ -239,6 +242,7 @@ mod tests {
         ZED_ADAPTER.fold(parsed, &mut fold_ctx, &mut sink).unwrap();
 
         assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].client.as_ref(), ClientId::Zed.as_str());
         assert_eq!(sink[0].session_id.as_ref(), "zed-thread-good");
         assert_eq!(fold_ctx.health.rejected_records(), 1);
         assert_eq!(fold_ctx.health.failed_inputs(), 0);
@@ -318,6 +322,9 @@ mod tests {
             .unwrap();
 
         let expected = finalized(sessions::zed::parse_zed_sqlite(&db_path).unwrap().messages);
+        assert!(actual
+            .iter()
+            .all(|message| message.client.as_ref() == ClientId::Zed.as_str()));
         assert_eq!(actual, expected);
     }
 }

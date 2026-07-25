@@ -45,7 +45,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::open_readonly_sqlite;
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{normalize_workspace_key, workspace_label_from_key, ParsedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use rusqlite::Connection;
@@ -127,7 +127,7 @@ fn parse_gen_metadata(
     session_id: &str,
     session_timestamp: i64,
     seen_response_ids: &mut HashSet<String>,
-) -> SessionParseResult<Option<UnifiedMessage>> {
+) -> SessionParseResult<Option<ParsedMessage>> {
     let chat_model = message_field(blob, 1).ok_or_else(|| {
         SessionParseError::invalid(
             "decode Antigravity CLI usage protobuf",
@@ -225,8 +225,7 @@ fn parse_gen_metadata(
 
     let dedup_key = response_id.as_deref().map(response_dedup_key);
 
-    Ok(Some(UnifiedMessage::new_with_dedup(
-        "antigravity",
+    Ok(Some(ParsedMessage::new_with_dedup(
         model_id,
         provider_id,
         session_id,
@@ -576,7 +575,7 @@ mod tests {
     use super::*;
     use rusqlite::{params, Connection};
 
-    fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_antigravity_cli_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_antigravity_cli_file(path).unwrap().messages
     }
 
@@ -585,7 +584,7 @@ mod tests {
         session_id: &str,
         session_timestamp: i64,
         seen_response_ids: &mut HashSet<String>,
-    ) -> Option<UnifiedMessage> {
+    ) -> Option<ParsedMessage> {
         super::parse_gen_metadata(blob, session_id, session_timestamp, seen_response_ids).unwrap()
     }
 
@@ -702,7 +701,6 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let message = &messages[0];
-        assert_eq!(message.client.as_ref(), "antigravity");
         assert_eq!(message.model_id.as_ref(), "gemini-3.5-flash");
         assert_eq!(message.provider_id.as_ref(), "google");
         assert_eq!(message.tokens.input, 1632);

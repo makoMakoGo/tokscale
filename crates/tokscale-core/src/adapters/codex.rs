@@ -12,7 +12,8 @@ use crate::adapters::{
 };
 use crate::clients::ClientId;
 use crate::input_health::InputStatus;
-use crate::{message_cache, pricing, sessions, UnifiedMessage};
+use crate::sessions::ParsedMessage;
+use crate::{message_cache, pricing, sessions};
 
 pub(crate) struct CodexAdapter;
 
@@ -21,7 +22,7 @@ pub(crate) struct CodexAppendInput {
     path: PathBuf,
     read_plan: message_cache::CacheReadPlan,
     parser_version: message_cache::ParserVersion,
-    tail_messages: Vec<UnifiedMessage>,
+    tail_messages: Vec<ParsedMessage>,
     cache_write: Option<Box<message_cache::CacheWritePlan>>,
 }
 
@@ -197,11 +198,12 @@ fn fold_codex_units(
         if finalization {
             finalize_codex_messages(&mut messages, ctx.pricing);
         }
-        sink.extend_messages(
+        adapter_cache::emit_messages(
+            client,
             messages
                 .into_iter()
-                .filter(|message| crate::should_keep_deduped_message(seen, message))
-                .collect(),
+                .filter(|message| crate::should_keep_deduped_message(seen, message)),
+            sink,
         );
     }
     Ok(())
@@ -229,7 +231,7 @@ fn write_codex_cache_and_apply_recovery(
     path: &Path,
     parser_version: message_cache::ParserVersion,
     cache_write: Option<Box<message_cache::CacheWritePlan>>,
-    messages: &[UnifiedMessage],
+    messages: &[ParsedMessage],
     invalidate_cache: bool,
     recovery_requires_removal: bool,
     ctx: &mut FoldContext<'_>,
@@ -243,7 +245,7 @@ fn write_codex_cache_and_apply_recovery(
 }
 
 struct CodexResolvedMessages {
-    messages: Vec<UnifiedMessage>,
+    messages: Vec<ParsedMessage>,
     cache_write: Option<Box<message_cache::CacheWritePlan>>,
     finalization: bool,
     recovery_requires_removal: bool,
@@ -325,7 +327,7 @@ fn parse_full_log_input(
 }
 
 fn finalize_codex_messages(
-    messages: &mut Vec<UnifiedMessage>,
+    messages: &mut Vec<ParsedMessage>,
     pricing: Option<&pricing::PricingService>,
 ) {
     crate::finalize_token_priced_messages(messages, pricing);
@@ -703,6 +705,7 @@ mod tests {
     use super::*;
     use crate::message_cache;
     use crate::pricing::{ModelPricing, PricingService};
+    use crate::UnifiedMessage;
 
     const FIRST_CODEX_ENTRY: &str = concat!(
         r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
@@ -828,6 +831,7 @@ mod tests {
                 &mut sink,
             )
             .expect("valid Codex fixture must fold");
+        assert_codex_attribution(&sink);
         sink
     }
 
@@ -877,6 +881,7 @@ mod tests {
         CODEX_ADAPTER
             .fold_batches(&mut batches, &mut FoldContext::new(cache, None), &mut sink)
             .unwrap();
+        assert_codex_attribution(&sink);
         sink
     }
 
@@ -888,15 +893,35 @@ mod tests {
         CODEX_ADAPTER
             .fold(parsed, &mut FoldContext::new(cache, None), &mut sink)
             .expect("valid Codex fixture must fold");
+        assert_codex_attribution(&sink);
         sink
     }
 
-    fn parser_messages(path: &Path) -> Vec<UnifiedMessage> {
+    fn parser_messages(path: &Path) -> Vec<ParsedMessage> {
         let mut messages = sessions::codex::parse_codex_file(path).unwrap();
         for message in &mut messages {
             message.refresh_derived_fields();
         }
         messages
+    }
+
+    fn assert_codex_attribution(messages: &[UnifiedMessage]) {
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.client.as_ref() == ClientId::Codex.as_str()),
+            "Codex fold output must be attributed from its InputUnit client"
+        );
+    }
+
+    fn assert_output_matches_parser(actual: &[UnifiedMessage], expected: &[ParsedMessage]) {
+        assert_codex_attribution(actual);
+        let attributed_expected: Vec<_> = expected
+            .iter()
+            .cloned()
+            .map(|message| message.attribute(ClientId::Codex))
+            .collect();
+        assert_eq!(actual, attributed_expected);
     }
 
     fn assert_cached_raw_messages_match_parser(cache_home: &Path, path: &Path) {
@@ -1026,7 +1051,7 @@ mod tests {
         );
         let expected = parser_messages(&path);
 
-        assert_eq!(actual, expected);
+        assert_output_matches_parser(&actual, &expected);
         assert!(cache
             .get_meta(
                 &path,
@@ -1099,6 +1124,7 @@ mod tests {
         let mut messages = Vec::new();
         let mut ctx = FoldContext::new(&mut cache, None);
         CODEX_ADAPTER.fold(parsed, &mut ctx, &mut messages).unwrap();
+        assert_codex_attribution(&messages);
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
@@ -1142,6 +1168,7 @@ mod tests {
         let mut messages = Vec::new();
         let mut ctx = FoldContext::new(&mut cache, None);
         CODEX_ADAPTER.fold(parsed, &mut ctx, &mut messages).unwrap();
+        assert_codex_attribution(&messages);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 8);
@@ -1187,6 +1214,7 @@ mod tests {
         let mut messages = Vec::new();
         let mut ctx = FoldContext::new(&mut cache, None);
         CODEX_ADAPTER.fold(parsed, &mut ctx, &mut messages).unwrap();
+        assert_codex_attribution(&messages);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
@@ -1313,6 +1341,7 @@ mod tests {
         let mut sink = Vec::new();
         let mut ctx = FoldContext::new(&mut warm_cache, None);
         CODEX_ADAPTER.fold(vec![hit], &mut ctx, &mut sink).unwrap();
+        assert_codex_attribution(&sink);
 
         assert!(!sink.is_empty());
         assert_eq!(ctx.health.rejected_records(), 1);
@@ -1360,6 +1389,7 @@ mod tests {
         CODEX_ADAPTER
             .fold(parsed, &mut append_ctx, &mut appended_messages)
             .unwrap();
+        assert_codex_attribution(&appended_messages);
         assert_eq!(append_ctx.health.rejected_records(), 1);
         append_ctx.input_cache.save_if_dirty().unwrap();
 
@@ -1373,6 +1403,7 @@ mod tests {
         CODEX_ADAPTER
             .fold(vec![hit], &mut warm_ctx, &mut warm_messages)
             .unwrap();
+        assert_codex_attribution(&warm_messages);
 
         assert_eq!(warm_messages, appended_messages);
         assert_eq!(warm_ctx.health.rejected_records(), 1);
@@ -1405,6 +1436,7 @@ mod tests {
         let mut messages = Vec::new();
         let mut ctx = FoldContext::new(&mut append_cache, None);
         CODEX_ADAPTER.fold(parsed, &mut ctx, &mut messages).unwrap();
+        assert_codex_attribution(&messages);
 
         assert_eq!(messages.len(), 2);
         assert_eq!(ctx.health.rejected_records(), 1);
@@ -1450,6 +1482,7 @@ mod tests {
         let mut messages = Vec::new();
         let mut ctx = FoldContext::new(&mut append_cache, None);
         CODEX_ADAPTER.fold(parsed, &mut ctx, &mut messages).unwrap();
+        assert_codex_attribution(&messages);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(ctx.health.partial_inputs(), 1);
@@ -1495,6 +1528,7 @@ mod tests {
         let mut messages = Vec::new();
         let mut ctx = FoldContext::new(&mut append_cache, None);
         CODEX_ADAPTER.fold(parsed, &mut ctx, &mut messages).unwrap();
+        assert_codex_attribution(&messages);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
@@ -1562,6 +1596,7 @@ mod tests {
         CODEX_ADAPTER
             .fold(vec![planned], &mut ctx, &mut sink)
             .expect("an interrupted Codex recovery scan must stay inside its input domain");
+        assert_codex_attribution(&sink);
         assert!(sink.is_empty());
         assert_eq!(ctx.health.partial_inputs(), 1);
         assert_eq!(ctx.health.rejected_records(), 1);
@@ -1607,6 +1642,7 @@ mod tests {
         CODEX_ADAPTER
             .fold(vec![planned], &mut ctx, &mut sink)
             .expect("an interrupted Codex recovery scan must stay inside its input domain");
+        assert_codex_attribution(&sink);
         assert!(sink.is_empty());
         assert_eq!(ctx.health.partial_inputs(), 1);
         assert_eq!(ctx.health.rejected_records(), 1);
@@ -1805,7 +1841,7 @@ mod tests {
             "Codex append must verify the prefix and hash the tail in one pass"
         );
         let expected = parser_messages(&path);
-        assert_eq!(actual, expected);
+        assert_output_matches_parser(&actual, &expected);
         assert_cached_raw_messages_match_parser(cache_home.path(), &path);
     }
 
@@ -1922,16 +1958,16 @@ mod tests {
         ));
 
         let messages_b = fold_parsed(parsed_b, &mut cache_b);
-        assert_eq!(messages_b, expected);
+        assert_output_matches_parser(&messages_b, &expected);
         cache_b.save_if_dirty().unwrap();
 
         let messages_a = fold_parsed(parsed_a, &mut cache_a);
-        assert_eq!(messages_a, expected);
+        assert_output_matches_parser(&messages_a, &expected);
         cache_a.save_if_dirty().unwrap();
 
         let mut warm_cache = message_cache::InputMessageCache::load().unwrap();
         let warm_messages = parse_and_fold(vec![codex_unit(&path)], &mut warm_cache);
-        assert_eq!(warm_messages, expected);
+        assert_output_matches_parser(&warm_messages, &expected);
     }
 
     #[test]
@@ -1970,12 +2006,12 @@ mod tests {
         remover.save_if_dirty().unwrap();
 
         let messages = fold_parsed(parsed, &mut cache);
-        assert_eq!(messages, expected);
+        assert_output_matches_parser(&messages, &expected);
         cache.save_if_dirty().unwrap();
         assert_cached_raw_messages_match_parser(&cache_home.path().join("cache"), &path);
 
         let mut warm_cache = message_cache::InputMessageCache::load().unwrap();
         let warm_messages = parse_and_fold(vec![codex_unit(&path)], &mut warm_cache);
-        assert_eq!(warm_messages, expected);
+        assert_output_matches_parser(&warm_messages, &expected);
     }
 }

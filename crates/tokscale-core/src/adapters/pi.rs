@@ -109,10 +109,12 @@ mod tests {
         }
     }
 
-    fn refresh(messages: &mut [crate::UnifiedMessage]) {
-        for message in messages {
-            message.refresh_derived_fields();
-        }
+    fn finalized(mut messages: Vec<crate::sessions::ParsedMessage>) -> Vec<crate::UnifiedMessage> {
+        crate::finalize_token_priced_messages(&mut messages, None);
+        messages
+            .into_iter()
+            .map(|message| message.attribute(ClientId::Pi))
+            .collect()
     }
 
     fn fold_with_adapter(
@@ -125,6 +127,9 @@ mod tests {
         adapter
             .fold(parsed, &mut FoldContext::new(cache, None), &mut sink)
             .unwrap();
+        assert!(sink
+            .iter()
+            .all(|message| message.client.as_ref() == adapter.client().as_str()));
         sink
     }
 
@@ -169,8 +174,7 @@ mod tests {
         let mut cache = message_cache::InputMessageCache::default();
 
         let actual = fold_with_adapter(&PI_ADAPTER, units, &mut cache);
-        let mut expected = sessions::pi::parse_pi_file(&path).unwrap().messages;
-        refresh(&mut expected);
+        let expected = finalized(sessions::pi::parse_pi_file(&path).unwrap().messages);
 
         assert_eq!(actual, expected);
     }
@@ -288,6 +292,9 @@ mod tests {
             .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut second)
             .unwrap();
 
+        assert!(second
+            .iter()
+            .all(|message| message.client.as_ref() == ClientId::Pi.as_str()));
         assert_eq!(second, first);
         restore_env_var("TOKSCALE_CONFIG_DIR", previous_config_dir);
     }

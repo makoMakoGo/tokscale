@@ -3,7 +3,7 @@
 //! Parses session-usage.json files from ~/.mux/sessions/<workspaceId>/session-usage.json
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::UnifiedMessage;
+use super::ParsedMessage;
 use crate::input_health::{RecordRejectionReason, ScannedInput};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -42,7 +42,7 @@ pub struct MuxLastRequest {
 }
 
 /// Parse a mux session-usage.json file.
-/// Returns one UnifiedMessage per model entry in byModel.
+/// Returns one ParsedMessage per model entry in byModel.
 pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let data = std::fs::read(path)
         .map_err(|error| SessionParseError::at_path(path, "read file", error))?;
@@ -161,8 +161,7 @@ pub fn parse_mux_file(path: &Path) -> SessionParseResult<ScannedInput> {
             .unwrap_or_else(|| raw_model_id.to_string());
         let provider = provider_identity::observed_provider_id(raw_provider, &model_id);
 
-        scanned.messages.push(UnifiedMessage::new_with_dedup(
-            "mux",
+        scanned.messages.push(ParsedMessage::new_with_dedup(
             model_id,
             provider,
             session_id.clone(),
@@ -210,7 +209,7 @@ fn invalid_at_path(
 mod tests {
     use super::*;
 
-    fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_mux_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_mux_file(path).unwrap().messages
     }
     use std::io::Write;
@@ -272,7 +271,6 @@ mod tests {
             .iter()
             .find(|m| m.model_id.as_ref() == "claude-opus-4.6")
             .unwrap();
-        assert_eq!(claude.client.as_ref(), "mux");
         assert_eq!(claude.provider_id.as_ref(), "anthropic");
         assert_eq!(claude.tokens.input, 100);
         assert_eq!(claude.tokens.cache_read, 5000);

@@ -4,7 +4,7 @@
 //! Current-format inputs are individual transcript files.
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::UnifiedMessage;
+use super::ParsedMessage;
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -234,8 +234,8 @@ fn parse_openclaw_session(
                     current_model = Some(model.clone());
                     current_provider = Some(provider.clone());
 
-                    scanned.messages.push(UnifiedMessage::new(
-                        "openclaw", model, provider, session_id, timestamp, tokens, 0.0,
+                    scanned.messages.push(ParsedMessage::new(
+                        model, provider, session_id, timestamp, tokens, 0.0,
                     ));
                 }
             }
@@ -300,13 +300,13 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn parse_openclaw_session(path: &Path, session_id: &str) -> Vec<UnifiedMessage> {
+    fn parse_openclaw_session(path: &Path, session_id: &str) -> Vec<ParsedMessage> {
         super::parse_openclaw_session(path, session_id)
             .unwrap()
             .messages
     }
 
-    fn parse_openclaw_transcript(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_openclaw_transcript(path: &Path) -> Vec<ParsedMessage> {
         super::parse_openclaw_transcript(path).unwrap().messages
     }
 

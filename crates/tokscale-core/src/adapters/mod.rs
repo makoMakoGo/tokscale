@@ -30,7 +30,7 @@ use rayon::prelude::*;
 use crate::clients::ClientId;
 use crate::input_health::{DataHealth, InputFailure, InputHealth, InputStatus, RejectionSummary};
 use crate::message_cache::{InputFileIdentity, ParserId, ParserRevision, ParserVersion};
-use crate::{message_cache, pricing, scanner, UnifiedMessage};
+use crate::{message_cache, pricing, scanner, sessions::ParsedMessage, UnifiedMessage};
 
 pub(crate) use error::{
     InputDiscoveryError, InputParseError, InputPipelineError, InputPlanningError,
@@ -117,12 +117,6 @@ impl<'a> FoldContext<'a> {
 
 pub(crate) trait MessageSink {
     fn push_message(&mut self, message: UnifiedMessage);
-
-    fn extend_messages(&mut self, messages: Vec<UnifiedMessage>) {
-        for message in messages {
-            self.push_message(message);
-        }
-    }
 }
 
 impl MessageSink for Vec<UnifiedMessage> {
@@ -133,7 +127,7 @@ impl MessageSink for Vec<UnifiedMessage> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct InputUnit {
-    pub client: ClientId,
+    client: ClientId,
     pub path: PathBuf,
     pub fingerprint_policy: FingerprintPolicy,
     pub meta: InputUnitMeta,
@@ -145,6 +139,11 @@ pub(crate) struct InputUnit {
 }
 
 impl InputUnit {
+    /// Adapter-issued source provenance for this input.
+    pub(crate) const fn client(&self) -> ClientId {
+        self.client
+    }
+
     pub(crate) fn plain_file(client: ClientId, path: PathBuf) -> Self {
         Self {
             client,
@@ -582,8 +581,8 @@ pub(crate) enum FingerprintPolicy {
 
 #[derive(Debug)]
 pub(crate) enum UnitMessagePayload {
-    Fresh(Vec<UnifiedMessage>),
-    CodexFresh(Vec<UnifiedMessage>),
+    Fresh(Vec<ParsedMessage>),
+    CodexFresh(Vec<ParsedMessage>),
     CacheHit(message_cache::CacheReadPlan),
     CodexCacheHit(message_cache::CacheReadPlan),
     CodexAppend(Box<codex::CodexAppendInput>),
@@ -726,6 +725,22 @@ pub(crate) struct ConfirmedAdapterInputs {
     pub client: ClientId,
     pub unit_digests: Vec<[u8; 32]>,
     pub present_files: Vec<(InputFileIdentity, u64)>,
+}
+
+pub(crate) fn validate_discovered_unit_sources(
+    adapter: &dyn LocalInputAdapter,
+    units: &[InputUnit],
+) -> Result<(), InputPipelineError> {
+    let expected = adapter.client();
+    if let Some(unit) = units.iter().find(|unit| unit.client != expected) {
+        return Err(InputPipelineError::contract(format!(
+            "local input adapter `{}` discovered `{}` input `{}`",
+            expected.as_str(),
+            unit.client.as_str(),
+            unit.path.display()
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) struct ParsedBatchInput<'a> {
@@ -933,6 +948,10 @@ pub(crate) fn run_prepared_local_input_adapters(
     sink: &mut dyn MessageSink,
     health: &mut DataHealth,
 ) -> Result<Vec<ConfirmedAdapterInputs>, InputPipelineError> {
+    for group in &prepared {
+        validate_discovered_unit_sources(group.adapter, &group.units)?;
+    }
+
     let mut confirmed = Vec::with_capacity(prepared.len());
     for PreparedAdapterInputs { adapter, units } in prepared {
         let mut batches = ParsedBatchInput::new(adapter, units);
@@ -1001,6 +1020,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn adapter_rejects_input_unit_with_foreign_source_identity() {
+        let prepared = PreparedAdapterInputs {
+            adapter: adapter_for(ClientId::Amp).unwrap(),
+            units: vec![InputUnit::plain_file(
+                ClientId::Codex,
+                PathBuf::from("foreign-input.jsonl"),
+            )],
+        };
+
+        let error = match validate_discovered_unit_sources(prepared.adapter, &prepared.units) {
+            Ok(_) => panic!("foreign source identity must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("local input adapter `amp` discovered `codex` input `foreign-input.jsonl`"));
+    }
+
     impl LocalInputAdapter for RecordingAdapter {
         fn client(&self) -> ClientId {
             ClientId::Amp
@@ -1019,8 +1058,7 @@ mod tests {
                 .into_iter()
                 .enumerate()
                 .map(|(index, unit)| {
-                    let message = UnifiedMessage::new(
-                        "amp",
+                    let message = ParsedMessage::new(
                         "model",
                         "provider",
                         unit.path.to_string_lossy(),
@@ -1068,8 +1106,7 @@ mod tests {
             for unit in units {
                 let session_id: Arc<str> = Arc::from(unit.path.to_string_lossy().into_owned());
                 *previous = Some(Arc::downgrade(&session_id));
-                let mut message = UnifiedMessage::new(
-                    "amp",
+                let mut message = ParsedMessage::new(
                     "model",
                     "provider",
                     "placeholder",
@@ -1115,8 +1152,7 @@ mod tests {
             units
                 .into_iter()
                 .map(|unit| {
-                    let message = UnifiedMessage::new(
-                        "amp",
+                    let message = ParsedMessage::new(
                         "model",
                         "provider",
                         unit.path.file_name().unwrap().to_string_lossy(),
@@ -1266,8 +1302,7 @@ mod tests {
                         &unit.path,
                         unit.parser_version,
                         unit.input_policy().fingerprint().unwrap(),
-                        vec![UnifiedMessage::new(
-                            "amp",
+                        vec![ParsedMessage::new(
                             "model",
                             "provider",
                             index.to_string(),
@@ -1329,8 +1364,7 @@ mod tests {
                         &unit.path,
                         unit.parser_version,
                         unit.input_policy().fingerprint().unwrap(),
-                        vec![UnifiedMessage::new(
-                            "amp",
+                        vec![ParsedMessage::new(
                             "model",
                             "provider",
                             index.to_string(),
@@ -1384,8 +1418,7 @@ mod tests {
             &path,
             unit.parser_version,
             unit.input_policy().fingerprint().unwrap(),
-            vec![UnifiedMessage::new(
-                "amp",
+            vec![ParsedMessage::new(
                 "model",
                 "provider",
                 "cached-session",
@@ -1426,8 +1459,7 @@ mod tests {
             &path,
             unit.parser_version,
             unit.input_policy().fingerprint().unwrap(),
-            vec![UnifiedMessage::new(
-                "amp",
+            vec![ParsedMessage::new(
                 "model",
                 "provider",
                 "cached-session",

@@ -12,9 +12,9 @@ use crate::adapters::{
 use crate::clients::ClientId;
 use crate::input_health::ScannedInput;
 use crate::message_cache::{ParserId, ParserVersion, RelatedInputFailurePolicy};
+use crate::sessions;
 use crate::sessions::error::SessionParseResult;
-use crate::sessions::WorkspaceMetadata;
-use crate::{sessions, UnifiedMessage};
+use crate::sessions::{ParsedMessage, WorkspaceMetadata};
 
 const GROK_TOTAL_ONLY_IMPUTATION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
 const MUX_STABLE_DEDUP_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
@@ -42,7 +42,7 @@ pub(crate) struct CachedFileAdapter {
     fingerprint_policy: FingerprintPolicy,
     dependency_failure_policy: RelatedInputFailurePolicy,
     dependency_path: Option<fn(&Path) -> Option<PathBuf>>,
-    workspace_enrichment: Option<fn(&Path, &mut [UnifiedMessage])>,
+    workspace_enrichment: Option<fn(&Path, &mut [ParsedMessage])>,
     parse: fn(&Path) -> SessionParseResult<ScannedInput>,
 }
 
@@ -121,7 +121,7 @@ impl CachedFileAdapter {
         }
     }
 
-    const fn with_workspace_enrichment(mut self, enrich: fn(&Path, &mut [UnifiedMessage])) -> Self {
+    const fn with_workspace_enrichment(mut self, enrich: fn(&Path, &mut [ParsedMessage])) -> Self {
         self.workspace_enrichment = Some(enrich);
         self
     }
@@ -195,7 +195,7 @@ impl LocalInputAdapter for CachedFileAdapter {
     }
 }
 
-fn apply_workspace(messages: &mut [UnifiedMessage], workspace: Option<WorkspaceMetadata>) {
+fn apply_workspace(messages: &mut [ParsedMessage], workspace: Option<WorkspaceMetadata>) {
     let Some(workspace) = workspace else {
         return;
     };
@@ -204,16 +204,16 @@ fn apply_workspace(messages: &mut [UnifiedMessage], workspace: Option<WorkspaceM
     }
 }
 
-fn enrich_droid_metadata(path: &Path, messages: &mut [UnifiedMessage]) {
+fn enrich_droid_metadata(path: &Path, messages: &mut [ParsedMessage]) {
     apply_workspace(messages, sessions::droid::droid_workspace_metadata(path));
     sessions::droid::classify_droid_main_session(path, messages);
 }
 
-fn enrich_kimi_workspace(path: &Path, messages: &mut [UnifiedMessage]) {
+fn enrich_kimi_workspace(path: &Path, messages: &mut [ParsedMessage]) {
     apply_workspace(messages, sessions::kimi::kimi_workspace_metadata(path));
 }
 
-fn enrich_gemini_workspace(path: &Path, messages: &mut [UnifiedMessage]) {
+fn enrich_gemini_workspace(path: &Path, messages: &mut [ParsedMessage]) {
     apply_workspace(messages, sessions::gemini::gemini_workspace_metadata(path));
 }
 
@@ -364,6 +364,7 @@ mod tests {
     use super::*;
     use crate::adapters::{FoldContext, ParseContext};
     use crate::message_cache;
+    use crate::sessions::ParsedMessage;
     use crate::UnifiedMessage;
 
     const AMP_CONTENT: &str = r#"{"id":"T-test","created":1767225600000,"usageLedger":{"events":[{"timestamp":"2026-01-01T00:00:00Z","model":"claude-sonnet-4-5","tokens":{"input":10,"output":5,"cacheReadInputTokens":2,"cacheCreationInputTokens":1}}]}}"#;
@@ -389,8 +390,15 @@ not-json
         std::fs::write(path, content).unwrap();
     }
 
-    fn finalized(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
+    fn finalized(client: ClientId, mut messages: Vec<ParsedMessage>) -> Vec<UnifiedMessage> {
         crate::finalize_token_priced_messages(&mut messages, None);
+        let messages: Vec<_> = messages
+            .into_iter()
+            .map(|message| message.attribute(client))
+            .collect();
+        assert!(messages
+            .iter()
+            .all(|message| message.client.as_ref() == client.as_str()));
         messages
     }
 
@@ -404,6 +412,9 @@ not-json
         adapter
             .fold(parsed, &mut FoldContext::new(cache, None), &mut sink)
             .unwrap();
+        assert!(sink
+            .iter()
+            .all(|message| message.client.as_ref() == adapter.client().as_str()));
         sink
     }
 
@@ -445,7 +456,10 @@ not-json
         let mut cache = message_cache::InputMessageCache::default();
 
         let actual = fold_with_adapter(&AMP_ADAPTER, units, &mut cache);
-        let expected = finalized(sessions::amp::parse_amp_file(&path).unwrap().messages);
+        let expected = finalized(
+            ClientId::Amp,
+            sessions::amp::parse_amp_file(&path).unwrap().messages,
+        );
 
         assert_eq!(actual, expected);
     }
@@ -1244,7 +1258,10 @@ model = "claude-sonnet-4"
         let mut cache = message_cache::InputMessageCache::default();
 
         let actual = fold_with_adapter(&ZCODE_ADAPTER, units, &mut cache);
-        let expected = finalized(sessions::zcode::parse_zcode_file(&path).unwrap().messages);
+        let expected = finalized(
+            ClientId::Zcode,
+            sessions::zcode::parse_zcode_file(&path).unwrap().messages,
+        );
 
         assert_eq!(actual, expected);
     }

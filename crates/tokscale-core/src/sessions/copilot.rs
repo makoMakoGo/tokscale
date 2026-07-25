@@ -5,7 +5,7 @@
 //! aggregate agent records are only used as a fallback to avoid double counting.
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
+use super::{workspace_metadata_from_key, ParsedMessage, WorkspaceMetadata};
 use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary, ScannedInput};
 use crate::provider_identity::observed_provider_id;
 use crate::TokenBreakdown;
@@ -334,9 +334,8 @@ enum SessionIdPriority {
 }
 
 impl CopilotUsageCandidate {
-    fn into_message(self) -> UnifiedMessage {
-        let mut message = UnifiedMessage::new_with_agent(
-            "copilot",
+    fn into_message(self) -> ParsedMessage {
+        let mut message = ParsedMessage::new_with_agent(
             self.model,
             self.provider_id,
             self.session_id,
@@ -1043,7 +1042,7 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_copilot_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_copilot_file(path).unwrap().messages
     }
 
@@ -1176,7 +1175,6 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let message = &messages[0];
-        assert_eq!(message.client.as_ref(), "copilot");
         assert_eq!(message.model_id.as_ref(), "claude-sonnet-4");
         assert_eq!(message.provider_id.as_ref(), "anthropic");
         assert_eq!(message.session_id.as_ref(), "conv-1");

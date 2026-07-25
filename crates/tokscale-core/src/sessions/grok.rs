@@ -8,14 +8,13 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{extract_string, parse_timestamp_value};
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{normalize_workspace_key, workspace_label_from_key, ParsedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary, ScannedInput};
 use crate::{model_aliases, token_imputation};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-const CLIENT_ID: &str = "grok";
 const PROVIDER_ID: &str = "xai";
 
 #[derive(Debug, Clone)]
@@ -367,7 +366,7 @@ fn build_messages(
     metadata: GrokMetadata,
     session_id: String,
     pending_messages: Vec<PendingGrokMessage>,
-) -> SessionParseResult<Vec<UnifiedMessage>> {
+) -> SessionParseResult<Vec<ParsedMessage>> {
     let totals: Vec<i64> = pending_messages
         .iter()
         .map(|message| message.token_delta)
@@ -386,7 +385,7 @@ fn build_messages(
     let messages = pending_messages
         .into_iter()
         .zip(token_rows)
-        .map(|(pending, tokens)| -> SessionParseResult<UnifiedMessage> {
+        .map(|(pending, tokens)| -> SessionParseResult<ParsedMessage> {
             let token_total = tokens.checked_total().ok_or_else(|| {
                 SessionParseError::invalid(
                     "validate imputed token breakdown",
@@ -399,8 +398,7 @@ fn build_messages(
                     "Grok imputed token total does not match its cumulative delta",
                 ));
             }
-            let mut message = UnifiedMessage::new_with_dedup(
-                CLIENT_ID,
+            let mut message = ParsedMessage::new_with_dedup(
                 pending.model_id,
                 PROVIDER_ID,
                 session_id.clone(),
@@ -667,7 +665,7 @@ fn hex_value(byte: u8) -> Option<u8> {
 mod tests {
     use super::*;
 
-    fn parse_grok_updates_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_grok_updates_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_grok_updates_file(path).unwrap().messages
     }
 
@@ -776,7 +774,6 @@ not-json
         let expected_tokens =
             crate::token_imputation::impute_total_only_token_breakdowns(&[200, 150]);
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].client.as_ref(), "grok");
         assert_eq!(messages[0].model_id.as_ref(), "composer-2.5-fast");
         assert_eq!(messages[0].provider_id.as_ref(), "xai");
         assert_eq!(messages[0].session_id.as_ref(), "session-1");

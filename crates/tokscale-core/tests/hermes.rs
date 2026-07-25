@@ -64,7 +64,6 @@ fn test_parse_hermes_sqlite_reads_session_rows_and_preserves_message_count() {
     assert_eq!(messages.len(), 1);
 
     let msg = &messages[0];
-    assert_eq!(msg.client.as_ref(), "hermes");
     assert_eq!(msg.agent.as_deref(), Some("Hermes Agent"));
     assert_eq!(msg.session_id.as_ref(), "session-1");
     assert_eq!(msg.model_id.as_ref(), "claude-sonnet-4");

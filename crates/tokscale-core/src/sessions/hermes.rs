@@ -9,7 +9,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{open_readonly_sqlite, parse_epoch_f64_millis};
-use super::UnifiedMessage;
+use super::ParsedMessage;
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use std::path::Path;
@@ -147,8 +147,7 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
             continue;
         };
         let provider = resolved_provider(billing_provider, &model_id);
-        let mut msg = UnifiedMessage::new_with_agent(
-            "hermes",
+        let mut msg = ParsedMessage::new_with_agent(
             model_id,
             provider,
             session_id.clone(),

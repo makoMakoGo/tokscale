@@ -11,7 +11,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{open_readonly_sqlite, parse_epoch_f64_millis, read_file};
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{normalize_workspace_key, workspace_label_from_key, ParsedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::TokenBreakdown;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-const CLIENT_ID: &str = "kiro";
 const PROVIDER_ID: &str = "amazon-bedrock";
 
 #[derive(Debug, Deserialize)]
@@ -350,7 +349,7 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedInput> {
     }
 
     for result in turns.into_iter().enumerate().map(
-        |(index, turn)| -> SessionParseResult<Option<UnifiedMessage>> {
+        |(index, turn)| -> SessionParseResult<Option<ParsedMessage>> {
             let turn = serde_json::from_str::<KiroTurnMetadata>(turn.get()).map_err(|source| {
                 SessionParseError::at_path(path, "decode Kiro turn metadata", source)
             })?;
@@ -509,8 +508,7 @@ pub fn parse_kiro_file(path: &Path) -> SessionParseResult<ScannedInput> {
                 )
             })?;
 
-            let mut message = UnifiedMessage::new_with_dedup(
-                CLIENT_ID,
+            let mut message = ParsedMessage::new_with_dedup(
                 model_id,
                 PROVIDER_ID,
                 session_id,
@@ -721,8 +719,7 @@ fn parse_kiro_global_storage_file(path: &Path) -> SessionParseResult<ScannedInpu
     let workspace = kiro_global_storage_workspace(path);
     let workspace_key = workspace.as_deref().and_then(normalize_workspace_key);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
-    let mut message = UnifiedMessage::new_with_dedup(
-        CLIENT_ID,
+    let mut message = ParsedMessage::new_with_dedup(
         model_id,
         PROVIDER_ID,
         session_id.clone(),
@@ -904,8 +901,7 @@ pub fn parse_kiro_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
                 continue;
             }
 
-            let mut message = UnifiedMessage::new_with_dedup(
-                CLIENT_ID,
+            let mut message = ParsedMessage::new_with_dedup(
                 model_id,
                 PROVIDER_ID,
                 conversation_id,
@@ -953,11 +949,11 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_kiro_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_kiro_file(path).unwrap().messages
     }
 
-    fn parse_kiro_sqlite(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_kiro_sqlite(path: &Path) -> Vec<ParsedMessage> {
         super::parse_kiro_sqlite(path).unwrap().messages
     }
 
@@ -987,7 +983,6 @@ mod tests {
         let messages = parse_kiro_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), "kiro");
         assert_eq!(messages[0].provider_id.as_ref(), "amazon-bedrock");
         assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-5");
         assert_eq!(messages[0].session_id.as_ref(), "session-1");
@@ -1565,7 +1560,6 @@ not json
         let messages = parse_kiro_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), "kiro");
         assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-5");
         assert_eq!(messages[0].session_id.as_ref(), "ide-session-1");
         assert_eq!(messages[0].timestamp, 1_770_983_426_420);

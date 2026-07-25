@@ -5,7 +5,7 @@
 //! extension writes final agent usage into extension logs.
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::{dedup_hash_str, normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{dedup_hash_str, normalize_workspace_key, workspace_label_from_key, ParsedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use chrono::TimeZone;
@@ -13,8 +13,6 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-
-const CLIENT_ID: &str = "codebuddy";
 
 #[derive(Debug, Deserialize)]
 struct CodeBuddyLine {
@@ -308,10 +306,9 @@ pub(crate) fn parse_codebuddy_jsonl_file(path: &Path) -> SessionParseResult<Scan
             .and_then(|provider| provider.message_id.as_deref())
             .or_else(|| provider_data.and_then(|provider| provider.trace_id.as_deref()))
             .or(item.id.as_deref())
-            .map(|key| dedup_hash_str(&format!("{CLIENT_ID}:{session_id}:{key}")));
+            .map(|key| dedup_hash_str(&format!("codebuddy:{session_id}:{key}")));
 
-        let mut message = UnifiedMessage::new_with_dedup(
-            CLIENT_ID,
+        let mut message = ParsedMessage::new_with_dedup(
             model_id,
             provider_id,
             session_id,
@@ -439,8 +436,7 @@ pub(crate) fn parse_codebuddy_extension_log_file(path: &Path) -> SessionParseRes
             continue;
         };
         let provider_id = provider_identity::observed_provider_id("", &model_id);
-        let mut message = UnifiedMessage::new_with_dedup(
-            CLIENT_ID,
+        let mut message = ParsedMessage::new_with_dedup(
             model_id,
             provider_id,
             agent_id,
@@ -582,11 +578,11 @@ fn workspace_from_log_path(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn parse_codebuddy_jsonl_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_codebuddy_jsonl_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_codebuddy_jsonl_file(path).unwrap().messages
     }
 
-    fn parse_codebuddy_extension_log_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_codebuddy_extension_log_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_codebuddy_extension_log_file(path)
             .unwrap()
             .messages
@@ -607,7 +603,6 @@ mod tests {
         let messages = parse_codebuddy_jsonl_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), "codebuddy");
         assert_eq!(messages[0].model_id.as_ref(), "glm-5.2");
         assert_eq!(messages[0].tokens.input, 24486);
         assert_eq!(messages[0].tokens.output, 3);

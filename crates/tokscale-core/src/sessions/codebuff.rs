@@ -15,13 +15,13 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{parse_timestamp_str, parse_timestamp_value, read_file};
-use super::UnifiedMessage;
+use super::ParsedMessage;
 use crate::input_health::{RecordRejectionReason, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde_json::Value;
 use std::path::Path;
 
-/// Parse a single `chat-messages.json` file into UnifiedMessages.
+/// Parse a single `chat-messages.json` file into source-neutral messages.
 pub fn parse_codebuff_file(path: &Path) -> SessionParseResult<ScannedInput> {
     let mut bytes = read_file(path)?;
     let root: Value = simd_json::from_slice(&mut bytes)
@@ -86,8 +86,7 @@ pub fn parse_codebuff_file(path: &Path) -> SessionParseResult<ScannedInput> {
         let dedup_key = upstream_message_id(msg)
             .unwrap_or_else(|| derive_dedup_key(&session_id, ts, &model, &usage, ordinal));
 
-        scanned.messages.push(UnifiedMessage::new_with_dedup(
-            "codebuff",
+        scanned.messages.push(ParsedMessage::new_with_dedup(
             &model,
             provider,
             &session_id,
@@ -667,7 +666,6 @@ mod tests {
         let messages = scanned.messages;
         assert_eq!(messages.len(), 1);
         let only = &messages[0];
-        assert_eq!(only.client.as_ref(), "codebuff");
         assert_eq!(only.model_id.as_ref(), "claude-sonnet-4-20250514");
         assert_eq!(only.provider_id.as_ref(), "anthropic");
         assert!(only.session_id.ends_with("/proj/2025-12-20T12-00-00.000Z"));

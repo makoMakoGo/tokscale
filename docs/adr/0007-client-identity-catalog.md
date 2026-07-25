@@ -45,11 +45,21 @@ definition. These three sets must have exact parity and no duplicate entries.
 
 The scan definition and the adapter's discovery implementation are the sole
 authority for fixed default roots beneath the selected home, filename
-selection, companion files, database sidecars, and custom-root support.
+selection, companion files, database sidecars, custom-root support, and source
+identity. An adapter stamps its generated `InputUnit` with its catalog
+`ClientId`; that value is the only source identity carried through acquisition.
 Additional roots come only from `scanner.extraScanPaths`; OpenCode database
-files come only from `scanner.opencodeDbPaths`. The adapter's session
-schema/parser is the sole authority for accepted envelopes, database schemas,
-required fields, record semantics, deduplication, and token interpretation.
+files come only from `scanner.opencodeDbPaths`.
+
+The adapter's session schema/parser is the sole authority for accepted
+envelopes, database schemas, required fields, record semantics, deduplication,
+and token interpretation, but not source identity. Parsers produce
+source-neutral `ParsedMessage` values. Derived message-cache shards also store
+only source-neutral messages. The sequential adapter fold attributes each
+message from `InputUnit.client` when it emits the final `UnifiedMessage`; parser
+modules do not repeat catalog IDs as message data. Before any adapter executes,
+the pipeline verifies that every discovered unit carries that adapter's
+`ClientId` and rejects a mismatched batch as a contract error.
 
 `docs/clients.md` is the user-facing discovery map generated from that contract.
 It does not create a second path or schema authority.
@@ -93,7 +103,7 @@ Adding a client requires one atomic contract change containing:
 1. one catalog identity;
 2. one scan definition;
 3. one registered local-input adapter;
-4. one current session schema/parser;
+4. one current source-neutral session schema/parser;
 5. focused discovery, parser, and health tests;
 6. catalog/scan/adapter parity checks; and
 7. a current discovery row in `docs/clients.md`.
@@ -107,5 +117,7 @@ requires a parser revision change.
 
 Each accepted local integration has one public identity and one executable
 input contract. Reports, filters, scanner configuration, caches, and TUI views
-therefore share the same client namespace, while path and format evolution stays
-owned by the adapter and schema that can validate it.
+therefore share the same client namespace. A parser cannot silently create a
+second source namespace because its output and persisted cache representation
+have no client field; path and format evolution stays owned by the adapter and
+schema that can validate it.

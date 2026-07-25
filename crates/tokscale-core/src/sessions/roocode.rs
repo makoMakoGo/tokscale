@@ -6,7 +6,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::parse_timestamp_str;
-use super::{normalize_agent_name, UnifiedMessage};
+use super::{normalize_agent_name, ParsedMessage};
 use crate::input_health::{RecordRejectionReason, RejectionSummary, ScannedInput};
 use crate::{provider_identity, TokenBreakdown};
 use serde_json::Value;
@@ -104,8 +104,7 @@ pub fn parse_roocode_file(path: &Path) -> SessionParseResult<ScannedInput> {
             provider.as_deref().unwrap_or_default(),
             &model_id,
         );
-        messages.push(UnifiedMessage::new_with_agent(
-            "roocode",
+        messages.push(ParsedMessage::new_with_agent(
             model_id.clone(),
             provider,
             session_id.clone(),
@@ -301,7 +300,7 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn parse_roocode_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_roocode_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_roocode_file(path).unwrap().messages
     }
 
@@ -348,7 +347,6 @@ after"#;
 
         let messages = parse_roocode_file(&path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), "roocode");
         assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4");
         assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
         assert_eq!(messages[0].session_id.as_ref(), "task-abc");

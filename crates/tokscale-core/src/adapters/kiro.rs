@@ -490,6 +490,9 @@ mod tests {
         KIRO_ADAPTER.fold(parsed, &mut ctx, &mut messages).unwrap();
 
         assert_eq!(messages.len(), 2);
+        assert!(messages
+            .iter()
+            .all(|message| message.client.as_ref() == ClientId::Kiro.as_str()));
         assert_eq!(ctx.health.rejected_records(), 1);
         assert_eq!(ctx.health.failed_inputs(), 0);
         assert_eq!(ctx.health.partial_inputs(), 0);
@@ -557,6 +560,7 @@ mod tests {
         KIRO_ADAPTER.fold(parsed, &mut ctx, &mut messages).unwrap();
 
         assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client.as_ref(), ClientId::Kiro.as_str());
         assert_eq!(messages[0].tokens.input, 13);
         assert_eq!(messages[0].tokens.output, 5);
         assert_eq!(ctx.health.partial_inputs(), 1);
@@ -576,8 +580,7 @@ mod tests {
             &path,
             unit.parser_version,
             unit.input_policy().fingerprint().unwrap(),
-            vec![crate::UnifiedMessage::new(
-                "kiro",
+            vec![crate::sessions::ParsedMessage::new(
                 "cached-model",
                 "cached-provider",
                 "cached-session",

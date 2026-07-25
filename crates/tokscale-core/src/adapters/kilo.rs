@@ -4,7 +4,7 @@ use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
     AdapterScanContext, FoldContext, InputDiscoveryError, InputUnit, LocalInputAdapter,
-    MessageSink, ParseContext, ParsedUnit, UnitMessagePayload,
+    MessageSink, ParseContext, ParsedUnit,
 };
 use crate::clients::ClientId;
 use crate::message_cache::{ParserId, ParserVersion};
@@ -68,13 +68,7 @@ impl LocalInputAdapter for KiloAdapter {
         ctx: &mut FoldContext<'_>,
         sink: &mut dyn MessageSink,
     ) -> Result<(), crate::adapters::InputPipelineError> {
-        for unit in parsed {
-            ctx.health.record(unit.input_health());
-            if let UnitMessagePayload::Fresh(messages) = unit.messages {
-                sink.extend_messages(messages);
-            }
-        }
-        Ok(())
+        adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
 

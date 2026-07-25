@@ -3,7 +3,7 @@
 //! Junie stores local sessions under `~/.junie/sessions/<session-id>/events.jsonl`.
 
 use super::error::{SessionParseError, SessionParseResult};
-use super::{dedup_hash_str, normalize_agent_name, UnifiedMessage};
+use super::{dedup_hash_str, normalize_agent_name, ParsedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use chrono::{Local, LocalResult, NaiveDateTime, TimeZone};
@@ -12,7 +12,6 @@ use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-const CLIENT_ID: &str = "junie";
 const USAGE_EVENT_KIND: &str = "LlmResponseMetadataEvent";
 const USER_PROMPT_KIND: &str = "UserPromptEvent";
 const SKIP_EVENT_KINDS: &[&str] = &[
@@ -130,7 +129,7 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedInput> {
             let provider_id = provider_from_usage(usage, &model_id);
 
             let dedup_key = format!(
-                "{CLIENT_ID}:{session_id}:{timestamp}:{model_id}:{}:{}:{}:{}:{}:{usage_index}",
+                "junie:{session_id}:{timestamp}:{model_id}:{}:{}:{}:{}:{}:{usage_index}",
                 tokens.input,
                 tokens.output,
                 tokens.cache_read,
@@ -141,8 +140,7 @@ pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedInput> {
                 continue;
             }
 
-            let mut message = UnifiedMessage::new_with_agent(
-                CLIENT_ID,
+            let mut message = ParsedMessage::new_with_agent(
                 model_id,
                 provider_id,
                 &session_id,
@@ -401,7 +399,7 @@ mod tests {
         parse_junie_file(&path)
     }
 
-    fn parse_events(content: &str) -> Vec<UnifiedMessage> {
+    fn parse_events(content: &str) -> Vec<ParsedMessage> {
         parse_events_result(content).unwrap().messages
     }
 
@@ -422,7 +420,6 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let message = &messages[0];
-        assert_eq!(message.client.as_ref(), "junie");
         assert_eq!(message.session_id.as_ref(), "session-250622-101010");
         assert_eq!(message.model_id.as_ref(), "gpt-4.1");
         assert_eq!(message.provider_id.as_ref(), "openai");

@@ -4,7 +4,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{extract_i64, extract_string, parse_timestamp_value};
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{normalize_workspace_key, workspace_label_from_key, ParsedMessage};
 use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary, ScannedInput};
 use crate::{checked_token_add, model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
@@ -727,7 +727,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
     let mut project_candidates = ClaudeProjectCandidates::default();
     let mut parent_session_id = None;
     let is_transcript_path = is_claude_transcripts_path(path);
-    let client_id = "claude".to_string();
     let mut session_id = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -746,7 +745,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
         .map_err(|source| SessionParseError::at_path(path, "open Claude session", source))?;
 
     let reader = BufReader::new(file);
-    let mut messages: Vec<UnifiedMessage> = Vec::with_capacity(64);
+    let mut messages: Vec<ParsedMessage> = Vec::with_capacity(64);
     let mut rejections = RejectionSummary::default();
     let mut interrupted = None;
     let mut provider_confidences: Vec<u8> = Vec::with_capacity(64);
@@ -924,7 +923,6 @@ fn parse_claude_file_with_cache_home_and_resolver(
                             entry: &entry,
                             last_model: last_model.as_deref(),
                             last_provider_hint: last_provider_hint.as_deref(),
-                            client_id: &client_id,
                             default_provider_hint: None,
                             session_id: &session_id,
                             suppress_unattributed: suppress_unattributed_tool_results,
@@ -1193,8 +1191,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     processed_hashes.insert(*hash, messages.len());
                 });
 
-                let mut unified = UnifiedMessage::new_with_dedup(
-                    client_id.clone(),
+                let mut message = ParsedMessage::new_with_dedup(
                     model,
                     provider_choice.id,
                     session_id.clone(),
@@ -1203,23 +1200,23 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     0.0,
                     dedup_key,
                 );
-                unified.is_main_session = is_main_session;
-                unified.agent = sidechain_agent
+                message.is_main_session = is_main_session;
+                message.agent = sidechain_agent
                     .as_deref()
                     .map(crate::sessions::intern::intern);
-                unified.set_agent_instance(sidechain_agent_instance.clone());
+                message.set_agent_instance(sidechain_agent_instance.clone());
                 let (message_workspace_key, message_workspace_label) = workspace_options_for_entry(
                     entry_workspace.as_ref(),
                     &workspace_key,
                     &workspace_label,
                 );
-                unified.set_workspace(message_workspace_key, message_workspace_label);
+                message.set_workspace(message_workspace_key, message_workspace_label);
                 // Mark the first assistant response after a user message as a turn start
                 if pending_turn_start {
-                    unified.is_turn_start = true;
+                    message.is_turn_start = true;
                     pending_turn_start = false;
                 }
-                messages.push(unified);
+                messages.push(message);
                 provider_confidences.push(provider_confidence);
             }
         }
@@ -1304,7 +1301,7 @@ fn workspace_parts_from_key(raw: &str) -> Option<ClaudeWorkspaceParts> {
     Some(ClaudeWorkspaceParts { key, label })
 }
 
-fn set_message_workspace(message: &mut UnifiedMessage, workspace: &ClaudeWorkspaceParts) {
+fn set_message_workspace(message: &mut ParsedMessage, workspace: &ClaudeWorkspaceParts) {
     let (workspace_key, workspace_label) = workspace.to_options();
     message.set_workspace(workspace_key, workspace_label);
 }
@@ -1327,7 +1324,7 @@ fn apply_resolved_project_workspace(
     candidates: &ClaudeProjectCandidates,
     input_path: &Path,
     parent_session_id: Option<&str>,
-    messages: &mut [UnifiedMessage],
+    messages: &mut [ParsedMessage],
 ) -> ClaudeProjectDependency {
     let Some(project_key) = project_key else {
         return ClaudeProjectDependency::None;
@@ -1603,7 +1600,7 @@ fn parse_claude_entry_timestamp_checked(
 }
 
 fn merge_claude_duplicate(
-    existing: &mut UnifiedMessage,
+    existing: &mut ParsedMessage,
     usage: &ClaudeUsage,
     parsed_timestamp: i64,
 ) {
@@ -1624,7 +1621,7 @@ fn merge_claude_duplicate(
 }
 
 fn merge_claude_tool_result_duplicate(
-    existing: &mut UnifiedMessage,
+    existing: &mut ParsedMessage,
     input_tokens: i64,
     timestamp_ms: i64,
 ) {
@@ -1645,7 +1642,6 @@ struct ClaudeToolResultContext<'a> {
     entry: &'a ClaudeEntry,
     last_model: Option<&'a str>,
     last_provider_hint: Option<&'a str>,
-    client_id: &'a str,
     default_provider_hint: Option<&'a str>,
     session_id: &'a str,
     suppress_unattributed: bool,
@@ -1658,7 +1654,7 @@ struct ClaudeToolResultContext<'a> {
 fn extract_claude_tool_result_message(
     line: &str,
     context: ClaudeToolResultContext<'_>,
-) -> SessionParseResult<Option<UnifiedMessage>> {
+) -> SessionParseResult<Option<ParsedMessage>> {
     let value: Value = serde_json::from_str(line).map_err(|source| {
         SessionParseError::at_path(
             context.input_path,
@@ -1740,8 +1736,7 @@ fn extract_claude_tool_result_message(
         )
     })?;
 
-    let mut message = UnifiedMessage::new_with_dedup(
-        context.client_id,
+    let mut message = ParsedMessage::new_with_dedup(
         model,
         provider_choice.id,
         context.session_id,
@@ -1756,8 +1751,8 @@ fn extract_claude_tool_result_message(
         0.0,
         usage.dedup_key.map(|key| {
             crate::sessions::dedup_hash_str(&format!(
-                "{}:tool_result:{}:{key}",
-                context.client_id, context.session_id
+                "claude:tool_result:{}:{key}",
+                context.session_id
             ))
         }),
     );
@@ -2226,7 +2221,7 @@ mod tests {
     // Most parser tests assert only the message projection. Health-specific
     // cases call `super::parse_claude_file` directly so rejections cannot be
     // discarded accidentally in the behavior under test.
-    fn parse_claude_file(path: &Path) -> SessionParseResult<Vec<UnifiedMessage>> {
+    fn parse_claude_file(path: &Path) -> SessionParseResult<Vec<ParsedMessage>> {
         super::parse_claude_file(path).map(|scanned| scanned.messages)
     }
 

@@ -461,7 +461,7 @@ fn fold_omp_cache_hits(
                     status,
                     rejections,
                 });
-                sink.extend_messages(messages);
+                adapter_cache::emit_messages(unit.client, messages, sink);
             }
             Err(failure) => {
                 if !failure.can_reparse_input() {
@@ -584,10 +584,12 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
-    fn refresh(messages: &mut [crate::UnifiedMessage]) {
-        for message in messages {
-            message.refresh_derived_fields();
-        }
+    fn finalized(mut messages: Vec<crate::sessions::ParsedMessage>) -> Vec<crate::UnifiedMessage> {
+        crate::finalize_token_priced_messages(&mut messages, None);
+        messages
+            .into_iter()
+            .map(|message| message.attribute(ClientId::Omp))
+            .collect()
     }
 
     fn fold_with_omp_adapter(
@@ -599,6 +601,9 @@ mod tests {
         OMP_ADAPTER
             .fold(parsed, &mut FoldContext::new(cache, None), &mut sink)
             .unwrap();
+        assert!(sink
+            .iter()
+            .all(|message| message.client.as_ref() == ClientId::Omp.as_str()));
         sink
     }
 
@@ -612,6 +617,9 @@ mod tests {
         OMP_ADAPTER
             .fold_batches(&mut batches, &mut ctx, &mut sink)
             .unwrap();
+        assert!(sink
+            .iter()
+            .all(|message| message.client.as_ref() == ClientId::Omp.as_str()));
         (sink, std::mem::take(&mut ctx.health))
     }
 
@@ -625,8 +633,7 @@ mod tests {
             &unit.path,
             unit.parser_version,
             unit.input_policy().fingerprint().unwrap(),
-            vec![crate::UnifiedMessage::new(
-                "omp",
+            vec![crate::sessions::ParsedMessage::new(
                 "gpt-5.5",
                 "openai",
                 session_id,
@@ -731,11 +738,11 @@ mod tests {
 
         let miss_paths = vec![child_path.clone()];
         let parent_index = sessions::pi::build_omp_parent_task_agent_index(&miss_paths);
-        let mut expected =
+        let expected = finalized(
             sessions::pi::parse_omp_file_with_parent_task_agent_index(&child_path, &parent_index)
                 .unwrap()
-                .messages;
-        refresh(&mut expected);
+                .messages,
+        );
 
         assert_eq!(actual, expected);
         assert_eq!(actual[0].agent.as_deref(), Some("OMP Reviewer"));
@@ -936,8 +943,7 @@ mod tests {
             &cached_path,
             parser_version,
             cached_unit.input_policy().fingerprint().unwrap(),
-            vec![crate::UnifiedMessage::new(
-                "omp",
+            vec![crate::sessions::ParsedMessage::new(
                 "gpt-5.5",
                 "openai",
                 "cached-session",
@@ -1510,8 +1516,7 @@ mod tests {
             &path,
             parser_version,
             unit.input_policy().fingerprint().unwrap(),
-            vec![crate::UnifiedMessage::new(
-                "omp",
+            vec![crate::sessions::ParsedMessage::new(
                 "gpt-5.5",
                 "openai",
                 "cached-session",

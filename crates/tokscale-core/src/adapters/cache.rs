@@ -4,8 +4,9 @@ use crate::adapters::{
     CacheHitPlan, FingerprintPolicy, FoldContext, InputPipelineError, InputPlanningError,
     InputUnit, MessageSink, ParseContext, ParsedUnit, UnitMessagePayload, UnitScanHealth,
 };
+use crate::clients::ClientId;
 use crate::input_health::{InputFailure, InputHealth, InputStatus, ScannedInput};
-use crate::{message_cache, UnifiedMessage};
+use crate::{message_cache, sessions::ParsedMessage};
 
 pub(crate) fn plan_cache_hit(
     mut unit: InputUnit,
@@ -337,6 +338,16 @@ pub(crate) fn fold_units(
     fold_units_with_filter(parsed, ctx, sink, |_, messages| messages)
 }
 
+pub(crate) fn emit_messages(
+    client: ClientId,
+    messages: impl IntoIterator<Item = ParsedMessage>,
+    sink: &mut dyn MessageSink,
+) {
+    for message in messages {
+        sink.push_message(message.attribute(client));
+    }
+}
+
 pub(crate) fn fold_units_with_filter<F>(
     parsed: Vec<ParsedUnit>,
     ctx: &mut FoldContext<'_>,
@@ -344,7 +355,7 @@ pub(crate) fn fold_units_with_filter<F>(
     mut filter: F,
 ) -> Result<(), InputPipelineError>
 where
-    F: FnMut(&InputUnit, Vec<UnifiedMessage>) -> Vec<UnifiedMessage>,
+    F: FnMut(&InputUnit, Vec<ParsedMessage>) -> Vec<ParsedMessage>,
 {
     for parsed_unit in parsed {
         let ResolvedUnit {
@@ -370,7 +381,7 @@ where
         }
         let cache_write_outcome = cache_write_outcome?;
         let messages = filter(&unit, messages);
-        sink.extend_messages(messages);
+        emit_messages(unit.client, messages, sink);
 
         if cache_write_outcome == CacheWriteOutcome::NotPlanned && invalidate_cache {
             ctx.input_cache.remove(&path, parser_version);
@@ -381,7 +392,7 @@ where
 
 pub(crate) struct ResolvedUnit {
     pub(crate) unit: InputUnit,
-    pub(crate) messages: Vec<UnifiedMessage>,
+    pub(crate) messages: Vec<ParsedMessage>,
     pub(crate) cache_write: Option<Box<message_cache::CacheWritePlan>>,
     pub(crate) invalidate_cache: bool,
     pub(crate) status: InputStatus,
@@ -470,7 +481,7 @@ pub(crate) enum CacheWriteOutcome {
 pub(crate) fn write_cache(
     cache_write: Option<Box<message_cache::CacheWritePlan>>,
     ctx: &mut FoldContext<'_>,
-    messages: &[UnifiedMessage],
+    messages: &[ParsedMessage],
 ) -> Result<CacheWriteOutcome, message_cache::InputCacheError> {
     if let Some(plan) = cache_write {
         ctx.input_cache.write_messages(*plan, messages)?;
@@ -482,7 +493,7 @@ pub(crate) fn write_cache(
 pub(crate) fn resolve_messages(
     payload: UnitMessagePayload,
     ctx: &mut FoldContext<'_>,
-) -> Result<Vec<UnifiedMessage>, message_cache::CacheReadFailure> {
+) -> Result<Vec<ParsedMessage>, message_cache::CacheReadFailure> {
     match payload {
         UnitMessagePayload::Fresh(messages) => Ok(messages),
         UnitMessagePayload::CacheHit(plan) => {
@@ -503,7 +514,7 @@ mod tests {
     use super::*;
     use crate::adapters::InputUnit;
     use crate::clients::ClientId;
-    use crate::TokenBreakdown;
+    use crate::{TokenBreakdown, UnifiedMessage};
 
     const PI_INPUT: &str = r#"{"type":"session","id":"input-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":17,"output":3,"cacheRead":0,"cacheWrite":0,"totalTokens":20}}}"#;
@@ -511,9 +522,8 @@ mod tests {
     const PI_REPLACEMENT_INPUT: &str = r#"{"type":"session","id":"replacement-input-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_002","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":29,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":34}}}"#;
 
-    fn cached_message() -> UnifiedMessage {
-        UnifiedMessage::new(
-            "test",
+    fn cached_message() -> ParsedMessage {
+        ParsedMessage::new(
             "gpt-5",
             "openai",
             "session",
@@ -523,9 +533,8 @@ mod tests {
         )
     }
 
-    fn scanned_message() -> UnifiedMessage {
-        UnifiedMessage::new(
-            "test",
+    fn scanned_message() -> ParsedMessage {
+        ParsedMessage::new(
             "gpt-5",
             "openai",
             "session",
@@ -573,8 +582,7 @@ mod tests {
             &unit.path,
             unit.parser_version,
             fingerprint.clone(),
-            vec![UnifiedMessage::new(
-                "pi",
+            vec![ParsedMessage::new(
                 "gpt-5.5",
                 "openai",
                 session_id,
@@ -1097,6 +1105,7 @@ mod tests {
         let input_path = input_dir.path().join("session.jsonl");
         std::fs::write(&input_path, PI_INPUT).unwrap();
         let unit = pi_unit(&input_path);
+        let expected_client = unit.client;
         let fingerprint = seed_disk_cache(cache_dir.path(), &unit, "stale-cache-session");
         message_cache::truncate_shard_after_header_for_test(
             cache_dir.path(),
@@ -1130,6 +1139,7 @@ mod tests {
         );
         let repaired = fold_planned_unit(parsed, &mut cache);
         assert_eq!(repaired.len(), 1);
+        assert_eq!(repaired[0].client.as_ref(), expected_client.as_str());
         assert_eq!(repaired[0].session_id.as_ref(), "input-session");
         assert_eq!(repaired[0].tokens.input, 17);
 
@@ -1140,6 +1150,7 @@ mod tests {
             "successful recovery must atomically replace the failed shard",
         );
         let warm_messages = fold_planned_unit(warm, &mut warm_cache);
+        assert_eq!(warm_messages[0].client.as_ref(), expected_client.as_str());
         assert_eq!(warm_messages[0].session_id.as_ref(), "input-session");
         assert_eq!(
             message_cache::get_input_read_stats(&input_path),
@@ -1376,6 +1387,7 @@ mod tests {
         let input_path = input_dir.path().join("session.jsonl");
         std::fs::write(&input_path, PI_INPUT).unwrap();
         let unit = pi_unit(&input_path);
+        let expected_client = unit.client;
         seed_disk_cache(cache_dir.path(), &unit, "stale-cache-session");
 
         let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
@@ -1418,6 +1430,7 @@ mod tests {
         );
         let mut cold_cache = cold_cache;
         let cold_messages = fold_planned_unit(cold_parsed, &mut cold_cache);
+        assert_eq!(cold_messages[0].client.as_ref(), expected_client.as_str());
         assert_eq!(cold_messages[0].session_id.as_ref(), "input-session");
     }
 

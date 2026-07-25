@@ -5,7 +5,7 @@
 
 use super::error::{SessionParseError, SessionParseResult};
 use super::utils::{extract_i64, extract_string, parse_timestamp_value};
-use super::{workspace_metadata_from_key, UnifiedMessage, WorkspaceMetadata};
+use super::{workspace_metadata_from_key, ParsedMessage, WorkspaceMetadata};
 use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary, ScannedInput};
 use crate::{checked_token_add, checked_token_sum, TokenBreakdown};
 use serde::Deserialize;
@@ -347,7 +347,7 @@ fn build_gemini_token_message(
     session_id: &str,
     timestamp: i64,
     tokens: GeminiTokens,
-) -> UnifiedMessage {
+) -> ParsedMessage {
     let (input, cache_read) = normalize_gemini_session_input_and_cache(
         tokens.input.unwrap_or(0),
         tokens.cached.unwrap_or(0),
@@ -359,8 +359,7 @@ fn build_gemini_token_message(
 
     let tool = tokens.tool.unwrap_or(0).max(0);
 
-    UnifiedMessage::new(
-        "gemini",
+    ParsedMessage::new(
         model,
         "google",
         session_id,
@@ -394,7 +393,7 @@ fn parse_direct_gemini_token_message(
     value: &Value,
     model_hint: Option<String>,
     session_id: Option<&str>,
-) -> SessionParseResult<Option<UnifiedMessage>> {
+) -> SessionParseResult<Option<ParsedMessage>> {
     let Some(tokens_value) = value.get("tokens") else {
         return Ok(None);
     };
@@ -686,7 +685,7 @@ fn build_messages_from_usages(
     usages: Vec<GeminiUsageStats>,
     session_id: &str,
     timestamp: i64,
-) -> Vec<UnifiedMessage> {
+) -> Vec<ParsedMessage> {
     usages
         .into_iter()
         .map(|usage| {
@@ -695,8 +694,7 @@ fn build_messages_from_usages(
             } else {
                 (usage.input.max(0), usage.cached.max(0))
             };
-            UnifiedMessage::new(
-                "gemini",
+            ParsedMessage::new(
                 usage.model,
                 "google",
                 session_id,
@@ -947,7 +945,7 @@ fn extract_timestamp_from_value(value: &Value) -> Option<i64> {
 mod tests {
     use super::*;
 
-    fn parse_gemini_file(path: &Path) -> Vec<UnifiedMessage> {
+    fn parse_gemini_file(path: &Path) -> Vec<ParsedMessage> {
         super::parse_gemini_file(path).unwrap().messages
     }
     use std::io::Write;

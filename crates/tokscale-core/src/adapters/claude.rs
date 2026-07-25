@@ -274,11 +274,12 @@ fn fold_claude_units(
             ctx.input_cache.remove(&path, unit.parser_version);
         }
         let cache_write_outcome = cache_write_outcome?;
-        sink.extend_messages(
+        adapter_cache::emit_messages(
+            unit.client,
             messages
                 .into_iter()
-                .filter(|message| crate::should_keep_deduped_message(seen_keys, message))
-                .collect(),
+                .filter(|message| crate::should_keep_deduped_message(seen_keys, message)),
+            sink,
         );
 
         if cache_write_outcome == adapter_cache::CacheWriteOutcome::NotPlanned && invalidate_cache {
@@ -334,6 +335,9 @@ mod tests {
         CLAUDE_ADAPTER
             .fold(parsed, &mut FoldContext::new(cache, None), &mut messages)
             .unwrap();
+        assert!(messages
+            .iter()
+            .all(|message| message.client.as_ref() == ClientId::Claude.as_str()));
         (messages, health)
     }
 
@@ -350,7 +354,18 @@ mod tests {
                 &mut messages,
             )
             .unwrap();
+        assert!(messages
+            .iter()
+            .all(|message| message.client.as_ref() == ClientId::Claude.as_str()));
         (messages, health)
+    }
+
+    fn finalized(mut messages: Vec<crate::sessions::ParsedMessage>) -> Vec<crate::UnifiedMessage> {
+        crate::finalize_token_priced_messages(&mut messages, None);
+        messages
+            .into_iter()
+            .map(|message| message.attribute(ClientId::Claude))
+            .collect()
     }
 
     fn explore_parent(agent_id: &str) -> String {
@@ -469,10 +484,14 @@ mod tests {
             .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut actual)
             .unwrap();
 
-        let expected =
+        let expected = finalized(
             sessions::claudecode::parse_claude_file_with_home(&session_path, Some(home.path()))
                 .unwrap()
-                .messages;
+                .messages,
+        );
+        assert!(actual
+            .iter()
+            .all(|message| message.client.as_ref() == ClientId::Claude.as_str()));
         assert_eq!(actual, expected);
         assert_eq!(actual.len(), 1);
     }
@@ -523,6 +542,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client.as_ref(), ClientId::Claude.as_str());
         assert_eq!(messages[0].tokens.input, 10);
         assert!(cache
             .get_meta(&session_path, parser_version)
