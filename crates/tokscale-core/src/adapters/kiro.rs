@@ -7,11 +7,12 @@ use walkdir::WalkDir;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
-    InputUnitMeta, LocalInputAdapter, MessageSink, ParseContext, ParsedUnit,
+    AdapterScanContext, BoundMessageSink, DecoderRoute, DecoderSpec, FingerprintPolicy,
+    FoldContext, InputDiscoveryError, InputUnit, LocalInputAdapter, ParseContext, ParsedUnit,
 };
 use crate::clients::ClientId;
-use crate::message_cache::{ParserId, ParserVersion};
+#[cfg(test)]
+use crate::message_cache::{DecoderId, DecoderVersion};
 use crate::sessions;
 
 const KIRO_RECORD_REJECTION_REVISION: u32 = 5;
@@ -19,63 +20,44 @@ const KIRO_RECORD_REJECTION_REVISION: u32 = 5;
 pub(crate) struct KiroAdapter;
 
 impl LocalInputAdapter for KiroAdapter {
-    fn client(&self) -> ClientId {
-        ClientId::Kiro
-    }
-
     fn discover_checked(
         &self,
+        client: ClientId,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
-        let def = ClientId::Kiro
+        let def = client
             .local_def()
             .expect("Kiro adapter must have local scan policy");
         let mut units = adapter_discover::input_units_from_paths(
-            ClientId::Kiro,
-            adapter_discover::scan_roots(
-                ClientId::Kiro,
-                [def.resolve_path(ctx.home_dir)],
-                def.pattern,
-            )?,
+            client,
+            adapter_discover::scan_roots(client, [def.resolve_path(ctx.home_dir)], def.pattern)?,
             FingerprintPolicy::PlainFile,
+            DecoderSpec::kiro_file(KIRO_RECORD_REJECTION_REVISION),
         )?
         .into_iter()
-        .map(kiro_file_unit)
+        .map(configure_kiro_file_unit)
         .collect::<Vec<_>>();
 
-        if let Some(db_path) = kiro_db_path(ctx.home_dir)? {
-            units.push(
-                InputUnit::sqlite_with_wal(ClientId::Kiro, db_path)
-                    .with_meta(InputUnitMeta::KiroSqlite)
-                    .with_parser_version(ParserVersion::new(
-                        ParserId::KiroSqlite,
-                        KIRO_RECORD_REJECTION_REVISION,
-                    )),
-            );
+        if let Some(db_path) = kiro_db_path(client, ctx.home_dir)? {
+            units.push(InputUnit::sqlite_with_wal(
+                db_path,
+                DecoderSpec::kiro_sqlite(KIRO_RECORD_REJECTION_REVISION),
+            ));
         }
 
-        units.extend(
-            adapter_discover::input_units_from_paths(
-                ClientId::Kiro,
-                adapter_discover::scan_roots(
-                    ClientId::Kiro,
-                    kiro_global_storage_roots(ctx.home_dir),
-                    "kiro-globalstorage",
-                )?,
-                FingerprintPolicy::PlainFile,
-            )?
-            .into_iter()
-            .map(|unit| {
-                unit.with_meta(InputUnitMeta::KiroGlobalStorage)
-                    .with_parser_version(ParserVersion::new(
-                        ParserId::KiroGlobalStorage,
-                        KIRO_RECORD_REJECTION_REVISION,
-                    ))
-            }),
-        );
+        units.extend(adapter_discover::input_units_from_paths(
+            client,
+            adapter_discover::scan_roots(
+                client,
+                kiro_global_storage_roots(ctx.home_dir),
+                "kiro-globalstorage",
+            )?,
+            FingerprintPolicy::PlainFile,
+            DecoderSpec::kiro_global_storage(KIRO_RECORD_REJECTION_REVISION),
+        )?);
 
-        units.extend(kiro_extra_units(ctx)?);
-        dedup_units_by_canonical_path(&mut units)?;
+        units.extend(kiro_extra_units(client, ctx)?);
+        dedup_units_by_canonical_path(client, &mut units)?;
         units.sort_by(|left, right| left.path.cmp(&right.path));
         Ok(units)
     }
@@ -83,26 +65,26 @@ impl LocalInputAdapter for KiroAdapter {
     fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
-            .map(|unit| match unit.meta {
-                InputUnitMeta::KiroFile => adapter_cache::load_or_scan_unit_with(
+            .map(|unit| match unit.decoder.route() {
+                DecoderRoute::KiroFile => adapter_cache::load_or_scan_unit_with(
                     unit,
                     ctx,
                     sessions::kiro::parse_kiro_file,
                 ),
-                InputUnitMeta::KiroSqlite => {
+                DecoderRoute::KiroSqlite => {
                     adapter_cache::parse_uncached_unit(unit, ctx, sessions::kiro::parse_kiro_sqlite)
                 }
-                InputUnitMeta::KiroGlobalStorage => adapter_cache::load_or_scan_unit_with(
+                DecoderRoute::KiroGlobalStorage => adapter_cache::load_or_scan_unit_with(
                     unit,
                     ctx,
                     sessions::kiro::parse_kiro_file,
                 ),
-                InputUnitMeta::None
-                | InputUnitMeta::AntigravityCliSqlite
-                | InputUnitMeta::OpenCodeSqlite
-                | InputUnitMeta::CodeBuddyJsonl
-                | InputUnitMeta::CodeBuddyExtensionLog { .. }
-                | InputUnitMeta::Codex => unreachable!("unexpected Kiro input unit meta"),
+                DecoderRoute::None
+                | DecoderRoute::AntigravityCliSqlite
+                | DecoderRoute::OpenCodeSqlite
+                | DecoderRoute::CodeBuddyJsonl
+                | DecoderRoute::CodeBuddyExtensionLog { .. }
+                | DecoderRoute::Codex => unreachable!("unexpected Kiro input unit meta"),
             })
             .collect()
     }
@@ -112,11 +94,11 @@ impl LocalInputAdapter for KiroAdapter {
         unit: InputUnit,
         input_cache: &crate::message_cache::InputMessageCache,
     ) -> Result<crate::adapters::CacheHitPlan, crate::adapters::InputPlanningError> {
-        match unit.meta {
-            InputUnitMeta::KiroFile | InputUnitMeta::KiroGlobalStorage => {
+        match unit.decoder.route() {
+            DecoderRoute::KiroFile | DecoderRoute::KiroGlobalStorage => {
                 adapter_cache::plan_cache_hit(unit, input_cache)
             }
-            InputUnitMeta::KiroSqlite => Ok(crate::adapters::CacheHitPlan::Miss(unit)),
+            DecoderRoute::KiroSqlite => Ok(crate::adapters::CacheHitPlan::Miss(unit)),
             _ => unreachable!("unexpected Kiro input unit meta"),
         }
     }
@@ -125,16 +107,16 @@ impl LocalInputAdapter for KiroAdapter {
         &self,
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), crate::adapters::InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
 }
 
-fn kiro_db_path(home_dir: &str) -> Result<Option<PathBuf>, InputDiscoveryError> {
+fn kiro_db_path(client: ClientId, home_dir: &str) -> Result<Option<PathBuf>, InputDiscoveryError> {
     let xdg_path = PathBuf::from(format!("{}/.local/share/kiro-cli/data.sqlite3", home_dir));
     let mut paths = Vec::new();
-    adapter_discover::push_existing_file(ClientId::Kiro, xdg_path, &mut paths)?;
+    adapter_discover::push_existing_file(client, xdg_path, &mut paths)?;
     if let Some(path) = paths.pop() {
         return Ok(Some(path));
     }
@@ -143,7 +125,7 @@ fn kiro_db_path(home_dir: &str) -> Result<Option<PathBuf>, InputDiscoveryError> 
         "{}/Library/Application Support/kiro-cli/data.sqlite3",
         home_dir
     ));
-    adapter_discover::push_existing_file(ClientId::Kiro, macos_path, &mut paths)?;
+    adapter_discover::push_existing_file(client, macos_path, &mut paths)?;
     Ok(paths.pop())
 }
 
@@ -176,28 +158,25 @@ fn kiro_global_storage_roots(home_dir: &str) -> Vec<PathBuf> {
     ]
 }
 
-fn kiro_file_unit(unit: InputUnit) -> InputUnit {
+fn configure_kiro_file_unit(unit: InputUnit) -> InputUnit {
     let sidecar = unit.path.with_extension("jsonl");
     unit.with_optional_dependency(sidecar)
-        .with_meta(InputUnitMeta::KiroFile)
-        .with_parser_version(ParserVersion::new(
-            ParserId::KiroFile,
-            KIRO_RECORD_REJECTION_REVISION,
-        ))
 }
 
-fn kiro_extra_units(ctx: &AdapterScanContext<'_>) -> Result<Vec<InputUnit>, InputDiscoveryError> {
+fn kiro_extra_units(
+    client: ClientId,
+    ctx: &AdapterScanContext<'_>,
+) -> Result<Vec<InputUnit>, InputDiscoveryError> {
     let mut cli_paths = Vec::new();
     let mut sqlite_paths = Vec::new();
     let mut global_storage_paths = Vec::new();
 
-    for root in adapter_discover::extra_roots_for_client(ClientId::Kiro, ctx)? {
+    for root in adapter_discover::extra_roots_for_client(client, ctx)? {
         match std::fs::metadata(&root) {
             Ok(_) => {}
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
             Err(source) => {
                 return Err(InputDiscoveryError::new(
-                    ClientId::Kiro,
                     &root,
                     "read extra scan root metadata",
                     source,
@@ -207,7 +186,7 @@ fn kiro_extra_units(ctx: &AdapterScanContext<'_>) -> Result<Vec<InputUnit>, Inpu
 
         for entry in WalkDir::new(&root) {
             let entry = entry.map_err(|source| {
-                InputDiscoveryError::new(ClientId::Kiro, &root, "walk extra scan root", source)
+                InputDiscoveryError::new(&root, "walk extra scan root", source)
             })?;
             if !entry.file_type().is_file() {
                 continue;
@@ -228,43 +207,26 @@ fn kiro_extra_units(ctx: &AdapterScanContext<'_>) -> Result<Vec<InputUnit>, Inpu
     }
 
     let mut units = adapter_discover::input_units_from_paths(
-        ClientId::Kiro,
+        client,
         cli_paths,
         FingerprintPolicy::PlainFile,
+        DecoderSpec::kiro_file(KIRO_RECORD_REJECTION_REVISION),
     )?
     .into_iter()
-    .map(kiro_file_unit)
+    .map(configure_kiro_file_unit)
     .collect::<Vec<_>>();
-    units.extend(
-        adapter_discover::input_units_from_paths(
-            ClientId::Kiro,
-            sqlite_paths,
-            FingerprintPolicy::SqliteWithWal,
-        )?
-        .into_iter()
-        .map(|unit| {
-            unit.with_meta(InputUnitMeta::KiroSqlite)
-                .with_parser_version(ParserVersion::new(
-                    ParserId::KiroSqlite,
-                    KIRO_RECORD_REJECTION_REVISION,
-                ))
-        }),
-    );
-    units.extend(
-        adapter_discover::input_units_from_paths(
-            ClientId::Kiro,
-            global_storage_paths,
-            FingerprintPolicy::PlainFile,
-        )?
-        .into_iter()
-        .map(|unit| {
-            unit.with_meta(InputUnitMeta::KiroGlobalStorage)
-                .with_parser_version(ParserVersion::new(
-                    ParserId::KiroGlobalStorage,
-                    KIRO_RECORD_REJECTION_REVISION,
-                ))
-        }),
-    );
+    units.extend(adapter_discover::input_units_from_paths(
+        client,
+        sqlite_paths,
+        FingerprintPolicy::SqliteWithWal,
+        DecoderSpec::kiro_sqlite(KIRO_RECORD_REJECTION_REVISION),
+    )?);
+    units.extend(adapter_discover::input_units_from_paths(
+        client,
+        global_storage_paths,
+        FingerprintPolicy::PlainFile,
+        DecoderSpec::kiro_global_storage(KIRO_RECORD_REJECTION_REVISION),
+    )?);
     Ok(units)
 }
 
@@ -287,17 +249,15 @@ fn is_kiro_global_storage_input(path: &Path) -> bool {
             .is_some_and(|extension| extension == "chat" || extension == "json")
 }
 
-fn dedup_units_by_canonical_path(units: &mut Vec<InputUnit>) -> Result<(), InputDiscoveryError> {
+fn dedup_units_by_canonical_path(
+    _client: ClientId,
+    units: &mut Vec<InputUnit>,
+) -> Result<(), InputDiscoveryError> {
     let mut seen = HashSet::new();
     let mut keys = Vec::with_capacity(units.len());
     for unit in units.iter() {
         keys.push(std::fs::canonicalize(&unit.path).map_err(|source| {
-            InputDiscoveryError::new(
-                ClientId::Kiro,
-                &unit.path,
-                "canonicalize discovered input",
-                source,
-            )
+            InputDiscoveryError::new(&unit.path, "canonicalize discovered input", source)
         })?);
     }
     let mut index = 0;
@@ -316,23 +276,16 @@ mod tests {
     use super::*;
 
     fn kiro_global_unit(path: PathBuf) -> InputUnit {
-        InputUnit::plain_file(ClientId::Kiro, path)
-            .with_meta(InputUnitMeta::KiroGlobalStorage)
-            .with_parser_version(ParserVersion::new(
-                ParserId::KiroGlobalStorage,
-                KIRO_RECORD_REJECTION_REVISION,
-            ))
+        InputUnit::plain_file(
+            path,
+            DecoderSpec::kiro_global_storage(KIRO_RECORD_REJECTION_REVISION),
+        )
     }
 
     fn kiro_file_unit(path: PathBuf) -> InputUnit {
         let sidecar = path.with_extension("jsonl");
-        InputUnit::plain_file(ClientId::Kiro, path)
+        InputUnit::plain_file(path, DecoderSpec::kiro_file(KIRO_RECORD_REJECTION_REVISION))
             .with_optional_dependency(sidecar)
-            .with_meta(InputUnitMeta::KiroFile)
-            .with_parser_version(ParserVersion::new(
-                ParserId::KiroFile,
-                KIRO_RECORD_REJECTION_REVISION,
-            ))
     }
 
     #[test]
@@ -353,21 +306,24 @@ mod tests {
             scanner_settings: &settings,
         };
 
-        let units = KIRO_ADAPTER.discover_checked(&ctx).unwrap();
+        let units = KIRO_ADAPTER.discover_checked(ClientId::Kiro, &ctx).unwrap();
 
         assert_eq!(units.len(), 3);
         assert!(units
             .iter()
-            .any(|unit| unit.path == file_path && matches!(unit.meta, InputUnitMeta::KiroFile)));
+            .any(|unit| unit.path == file_path
+                && matches!(unit.decoder.route(), DecoderRoute::KiroFile)));
         assert!(units
             .iter()
-            .any(|unit| unit.path == db_path && matches!(unit.meta, InputUnitMeta::KiroSqlite)));
+            .any(|unit| unit.path == db_path
+                && matches!(unit.decoder.route(), DecoderRoute::KiroSqlite)));
         assert!(units.iter().any(|unit| {
-            unit.path == global_path && matches!(unit.meta, InputUnitMeta::KiroGlobalStorage)
+            unit.path == global_path
+                && matches!(unit.decoder.route(), DecoderRoute::KiroGlobalStorage)
         }));
         let file_unit = units
             .iter()
-            .find(|unit| matches!(unit.meta, InputUnitMeta::KiroFile))
+            .find(|unit| matches!(unit.decoder.route(), DecoderRoute::KiroFile))
             .unwrap();
         assert_eq!(
             file_unit.fingerprint_policy,
@@ -379,19 +335,19 @@ mod tests {
         );
         let global_unit = units
             .iter()
-            .find(|unit| matches!(unit.meta, InputUnitMeta::KiroGlobalStorage))
+            .find(|unit| matches!(unit.decoder.route(), DecoderRoute::KiroGlobalStorage))
             .unwrap();
         assert_eq!(global_unit.fingerprint_policy, FingerprintPolicy::PlainFile);
         for unit in &units {
-            let parser_id = match unit.meta {
-                InputUnitMeta::KiroFile => ParserId::KiroFile,
-                InputUnitMeta::KiroSqlite => ParserId::KiroSqlite,
-                InputUnitMeta::KiroGlobalStorage => ParserId::KiroGlobalStorage,
+            let decoder_id = match unit.decoder.route() {
+                DecoderRoute::KiroFile => DecoderId::KiroFile,
+                DecoderRoute::KiroSqlite => DecoderId::KiroSqlite,
+                DecoderRoute::KiroGlobalStorage => DecoderId::KiroGlobalStorage,
                 _ => unreachable!(),
             };
             assert_eq!(
-                unit.parser_version,
-                ParserVersion::new(parser_id, KIRO_RECORD_REJECTION_REVISION)
+                unit.decoder.version(),
+                DecoderVersion::new(decoder_id, KIRO_RECORD_REJECTION_REVISION)
             );
         }
     }
@@ -422,11 +378,11 @@ mod tests {
             scanner_settings: &settings,
         };
 
-        let units = KIRO_ADAPTER.discover_checked(&ctx).unwrap();
+        let units = KIRO_ADAPTER.discover_checked(ClientId::Kiro, &ctx).unwrap();
         assert_eq!(units.len(), 3);
 
         let cli_unit = units.iter().find(|unit| unit.path == cli_path).unwrap();
-        assert_eq!(cli_unit.meta, InputUnitMeta::KiroFile);
+        assert_eq!(cli_unit.decoder.route(), DecoderRoute::KiroFile);
         assert_eq!(
             cli_unit.fingerprint_policy,
             FingerprintPolicy::PrimaryWithDependency {
@@ -436,26 +392,26 @@ mod tests {
             }
         );
         assert_eq!(
-            cli_unit.parser_version,
-            ParserVersion::new(ParserId::KiroFile, KIRO_RECORD_REJECTION_REVISION)
+            cli_unit.decoder.version(),
+            DecoderVersion::new(DecoderId::KiroFile, KIRO_RECORD_REJECTION_REVISION)
         );
 
         let sqlite_unit = units.iter().find(|unit| unit.path == sqlite_path).unwrap();
-        assert_eq!(sqlite_unit.meta, InputUnitMeta::KiroSqlite);
+        assert_eq!(sqlite_unit.decoder.route(), DecoderRoute::KiroSqlite);
         assert_eq!(
             sqlite_unit.fingerprint_policy,
             FingerprintPolicy::SqliteWithWal
         );
         assert_eq!(
-            sqlite_unit.parser_version,
-            ParserVersion::new(ParserId::KiroSqlite, KIRO_RECORD_REJECTION_REVISION)
+            sqlite_unit.decoder.version(),
+            DecoderVersion::new(DecoderId::KiroSqlite, KIRO_RECORD_REJECTION_REVISION)
         );
 
         let global_unit = units.iter().find(|unit| unit.path == global_path).unwrap();
-        assert_eq!(global_unit.meta, InputUnitMeta::KiroGlobalStorage);
+        assert_eq!(global_unit.decoder.route(), DecoderRoute::KiroGlobalStorage);
         assert_eq!(
-            global_unit.parser_version,
-            ParserVersion::new(ParserId::KiroGlobalStorage, KIRO_RECORD_REJECTION_REVISION)
+            global_unit.decoder.version(),
+            DecoderVersion::new(DecoderId::KiroGlobalStorage, KIRO_RECORD_REJECTION_REVISION)
         );
     }
 
@@ -484,18 +440,20 @@ mod tests {
         let units = paths.into_iter().map(kiro_global_unit).collect();
         let parsed = KIRO_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
         let mut cache = crate::message_cache::InputMessageCache::default();
-        let mut ctx = FoldContext::new(&mut cache, None);
         let mut messages = Vec::new();
+        let binding = crate::adapters::adapter_for(ClientId::Kiro).unwrap();
+        let mut ctx = FoldContext::new(binding, &mut cache, None);
+        let mut sink = BoundMessageSink::new(binding, &mut messages);
 
-        KIRO_ADAPTER.fold(parsed, &mut ctx, &mut messages).unwrap();
+        KIRO_ADAPTER.fold(parsed, &mut ctx, &mut sink).unwrap();
 
         assert_eq!(messages.len(), 2);
         assert!(messages
             .iter()
-            .all(|message| message.client.as_ref() == ClientId::Kiro.as_str()));
-        assert_eq!(ctx.health.rejected_records(), 1);
-        assert_eq!(ctx.health.failed_inputs(), 0);
-        assert_eq!(ctx.health.partial_inputs(), 0);
+            .all(|message| message.client == ClientId::Kiro));
+        assert_eq!(ctx.health().rejected_records(), 1);
+        assert_eq!(ctx.health().failed_inputs(), 0);
+        assert_eq!(ctx.health().partial_inputs(), 0);
     }
 
     #[test]
@@ -507,7 +465,7 @@ mod tests {
         let parsed =
             KIRO_ADAPTER.parse_checked(vec![kiro_file_unit(path)], &ParseContext { pricing: None });
 
-        let health = parsed[0].input_health();
+        let health = &parsed[0].health;
         let failure = health.status.failure().unwrap();
         assert!(matches!(
             health.status,
@@ -537,11 +495,11 @@ mod tests {
         .unwrap();
         std::fs::create_dir(&sidecar).unwrap();
         let unit = kiro_file_unit(path.clone());
-        let parser_version = unit.parser_version;
+        let decoder_version = unit.decoder.version();
 
         let parsed = KIRO_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
 
-        let health = parsed[0].input_health();
+        let health = &parsed[0].health;
         let failure = health.status.failure().unwrap();
         assert!(matches!(
             health.status,
@@ -555,16 +513,18 @@ mod tests {
         assert!(parsed[0].cache_write.is_none());
 
         let mut cache = crate::message_cache::InputMessageCache::default();
-        let mut ctx = FoldContext::new(&mut cache, None);
         let mut messages = Vec::new();
-        KIRO_ADAPTER.fold(parsed, &mut ctx, &mut messages).unwrap();
+        let binding = crate::adapters::adapter_for(ClientId::Kiro).unwrap();
+        let mut ctx = FoldContext::new(binding, &mut cache, None);
+        let mut sink = BoundMessageSink::new(binding, &mut messages);
+        KIRO_ADAPTER.fold(parsed, &mut ctx, &mut sink).unwrap();
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), ClientId::Kiro.as_str());
+        assert_eq!(messages[0].client, ClientId::Kiro);
         assert_eq!(messages[0].tokens.input, 13);
         assert_eq!(messages[0].tokens.output, 5);
-        assert_eq!(ctx.health.partial_inputs(), 1);
-        assert!(cache.get_meta(&path, parser_version).unwrap().is_none());
+        assert_eq!(ctx.health().partial_inputs(), 1);
+        assert!(cache.get_meta(&path, decoder_version).unwrap().is_none());
     }
 
     #[test]
@@ -578,7 +538,7 @@ mod tests {
         let mut cache = crate::message_cache::InputMessageCache::default();
         cache.insert(crate::message_cache::CachedInputEntry::new_with_version(
             &path,
-            unit.parser_version,
+            unit.decoder.version(),
             unit.input_policy().fingerprint().unwrap(),
             vec![crate::sessions::ParsedMessage::new(
                 "cached-model",

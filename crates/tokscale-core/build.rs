@@ -178,6 +178,50 @@ impl ClientId {{
     }}
 }}
 
+impl std::fmt::Display for ClientId {{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{
+        formatter.write_str(self.as_str())
+    }}
+}}
+
+impl PartialOrd for ClientId {{
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {{
+        Some(self.cmp(other))
+    }}
+}}
+
+impl Ord for ClientId {{
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {{
+        self.as_str().cmp(other.as_str())
+    }}
+}}
+
+impl AsRef<str> for ClientId {{
+    fn as_ref(&self) -> &str {{
+        self.as_str()
+    }}
+}}
+
+impl serde::Serialize for ClientId {{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {{
+        serializer.serialize_str(self.as_str())
+    }}
+}}
+
+impl<'de> serde::Deserialize<'de> for ClientId {{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {{
+        let id = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::from_str(&id)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown local client `{{id}}`")))
+    }}
+}}
+
 pub const CLIENT_IDENTITIES: [ClientIdentity; ClientId::COUNT] = [
 {identities}];
 "#

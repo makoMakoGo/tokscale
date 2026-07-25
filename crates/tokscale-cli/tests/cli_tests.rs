@@ -1178,6 +1178,13 @@ fn test_models_json_output() {
         json["metadata"].get("processingTimeMs").is_some(),
         "Missing processingTimeMs"
     );
+    assert!(
+        json["metadata"]["inputFootprint"]["opencode"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "Missing confirmed OpenCode input footprint"
+    );
+    assert!(json["health"].get("inputDataBytes").is_none());
 
     let models = model_rows(&json);
     assert!(!models.is_empty(), "Should have models from fixture data");
@@ -1237,6 +1244,7 @@ fn test_every_local_json_command_uses_the_common_envelope() {
             invocation.join(" ")
         );
         assert!(document["metadata"]["processingTimeMs"].is_number());
+        assert!(document["metadata"]["inputFootprint"].is_object());
     }
 }
 

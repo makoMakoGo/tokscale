@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::adapters::{AdapterScanContext, FingerprintPolicy, InputDiscoveryError, InputUnit};
+use crate::adapters::{
+    AdapterScanContext, DecoderSpec, FingerprintPolicy, InputDiscoveryError, InputUnit,
+};
 use crate::clients::ClientId;
 use crate::scanner;
 
@@ -9,6 +11,7 @@ pub(crate) fn discover_default_scanned_units(
     client: ClientId,
     ctx: &AdapterScanContext<'_>,
     fingerprint_policy: FingerprintPolicy,
+    decoder: DecoderSpec,
 ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
     let def = client
         .local_def()
@@ -21,7 +24,7 @@ pub(crate) fn discover_default_scanned_units(
         extra_roots_for_client(client, ctx)?,
         def.pattern,
     )?);
-    input_units_from_paths(client, paths, fingerprint_policy)
+    input_units_from_paths(client, paths, fingerprint_policy, decoder)
 }
 
 pub(crate) fn extra_roots_for_client(
@@ -43,7 +46,7 @@ pub(crate) fn extra_roots_for_client(
 }
 
 pub(crate) fn scan_roots<I>(
-    client: ClientId,
+    _client: ClientId,
     roots: I,
     pattern: &str,
 ) -> Result<Vec<PathBuf>, InputDiscoveryError>
@@ -53,9 +56,8 @@ where
     let mut paths = Vec::new();
     for root in roots {
         paths.extend(
-            scanner::scan_directory(&root, pattern).map_err(|source| {
-                InputDiscoveryError::new(client, &root, "walk directory", source)
-            })?,
+            scanner::scan_directory(&root, pattern)
+                .map_err(|source| InputDiscoveryError::new(&root, "walk directory", source))?,
         );
     }
     Ok(paths)
@@ -65,6 +67,7 @@ pub(crate) fn input_units_from_paths(
     client: ClientId,
     paths: Vec<PathBuf>,
     fingerprint_policy: FingerprintPolicy,
+    decoder: DecoderSpec,
 ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
     let mut seen = HashSet::new();
     let mut units = Vec::new();
@@ -72,7 +75,7 @@ pub(crate) fn input_units_from_paths(
     for path in paths {
         let key = canonical_key(client, &path)?;
         if seen.insert(key) {
-            units.push(input_unit_for_policy(client, path, &fingerprint_policy)?);
+            units.push(input_unit_for_policy(path, &fingerprint_policy, decoder));
         }
     }
 
@@ -84,6 +87,7 @@ pub(crate) fn input_units_from_paths_preserving_order(
     client: ClientId,
     paths: Vec<PathBuf>,
     fingerprint_policy: FingerprintPolicy,
+    decoder: DecoderSpec,
 ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
     let mut seen = HashSet::new();
     let mut units = Vec::new();
@@ -91,7 +95,7 @@ pub(crate) fn input_units_from_paths_preserving_order(
     for path in paths {
         let key = canonical_key(client, &path)?;
         if seen.insert(key) {
-            units.push(input_unit_for_policy(client, path, &fingerprint_policy)?);
+            units.push(input_unit_for_policy(path, &fingerprint_policy, decoder));
         }
     }
 
@@ -99,7 +103,7 @@ pub(crate) fn input_units_from_paths_preserving_order(
 }
 
 pub(crate) fn push_existing_file(
-    client: ClientId,
+    _client: ClientId,
     path: PathBuf,
     paths: &mut Vec<PathBuf>,
 ) -> Result<(), InputDiscoveryError> {
@@ -107,7 +111,6 @@ pub(crate) fn push_existing_file(
         Ok(metadata) if metadata.is_file() => paths.push(path),
         Ok(_) => {
             return Err(InputDiscoveryError::new(
-                client,
                 &path,
                 "validate file candidate",
                 std::io::Error::new(
@@ -119,7 +122,6 @@ pub(crate) fn push_existing_file(
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => {
             return Err(InputDiscoveryError::new(
-                client,
                 &path,
                 "read file candidate metadata",
                 source,
@@ -129,28 +131,27 @@ pub(crate) fn push_existing_file(
     Ok(())
 }
 
-fn canonical_key(client: ClientId, path: &Path) -> Result<PathBuf, InputDiscoveryError> {
-    std::fs::canonicalize(path).map_err(|source| {
-        InputDiscoveryError::new(client, path, "canonicalize discovered input", source)
-    })
+fn canonical_key(_client: ClientId, path: &Path) -> Result<PathBuf, InputDiscoveryError> {
+    std::fs::canonicalize(path)
+        .map_err(|source| InputDiscoveryError::new(path, "canonicalize discovered input", source))
 }
 
 fn input_unit_for_policy(
-    client: ClientId,
     path: PathBuf,
     fingerprint_policy: &FingerprintPolicy,
-) -> Result<InputUnit, InputDiscoveryError> {
-    let unit = match fingerprint_policy {
-        FingerprintPolicy::PlainFile => InputUnit::plain_file(client, path),
-        FingerprintPolicy::SqliteWithWal => InputUnit::sqlite_with_wal(client, path),
+    decoder: DecoderSpec,
+) -> InputUnit {
+    match fingerprint_policy {
+        FingerprintPolicy::PlainFile => InputUnit::plain_file(path, decoder),
+        FingerprintPolicy::SqliteWithWal => InputUnit::sqlite_with_wal(path, decoder),
         FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => {
-            InputUnit::claude_code(client, path, home_dir.clone())
+            InputUnit::claude_code(path, home_dir.clone(), decoder)
         }
         FingerprintPolicy::PrimaryWithSiblings {
             sibling_names,
             related_failure_policy,
         } => {
-            let mut unit = InputUnit::plain_file(client, path);
+            let mut unit = InputUnit::plain_file(path, decoder);
             unit.fingerprint_policy = FingerprintPolicy::PrimaryWithSiblings {
                 sibling_names,
                 related_failure_policy: *related_failure_policy,
@@ -162,14 +163,13 @@ fn input_unit_for_policy(
             related_failure_policy,
         } => match related_failure_policy {
             crate::message_cache::RelatedInputFailurePolicy::FailInput => {
-                InputUnit::plain_file(client, path).with_dependency(dependency_path.clone())
+                InputUnit::plain_file(path, decoder).with_dependency(dependency_path.clone())
             }
             crate::message_cache::RelatedInputFailurePolicy::PreservePrimary => {
-                InputUnit::plain_file(client, path)
+                InputUnit::plain_file(path, decoder)
                     .with_optional_dependency(dependency_path.clone())
             }
         },
-        FingerprintPolicy::NoMessageCache => InputUnit::no_message_cache(client, path),
-    };
-    Ok(unit)
+        FingerprintPolicy::NoMessageCache => InputUnit::no_message_cache(path, decoder),
+    }
 }

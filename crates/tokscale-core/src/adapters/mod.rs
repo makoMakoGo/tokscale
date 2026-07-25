@@ -5,6 +5,7 @@ mod cline;
 mod codebuddy;
 mod codebuff;
 mod codex;
+mod decoder;
 pub(crate) mod discover;
 pub(crate) mod error;
 pub(crate) mod file;
@@ -19,6 +20,7 @@ mod opencode;
 mod omp;
 mod pi;
 mod roocode;
+mod runtime;
 mod warp;
 mod zed;
 
@@ -29,31 +31,34 @@ use rayon::prelude::*;
 
 use crate::clients::ClientId;
 use crate::input_health::{DataHealth, InputFailure, InputHealth, InputStatus, RejectionSummary};
-use crate::message_cache::{InputFileIdentity, ParserId, ParserRevision, ParserVersion};
+#[cfg(test)]
+use crate::message_cache::DecoderId;
+use crate::message_cache::{DecoderRevision, InputFileIdentity};
 use crate::{message_cache, pricing, scanner, sessions::ParsedMessage, UnifiedMessage};
 
+pub(crate) use decoder::{DecoderRoute, DecoderSpec};
 pub(crate) use error::{
     InputDiscoveryError, InputParseError, InputPipelineError, InputPlanningError,
 };
+pub(crate) use runtime::{BoundMessageSink, FoldContext};
 
-pub(crate) const MODEL_ID_CANONICALIZATION_REVISION: ParserRevision = 3;
+pub(crate) const MODEL_ID_CANONICALIZATION_REVISION: DecoderRevision = 3;
 // Record-level rejection and parsed Agent identity changes alter the cached
 // scan outcome, so old OpenCode shards must be rebuilt.
-pub(crate) const OPENCODE_CURRENT_SQLITE_REVISION: ParserRevision =
+pub(crate) const OPENCODE_CURRENT_SQLITE_REVISION: DecoderRevision =
     MODEL_ID_CANONICALIZATION_REVISION + 6;
-pub(crate) const EXPLICIT_TOKEN_OVERFLOW_REVISION: ParserRevision =
+pub(crate) const EXPLICIT_TOKEN_OVERFLOW_REVISION: DecoderRevision =
     MODEL_ID_CANONICALIZATION_REVISION + 1;
-pub(crate) const ZED_RECORD_FILTER_REVISION: ParserRevision = EXPLICIT_TOKEN_OVERFLOW_REVISION + 2;
+pub(crate) const ZED_RECORD_FILTER_REVISION: DecoderRevision = EXPLICIT_TOKEN_OVERFLOW_REVISION + 2;
 // Codex Agent roles use the shared neutral text normalizer. Keep cached
 // messages aligned when that parser-owned identity changes.
-pub(crate) const CODEX_EXEC_IDENTITY_REVISION: ParserRevision =
+pub(crate) const CODEX_EXEC_IDENTITY_REVISION: DecoderRevision =
     MODEL_ID_CANONICALIZATION_REVISION + 4;
 
 pub(crate) trait LocalInputAdapter: Sync {
-    fn client(&self) -> ClientId;
-
     fn discover_checked(
         &self,
+        client: ClientId,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError>;
 
@@ -71,14 +76,14 @@ pub(crate) trait LocalInputAdapter: Sync {
         &self,
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), InputPipelineError>;
 
     fn fold_batches(
         &self,
         batches: &mut ParsedBatchInput<'_>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), InputPipelineError> {
         while let Some(parsed) = batches.next(ctx)? {
             self.fold(parsed, ctx, sink)?;
@@ -96,30 +101,11 @@ pub(crate) struct ParseContext<'a> {
     pub pricing: Option<&'a pricing::PricingService>,
 }
 
-pub(crate) struct FoldContext<'a> {
-    pub input_cache: &'a mut message_cache::InputMessageCache,
-    pub pricing: Option<&'a pricing::PricingService>,
-    pub health: DataHealth,
-}
-
-impl<'a> FoldContext<'a> {
-    pub(crate) fn new(
-        input_cache: &'a mut message_cache::InputMessageCache,
-        pricing: Option<&'a pricing::PricingService>,
-    ) -> Self {
-        Self {
-            input_cache,
-            pricing,
-            health: DataHealth::default(),
-        }
-    }
-}
-
-pub(crate) trait MessageSink {
+pub(crate) trait UnifiedMessageSink {
     fn push_message(&mut self, message: UnifiedMessage);
 }
 
-impl MessageSink for Vec<UnifiedMessage> {
+impl UnifiedMessageSink for Vec<UnifiedMessage> {
     fn push_message(&mut self, message: UnifiedMessage) {
         self.push(message);
     }
@@ -127,11 +113,9 @@ impl MessageSink for Vec<UnifiedMessage> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct InputUnit {
-    client: ClientId,
     pub path: PathBuf,
     pub fingerprint_policy: FingerprintPolicy,
-    pub meta: InputUnitMeta,
-    pub parser_version: ParserVersion,
+    pub decoder: DecoderSpec,
     prepared_snapshot: Option<message_cache::InputSnapshot>,
     snapshot_confirmed_for_execution: bool,
     planned_cache_meta: Option<message_cache::CachedInputMeta>,
@@ -139,18 +123,11 @@ pub(crate) struct InputUnit {
 }
 
 impl InputUnit {
-    /// Adapter-issued source provenance for this input.
-    pub(crate) const fn client(&self) -> ClientId {
-        self.client
-    }
-
-    pub(crate) fn plain_file(client: ClientId, path: PathBuf) -> Self {
+    pub(crate) fn plain_file(path: PathBuf, decoder: DecoderSpec) -> Self {
         Self {
-            client,
             path,
             fingerprint_policy: FingerprintPolicy::PlainFile,
-            meta: InputUnitMeta::None,
-            parser_version: InputUnitMeta::None.parser_version(client),
+            decoder,
             prepared_snapshot: None,
             snapshot_confirmed_for_execution: false,
             planned_cache_meta: None,
@@ -158,13 +135,11 @@ impl InputUnit {
         }
     }
 
-    pub(crate) fn sqlite_with_wal(client: ClientId, path: PathBuf) -> Self {
+    pub(crate) fn sqlite_with_wal(path: PathBuf, decoder: DecoderSpec) -> Self {
         Self {
-            client,
             path,
             fingerprint_policy: FingerprintPolicy::SqliteWithWal,
-            meta: InputUnitMeta::None,
-            parser_version: InputUnitMeta::None.parser_version(client),
+            decoder,
             prepared_snapshot: None,
             snapshot_confirmed_for_execution: false,
             planned_cache_meta: None,
@@ -172,13 +147,11 @@ impl InputUnit {
         }
     }
 
-    pub(crate) fn no_message_cache(client: ClientId, path: PathBuf) -> Self {
+    pub(crate) fn no_message_cache(path: PathBuf, decoder: DecoderSpec) -> Self {
         Self {
-            client,
             path,
             fingerprint_policy: FingerprintPolicy::NoMessageCache,
-            meta: InputUnitMeta::None,
-            parser_version: InputUnitMeta::None.parser_version(client),
+            decoder,
             prepared_snapshot: None,
             snapshot_confirmed_for_execution: false,
             planned_cache_meta: None,
@@ -186,32 +159,19 @@ impl InputUnit {
         }
     }
 
-    pub(crate) fn claude_code(client: ClientId, path: PathBuf, home_dir: PathBuf) -> Self {
+    pub(crate) fn claude_code(path: PathBuf, home_dir: PathBuf, decoder: DecoderSpec) -> Self {
         Self {
-            client,
             path,
             fingerprint_policy: FingerprintPolicy::ClaudeCodeWithHome {
                 home_dir,
                 parent_session_path: None,
             },
-            meta: InputUnitMeta::None,
-            parser_version: InputUnitMeta::None.parser_version(client),
+            decoder,
             prepared_snapshot: None,
             snapshot_confirmed_for_execution: false,
             planned_cache_meta: None,
             cache_lookup_completed_no_hit: false,
         }
-    }
-
-    pub(crate) fn with_meta(mut self, meta: InputUnitMeta) -> Self {
-        self.parser_version = meta.parser_version(self.client);
-        self.meta = meta;
-        self
-    }
-
-    pub(crate) fn with_parser_version(mut self, parser_version: ParserVersion) -> Self {
-        self.parser_version = parser_version;
-        self
     }
 
     pub(crate) fn with_dependency(mut self, dependency_path: PathBuf) -> Self {
@@ -334,13 +294,12 @@ impl InputUnit {
             .prepared_snapshot
             .as_ref()
             .expect("inventory units must carry a prepared input snapshot");
-        message_cache::hash_inventory_bytes(hasher, self.client.as_str().as_bytes());
         message_cache::hash_inventory_bytes(
             hasher,
-            self.parser_version.parser_id.stable_name().as_bytes(),
+            self.decoder.version().decoder_id.stable_name().as_bytes(),
         );
-        hasher.update(self.parser_version.revision.to_le_bytes());
-        self.update_meta_inventory_signature(hasher);
+        hasher.update(self.decoder.version().revision.to_le_bytes());
+        self.update_decoder_inventory_signature(hasher);
         self.update_policy_inventory_signature(hasher);
         self.input_policy()
             .update_inventory_signature(snapshot, hasher);
@@ -355,23 +314,23 @@ impl InputUnit {
         hasher.finalize().into()
     }
 
-    fn update_meta_inventory_signature(&self, hasher: &mut sha2::Sha256) {
-        let (name, detail) = match self.meta {
-            InputUnitMeta::None => ("none", None),
-            InputUnitMeta::OpenCodeSqlite => ("opencode-sqlite", None),
-            InputUnitMeta::AntigravityCliSqlite => ("antigravity-cli-sqlite", None),
-            InputUnitMeta::KiroFile => ("kiro-file", None),
-            InputUnitMeta::KiroSqlite => ("kiro-sqlite", None),
-            InputUnitMeta::KiroGlobalStorage => ("kiro-global-storage", None),
-            InputUnitMeta::CodeBuddyJsonl => ("codebuddy-jsonl", None),
-            InputUnitMeta::CodeBuddyExtensionLog { origin } => (
+    fn update_decoder_inventory_signature(&self, hasher: &mut sha2::Sha256) {
+        let (name, detail) = match self.decoder.route() {
+            DecoderRoute::None => ("none", None),
+            DecoderRoute::OpenCodeSqlite => ("opencode-sqlite", None),
+            DecoderRoute::AntigravityCliSqlite => ("antigravity-cli-sqlite", None),
+            DecoderRoute::KiroFile => ("kiro-file", None),
+            DecoderRoute::KiroSqlite => ("kiro-sqlite", None),
+            DecoderRoute::KiroGlobalStorage => ("kiro-global-storage", None),
+            DecoderRoute::CodeBuddyJsonl => ("codebuddy-jsonl", None),
+            DecoderRoute::CodeBuddyExtensionLog { origin } => (
                 "codebuddy-extension-log",
                 Some(match origin {
                     CodeBuddyLogOrigin::Extension => "extension",
                     CodeBuddyLogOrigin::Host => "host",
                 }),
             ),
-            InputUnitMeta::Codex => ("codex", None),
+            DecoderRoute::Codex => ("codex", None),
         };
         message_cache::hash_inventory_bytes(hasher, name.as_bytes());
         message_cache::hash_inventory_bytes(hasher, detail.unwrap_or("").as_bytes());
@@ -473,91 +432,10 @@ impl InputUnit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum InputUnitMeta {
-    #[default]
-    None,
-    OpenCodeSqlite,
-    AntigravityCliSqlite,
-    KiroFile,
-    KiroSqlite,
-    KiroGlobalStorage,
-    CodeBuddyJsonl,
-    CodeBuddyExtensionLog {
-        origin: CodeBuddyLogOrigin,
-    },
-    Codex,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodeBuddyLogOrigin {
     Extension,
     Host,
-}
-
-impl InputUnitMeta {
-    fn parser_version(&self, client: ClientId) -> ParserVersion {
-        match self {
-            Self::None => ParserVersion::new(
-                default_parser_id(client),
-                MODEL_ID_CANONICALIZATION_REVISION,
-            ),
-            Self::OpenCodeSqlite => {
-                ParserVersion::new(ParserId::OpenCodeSqlite, OPENCODE_CURRENT_SQLITE_REVISION)
-            }
-            Self::AntigravityCliSqlite => ParserVersion::new(
-                ParserId::AntigravityCliSqlite,
-                EXPLICIT_TOKEN_OVERFLOW_REVISION,
-            ),
-            Self::KiroFile => {
-                ParserVersion::new(ParserId::KiroFile, MODEL_ID_CANONICALIZATION_REVISION)
-            }
-            Self::KiroSqlite => {
-                ParserVersion::new(ParserId::KiroSqlite, MODEL_ID_CANONICALIZATION_REVISION)
-            }
-            Self::KiroGlobalStorage => ParserVersion::new(
-                ParserId::KiroGlobalStorage,
-                MODEL_ID_CANONICALIZATION_REVISION,
-            ),
-            Self::CodeBuddyJsonl | Self::CodeBuddyExtensionLog { .. } => {
-                ParserVersion::new(ParserId::CodeBuddy, MODEL_ID_CANONICALIZATION_REVISION)
-            }
-            Self::Codex => ParserVersion::new(ParserId::Codex, CODEX_EXEC_IDENTITY_REVISION),
-        }
-    }
-}
-
-fn default_parser_id(client: ClientId) -> ParserId {
-    match client {
-        ClientId::OpenCode => ParserId::OpenCodeSqlite,
-        ClientId::Claude => ParserId::Claude,
-        ClientId::Codex => ParserId::Codex,
-        ClientId::Gemini => ParserId::Gemini,
-        ClientId::Amp => ParserId::Amp,
-        ClientId::Droid => ParserId::Droid,
-        ClientId::OpenClaw => ParserId::OpenClaw,
-        ClientId::Pi => ParserId::Pi,
-        ClientId::Omp => ParserId::Omp,
-        ClientId::Kimi => ParserId::Kimi,
-        ClientId::Qwen => ParserId::Qwen,
-        ClientId::RooCode => ParserId::RooCode,
-        ClientId::Mux => ParserId::Mux,
-        ClientId::Kilo => ParserId::Kilo,
-        ClientId::Hermes => ParserId::Hermes,
-        ClientId::Copilot => ParserId::Copilot,
-        ClientId::Goose => ParserId::Goose,
-        ClientId::Codebuff => ParserId::Codebuff,
-        ClientId::CodeBuddy => ParserId::CodeBuddy,
-        ClientId::Antigravity => ParserId::AntigravityCliSqlite,
-        ClientId::Zed => ParserId::Zed,
-        ClientId::Zcode => ParserId::Zcode,
-        ClientId::Kiro => ParserId::Kiro,
-        ClientId::Junie => ParserId::Junie,
-        ClientId::Cline => ParserId::Cline,
-        ClientId::CommandCode => ParserId::CommandCode,
-        ClientId::Grok => ParserId::Grok,
-        ClientId::Warp => ParserId::Warp,
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -640,64 +518,75 @@ impl ParsedUnit {
             }),
         }
     }
+}
 
-    pub(crate) fn input_health(&self) -> InputHealth {
-        InputHealth {
-            client: self.unit.client,
-            path: self.unit.path.clone(),
-            status: self.health.status.clone(),
-            rejections: self.health.rejections.clone(),
-        }
+#[derive(Clone, Copy)]
+pub(crate) struct AdapterBinding<'a> {
+    client: ClientId,
+    adapter: &'a dyn LocalInputAdapter,
+}
+
+impl<'a> AdapterBinding<'a> {
+    const fn new(client: ClientId, adapter: &'a dyn LocalInputAdapter) -> Self {
+        Self { client, adapter }
+    }
+
+    pub(crate) const fn client(self) -> ClientId {
+        self.client
+    }
+
+    pub(crate) const fn adapter(self) -> &'a dyn LocalInputAdapter {
+        self.adapter
     }
 }
 
-static LOCAL_INPUT_ADAPTERS: [&dyn LocalInputAdapter; 28] = [
-    &zed::ZED_ADAPTER,
-    &pi::PI_ADAPTER,
-    &omp::OMP_ADAPTER,
-    &claude::CLAUDE_ADAPTER,
-    &codex::CODEX_ADAPTER,
-    &opencode::OPENCODE_ADAPTER,
-    &file::COPILOT_ADAPTER,
-    &file::GEMINI_ADAPTER,
-    &file::GROK_ADAPTER,
-    &file::AMP_ADAPTER,
-    &file::DROID_ADAPTER,
-    &file::KIMI_ADAPTER,
-    &file::QWEN_ADAPTER,
-    &file::MUX_ADAPTER,
-    &codebuff::CODEBUFF_ADAPTER,
-    &codebuddy::CODEBUDDY_ADAPTER,
-    &openclaw::OPENCLAW_ADAPTER,
-    &roocode::ROOCODE_ADAPTER,
-    &cline::CLINE_ADAPTER,
-    &antigravity::ANTIGRAVITY_ADAPTER,
-    &kilo::KILO_ADAPTER,
-    &hermes::HERMES_ADAPTER,
-    &goose::GOOSE_ADAPTER,
-    &file::ZCODE_ADAPTER,
-    &kiro::KIRO_ADAPTER,
-    &junie::JUNIE_ADAPTER,
-    &file::COMMANDCODE_ADAPTER,
-    &warp::WARP_ADAPTER,
+static LOCAL_INPUT_ADAPTERS: &[AdapterBinding<'static>] = &[
+    AdapterBinding::new(ClientId::Zed, &zed::ZED_ADAPTER),
+    AdapterBinding::new(ClientId::Pi, &pi::PI_ADAPTER),
+    AdapterBinding::new(ClientId::Omp, &omp::OMP_ADAPTER),
+    AdapterBinding::new(ClientId::Claude, &claude::CLAUDE_ADAPTER),
+    AdapterBinding::new(ClientId::Codex, &codex::CODEX_ADAPTER),
+    AdapterBinding::new(ClientId::OpenCode, &opencode::OPENCODE_ADAPTER),
+    AdapterBinding::new(ClientId::Copilot, &file::COPILOT_ADAPTER),
+    AdapterBinding::new(ClientId::Gemini, &file::GEMINI_ADAPTER),
+    AdapterBinding::new(ClientId::Grok, &file::GROK_ADAPTER),
+    AdapterBinding::new(ClientId::Amp, &file::AMP_ADAPTER),
+    AdapterBinding::new(ClientId::Droid, &file::DROID_ADAPTER),
+    AdapterBinding::new(ClientId::Kimi, &file::KIMI_ADAPTER),
+    AdapterBinding::new(ClientId::Qwen, &file::QWEN_ADAPTER),
+    AdapterBinding::new(ClientId::Mux, &file::MUX_ADAPTER),
+    AdapterBinding::new(ClientId::Codebuff, &codebuff::CODEBUFF_ADAPTER),
+    AdapterBinding::new(ClientId::CodeBuddy, &codebuddy::CODEBUDDY_ADAPTER),
+    AdapterBinding::new(ClientId::OpenClaw, &openclaw::OPENCLAW_ADAPTER),
+    AdapterBinding::new(ClientId::RooCode, &roocode::ROOCODE_ADAPTER),
+    AdapterBinding::new(ClientId::Cline, &cline::CLINE_ADAPTER),
+    AdapterBinding::new(ClientId::Antigravity, &antigravity::ANTIGRAVITY_ADAPTER),
+    AdapterBinding::new(ClientId::Kilo, &kilo::KILO_ADAPTER),
+    AdapterBinding::new(ClientId::Hermes, &hermes::HERMES_ADAPTER),
+    AdapterBinding::new(ClientId::Goose, &goose::GOOSE_ADAPTER),
+    AdapterBinding::new(ClientId::Zcode, &file::ZCODE_ADAPTER),
+    AdapterBinding::new(ClientId::Kiro, &kiro::KIRO_ADAPTER),
+    AdapterBinding::new(ClientId::Junie, &junie::JUNIE_ADAPTER),
+    AdapterBinding::new(ClientId::CommandCode, &file::COMMANDCODE_ADAPTER),
+    AdapterBinding::new(ClientId::Warp, &warp::WARP_ADAPTER),
 ];
 
-pub(crate) fn local_input_adapters() -> &'static [&'static dyn LocalInputAdapter] {
-    &LOCAL_INPUT_ADAPTERS
+pub(crate) fn local_input_adapters() -> &'static [AdapterBinding<'static>] {
+    LOCAL_INPUT_ADAPTERS
 }
 
-pub(crate) fn adapter_for(client: ClientId) -> Option<&'static dyn LocalInputAdapter> {
+pub(crate) fn adapter_for(client: ClientId) -> Option<AdapterBinding<'static>> {
     local_input_adapters()
         .iter()
         .copied()
-        .find(|adapter| adapter.client() == client)
+        .find(|binding| binding.client == client)
 }
 
 pub(crate) fn selected_adapters(
-    clients: &[String],
-) -> Result<Vec<&'static dyn LocalInputAdapter>, String> {
+    clients: &[ClientId],
+) -> Result<Vec<AdapterBinding<'static>>, String> {
     let include_all = clients.is_empty();
-    let requested = requested_client_ids(clients)?;
+    let requested: HashSet<ClientId> = clients.iter().copied().collect();
 
     let missing = ClientId::iter().find(|client| {
         (include_all || requested.contains(client)) && adapter_for(*client).is_none()
@@ -712,12 +601,12 @@ pub(crate) fn selected_adapters(
     Ok(local_input_adapters()
         .iter()
         .copied()
-        .filter(|adapter| include_all || requested.contains(&adapter.client()))
+        .filter(|binding| include_all || requested.contains(&binding.client))
         .collect())
 }
 
 pub(crate) struct PreparedAdapterInputs {
-    pub adapter: &'static dyn LocalInputAdapter,
+    pub binding: AdapterBinding<'static>,
     pub units: Vec<InputUnit>,
 }
 
@@ -727,24 +616,8 @@ pub(crate) struct ConfirmedAdapterInputs {
     pub present_files: Vec<(InputFileIdentity, u64)>,
 }
 
-pub(crate) fn validate_discovered_unit_sources(
-    adapter: &dyn LocalInputAdapter,
-    units: &[InputUnit],
-) -> Result<(), InputPipelineError> {
-    let expected = adapter.client();
-    if let Some(unit) = units.iter().find(|unit| unit.client != expected) {
-        return Err(InputPipelineError::contract(format!(
-            "local input adapter `{}` discovered `{}` input `{}`",
-            expected.as_str(),
-            unit.client.as_str(),
-            unit.path.display()
-        )));
-    }
-    Ok(())
-}
-
 pub(crate) struct ParsedBatchInput<'a> {
-    adapter: &'a dyn LocalInputAdapter,
+    binding: AdapterBinding<'a>,
     units: Option<Vec<InputUnit>>,
     planned: VecDeque<PlannedInputUnit>,
     confirmed_inventory_digests: Vec<[u8; 32]>,
@@ -770,9 +643,9 @@ enum BatchSlot {
 }
 
 impl<'a> ParsedBatchInput<'a> {
-    fn new(adapter: &'a dyn LocalInputAdapter, units: Vec<InputUnit>) -> Self {
+    fn new(binding: AdapterBinding<'a>, units: Vec<InputUnit>) -> Self {
         Self {
-            adapter,
+            binding,
             units: Some(units),
             planned: VecDeque::new(),
             confirmed_inventory_digests: Vec::new(),
@@ -817,7 +690,7 @@ impl<'a> ParsedBatchInput<'a> {
         let parsed_misses = if miss_units.is_empty() {
             Vec::new()
         } else {
-            self.adapter.parse_checked(
+            self.binding.adapter().parse_checked(
                 miss_units,
                 &ParseContext {
                     pricing: ctx.pricing,
@@ -892,11 +765,10 @@ impl<'a> ParsedBatchInput<'a> {
         let planned: Vec<PlannedOrFailed> = units
             .into_par_iter()
             .map(|mut unit| {
-                let client = unit.client;
                 let path = unit.path.clone();
                 if let Err(source) = unit.revalidate_snapshot_for_cache_decision() {
                     return PlannedOrFailed::Failed(InputHealth {
-                        client,
+                        client: self.binding.client(),
                         path,
                         status: InputStatus::Unavailable {
                             failure: InputFailure::new(
@@ -912,7 +784,11 @@ impl<'a> ParsedBatchInput<'a> {
                 unit.prepared_input_snapshot()
                     .expect("revalidated input unit must retain its confirmed snapshot")
                     .visit_present_files(|identity, size| present_files.push((identity, size)));
-                match self.adapter.plan_cache_hit(unit, &*ctx.input_cache) {
+                match self
+                    .binding
+                    .adapter()
+                    .plan_cache_hit(unit, &*ctx.input_cache)
+                {
                     Ok(plan) => {
                         let planned = match plan {
                             CacheHitPlan::Hit(parsed) => PlannedInputUnit::Hit(parsed),
@@ -945,38 +821,28 @@ pub(crate) fn run_prepared_local_input_adapters(
     prepared: Vec<PreparedAdapterInputs>,
     input_cache: &mut message_cache::InputMessageCache,
     pricing: Option<&pricing::PricingService>,
-    sink: &mut dyn MessageSink,
+    sink: &mut dyn UnifiedMessageSink,
     health: &mut DataHealth,
 ) -> Result<Vec<ConfirmedAdapterInputs>, InputPipelineError> {
-    for group in &prepared {
-        validate_discovered_unit_sources(group.adapter, &group.units)?;
-    }
-
     let mut confirmed = Vec::with_capacity(prepared.len());
-    for PreparedAdapterInputs { adapter, units } in prepared {
-        let mut batches = ParsedBatchInput::new(adapter, units);
-        let mut fold_ctx = FoldContext::new(input_cache, pricing);
-        adapter.fold_batches(&mut batches, &mut fold_ctx, sink)?;
-        health.merge(std::mem::take(&mut fold_ctx.health));
+    for PreparedAdapterInputs { binding, units } in prepared {
+        let mut batches = ParsedBatchInput::new(binding, units);
+        let mut fold_ctx = FoldContext::new(binding, input_cache, pricing);
+        let mut bound_sink = BoundMessageSink::new(binding, sink);
+        binding
+            .adapter()
+            .fold_batches(&mut batches, &mut fold_ctx, &mut bound_sink)?;
+        health.merge(fold_ctx.take_health());
         for failed in batches.take_failed_health() {
             health.record(failed);
         }
         confirmed.push(ConfirmedAdapterInputs {
-            client: adapter.client(),
+            client: binding.client(),
             unit_digests: batches.confirmed_inventory_digests,
             present_files: batches.confirmed_present_files.into_iter().collect(),
         });
     }
     Ok(confirmed)
-}
-
-fn requested_client_ids(clients: &[String]) -> Result<HashSet<ClientId>, String> {
-    clients
-        .iter()
-        .map(|client| {
-            ClientId::from_str(client).ok_or_else(|| format!("unknown local client `{client}`"))
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -1000,6 +866,10 @@ mod tests {
         planner_calls: AtomicUsize,
     }
 
+    fn amp_decoder() -> DecoderSpec {
+        DecoderSpec::plain(DecoderId::Amp, 0)
+    }
+
     #[test]
     fn local_adapter_registry_is_unique_and_covers_catalog() {
         let adapters: Vec<ClientId> = local_input_adapters()
@@ -1021,32 +891,28 @@ mod tests {
     }
 
     #[test]
-    fn adapter_rejects_input_unit_with_foreign_source_identity() {
-        let prepared = PreparedAdapterInputs {
-            adapter: adapter_for(ClientId::Amp).unwrap(),
-            units: vec![InputUnit::plain_file(
-                ClientId::Codex,
-                PathBuf::from("foreign-input.jsonl"),
-            )],
-        };
+    fn bound_sink_attributes_messages_with_the_registry_client() {
+        let binding = adapter_for(ClientId::Amp).unwrap();
+        let mut messages = Vec::new();
+        let mut sink = BoundMessageSink::new(binding, &mut messages);
 
-        let error = match validate_discovered_unit_sources(prepared.adapter, &prepared.units) {
-            Ok(_) => panic!("foreign source identity must be rejected"),
-            Err(error) => error,
-        };
+        sink.emit(ParsedMessage::new(
+            "model",
+            "provider",
+            "session",
+            1,
+            crate::TokenBreakdown::default(),
+            0.0,
+        ));
 
-        assert!(error
-            .to_string()
-            .contains("local input adapter `amp` discovered `codex` input `foreign-input.jsonl`"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, ClientId::Amp);
     }
 
     impl LocalInputAdapter for RecordingAdapter {
-        fn client(&self) -> ClientId {
-            ClientId::Amp
-        }
-
         fn discover_checked(
             &self,
+            _client: ClientId,
             _ctx: &AdapterScanContext<'_>,
         ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
             unreachable!("test adapter does not discover inputs")
@@ -1075,19 +941,16 @@ mod tests {
             &self,
             parsed: Vec<ParsedUnit>,
             ctx: &mut FoldContext<'_>,
-            sink: &mut dyn MessageSink,
+            sink: &mut BoundMessageSink<'_>,
         ) -> Result<(), InputPipelineError> {
             cache::fold_units(parsed, ctx, sink)
         }
     }
 
     impl LocalInputAdapter for BatchLifetimeAdapter {
-        fn client(&self) -> ClientId {
-            ClientId::Amp
-        }
-
         fn discover_checked(
             &self,
+            _client: ClientId,
             _ctx: &AdapterScanContext<'_>,
         ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
             unreachable!("test adapter does not discover inputs")
@@ -1129,19 +992,16 @@ mod tests {
             &self,
             parsed: Vec<ParsedUnit>,
             ctx: &mut FoldContext<'_>,
-            sink: &mut dyn MessageSink,
+            sink: &mut BoundMessageSink<'_>,
         ) -> Result<(), InputPipelineError> {
             cache::fold_units(parsed, ctx, sink)
         }
     }
 
     impl LocalInputAdapter for PlannedWeaveAdapter {
-        fn client(&self) -> ClientId {
-            ClientId::Amp
-        }
-
         fn discover_checked(
             &self,
+            _client: ClientId,
             _ctx: &AdapterScanContext<'_>,
         ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
             unreachable!("test adapter does not discover inputs")
@@ -1181,7 +1041,7 @@ mod tests {
             &self,
             parsed: Vec<ParsedUnit>,
             ctx: &mut FoldContext<'_>,
-            sink: &mut dyn MessageSink,
+            sink: &mut BoundMessageSink<'_>,
         ) -> Result<(), InputPipelineError> {
             cache::fold_units(parsed, ctx, sink)
         }
@@ -1189,7 +1049,7 @@ mod tests {
 
     struct DroppingSink;
 
-    impl MessageSink for DroppingSink {
+    impl UnifiedMessageSink for DroppingSink {
         fn push_message(&mut self, _message: UnifiedMessage) {}
     }
 
@@ -1214,19 +1074,18 @@ mod tests {
             let units = input_paths
                 .iter()
                 .cloned()
-                .map(|path| InputUnit::plain_file(ClientId::Amp, path))
+                .map(|path| InputUnit::plain_file(path, amp_decoder()))
                 .collect();
 
             let sessions = pool.install(|| {
                 let mut cache = message_cache::InputMessageCache::default();
                 let mut sink = Vec::new();
-                let mut batches = ParsedBatchInput::new(&adapter, units);
+                let binding = AdapterBinding::new(ClientId::Amp, &adapter);
+                let mut batches = ParsedBatchInput::new(binding, units);
+                let mut fold_ctx = FoldContext::new(binding, &mut cache, None);
+                let mut bound_sink = BoundMessageSink::new(binding, &mut sink);
                 adapter
-                    .fold_batches(
-                        &mut batches,
-                        &mut FoldContext::new(&mut cache, None),
-                        &mut sink,
-                    )
+                    .fold_batches(&mut batches, &mut fold_ctx, &mut bound_sink)
                     .unwrap();
                 sink.into_iter()
                     .map(|message| message.session_id.to_string())
@@ -1259,17 +1118,17 @@ mod tests {
                     .map(|index| {
                         let path = dir.path().join(index.to_string());
                         std::fs::write(&path, format!("input {index}")).unwrap();
-                        InputUnit::plain_file(ClientId::Amp, path)
+                        InputUnit::plain_file(path, amp_decoder())
                     })
                     .collect();
                 let mut cache = message_cache::InputMessageCache::default();
-                let mut batches = ParsedBatchInput::new(&adapter, units);
+                let binding = AdapterBinding::new(ClientId::Amp, &adapter);
+                let mut batches = ParsedBatchInput::new(binding, units);
+                let mut fold_ctx = FoldContext::new(binding, &mut cache, None);
+                let mut dropping_sink = DroppingSink;
+                let mut bound_sink = BoundMessageSink::new(binding, &mut dropping_sink);
                 adapter
-                    .fold_batches(
-                        &mut batches,
-                        &mut FoldContext::new(&mut cache, None),
-                        &mut DroppingSink,
-                    )
+                    .fold_batches(&mut batches, &mut fold_ctx, &mut bound_sink)
                     .unwrap();
             });
     }
@@ -1286,7 +1145,7 @@ mod tests {
                     .map(|index| {
                         let path = dir.path().join(index.to_string());
                         std::fs::write(&path, format!("input {index}")).unwrap();
-                        InputUnit::plain_file(ClientId::Amp, path)
+                        InputUnit::plain_file(path, amp_decoder())
                             .prepare_snapshot()
                             .unwrap()
                     })
@@ -1300,7 +1159,7 @@ mod tests {
                     let unit = &units[index];
                     cache.insert(message_cache::CachedInputEntry::new_with_version(
                         &unit.path,
-                        unit.parser_version,
+                        unit.decoder.version(),
                         unit.input_policy().fingerprint().unwrap(),
                         vec![ParsedMessage::new(
                             "model",
@@ -1317,13 +1176,12 @@ mod tests {
                     ));
                 }
                 let mut sink = Vec::new();
-                let mut batches = ParsedBatchInput::new(&adapter, units);
+                let binding = AdapterBinding::new(ClientId::Amp, &adapter);
+                let mut batches = ParsedBatchInput::new(binding, units);
+                let mut fold_ctx = FoldContext::new(binding, &mut cache, None);
+                let mut bound_sink = BoundMessageSink::new(binding, &mut sink);
                 adapter
-                    .fold_batches(
-                        &mut batches,
-                        &mut FoldContext::new(&mut cache, None),
-                        &mut sink,
-                    )
+                    .fold_batches(&mut batches, &mut fold_ctx, &mut bound_sink)
                     .unwrap();
 
                 assert_eq!(adapter.planner_calls.load(Ordering::Relaxed), 6);
@@ -1349,7 +1207,7 @@ mod tests {
                     .map(|index| {
                         let path = dir.path().join(index.to_string());
                         std::fs::write(&path, format!("input {index}")).unwrap();
-                        InputUnit::plain_file(ClientId::Amp, path)
+                        InputUnit::plain_file(path, amp_decoder())
                             .prepare_snapshot()
                             .unwrap()
                     })
@@ -1362,7 +1220,7 @@ mod tests {
                 for (index, unit) in units.iter().enumerate() {
                     cache.insert(message_cache::CachedInputEntry::new_with_version(
                         &unit.path,
-                        unit.parser_version,
+                        unit.decoder.version(),
                         unit.input_policy().fingerprint().unwrap(),
                         vec![ParsedMessage::new(
                             "model",
@@ -1380,13 +1238,12 @@ mod tests {
                     message_cache::reset_input_read_stats(&unit.path);
                 }
                 let mut sink = Vec::new();
-                let mut batches = ParsedBatchInput::new(&adapter, units);
+                let binding = AdapterBinding::new(ClientId::Amp, &adapter);
+                let mut batches = ParsedBatchInput::new(binding, units);
+                let mut fold_ctx = FoldContext::new(binding, &mut cache, None);
+                let mut bound_sink = BoundMessageSink::new(binding, &mut sink);
                 adapter
-                    .fold_batches(
-                        &mut batches,
-                        &mut FoldContext::new(&mut cache, None),
-                        &mut sink,
-                    )
+                    .fold_batches(&mut batches, &mut fold_ctx, &mut bound_sink)
                     .unwrap();
 
                 assert_eq!(adapter.planner_calls.load(Ordering::Relaxed), 4);
@@ -1406,7 +1263,7 @@ mod tests {
         let cache_dir = tempfile::TempDir::new().unwrap();
         let path = input_dir.path().join("future-cache-input");
         std::fs::write(&path, b"input").unwrap();
-        let unit = InputUnit::plain_file(ClientId::Amp, path.clone())
+        let unit = InputUnit::plain_file(path.clone(), amp_decoder())
             .prepare_snapshot()
             .unwrap();
         let adapter = PlannedWeaveAdapter {
@@ -1416,7 +1273,7 @@ mod tests {
         let mut seeded = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         seeded.insert(message_cache::CachedInputEntry::new_with_version(
             &path,
-            unit.parser_version,
+            unit.decoder.version(),
             unit.input_policy().fingerprint().unwrap(),
             vec![ParsedMessage::new(
                 "model",
@@ -1432,17 +1289,17 @@ mod tests {
         message_cache::mark_current_key_shard_as_future_format_for_test(
             cache_dir.path(),
             &path,
-            unit.parser_version,
+            unit.decoder.version(),
         );
 
         let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
-        let mut batches = ParsedBatchInput::new(&adapter, vec![unit]);
+        let binding = AdapterBinding::new(ClientId::Amp, &adapter);
+        let mut batches = ParsedBatchInput::new(binding, vec![unit]);
+        let mut fold_ctx = FoldContext::new(binding, &mut cache, None);
+        let mut dropping_sink = DroppingSink;
+        let mut bound_sink = BoundMessageSink::new(binding, &mut dropping_sink);
         adapter
-            .fold_batches(
-                &mut batches,
-                &mut FoldContext::new(&mut cache, None),
-                &mut DroppingSink,
-            )
+            .fold_batches(&mut batches, &mut fold_ctx, &mut bound_sink)
             .expect("a newer cache shard must be discarded and reparsed");
     }
 
@@ -1451,13 +1308,13 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("direct-input");
         std::fs::write(&path, b"direct input").unwrap();
-        let unit = InputUnit::plain_file(ClientId::Amp, path.clone())
+        let unit = InputUnit::plain_file(path.clone(), amp_decoder())
             .prepare_snapshot()
             .unwrap();
         let mut cache = message_cache::InputMessageCache::default();
         cache.insert(message_cache::CachedInputEntry::new_with_version(
             &path,
-            unit.parser_version,
+            unit.decoder.version(),
             unit.input_policy().fingerprint().unwrap(),
             vec![ParsedMessage::new(
                 "model",
@@ -1476,14 +1333,13 @@ mod tests {
             batch_sizes: Mutex::new(Vec::new()),
         };
         let mut sink = Vec::new();
-        let mut batches = ParsedBatchInput::new(&adapter, vec![unit]);
+        let binding = AdapterBinding::new(ClientId::Amp, &adapter);
+        let mut batches = ParsedBatchInput::new(binding, vec![unit]);
+        let mut fold_ctx = FoldContext::new(binding, &mut cache, None);
+        let mut bound_sink = BoundMessageSink::new(binding, &mut sink);
 
         adapter
-            .fold_batches(
-                &mut batches,
-                &mut FoldContext::new(&mut cache, None),
-                &mut sink,
-            )
+            .fold_batches(&mut batches, &mut fold_ctx, &mut bound_sink)
             .unwrap();
 
         assert_eq!(*adapter.batch_sizes.lock().unwrap(), [1]);
@@ -1499,10 +1355,16 @@ mod tests {
         let adapter = RecordingAdapter {
             batch_sizes: Mutex::new(Vec::new()),
         };
-        let mut batches =
-            ParsedBatchInput::new(&adapter, vec![InputUnit::plain_file(ClientId::Amp, path)]);
+        let mut batches = ParsedBatchInput::new(
+            AdapterBinding::new(ClientId::Amp, &adapter),
+            vec![InputUnit::plain_file(path, amp_decoder())],
+        );
         let mut cache = message_cache::InputMessageCache::default();
-        let fold_context = FoldContext::new(&mut cache, None);
+        let fold_context = FoldContext::new(
+            AdapterBinding::new(ClientId::Amp, &adapter),
+            &mut cache,
+            None,
+        );
 
         let planned = batches.take_all_planned_units(&fold_context).unwrap();
 
@@ -1520,7 +1382,7 @@ mod tests {
     #[test]
     fn plain_db_input_does_not_guess_a_wal_input() {
         let path = PathBuf::from("/tmp/plain-history.db");
-        let unit = InputUnit::plain_file(ClientId::Amp, path.clone());
+        let unit = InputUnit::plain_file(path.clone(), amp_decoder());
 
         assert_eq!(unit.digest_paths(), vec![path]);
     }
@@ -1532,8 +1394,9 @@ mod tests {
         let dependency = dir.path().join("parent.jsonl");
         std::fs::write(&primary, b"child").unwrap();
 
-        let mut unit = InputUnit::plain_file(ClientId::Omp, primary.clone())
-            .with_dependency(dependency.clone());
+        let mut unit =
+            InputUnit::plain_file(primary.clone(), DecoderSpec::plain(DecoderId::Omp, 0))
+                .with_dependency(dependency.clone());
         assert_eq!(
             unit.digest_paths(),
             vec![primary.clone(), dependency.clone()]
@@ -1560,12 +1423,12 @@ mod tests {
             adapter_for(ClientId::Warp).map(|adapter| adapter.client()),
             Some(ClientId::Warp)
         );
-        assert_eq!(selected_adapters(&["warp".to_string()]).unwrap().len(), 1);
+        assert_eq!(selected_adapters(&[ClientId::Warp]).unwrap().len(), 1);
     }
 
     #[test]
     fn antigravity_uses_one_adapter_for_all_local_inputs() {
-        let adapters = selected_adapters(&["antigravity".to_string()]).unwrap();
+        let adapters = selected_adapters(&[ClientId::Antigravity]).unwrap();
 
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].client(), ClientId::Antigravity);
@@ -1573,7 +1436,7 @@ mod tests {
 
     #[test]
     fn kilo_uses_one_current_runtime_adapter() {
-        let adapters = selected_adapters(&["kilo".to_string()]).unwrap();
+        let adapters = selected_adapters(&[ClientId::Kilo]).unwrap();
 
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].client(), ClientId::Kilo);

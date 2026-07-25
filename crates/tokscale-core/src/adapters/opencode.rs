@@ -4,8 +4,9 @@ use rayon::prelude::*;
 
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::{
-    AdapterScanContext, FoldContext, InputDiscoveryError, InputPipelineError, InputUnit,
-    InputUnitMeta, LocalInputAdapter, MessageSink, ParseContext, ParsedBatchInput, ParsedUnit,
+    AdapterScanContext, BoundMessageSink, DecoderRoute, DecoderSpec, FoldContext,
+    InputDiscoveryError, InputPipelineError, InputUnit, LocalInputAdapter, ParseContext,
+    ParsedBatchInput, ParsedUnit, OPENCODE_CURRENT_SQLITE_REVISION,
 };
 use crate::clients::ClientId;
 use crate::{scanner, sessions};
@@ -13,22 +14,14 @@ use crate::{scanner, sessions};
 pub(crate) struct OpenCodeAdapter;
 
 impl LocalInputAdapter for OpenCodeAdapter {
-    fn client(&self) -> ClientId {
-        ClientId::OpenCode
-    }
-
     fn discover_checked(
         &self,
+        _client: ClientId,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let data_dir = scanner::opencode_data_dir(ctx.home_dir);
         let mut db_paths = scanner::discover_opencode_dbs(&data_dir).map_err(|source| {
-            InputDiscoveryError::new(
-                ClientId::OpenCode,
-                &data_dir,
-                "discover OpenCode databases",
-                source,
-            )
+            InputDiscoveryError::new(&data_dir, "discover OpenCode databases", source)
         })?;
         scanner::merge_user_opencode_db_paths(
             &mut db_paths,
@@ -39,8 +32,10 @@ impl LocalInputAdapter for OpenCodeAdapter {
         Ok(db_paths
             .into_iter()
             .map(|path| {
-                InputUnit::sqlite_with_wal(ClientId::OpenCode, path)
-                    .with_meta(InputUnitMeta::OpenCodeSqlite)
+                InputUnit::sqlite_with_wal(
+                    path,
+                    DecoderSpec::opencode_sqlite(OPENCODE_CURRENT_SQLITE_REVISION),
+                )
             })
             .collect())
     }
@@ -48,8 +43,8 @@ impl LocalInputAdapter for OpenCodeAdapter {
     fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
-            .map(|unit| match unit.meta {
-                InputUnitMeta::OpenCodeSqlite => {
+            .map(|unit| match unit.decoder.route() {
+                DecoderRoute::OpenCodeSqlite => {
                     adapter_cache::load_or_scan_unit_with(unit, ctx, |path| {
                         sessions::opencode::parse_opencode_sqlite(path).map_err(|error| {
                             crate::sessions::error::SessionParseError::new(
@@ -59,14 +54,14 @@ impl LocalInputAdapter for OpenCodeAdapter {
                         })
                     })
                 }
-                InputUnitMeta::None
-                | InputUnitMeta::AntigravityCliSqlite
-                | InputUnitMeta::KiroFile
-                | InputUnitMeta::KiroSqlite
-                | InputUnitMeta::KiroGlobalStorage
-                | InputUnitMeta::CodeBuddyJsonl
-                | InputUnitMeta::CodeBuddyExtensionLog { .. }
-                | InputUnitMeta::Codex => {
+                DecoderRoute::None
+                | DecoderRoute::AntigravityCliSqlite
+                | DecoderRoute::KiroFile
+                | DecoderRoute::KiroSqlite
+                | DecoderRoute::KiroGlobalStorage
+                | DecoderRoute::CodeBuddyJsonl
+                | DecoderRoute::CodeBuddyExtensionLog { .. }
+                | DecoderRoute::Codex => {
                     unreachable!("unexpected OpenCode input unit meta")
                 }
             })
@@ -85,7 +80,7 @@ impl LocalInputAdapter for OpenCodeAdapter {
         &self,
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), InputPipelineError> {
         let mut seen = HashSet::new();
         for unit in parsed {
@@ -98,7 +93,7 @@ impl LocalInputAdapter for OpenCodeAdapter {
         &self,
         batches: &mut ParsedBatchInput<'_>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), InputPipelineError> {
         let mut seen = HashSet::new();
         while let Some(parsed) = batches.next(ctx)? {
@@ -113,7 +108,7 @@ impl LocalInputAdapter for OpenCodeAdapter {
 fn fold_opencode_unit(
     parsed: ParsedUnit,
     ctx: &mut FoldContext<'_>,
-    sink: &mut dyn MessageSink,
+    sink: &mut BoundMessageSink<'_>,
     seen: &mut HashSet<u64>,
 ) -> Result<(), InputPipelineError> {
     let adapter_cache::ResolvedUnit {
@@ -124,20 +119,14 @@ fn fold_opencode_unit(
         status,
         rejections,
     } = adapter_cache::resolve_unit(parsed, ctx)?;
-    ctx.health.record(crate::input_health::InputHealth {
-        client: unit.client,
-        path: unit.path.clone(),
-        status,
-        rejections,
-    });
+    ctx.record_health(unit.path.clone(), status, rejections);
     let path = unit.path.clone();
     let cache_write_outcome = adapter_cache::write_cache(cache_write, ctx, &messages);
     if cache_write_outcome.is_err() && invalidate_cache {
-        ctx.input_cache.remove(&path, unit.parser_version);
+        ctx.input_cache.remove(&path, unit.decoder.version());
     }
     let cache_write_outcome = cache_write_outcome?;
     adapter_cache::emit_messages(
-        unit.client,
         messages
             .into_iter()
             .filter(|message| message.dedup_key.is_none_or(|key| seen.insert(key))),
@@ -145,7 +134,7 @@ fn fold_opencode_unit(
     );
 
     if cache_write_outcome == adapter_cache::CacheWriteOutcome::NotPlanned && invalidate_cache {
-        ctx.input_cache.remove(&path, unit.parser_version);
+        ctx.input_cache.remove(&path, unit.decoder.version());
     }
     Ok(())
 }
@@ -209,7 +198,9 @@ mod tests {
             scanner_settings: &settings,
         };
 
-        let units = OPENCODE_ADAPTER.discover_checked(&ctx).unwrap();
+        let units = OPENCODE_ADAPTER
+            .discover_checked(ClientId::OpenCode, &ctx)
+            .unwrap();
         assert_eq!(
             units
                 .iter()
@@ -219,7 +210,7 @@ mod tests {
         );
         assert!(units
             .iter()
-            .all(|unit| matches!(unit.meta, InputUnitMeta::OpenCodeSqlite)));
+            .all(|unit| matches!(unit.decoder.route(), DecoderRoute::OpenCodeSqlite)));
         assert!(units.iter().all(|unit| unit.digest_paths().len() == 2));
     }
 
@@ -245,8 +236,10 @@ mod tests {
                     Some(key),
                 );
                 ParsedUnit::healthy(
-                    InputUnit::sqlite_with_wal(ClientId::OpenCode, dir.path().join(name))
-                        .with_meta(InputUnitMeta::OpenCodeSqlite),
+                    InputUnit::sqlite_with_wal(
+                        dir.path().join(name),
+                        DecoderSpec::opencode_sqlite(OPENCODE_CURRENT_SQLITE_REVISION),
+                    ),
                     UnitMessagePayload::Fresh(vec![message]),
                     None,
                     false,
@@ -255,12 +248,15 @@ mod tests {
             .collect();
         let mut cache = message_cache::InputMessageCache::default();
         let mut sink = Vec::new();
+        let binding = crate::adapters::adapter_for(ClientId::OpenCode).unwrap();
+        let mut fold_ctx = FoldContext::new(binding, &mut cache, None);
+        let mut bound_sink = BoundMessageSink::new(binding, &mut sink);
 
         OPENCODE_ADAPTER
-            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut sink)
+            .fold(parsed, &mut fold_ctx, &mut bound_sink)
             .unwrap();
         assert_eq!(sink.len(), 1);
-        assert_eq!(sink[0].client.as_ref(), ClientId::OpenCode.as_str());
+        assert_eq!(sink[0].client, ClientId::OpenCode);
         assert_eq!(sink[0].session_id.as_ref(), "session-0");
     }
 
@@ -274,10 +270,12 @@ mod tests {
         let units = vec![first, second]
             .into_iter()
             .map(|path| {
-                InputUnit::sqlite_with_wal(ClientId::OpenCode, path)
-                    .with_meta(InputUnitMeta::OpenCodeSqlite)
-                    .prepare_snapshot()
-                    .unwrap()
+                InputUnit::sqlite_with_wal(
+                    path,
+                    DecoderSpec::opencode_sqlite(OPENCODE_CURRENT_SQLITE_REVISION),
+                )
+                .prepare_snapshot()
+                .unwrap()
             })
             .collect();
 
@@ -288,18 +286,17 @@ mod tests {
             .install(|| {
                 let mut cache = message_cache::InputMessageCache::default();
                 let mut sink = Vec::new();
-                let mut batches = ParsedBatchInput::new(&OPENCODE_ADAPTER, units);
+                let binding = crate::adapters::adapter_for(ClientId::OpenCode).unwrap();
+                let mut batches = ParsedBatchInput::new(binding, units);
+                let mut fold_ctx = FoldContext::new(binding, &mut cache, None);
+                let mut bound_sink = BoundMessageSink::new(binding, &mut sink);
                 OPENCODE_ADAPTER
-                    .fold_batches(
-                        &mut batches,
-                        &mut FoldContext::new(&mut cache, None),
-                        &mut sink,
-                    )
+                    .fold_batches(&mut batches, &mut fold_ctx, &mut bound_sink)
                     .unwrap();
                 sink
             });
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), ClientId::OpenCode.as_str());
+        assert_eq!(messages[0].client, ClientId::OpenCode);
     }
 
     #[test]
@@ -310,17 +307,19 @@ mod tests {
         conn.execute_batch("CREATE TABLE message (id TEXT, session_id TEXT, data TEXT);")
             .unwrap();
         drop(conn);
-        let unit = InputUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
-            .with_meta(InputUnitMeta::OpenCodeSqlite)
-            .prepare_snapshot()
-            .unwrap();
-        let parser_version = unit.parser_version;
+        let unit = InputUnit::sqlite_with_wal(
+            path.clone(),
+            DecoderSpec::opencode_sqlite(OPENCODE_CURRENT_SQLITE_REVISION),
+        )
+        .prepare_snapshot()
+        .unwrap();
+        let decoder_version = unit.decoder.version();
         let fingerprint = unit.input_policy().fingerprint().unwrap();
         let mut cache = message_cache::InputMessageCache::default();
         cache.insert(message_cache::CachedInputEntry::new_with_version(
             &path,
-            message_cache::ParserVersion::new(
-                message_cache::ParserId::OpenCodeSqlite,
+            message_cache::DecoderVersion::new(
+                message_cache::DecoderId::OpenCodeSqlite,
                 crate::adapters::MODEL_ID_CANONICALIZATION_REVISION,
             ),
             fingerprint,
@@ -340,12 +339,12 @@ mod tests {
 
         let parsed = OPENCODE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].input_health();
-        assert_eq!(health.path, path);
+        let health = &parsed[0].health;
+        assert_eq!(parsed[0].unit.path, path);
         let failure = health.status.failure().expect("input must be unavailable");
         assert_eq!(failure.operation, "parse OpenCode SQLite");
         assert!(failure.message.contains("current session schema"));
-        assert!(cache.get_meta(&path, parser_version).unwrap().is_none());
+        assert!(cache.get_meta(&path, decoder_version).unwrap().is_none());
     }
 
     #[test]
@@ -374,18 +373,20 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let unit = InputUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
-            .with_meta(InputUnitMeta::OpenCodeSqlite)
-            .prepare_snapshot()
-            .unwrap();
-        let parser_version = unit.parser_version;
+        let unit = InputUnit::sqlite_with_wal(
+            path.clone(),
+            DecoderSpec::opencode_sqlite(OPENCODE_CURRENT_SQLITE_REVISION),
+        )
+        .prepare_snapshot()
+        .unwrap();
+        let decoder_version = unit.decoder.version();
         let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
 
         let parsed =
             OPENCODE_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].input_health();
-        assert_eq!(health.path, path);
+        let health = &parsed[0].health;
+        assert_eq!(parsed[0].unit.path, path);
         assert!(matches!(
             health.status,
             crate::input_health::InputStatus::Complete
@@ -395,12 +396,15 @@ mod tests {
         assert_eq!(rejection.key, "malformed-record");
 
         let mut sink = Vec::new();
+        let binding = crate::adapters::adapter_for(ClientId::OpenCode).unwrap();
+        let mut fold_ctx = FoldContext::new(binding, &mut cache, None);
+        let mut bound_sink = BoundMessageSink::new(binding, &mut sink);
         OPENCODE_ADAPTER
-            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut sink)
+            .fold(parsed, &mut fold_ctx, &mut bound_sink)
             .unwrap();
         assert!(sink.is_empty());
         cache.save_if_dirty().unwrap();
-        let cached = cache.get_meta(&path, parser_version).unwrap().unwrap();
+        let cached = cache.get_meta(&path, decoder_version).unwrap().unwrap();
         assert_eq!(cached.rejections.total(), 1);
 
         let warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
@@ -408,7 +412,7 @@ mod tests {
         let crate::adapters::CacheHitPlan::Hit(warm) = warm else {
             panic!("unchanged all-bad input must use the complete cached scan");
         };
-        let warm_health = warm.input_health();
+        let warm_health = &warm.health;
         assert!(matches!(
             warm_health.status,
             crate::input_health::InputStatus::Complete
@@ -435,14 +439,16 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let unit = InputUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
-            .with_meta(InputUnitMeta::OpenCodeSqlite)
-            .prepare_snapshot()
-            .unwrap();
-        let parser_version = unit.parser_version;
+        let unit = InputUnit::sqlite_with_wal(
+            path.clone(),
+            DecoderSpec::opencode_sqlite(OPENCODE_CURRENT_SQLITE_REVISION),
+        )
+        .prepare_snapshot()
+        .unwrap();
+        let decoder_version = unit.decoder.version();
         let parsed = OPENCODE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].input_health();
+        let health = &parsed[0].health;
         assert!(matches!(
             health.status,
             crate::input_health::InputStatus::Complete
@@ -455,16 +461,18 @@ mod tests {
 
         let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
         let mut sink = Vec::new();
-        let mut fold_ctx = FoldContext::new(&mut cache, None);
+        let binding = crate::adapters::adapter_for(ClientId::OpenCode).unwrap();
+        let mut fold_ctx = FoldContext::new(binding, &mut cache, None);
+        let mut bound_sink = BoundMessageSink::new(binding, &mut sink);
         OPENCODE_ADAPTER
-            .fold(parsed, &mut fold_ctx, &mut sink)
+            .fold(parsed, &mut fold_ctx, &mut bound_sink)
             .unwrap();
 
         assert_eq!(sink.len(), 1);
         assert_eq!(sink[0].session_id.as_ref(), "session-1");
-        assert_eq!(fold_ctx.health.partial_inputs(), 0);
-        assert_eq!(fold_ctx.health.rejected_records(), 1);
-        let cached = cache.get_meta(&path, parser_version).unwrap().unwrap();
+        assert_eq!(fold_ctx.health().partial_inputs(), 0);
+        assert_eq!(fold_ctx.health().rejected_records(), 1);
+        let cached = cache.get_meta(&path, decoder_version).unwrap().unwrap();
         assert_eq!(cached.rejections.total(), 1);
     }
 }

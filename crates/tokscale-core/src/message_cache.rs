@@ -15,10 +15,10 @@ use std::time::UNIX_EPOCH;
 #[cfg(not(any(unix, windows)))]
 compile_error!("input-message cache requires stable Unix or Windows file identity");
 
-// Input-message cache shards split serialization layout from parser/input
-// semantics. Bump this only when the shard bincode layout changes; parser-only
-// fixes should bump the relevant InputUnit parser revision instead.
-const CACHE_FORMAT_VERSION: u32 = 11;
+// Input-message cache shards split serialization layout from decoder/input
+// semantics. Bump this only when the shard bincode layout changes; decoder-only
+// fixes should bump the relevant InputUnit decoder revision instead.
+const CACHE_FORMAT_VERSION: u32 = 12;
 #[cfg(test)]
 const UNSUPPORTED_CACHE_FORMAT_VERSION: u32 = CACHE_FORMAT_VERSION - 1;
 const SHARD_MAGIC: [u8; 8] = *b"TOKSHRD\0";
@@ -257,97 +257,108 @@ impl InputCachePruneError {
     }
 }
 
-pub(crate) type ParserRevision = u32;
+pub(crate) type DecoderRevision = u32;
 
-// Persisted in input-cache shard headers. Shard filenames use the stable names
-// below, but reordering or removing variants still changes header bincode and
-// must bump CACHE_FORMAT_VERSION.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) enum ParserId {
-    OpenCodeSqlite,
-    Claude,
-    Codex,
-    Gemini,
-    Amp,
-    Droid,
-    OpenClaw,
-    Pi,
-    Omp,
-    Kimi,
-    Qwen,
-    RooCode,
-    Mux,
-    Kilo,
-    Hermes,
-    Copilot,
-    Goose,
-    Codebuff,
-    AntigravityCliSqlite,
-    Zed,
-    Kiro,
-    KiroFile,
-    KiroSqlite,
-    KiroGlobalStorage,
-    Junie,
-    Cline,
-    CommandCode,
-    Grok,
-    Zcode,
-    Warp,
-    CodeBuddy,
-    OmpParentHealth,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct ParserVersion {
-    pub parser_id: ParserId,
-    pub revision: ParserRevision,
-}
-
-impl ParserVersion {
-    pub(crate) const fn new(parser_id: ParserId, revision: ParserRevision) -> Self {
-        Self {
-            parser_id,
-            revision,
+macro_rules! define_decoder_ids {
+    ($($variant:ident => ($stable_name:literal, $plain:literal)),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub(crate) enum DecoderId {
+            $($variant),+
         }
-    }
+
+        impl DecoderId {
+            pub(crate) const fn stable_name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $stable_name),+
+                }
+            }
+
+            pub(crate) fn from_stable_name(stable_name: &str) -> Option<Self> {
+                match stable_name {
+                    $($stable_name => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+
+            pub(crate) const fn supports_plain_route(self) -> bool {
+                match self {
+                    $(Self::$variant => $plain),+
+                }
+            }
+        }
+
+        impl Serialize for DecoderId {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_str(self.stable_name())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for DecoderId {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let stable_name = String::deserialize(deserializer)?;
+                Self::from_stable_name(&stable_name).ok_or_else(|| {
+                    serde::de::Error::unknown_variant(
+                        &stable_name,
+                        &[$($stable_name),+],
+                    )
+                })
+            }
+        }
+    };
 }
 
-impl ParserId {
-    pub(crate) const fn stable_name(self) -> &'static str {
-        match self {
-            Self::OpenCodeSqlite => "opencode-sqlite",
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Gemini => "gemini",
-            Self::Amp => "amp",
-            Self::Droid => "droid",
-            Self::OpenClaw => "openclaw",
-            Self::Pi => "pi",
-            Self::Omp => "omp",
-            Self::OmpParentHealth => "omp-parent-health",
-            Self::Kimi => "kimi",
-            Self::Qwen => "qwen",
-            Self::RooCode => "roo-code",
-            Self::Mux => "mux",
-            Self::Kilo => "kilo",
-            Self::Hermes => "hermes",
-            Self::Copilot => "copilot",
-            Self::Goose => "goose",
-            Self::Codebuff => "codebuff",
-            Self::AntigravityCliSqlite => "antigravity-cli-sqlite",
-            Self::Zed => "zed",
-            Self::Kiro => "kiro",
-            Self::KiroFile => "kiro-file",
-            Self::KiroSqlite => "kiro-sqlite",
-            Self::KiroGlobalStorage => "kiro-global-storage",
-            Self::Junie => "junie",
-            Self::Cline => "cline",
-            Self::CommandCode => "command-code",
-            Self::Grok => "grok",
-            Self::Zcode => "zcode",
-            Self::Warp => "warp",
-            Self::CodeBuddy => "codebuddy",
+define_decoder_ids! {
+    OpenCodeSqlite => ("opencode-sqlite", false),
+    Claude => ("claude", true),
+    Codex => ("codex", false),
+    Gemini => ("gemini", true),
+    Amp => ("amp", true),
+    Droid => ("droid", true),
+    OpenClaw => ("openclaw", true),
+    Pi => ("pi", true),
+    Omp => ("omp", true),
+    Kimi => ("kimi", true),
+    Qwen => ("qwen", true),
+    RooCode => ("roo-code", true),
+    Mux => ("mux", true),
+    Kilo => ("kilo", true),
+    Hermes => ("hermes", true),
+    Copilot => ("copilot", true),
+    Goose => ("goose", true),
+    Codebuff => ("codebuff", true),
+    AntigravityCliSqlite => ("antigravity-cli-sqlite", false),
+    Zed => ("zed", true),
+    Kiro => ("kiro", true),
+    KiroFile => ("kiro-file", false),
+    KiroSqlite => ("kiro-sqlite", false),
+    KiroGlobalStorage => ("kiro-global-storage", false),
+    Junie => ("junie", true),
+    Cline => ("cline", true),
+    CommandCode => ("command-code", true),
+    Grok => ("grok", true),
+    Zcode => ("zcode", true),
+    Warp => ("warp", true),
+    CodeBuddy => ("codebuddy", false),
+    OmpParentHealth => ("omp-parent-health", true),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct DecoderVersion {
+    pub decoder_id: DecoderId,
+    pub revision: DecoderRevision,
+}
+
+impl DecoderVersion {
+    pub(crate) const fn new(decoder_id: DecoderId, revision: DecoderRevision) -> Self {
+        Self {
+            decoder_id,
+            revision,
         }
     }
 }
@@ -1064,14 +1075,14 @@ pub(crate) struct CodexIncrementalCache {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CachedInputKey {
     path: CachedPath,
-    parser_version: ParserVersion,
+    decoder_version: DecoderVersion,
 }
 
 impl CachedInputKey {
-    fn new(path: &Path, parser_version: ParserVersion) -> Self {
+    fn new(path: &Path, decoder_version: DecoderVersion) -> Self {
         Self {
             path: CachedPath::from_path(path),
-            parser_version,
+            decoder_version,
         }
     }
 
@@ -1124,8 +1135,8 @@ pub(crate) enum CacheReadFailureReason {
     },
     #[error("shard input path no longer matches the read plan")]
     InputPathMismatch,
-    #[error("shard parser version no longer matches the read plan")]
-    ParserVersionMismatch,
+    #[error("shard decoder version no longer matches the read plan")]
+    DecoderVersionMismatch,
     #[error("shard fingerprint no longer matches the read plan")]
     ShardFingerprintMismatch,
     #[error("failed to decode shard body: {source}")]
@@ -1150,7 +1161,7 @@ impl CacheReadFailureReason {
                 | Self::InvalidHeaderLength { .. }
                 | Self::HeaderDecode { .. }
                 | Self::InputPathMismatch
-                | Self::ParserVersionMismatch
+                | Self::DecoderVersionMismatch
         )
     }
 }
@@ -1158,7 +1169,7 @@ impl CacheReadFailureReason {
 #[derive(Debug)]
 pub(crate) struct CacheReadFailure {
     pub(crate) input_path: PathBuf,
-    pub(crate) parser_version: ParserVersion,
+    pub(crate) decoder_version: DecoderVersion,
     pub(crate) shard_path: Option<PathBuf>,
     pub(crate) reason: CacheReadFailureReason,
 }
@@ -1178,7 +1189,7 @@ impl CacheReadFailure {
             | CacheReadFailureReason::InvalidHeaderLength { .. }
             | CacheReadFailureReason::HeaderDecode { .. }
             | CacheReadFailureReason::InputPathMismatch
-            | CacheReadFailureReason::ParserVersionMismatch
+            | CacheReadFailureReason::DecoderVersionMismatch
             | CacheReadFailureReason::ShardFingerprintMismatch
             | CacheReadFailureReason::BodyDecode { .. }
             | CacheReadFailureReason::MessageCountMismatch { .. } => true,
@@ -1206,7 +1217,7 @@ impl CacheReadFailure {
             | CacheReadFailureReason::InvalidHeaderLength { .. }
             | CacheReadFailureReason::HeaderDecode { .. }
             | CacheReadFailureReason::InputPathMismatch
-            | CacheReadFailureReason::ParserVersionMismatch
+            | CacheReadFailureReason::DecoderVersionMismatch
             | CacheReadFailureReason::ShardFingerprintMismatch => false,
         }
     }
@@ -1215,7 +1226,7 @@ impl CacheReadFailure {
 #[derive(Debug)]
 pub(crate) struct CacheLookupFailure {
     pub(crate) input_path: PathBuf,
-    pub(crate) parser_version: ParserVersion,
+    pub(crate) decoder_version: DecoderVersion,
     pub(crate) shard_path: PathBuf,
     pub(crate) reason: CacheReadFailureReason,
 }
@@ -1224,10 +1235,10 @@ impl std::fmt::Display for CacheLookupFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "input cache v{} header read failed for `{}` with parser {:?} at `{}`: {}",
+            "input cache v{} header read failed for `{}` with decoder {:?} at `{}`: {}",
             CACHE_FORMAT_VERSION,
             self.input_path.display(),
-            self.parser_version,
+            self.decoder_version,
             self.shard_path.display(),
             self.reason
         )
@@ -1244,9 +1255,9 @@ impl std::fmt::Display for CacheReadFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "input cache body read failed for `{}` with parser {:?}",
+            "input cache body read failed for `{}` with decoder {:?}",
             self.input_path.display(),
-            self.parser_version
+            self.decoder_version
         )?;
         if let Some(shard_path) = &self.shard_path {
             write!(formatter, " at `{}`", shard_path.display())?;
@@ -1269,7 +1280,7 @@ impl CacheReadFailure {
     ) -> Self {
         Self {
             input_path: plan.path(),
-            parser_version: plan.parser_version(),
+            decoder_version: plan.decoder_version(),
             shard_path,
             reason,
         }
@@ -1279,11 +1290,11 @@ impl CacheReadFailure {
 impl CacheReadPlan {
     pub(crate) fn new(
         path: &Path,
-        parser_version: ParserVersion,
+        decoder_version: DecoderVersion,
         fingerprint: InputFingerprint,
     ) -> Self {
         Self {
-            key: CachedInputKey::new(path, parser_version),
+            key: CachedInputKey::new(path, decoder_version),
             fingerprint,
         }
     }
@@ -1292,15 +1303,15 @@ impl CacheReadPlan {
         self.key.to_path_buf()
     }
 
-    pub(crate) fn parser_version(&self) -> ParserVersion {
-        self.key.parser_version
+    pub(crate) fn decoder_version(&self) -> DecoderVersion {
+        self.key.decoder_version
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct CachedInputEntry {
     pub path: CachedPath,
-    pub parser_version: ParserVersion,
+    pub decoder_version: DecoderVersion,
     pub fingerprint: InputFingerprint,
     pub messages: Vec<ParsedMessage>,
     pub codex_incremental: Option<CodexIncrementalCache>,
@@ -1321,14 +1332,14 @@ impl CachedInputEntry {
     #[cfg(test)]
     pub(crate) fn new_with_revision(
         path: &Path,
-        parser_revision: ParserRevision,
+        decoder_revision: DecoderRevision,
         fingerprint: InputFingerprint,
         messages: Vec<ParsedMessage>,
         codex_incremental: Option<CodexIncrementalCache>,
     ) -> Self {
         Self::new_with_version(
             path,
-            ParserVersion::new(ParserId::Amp, parser_revision),
+            DecoderVersion::new(DecoderId::Amp, decoder_revision),
             fingerprint,
             messages,
             codex_incremental,
@@ -1338,14 +1349,14 @@ impl CachedInputEntry {
     #[cfg(test)]
     pub(crate) fn new_with_version(
         path: &Path,
-        parser_version: ParserVersion,
+        decoder_version: DecoderVersion,
         fingerprint: InputFingerprint,
         messages: Vec<ParsedMessage>,
         codex_incremental: Option<CodexIncrementalCache>,
     ) -> Self {
         Self {
             path: CachedPath::from_path(path),
-            parser_version,
+            decoder_version,
             fingerprint,
             messages,
             codex_incremental,
@@ -1356,7 +1367,7 @@ impl CachedInputEntry {
     fn plan(&self) -> CacheWritePlan {
         CacheWritePlan {
             path: self.path.clone(),
-            parser_version: self.parser_version,
+            decoder_version: self.decoder_version,
             fingerprint: self.fingerprint.clone(),
             codex_incremental: self.codex_incremental.clone(),
             rejections: self.rejections.clone(),
@@ -1367,7 +1378,7 @@ impl CachedInputEntry {
     fn key(&self) -> CachedInputKey {
         CachedInputKey {
             path: self.path.clone(),
-            parser_version: self.parser_version,
+            decoder_version: self.decoder_version,
         }
     }
 }
@@ -1375,7 +1386,7 @@ impl CachedInputEntry {
 #[derive(Debug, Clone)]
 pub(crate) struct CacheWritePlan {
     path: CachedPath,
-    parser_version: ParserVersion,
+    decoder_version: DecoderVersion,
     fingerprint: InputFingerprint,
     codex_incremental: Option<CodexIncrementalCache>,
     rejections: crate::input_health::RejectionSummary,
@@ -1384,13 +1395,13 @@ pub(crate) struct CacheWritePlan {
 impl CacheWritePlan {
     pub(crate) fn new(
         path: &Path,
-        parser_version: ParserVersion,
+        decoder_version: DecoderVersion,
         fingerprint: InputFingerprint,
         codex_incremental: Option<CodexIncrementalCache>,
     ) -> Self {
         Self {
             path: CachedPath::from_path(path),
-            parser_version,
+            decoder_version,
             fingerprint,
             codex_incremental,
             rejections: Default::default(),
@@ -1410,14 +1421,14 @@ impl CacheWritePlan {
     fn key(&self) -> CachedInputKey {
         CachedInputKey {
             path: self.path.clone(),
-            parser_version: self.parser_version,
+            decoder_version: self.decoder_version,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedShardHeader {
-    parser_version: ParserVersion,
+    decoder_version: DecoderVersion,
     path: CachedPath,
     fingerprint: InputFingerprint,
     codex_incremental: Option<CodexIncrementalCache>,
@@ -1513,9 +1524,9 @@ impl InputMessageCache {
     pub(crate) fn get_meta(
         &self,
         path: &Path,
-        parser_version: ParserVersion,
+        decoder_version: DecoderVersion,
     ) -> Result<Option<CachedInputMeta>, CacheLookupFailure> {
-        let key = CachedInputKey::new(path, parser_version);
+        let key = CachedInputKey::new(path, decoder_version);
         if self.deleted_paths.contains(&key) || self.taken_paths.contains(&key) {
             return Ok(None);
         }
@@ -1533,21 +1544,21 @@ impl InputMessageCache {
             Err(reason) => {
                 return Err(CacheLookupFailure {
                     input_path: key.to_path_buf(),
-                    parser_version: key.parser_version,
+                    decoder_version: key.decoder_version,
                     shard_path,
                     reason,
                 });
             }
         };
-        if header.path != key.path || header.parser_version != key.parser_version {
+        if header.path != key.path || header.decoder_version != key.decoder_version {
             let reason = if header.path != key.path {
                 CacheReadFailureReason::InputPathMismatch
             } else {
-                CacheReadFailureReason::ParserVersionMismatch
+                CacheReadFailureReason::DecoderVersionMismatch
             };
             return Err(CacheLookupFailure {
                 input_path: key.to_path_buf(),
-                parser_version: key.parser_version,
+                decoder_version: key.decoder_version,
                 shard_path,
                 reason,
             });
@@ -1632,8 +1643,8 @@ impl InputMessageCache {
         Ok(entry.messages)
     }
 
-    pub(crate) fn remove(&mut self, path: &Path, parser_version: ParserVersion) {
-        let key = CachedInputKey::new(path, parser_version);
+    pub(crate) fn remove(&mut self, path: &Path, decoder_version: DecoderVersion) {
+        let key = CachedInputKey::new(path, decoder_version);
         if self.is_protected(&key) {
             return;
         }
@@ -1644,8 +1655,8 @@ impl InputMessageCache {
         self.dirty = true;
     }
 
-    pub(crate) fn invalidate_read(&mut self, path: &Path, parser_version: ParserVersion) {
-        let key = CachedInputKey::new(path, parser_version);
+    pub(crate) fn invalidate_read(&mut self, path: &Path, decoder_version: DecoderVersion) {
+        let key = CachedInputKey::new(path, decoder_version);
         self.invalidated_read_paths.insert(key.clone());
         self.taken_paths.insert(key);
     }
@@ -1740,7 +1751,7 @@ pub fn prune_input_message_cache() -> Result<InputCachePruneStats, InputCachePru
     let shards_dir = cache_dir.join(SHARDS_DIRNAME);
     let shard_paths = shard_paths_for_prune(&shards_dir)?;
     let mut shards = Vec::with_capacity(shard_paths.len());
-    let mut latest_revisions: HashMap<(CachedPath, ParserId), ParserRevision> = HashMap::new();
+    let mut latest_revisions: HashMap<(CachedPath, DecoderId), DecoderRevision> = HashMap::new();
     let mut input_existence: HashMap<CachedPath, bool> = HashMap::new();
 
     for shard_path in shard_paths {
@@ -1755,7 +1766,7 @@ pub fn prune_input_message_cache() -> Result<InputCachePruneStats, InputCachePru
         };
         let key = CachedInputKey {
             path: header.path.clone(),
-            parser_version: header.parser_version,
+            decoder_version: header.decoder_version,
         };
         let canonical_path = shard_path_for_input_key(&cache_dir, &key) == shard_path;
         let input_exists = match input_existence.get(&header.path) {
@@ -1772,9 +1783,9 @@ pub fn prune_input_message_cache() -> Result<InputCachePruneStats, InputCachePru
 
         if input_exists && canonical_path {
             latest_revisions
-                .entry((header.path.clone(), header.parser_version.parser_id))
-                .and_modify(|revision| *revision = (*revision).max(header.parser_version.revision))
-                .or_insert(header.parser_version.revision);
+                .entry((header.path.clone(), header.decoder_version.decoder_id))
+                .and_modify(|revision| *revision = (*revision).max(header.decoder_version.revision))
+                .or_insert(header.decoder_version.revision);
         }
 
         shards.push(PrunableShard {
@@ -1790,8 +1801,8 @@ pub fn prune_input_message_cache() -> Result<InputCachePruneStats, InputCachePru
     for shard in shards {
         let stale_revision = shard.header.as_ref().is_some_and(|header| {
             latest_revisions
-                .get(&(header.path.clone(), header.parser_version.parser_id))
-                .is_some_and(|latest| header.parser_version.revision < *latest)
+                .get(&(header.path.clone(), header.decoder_version.decoder_id))
+                .is_some_and(|latest| header.decoder_version.revision < *latest)
         });
         let should_remove = shard.header.is_none()
             || !shard.input_exists
@@ -1835,21 +1846,21 @@ fn shard_key_for_input_key(key: &CachedInputKey) -> [u8; 32] {
     key.path.update_shard_key(&mut hasher);
     hash_inventory_bytes(
         &mut hasher,
-        key.parser_version.parser_id.stable_name().as_bytes(),
+        key.decoder_version.decoder_id.stable_name().as_bytes(),
     );
-    hasher.update(key.parser_version.revision.to_le_bytes());
+    hasher.update(key.decoder_version.revision.to_le_bytes());
     hasher.finalize().into()
 }
 
 #[cfg(test)]
 fn shard_path(
     path: &Path,
-    parser_version: ParserVersion,
+    decoder_version: DecoderVersion,
 ) -> Result<PathBuf, crate::paths::ConfigDirUnavailable> {
     let dir = cache_dir()?;
     Ok(shard_path_for_input_key(
         &dir,
-        &CachedInputKey::new(path, parser_version),
+        &CachedInputKey::new(path, decoder_version),
     ))
 }
 
@@ -1866,18 +1877,18 @@ fn shard_path_for_input_key(cache_dir: &Path, key: &CachedInputKey) -> PathBuf {
 pub(crate) fn shard_path_for_test(
     cache_dir: &Path,
     input_path: &Path,
-    parser_version: ParserVersion,
+    decoder_version: DecoderVersion,
 ) -> PathBuf {
-    shard_path_for_input_key(cache_dir, &CachedInputKey::new(input_path, parser_version))
+    shard_path_for_input_key(cache_dir, &CachedInputKey::new(input_path, decoder_version))
 }
 
 #[cfg(test)]
 pub(crate) fn mark_current_key_shard_as_unsupported_format_for_test(
     cache_dir: &Path,
     input_path: &Path,
-    parser_version: ParserVersion,
+    decoder_version: DecoderVersion,
 ) -> PathBuf {
-    let shard_path = shard_path_for_test(cache_dir, input_path, parser_version);
+    let shard_path = shard_path_for_test(cache_dir, input_path, decoder_version);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .open(&shard_path)
@@ -1894,9 +1905,9 @@ pub(crate) fn mark_current_key_shard_as_unsupported_format_for_test(
 pub(crate) fn mark_current_key_shard_as_future_format_for_test(
     cache_dir: &Path,
     input_path: &Path,
-    parser_version: ParserVersion,
+    decoder_version: DecoderVersion,
 ) -> PathBuf {
-    let shard_path = shard_path_for_test(cache_dir, input_path, parser_version);
+    let shard_path = shard_path_for_test(cache_dir, input_path, decoder_version);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .open(&shard_path)
@@ -1913,9 +1924,9 @@ pub(crate) fn mark_current_key_shard_as_future_format_for_test(
 pub(crate) fn truncate_shard_after_header_for_test(
     cache_dir: &Path,
     input_path: &Path,
-    parser_version: ParserVersion,
+    decoder_version: DecoderVersion,
 ) -> PathBuf {
-    let shard_path = shard_path_for_test(cache_dir, input_path, parser_version);
+    let shard_path = shard_path_for_test(cache_dir, input_path, decoder_version);
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1939,10 +1950,10 @@ pub(crate) fn truncate_shard_after_header_for_test(
 pub(crate) fn replace_shard_message_count_for_test(
     cache_dir: &Path,
     input_path: &Path,
-    parser_version: ParserVersion,
+    decoder_version: DecoderVersion,
     message_count: usize,
 ) -> PathBuf {
-    let shard_path = shard_path_for_test(cache_dir, input_path, parser_version);
+    let shard_path = shard_path_for_test(cache_dir, input_path, decoder_version);
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1978,7 +1989,7 @@ fn hex_sha256(bytes: &[u8; 32]) -> String {
 
 fn header_from_plan(plan: &CacheWritePlan, message_count: usize) -> CachedShardHeader {
     CachedShardHeader {
-        parser_version: plan.parser_version,
+        decoder_version: plan.decoder_version,
         path: plan.path.clone(),
         fingerprint: plan.fingerprint.clone(),
         codex_incremental: plan.codex_incremental.clone(),
@@ -2027,8 +2038,8 @@ fn read_shard_entry_with_plan(
     if header.path != plan.key.path {
         return Err(CacheReadFailureReason::InputPathMismatch);
     }
-    if header.parser_version != plan.key.parser_version {
-        return Err(CacheReadFailureReason::ParserVersionMismatch);
+    if header.decoder_version != plan.key.decoder_version {
+        return Err(CacheReadFailureReason::DecoderVersionMismatch);
     }
     if header.fingerprint != plan.fingerprint {
         return Err(CacheReadFailureReason::ShardFingerprintMismatch);
@@ -2046,7 +2057,7 @@ fn read_shard_entry_with_plan(
 
     Ok(CachedInputEntry {
         path: header.path,
-        parser_version: header.parser_version,
+        decoder_version: header.decoder_version,
         fingerprint: header.fingerprint,
         messages: body.messages,
         rejections: header.rejections,
@@ -2446,35 +2457,51 @@ mod tests {
         restore_env_var("TOKSCALE_CONFIG_DIR", prev.3);
     }
 
-    fn test_parser_version(revision: ParserRevision) -> ParserVersion {
-        ParserVersion::new(ParserId::Amp, revision)
+    fn test_decoder_version(revision: DecoderRevision) -> DecoderVersion {
+        DecoderVersion::new(DecoderId::Amp, revision)
+    }
+
+    #[test]
+    fn decoder_id_bincode_uses_its_stable_name() {
+        let encoded_id = bincode::options().serialize(&DecoderId::Amp).unwrap();
+        let encoded_name = bincode::options()
+            .serialize(DecoderId::Amp.stable_name())
+            .unwrap();
+
+        assert_eq!(encoded_id, encoded_name);
+        assert_eq!(
+            bincode::options()
+                .deserialize::<DecoderId>(&encoded_id)
+                .unwrap(),
+            DecoderId::Amp
+        );
     }
 
     fn test_cache_read_failure(reason: CacheReadFailureReason) -> CacheReadFailure {
         CacheReadFailure {
             input_path: PathBuf::from("/test/input"),
-            parser_version: test_parser_version(1),
+            decoder_version: test_decoder_version(1),
             shard_path: Some(PathBuf::from("/test/shard")),
             reason,
         }
     }
 
     #[test]
-    fn current_shard_key_uses_stable_path_parser_tag_and_revision_fields() {
+    fn current_shard_key_uses_stable_path_decoder_tag_and_revision_fields() {
         let path = Path::new("/test/input");
-        let amp_v1 = CachedInputKey::new(path, ParserVersion::new(ParserId::Amp, 1));
-        let amp_v2 = CachedInputKey::new(path, ParserVersion::new(ParserId::Amp, 2));
-        let claude_v1 = CachedInputKey::new(path, ParserVersion::new(ParserId::Claude, 1));
+        let amp_v1 = CachedInputKey::new(path, DecoderVersion::new(DecoderId::Amp, 1));
+        let amp_v2 = CachedInputKey::new(path, DecoderVersion::new(DecoderId::Amp, 2));
+        let claude_v1 = CachedInputKey::new(path, DecoderVersion::new(DecoderId::Claude, 1));
         let other_path = CachedInputKey::new(
             Path::new("/test/other-input"),
-            ParserVersion::new(ParserId::Amp, 1),
+            DecoderVersion::new(DecoderId::Amp, 1),
         );
 
         assert_eq!(
             shard_key_for_input_key(&amp_v1),
             shard_key_for_input_key(&CachedInputKey::new(
                 path,
-                ParserVersion::new(ParserId::Amp, 1),
+                DecoderVersion::new(DecoderId::Amp, 1),
             ))
         );
         assert_ne!(
@@ -2526,7 +2553,7 @@ mod tests {
                 )),
             },
             CacheReadFailureReason::InputPathMismatch,
-            CacheReadFailureReason::ParserVersionMismatch,
+            CacheReadFailureReason::DecoderVersionMismatch,
             CacheReadFailureReason::FingerprintMismatch,
             CacheReadFailureReason::ShardFingerprintMismatch,
         ] {
@@ -3203,7 +3230,7 @@ mod tests {
         cache.insert(entry);
         cache.save_if_dirty().unwrap();
 
-        let shard = shard_path(file.path(), test_parser_version(1)).unwrap();
+        let shard = shard_path(file.path(), test_decoder_version(1)).unwrap();
         assert!(shard.exists());
         let mut envelope = [0_u8; 12];
         File::open(&shard)
@@ -3218,7 +3245,7 @@ mod tests {
 
         let mut loaded = InputMessageCache::load().unwrap();
         let meta = loaded
-            .get_meta(file.path(), test_parser_version(1))
+            .get_meta(file.path(), test_decoder_version(1))
             .unwrap()
             .unwrap();
         assert_eq!(meta.fingerprint, expected_fingerprint);
@@ -3228,7 +3255,7 @@ mod tests {
         let messages = loaded
             .take_messages(&CacheReadPlan::new(
                 file.path(),
-                test_parser_version(1),
+                test_decoder_version(1),
                 expected_fingerprint,
             ))
             .unwrap();
@@ -3255,7 +3282,7 @@ mod tests {
         let fingerprint = InputFingerprint::from_path(file.path()).unwrap();
         let plan = CacheWritePlan::new(
             file.path(),
-            test_parser_version(3),
+            test_decoder_version(3),
             fingerprint.clone(),
             None,
         );
@@ -3279,19 +3306,19 @@ mod tests {
 
         assert!(!cache.dirty);
         assert!(cache.dirty_entries.is_empty());
-        let shard = shard_path(file.path(), test_parser_version(3)).unwrap();
+        let shard = shard_path(file.path(), test_decoder_version(3)).unwrap();
         assert!(shard.exists());
 
         let mut loaded = InputMessageCache::load().unwrap();
         let meta = loaded
-            .get_meta(file.path(), test_parser_version(3))
+            .get_meta(file.path(), test_decoder_version(3))
             .unwrap()
             .unwrap();
         assert_eq!(meta.fingerprint, fingerprint);
         let restored = loaded
             .take_messages(&CacheReadPlan::new(
                 file.path(),
-                test_parser_version(3),
+                test_decoder_version(3),
                 fingerprint,
             ))
             .unwrap();
@@ -3302,7 +3329,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_explicit_prune_removes_orphans_and_old_parser_revisions() {
+    fn test_explicit_prune_removes_orphans_and_old_decoder_revisions() {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
 
@@ -3337,9 +3364,10 @@ mod tests {
             ));
         }
         cache.save_if_dirty().unwrap();
-        let stale_revision_shard = shard_path(live_input.path(), test_parser_version(1)).unwrap();
-        let current_revision_shard = shard_path(live_input.path(), test_parser_version(3)).unwrap();
-        let orphan_shard = shard_path(&orphan_path, test_parser_version(2)).unwrap();
+        let stale_revision_shard = shard_path(live_input.path(), test_decoder_version(1)).unwrap();
+        let current_revision_shard =
+            shard_path(live_input.path(), test_decoder_version(3)).unwrap();
+        let orphan_shard = shard_path(&orphan_path, test_decoder_version(2)).unwrap();
         assert!(stale_revision_shard.exists());
         assert!(current_revision_shard.exists());
         assert!(orphan_shard.exists());
@@ -3378,7 +3406,7 @@ mod tests {
             None,
         ));
         cache.save_if_dirty().unwrap();
-        let orphan_shard = shard_path(&orphan_path, test_parser_version(1)).unwrap();
+        let orphan_shard = shard_path(&orphan_path, test_decoder_version(1)).unwrap();
         drop(orphan_input);
 
         let invalid_shard = cache_dir()
@@ -3483,17 +3511,17 @@ mod tests {
     fn prune_classifier_accepts_current_envelope_and_rejects_unsupported_version() {
         let cache_home = TempDir::new().unwrap();
         let input = write_temp_file(b"primary");
-        let parser_version = test_parser_version(1);
+        let decoder_version = test_decoder_version(1);
         let mut cache = InputMessageCache::with_cache_dir(cache_home.path());
         cache.insert(CachedInputEntry::new_with_version(
             input.path(),
-            parser_version,
+            decoder_version,
             InputFingerprint::from_path(input.path()).unwrap(),
             Vec::new(),
             None,
         ));
         cache.save_if_dirty().unwrap();
-        let current_shard = shard_path_for_test(cache_home.path(), input.path(), parser_version);
+        let current_shard = shard_path_for_test(cache_home.path(), input.path(), decoder_version);
         assert!(read_shard_header_for_prune(&current_shard)
             .unwrap()
             .is_some());
@@ -3544,7 +3572,7 @@ mod tests {
             None,
         ));
         cache.save_if_dirty().unwrap();
-        let shard = shard_path(&path, test_parser_version(1)).unwrap();
+        let shard = shard_path(&path, test_decoder_version(1)).unwrap();
         assert!(shard.exists());
 
         drop(input);
@@ -3592,11 +3620,11 @@ mod tests {
     fn save_reports_invalidated_shard_removal_failure_with_path() {
         let cache_home = TempDir::new().unwrap();
         let input = write_temp_file(b"primary");
-        let parser_version = test_parser_version(31);
-        let shard_path = shard_path_for_test(cache_home.path(), input.path(), parser_version);
+        let decoder_version = test_decoder_version(31);
+        let shard_path = shard_path_for_test(cache_home.path(), input.path(), decoder_version);
         let mut cache = InputMessageCache::with_cache_dir(cache_home.path());
         ensure_cache_dir(&shard_path).unwrap();
-        cache.remove(input.path(), parser_version);
+        cache.remove(input.path(), decoder_version);
 
         let error = cache
             .save_if_dirty()
@@ -3627,7 +3655,7 @@ mod tests {
             None,
         ));
         seed.save_if_dirty().unwrap();
-        let shard = shard_path(input.path(), test_parser_version(1)).unwrap();
+        let shard = shard_path(input.path(), test_decoder_version(1)).unwrap();
         let file = std::fs::OpenOptions::new()
             .write(true)
             .open(&shard)
@@ -3636,7 +3664,7 @@ mod tests {
 
         let loaded = InputMessageCache::load().unwrap();
         let failure = loaded
-            .get_meta(input.path(), test_parser_version(1))
+            .get_meta(input.path(), test_decoder_version(1))
             .expect_err("oversized shard lookup must fail explicitly");
         assert_eq!(failure.input_path, input.path());
         assert_eq!(failure.shard_path, shard);
@@ -3657,10 +3685,10 @@ mod tests {
 
         let input = write_temp_file(b"input\n");
         let _initialized = InputMessageCache::load().unwrap();
-        let shard = shard_path(input.path(), test_parser_version(1)).unwrap();
+        let shard = shard_path(input.path(), test_decoder_version(1)).unwrap();
         ensure_cache_dir(shard.parent().unwrap()).unwrap();
         let header = CachedShardHeader {
-            parser_version: test_parser_version(1),
+            decoder_version: test_decoder_version(1),
             path: CachedPath::from_path(input.path()),
             fingerprint: InputFingerprint::from_path(input.path()).unwrap(),
             codex_incremental: None,
@@ -3679,7 +3707,7 @@ mod tests {
 
         let loaded = InputMessageCache::load().unwrap();
         assert!(loaded
-            .get_meta(input.path(), test_parser_version(1))
+            .get_meta(input.path(), test_decoder_version(1))
             .is_err());
         assert!(shard.exists());
 
@@ -3693,12 +3721,12 @@ mod tests {
         let prev_env = sandbox_cache_env(temp_home.path());
 
         let input = write_temp_file(b"input\n");
-        let parser_version = test_parser_version(1);
+        let decoder_version = test_decoder_version(1);
         let fingerprint = InputFingerprint::from_path(input.path()).unwrap();
         let mut seed = InputMessageCache::load().unwrap();
         seed.insert(CachedInputEntry::new_with_version(
             input.path(),
-            parser_version,
+            decoder_version,
             fingerprint.clone(),
             vec![ParsedMessage::new(
                 "gpt-5",
@@ -3711,7 +3739,7 @@ mod tests {
             None,
         ));
         seed.save_if_dirty().unwrap();
-        let shard = shard_path(input.path(), parser_version).unwrap();
+        let shard = shard_path(input.path(), decoder_version).unwrap();
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .open(&shard)
@@ -3724,7 +3752,7 @@ mod tests {
         let original_bytes = std::fs::read(&shard).unwrap();
 
         let mut loaded = InputMessageCache::load().unwrap();
-        assert!(loaded.get_meta(input.path(), parser_version).is_err());
+        assert!(loaded.get_meta(input.path(), decoder_version).is_err());
         assert_eq!(
             std::fs::read(&shard).unwrap(),
             original_bytes,
@@ -3741,7 +3769,7 @@ mod tests {
         )];
         assert!(loaded
             .write_messages(
-                CacheWritePlan::new(input.path(), parser_version, fingerprint.clone(), None,),
+                CacheWritePlan::new(input.path(), decoder_version, fingerprint.clone(), None,),
                 &replacement,
             )
             .is_ok());
@@ -3752,13 +3780,13 @@ mod tests {
         );
         let mut warm = InputMessageCache::load().unwrap();
         let meta = warm
-            .get_meta(input.path(), parser_version)
+            .get_meta(input.path(), decoder_version)
             .expect("successful atomic replacement must read without error")
             .expect("successful atomic replacement must produce a current-format hit");
         let messages = warm
             .take_messages(&CacheReadPlan::new(
                 input.path(),
-                parser_version,
+                decoder_version,
                 meta.fingerprint,
             ))
             .unwrap();
@@ -3775,10 +3803,10 @@ mod tests {
         let input = write_temp_file(b"input\n");
         let _initialized = InputMessageCache::load().unwrap();
 
-        for (parser_version, bytes) in [
-            (test_parser_version(11), b"raw-blob".to_vec()),
+        for (decoder_version, bytes) in [
+            (test_decoder_version(11), b"raw-blob".to_vec()),
             (
-                test_parser_version(12),
+                test_decoder_version(12),
                 [
                     SHARD_MAGIC.as_slice(),
                     CACHE_FORMAT_VERSION.to_le_bytes().as_slice(),
@@ -3788,11 +3816,11 @@ mod tests {
                 .concat(),
             ),
         ] {
-            let shard = shard_path(input.path(), parser_version).unwrap();
+            let shard = shard_path(input.path(), decoder_version).unwrap();
             ensure_cache_dir(shard.parent().unwrap()).unwrap();
             std::fs::write(&shard, &bytes).unwrap();
             let cache = InputMessageCache::load().unwrap();
-            assert!(cache.get_meta(input.path(), parser_version).is_err());
+            assert!(cache.get_meta(input.path(), decoder_version).is_err());
             assert_eq!(std::fs::read(&shard).unwrap(), bytes);
         }
 
@@ -3805,21 +3833,21 @@ mod tests {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
         let input = write_temp_file(b"input\n");
-        let parser_version = test_parser_version(13);
+        let decoder_version = test_decoder_version(13);
         let _initialized = InputMessageCache::load().unwrap();
-        let shard = shard_path(input.path(), parser_version).unwrap();
+        let shard = shard_path(input.path(), decoder_version).unwrap();
         ensure_cache_dir(shard.parent().unwrap()).unwrap();
         let unknown_bytes = b"unknown!";
         std::fs::write(&shard, unknown_bytes).unwrap();
         let fingerprint = InputFingerprint::from_path(input.path()).unwrap();
         let mut cache = InputMessageCache::load().unwrap();
-        assert!(cache.get_meta(input.path(), parser_version).is_err());
+        assert!(cache.get_meta(input.path(), decoder_version).is_err());
         let real_cache_dir = cache.cache_dir.clone();
         cache.cache_dir = PathBuf::from(OsString::from("invalid\0cache-dir"));
 
         let error = cache
             .write_messages(
-                CacheWritePlan::new(input.path(), parser_version, fingerprint, None),
+                CacheWritePlan::new(input.path(), decoder_version, fingerprint, None),
                 &[ParsedMessage::new(
                     "gpt-5",
                     "provider",
@@ -3847,7 +3875,7 @@ mod tests {
     fn cache_lookup_error_retains_path_version_and_decode_root_cause() {
         let failure = CacheLookupFailure {
             input_path: PathBuf::from("/test/input"),
-            parser_version: test_parser_version(7),
+            decoder_version: test_decoder_version(7),
             shard_path: PathBuf::from("/test/shard"),
             reason: CacheReadFailureReason::HeaderDecode {
                 source: Box::new(bincode::ErrorKind::Custom("bad header".to_string())),
@@ -3870,7 +3898,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_get_meta_ignores_stale_parser_revision() {
+    fn test_get_meta_ignores_stale_decoder_revision() {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
 
@@ -3901,11 +3929,11 @@ mod tests {
 
         let loaded = InputMessageCache::load().unwrap();
         assert!(loaded
-            .get_meta(input.path(), test_parser_version(7))
+            .get_meta(input.path(), test_decoder_version(7))
             .unwrap()
             .is_some());
         assert!(loaded
-            .get_meta(input.path(), test_parser_version(8))
+            .get_meta(input.path(), test_decoder_version(8))
             .unwrap()
             .is_none());
 
@@ -3914,7 +3942,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_get_meta_ignores_stale_parser_id() {
+    fn test_get_meta_ignores_stale_decoder_id() {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
 
@@ -3923,7 +3951,7 @@ mod tests {
         let mut cache = InputMessageCache::load().unwrap();
         cache.insert(CachedInputEntry::new_with_version(
             input.path(),
-            ParserVersion::new(ParserId::Copilot, 1),
+            DecoderVersion::new(DecoderId::Copilot, 1),
             fingerprint,
             vec![ParsedMessage::new(
                 "gpt-5",
@@ -3945,11 +3973,11 @@ mod tests {
 
         let loaded = InputMessageCache::load().unwrap();
         assert!(loaded
-            .get_meta(input.path(), ParserVersion::new(ParserId::Copilot, 1))
+            .get_meta(input.path(), DecoderVersion::new(DecoderId::Copilot, 1))
             .unwrap()
             .is_some());
         assert!(loaded
-            .get_meta(input.path(), ParserVersion::new(ParserId::Gemini, 1))
+            .get_meta(input.path(), DecoderVersion::new(DecoderId::Gemini, 1))
             .unwrap()
             .is_none());
 
@@ -4013,17 +4041,17 @@ mod tests {
 
             let loaded = InputMessageCache::load().unwrap();
             assert!(loaded
-                .get_meta(file_one.path(), test_parser_version(1))
+                .get_meta(file_one.path(), test_decoder_version(1))
                 .unwrap()
                 .is_some());
             assert!(loaded
-                .get_meta(file_two.path(), test_parser_version(1))
+                .get_meta(file_two.path(), test_decoder_version(1))
                 .unwrap()
                 .is_some());
-            assert!(shard_path(file_one.path(), test_parser_version(1))
+            assert!(shard_path(file_one.path(), test_decoder_version(1))
                 .unwrap()
                 .exists());
-            assert!(shard_path(file_two.path(), test_parser_version(1))
+            assert!(shard_path(file_two.path(), test_decoder_version(1))
                 .unwrap()
                 .exists());
         }
@@ -4033,14 +4061,14 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_same_path_different_parser_versions_use_distinct_shards() {
+    fn test_same_path_different_decoder_versions_use_distinct_shards() {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
 
         let input = write_temp_file(b"input\n");
         let fingerprint = InputFingerprint::from_path(input.path()).unwrap();
-        let copilot_version = ParserVersion::new(ParserId::Copilot, 1);
-        let gemini_version = ParserVersion::new(ParserId::Gemini, 1);
+        let copilot_version = DecoderVersion::new(DecoderId::Copilot, 1);
+        let gemini_version = DecoderVersion::new(DecoderId::Gemini, 1);
         let mut cache = InputMessageCache::load().unwrap();
         cache.insert(CachedInputEntry::new_with_version(
             input.path(),
@@ -4126,12 +4154,12 @@ mod tests {
         let prev_env = sandbox_cache_env(temp_home.path());
 
         let input = write_temp_file(b"input-one\n");
-        let parser_version = ParserVersion::new(ParserId::Copilot, 1);
+        let decoder_version = DecoderVersion::new(DecoderId::Copilot, 1);
         let initial_fingerprint = InputFingerprint::from_path(input.path()).unwrap();
         let mut seed = InputMessageCache::load().unwrap();
         seed.insert(CachedInputEntry::new_with_version(
             input.path(),
-            parser_version,
+            decoder_version,
             initial_fingerprint.clone(),
             vec![ParsedMessage::new(
                 "gpt-5",
@@ -4153,17 +4181,17 @@ mod tests {
 
         let mut reader = InputMessageCache::load().unwrap();
         let meta = reader
-            .get_meta(input.path(), parser_version)
+            .get_meta(input.path(), decoder_version)
             .unwrap()
             .unwrap();
-        let read_plan = CacheReadPlan::new(input.path(), parser_version, meta.fingerprint);
+        let read_plan = CacheReadPlan::new(input.path(), decoder_version, meta.fingerprint);
 
         std::fs::write(input.path(), b"input-two\n").unwrap();
         let replacement_fingerprint = InputFingerprint::from_path(input.path()).unwrap();
         let mut writer = InputMessageCache::load().unwrap();
         writer.insert(CachedInputEntry::new_with_version(
             input.path(),
-            parser_version,
+            decoder_version,
             replacement_fingerprint,
             vec![ParsedMessage::new(
                 "gpt-5",
@@ -4196,7 +4224,7 @@ mod tests {
         let replacement_messages = reader
             .take_messages(&CacheReadPlan::new(
                 input.path(),
-                parser_version,
+                decoder_version,
                 InputFingerprint::from_path(input.path()).unwrap(),
             ))
             .expect("failed stale read plan must not poison the input key");

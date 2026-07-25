@@ -36,7 +36,7 @@ pub(crate) fn run_warm_tui_cache(
     let _ = save_tui_bundle_cache(
         &result.accumulator,
         &result.sessions,
-        &result.client_space,
+        &result.input_footprint,
         &health,
         &enabled_set,
         &report_scope,

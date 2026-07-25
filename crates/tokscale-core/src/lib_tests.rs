@@ -3,10 +3,10 @@ use super::{
     load_cache_only_pricing_with_diagnostics, load_usage_data_with_pricing, message_cache,
     normalize_model_for_grouping, parse_all_messages_with_health,
     parse_all_messages_with_health_with_settings, parse_all_messages_with_pricing,
-    parse_all_messages_with_pricing_with_settings, positive_token_total, pricing,
-    retain_for_requested_clients, scanner, select_local_parse_pricing, AggregatedViews,
-    AggregationConfig, ClientId, DateRange, GroupBy, LocalParseOptions, ReportOptions,
-    TokenBreakdown, UnifiedMessage, ViewSet, UNKNOWN_WORKSPACE_LABEL,
+    parse_all_messages_with_pricing_with_settings, positive_token_total, pricing, scanner,
+    select_local_parse_pricing, AggregatedViews, AggregationConfig, ClientId, DateRange, GroupBy,
+    LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage, ViewSet,
+    UNKNOWN_WORKSPACE_LABEL,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -35,10 +35,8 @@ impl TestClientCounts {
     fn from_messages(messages: &[UnifiedMessage]) -> Self {
         let mut counts = Self::default();
         for message in messages {
-            if let Some(client) = ClientId::from_str(&message.client) {
-                counts.0[client as usize] =
-                    counts.0[client as usize].saturating_add(message.message_count.max(0));
-            }
+            counts.0[message.client as usize] =
+                counts.0[message.client as usize].saturating_add(message.message_count.max(0));
         }
         counts
     }
@@ -68,6 +66,33 @@ fn input_cache_for_test_home(home: &Path) -> message_cache::InputMessageCache {
     message_cache::InputMessageCache::with_cache_dir(&super::input_cache_dir_for_test_home(
         home.to_str().unwrap(),
     ))
+}
+
+fn test_decoder(decoder_id: message_cache::DecoderId) -> crate::adapters::DecoderSpec {
+    crate::adapters::DecoderSpec::plain(decoder_id, 0)
+}
+
+fn plain_test_input(
+    decoder_id: message_cache::DecoderId,
+    path: PathBuf,
+) -> crate::adapters::InputUnit {
+    crate::adapters::InputUnit::plain_file(path, test_decoder(decoder_id))
+}
+
+fn sqlite_test_input(
+    decoder_id: message_cache::DecoderId,
+    path: PathBuf,
+) -> crate::adapters::InputUnit {
+    crate::adapters::InputUnit::sqlite_with_wal(path, test_decoder(decoder_id))
+}
+
+fn opencode_test_input(path: PathBuf) -> crate::adapters::InputUnit {
+    crate::adapters::InputUnit::sqlite_with_wal(
+        path,
+        crate::adapters::DecoderSpec::opencode_sqlite(
+            crate::adapters::OPENCODE_CURRENT_SQLITE_REVISION,
+        ),
+    )
 }
 
 fn parse_all_messages_with_pricing_in_cache(
@@ -128,7 +153,7 @@ impl Drop for HomeEnvGuard {
 }
 
 fn make_workspace_message(
-    client: &str,
+    client: ClientId,
     model_id: &str,
     provider_id: &str,
     session_id: &str,
@@ -160,7 +185,7 @@ fn make_workspace_message(
 
 #[allow(clippy::too_many_arguments)]
 fn make_message_with_tokens(
-    client: &str,
+    client: ClientId,
     model_id: &str,
     provider_id: &str,
     session_id: &str,
@@ -336,7 +361,7 @@ fn test_streaming_tui_usage_matches_reference_aggregation() {
 
 #[test]
 #[serial_test::serial]
-fn prepared_tui_bundle_data_size_matches_real_client_inventory_sum() {
+fn prepared_tui_bundle_footprint_sums_the_two_client_fixture() {
     let home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(home.path());
     let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
@@ -350,15 +375,46 @@ fn prepared_tui_bundle_data_size_matches_real_client_inventory_sum() {
         .block_on(super::load_prepared_tui_bundle_with_diagnostics(prepared))
         .unwrap();
 
-    assert!(result.client_space["opencode"] > 0);
-    assert!(result.client_space["codex"] > 0);
-    let client_space_total = result
-        .client_space
-        .values()
-        .copied()
-        .try_fold(0_u64, u64::checked_add)
+    let opencode_bytes = result.input_footprint.bytes_for(ClientId::OpenCode);
+    let codex_bytes = result.input_footprint.bytes_for(ClientId::Codex);
+    assert!(opencode_bytes > 0);
+    assert!(codex_bytes > 0);
+    assert_eq!(
+        result.input_footprint.total_bytes().unwrap(),
+        opencode_bytes.checked_add(codex_bytes).unwrap()
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn public_usage_report_carries_confirmed_input_footprint() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(home.path());
+    let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
+    write_streaming_fold_fixture(home.path());
+
+    let report = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(super::get_usage_report(streaming_report_options(
+            home.path(),
+            vec!["opencode", "codex"],
+        )))
         .unwrap();
-    assert_eq!(result.health.input_data_bytes(), client_space_total);
+
+    assert_eq!(report.health, report.data.health);
+    assert_ne!(
+        report.metadata.input_inventory_signature.as_bytes(),
+        &[0_u8; 32]
+    );
+    let footprint = &report.metadata.input_footprint;
+    let opencode_bytes = footprint.bytes_for(ClientId::OpenCode);
+    let codex_bytes = footprint.bytes_for(ClientId::Codex);
+    assert!(opencode_bytes > 0);
+    assert!(codex_bytes > 0);
+    assert_eq!(
+        footprint.total_bytes().unwrap(),
+        opencode_bytes.checked_add(codex_bytes).unwrap()
+    );
 }
 
 #[test]
@@ -1080,7 +1136,7 @@ fn test_workspace_model_grouping_merges_same_workspace_and_model() {
     let entries = aggregate_model_usage_entries(
         vec![
             make_workspace_message(
-                "claude",
+                ClientId::Claude,
                 "claude-sonnet-4.5",
                 "anthropic",
                 "session-1",
@@ -1089,7 +1145,7 @@ fn test_workspace_model_grouping_merges_same_workspace_and_model() {
                 Some("repo-a"),
             ),
             make_workspace_message(
-                "qwen",
+                ClientId::Qwen,
                 "claude-sonnet-4.5",
                 "anthropic",
                 "session-2",
@@ -1114,7 +1170,7 @@ fn test_model_grouping_cleans_fast_variant() {
     let entries = aggregate_finalized_model_usage_entries(
         vec![
             make_workspace_message(
-                "opencode",
+                ClientId::OpenCode,
                 "gpt-5.5-fast",
                 "openai",
                 "session-1",
@@ -1122,7 +1178,15 @@ fn test_model_grouping_cleans_fast_variant() {
                 None,
                 None,
             ),
-            make_workspace_message("codex", "gpt-5.5", "openai", "session-2", 2.0, None, None),
+            make_workspace_message(
+                ClientId::Codex,
+                "gpt-5.5",
+                "openai",
+                "session-2",
+                2.0,
+                None,
+                None,
+            ),
         ],
         &GroupBy::Model,
     );
@@ -1137,7 +1201,7 @@ fn test_model_grouping_cleans_hyphenated_date_snapshot() {
     let entries = aggregate_finalized_model_usage_entries(
         vec![
             make_workspace_message(
-                "qwen",
+                ClientId::Qwen,
                 "qwen3.7-max-2026-05-20",
                 "qwen",
                 "session-1",
@@ -1145,7 +1209,15 @@ fn test_model_grouping_cleans_hyphenated_date_snapshot() {
                 None,
                 None,
             ),
-            make_workspace_message("qwen", "qwen3.7-max", "qwen", "session-2", 2.75, None, None),
+            make_workspace_message(
+                ClientId::Qwen,
+                "qwen3.7-max",
+                "qwen",
+                "session-2",
+                2.75,
+                None,
+                None,
+            ),
         ],
         &GroupBy::ClientModel,
     );
@@ -1160,7 +1232,7 @@ fn test_model_grouping_cleans_anthropic_prefixed_claude_variant() {
     let entries = aggregate_finalized_model_usage_entries(
         vec![
             make_workspace_message(
-                "claude",
+                ClientId::Claude,
                 "anthropic/claude-4-6-sonnet",
                 "anthropic",
                 "session-1",
@@ -1169,7 +1241,7 @@ fn test_model_grouping_cleans_anthropic_prefixed_claude_variant() {
                 Some("repo-a"),
             ),
             make_workspace_message(
-                "claude",
+                ClientId::Claude,
                 "claude-sonnet-4.6",
                 "anthropic",
                 "session-2",
@@ -1191,7 +1263,7 @@ fn test_model_grouping_uses_finalized_provider_ids() {
     let entries = aggregate_finalized_model_usage_entries(
         vec![
             make_workspace_message(
-                "opencode",
+                ClientId::OpenCode,
                 "xiaomi/mimo-v2.5-pro",
                 "xiaomi",
                 "session-1",
@@ -1200,7 +1272,7 @@ fn test_model_grouping_uses_finalized_provider_ids() {
                 None,
             ),
             make_workspace_message(
-                "opencode",
+                ClientId::OpenCode,
                 "xiaomi/mimo-v2.5-pro",
                 "xiaomi",
                 "session-2",
@@ -1223,7 +1295,7 @@ fn test_client_provider_model_grouping_uses_finalized_provider_ids() {
     let entries = aggregate_finalized_model_usage_entries(
         vec![
             make_workspace_message(
-                "opencode",
+                ClientId::OpenCode,
                 "xiaomi/mimo-v2.5-pro",
                 "xiaomi",
                 "session-1",
@@ -1232,7 +1304,7 @@ fn test_client_provider_model_grouping_uses_finalized_provider_ids() {
                 None,
             ),
             make_workspace_message(
-                "opencode",
+                ClientId::OpenCode,
                 "xiaomi/mimo-v2.5-pro",
                 "xiaomi",
                 "session-2",
@@ -1256,7 +1328,7 @@ fn test_model_grouping_orders_merged_clients_by_total_tokens() {
     let entries = aggregate_model_usage_entries(
         vec![
             make_message_with_tokens(
-                "opencode",
+                ClientId::OpenCode,
                 "gpt-5.5",
                 "openai",
                 "session-opencode",
@@ -1267,7 +1339,7 @@ fn test_model_grouping_orders_merged_clients_by_total_tokens() {
                 0,
             ),
             make_message_with_tokens(
-                "codex",
+                ClientId::Codex,
                 "gpt-5.5",
                 "openai",
                 "session-codex",
@@ -1277,7 +1349,17 @@ fn test_model_grouping_orders_merged_clients_by_total_tokens() {
                 0,
                 0,
             ),
-            make_message_with_tokens("pi", "gpt-5.5", "openai", "session-pi", 100, 0, 0, 0, 0),
+            make_message_with_tokens(
+                ClientId::Pi,
+                "gpt-5.5",
+                "openai",
+                "session-pi",
+                100,
+                0,
+                0,
+                0,
+                0,
+            ),
         ],
         &GroupBy::Model,
     );
@@ -1291,7 +1373,7 @@ fn test_model_grouping_ignores_negative_client_token_contribution() {
     let entries = aggregate_model_usage_entries(
         vec![
             make_message_with_tokens(
-                "negative-client",
+                ClientId::Amp,
                 "gpt-5.5",
                 "openai",
                 "session-negative",
@@ -1302,7 +1384,7 @@ fn test_model_grouping_ignores_negative_client_token_contribution() {
                 0,
             ),
             make_message_with_tokens(
-                "positive-client",
+                ClientId::Codex,
                 "gpt-5.5",
                 "openai",
                 "session-positive",
@@ -1317,7 +1399,7 @@ fn test_model_grouping_ignores_negative_client_token_contribution() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].client, "positive-client, negative-client");
+    assert_eq!(entries[0].client, "codex, amp");
 }
 
 #[test]
@@ -1325,7 +1407,7 @@ fn test_workspace_model_grouping_separates_different_workspaces() {
     let entries = aggregate_model_usage_entries(
         vec![
             make_workspace_message(
-                "claude",
+                ClientId::Claude,
                 "claude-sonnet-4-5-20250929",
                 "anthropic",
                 "session-1",
@@ -1334,7 +1416,7 @@ fn test_workspace_model_grouping_separates_different_workspaces() {
                 Some("repo-a"),
             ),
             make_workspace_message(
-                "claude",
+                ClientId::Claude,
                 "claude-sonnet-4-5-20250929",
                 "anthropic",
                 "session-2",
@@ -1359,7 +1441,7 @@ fn test_workspace_model_grouping_uses_unknown_bucket_without_workspace_metadata(
     let entries = aggregate_model_usage_entries(
         vec![
             make_workspace_message(
-                "claude",
+                ClientId::Claude,
                 "claude-sonnet-4-5-20250929",
                 "anthropic",
                 "session-1",
@@ -1368,7 +1450,7 @@ fn test_workspace_model_grouping_uses_unknown_bucket_without_workspace_metadata(
                 None,
             ),
             make_workspace_message(
-                "claude",
+                ClientId::Claude,
                 "claude-sonnet-4-5-20250929",
                 "anthropic",
                 "session-2",
@@ -1394,7 +1476,7 @@ fn test_workspace_model_grouping_keeps_real_unknown_workspace_separate() {
     let entries = aggregate_model_usage_entries(
         vec![
             make_workspace_message(
-                "claude",
+                ClientId::Claude,
                 "claude-sonnet-4-5-20250929",
                 "anthropic",
                 "session-1",
@@ -1403,7 +1485,7 @@ fn test_workspace_model_grouping_keeps_real_unknown_workspace_separate() {
                 Some("unknown-workspace"),
             ),
             make_workspace_message(
-                "claude",
+                ClientId::Claude,
                 "claude-sonnet-4-5-20250929",
                 "anthropic",
                 "session-2",
@@ -1433,7 +1515,7 @@ fn test_workspace_model_grouping_avoids_separator_key_collisions() {
     let entries = aggregate_model_usage_entries(
         vec![
             make_workspace_message(
-                "claude",
+                ClientId::Claude,
                 "c",
                 "anthropic",
                 "session-1",
@@ -1442,7 +1524,7 @@ fn test_workspace_model_grouping_avoids_separator_key_collisions() {
                 Some("workspace-ab"),
             ),
             make_workspace_message(
-                "claude",
+                ClientId::Claude,
                 "b:c",
                 "anthropic",
                 "session-2",
@@ -1465,23 +1547,6 @@ fn test_workspace_model_grouping_avoids_separator_key_collisions() {
             && entry.model_id == "b:c"
             && (entry.cost - 2.0).abs() < f64::EPSILON
     }));
-}
-
-#[test]
-fn test_retain_for_requested_clients_keeps_original_client_matches() {
-    let requested: HashSet<&str> = HashSet::from(["opencode"]);
-    assert!(retain_for_requested_clients(
-        "opencode",
-        "gpt-4o",
-        "anthropic",
-        &requested
-    ));
-    assert!(!retain_for_requested_clients(
-        "claude",
-        "gpt-4o",
-        "anthropic",
-        &requested
-    ));
 }
 
 fn write_kimi_code_usage_fixture(input_home: &std::path::Path) {
@@ -1602,7 +1667,7 @@ fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_p
     let wire_path = input_home
         .path()
         .join(".kimi-code/sessions/wd-project/session_1/agents/main/wire.jsonl");
-    let parser_version = prepared.groups[0].units[0].parser_version;
+    let decoder_version = prepared.groups[0].units[0].decoder.version();
     let mut cold_messages = Vec::new();
     let cold_health =
         super::fold_prepared_local_inputs_with_pricing(prepared, None, &mut cold_messages)
@@ -1611,7 +1676,7 @@ fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_p
     assert_eq!(cold_messages.len(), 2);
     assert_eq!(cold_health.issue_count(), 0);
     assert!(input_cache_for_test_home(input_home.path())
-        .get_meta(&wire_path, parser_version)
+        .get_meta(&wire_path, decoder_version)
         .unwrap()
         .is_some());
 
@@ -1659,7 +1724,7 @@ fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_p
     assert_eq!(health.partial_inputs(), 1);
     assert_eq!(health.failed_inputs(), 0);
     assert!(input_cache_for_test_home(input_home.path())
-        .get_meta(&wire_path, parser_version)
+        .get_meta(&wire_path, decoder_version)
         .unwrap()
         .is_none());
 }
@@ -1681,8 +1746,7 @@ fn test_input_cache_refreshes_stale_provider_on_cache_hit() {
         );
         drop(conn);
 
-        let unit = crate::adapters::InputUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
-            .with_meta(crate::adapters::InputUnitMeta::OpenCodeSqlite);
+        let unit = opencode_test_input(path.clone());
         let fingerprint = unit.input_policy().fingerprint().unwrap();
         // Provider deliberately wrong for the model: the cache-hit path
         // must re-run refresh_derived_fields (dates are derived from
@@ -1706,7 +1770,7 @@ fn test_input_cache_refreshes_stale_provider_on_cache_hit() {
         let mut cache = input_cache_for_test_home(input_home.path());
         cache.insert(message_cache::CachedInputEntry::new_with_version(
             &path,
-            unit.parser_version,
+            unit.decoder.version(),
             fingerprint,
             vec![stale_message],
             None,
@@ -1738,8 +1802,20 @@ fn inventory_options(home: &Path, clients: &[&str]) -> LocalParseOptions {
     }
 }
 
+#[test]
+fn local_parse_request_resolves_client_strings_once_at_the_boundary() {
+    let home = tempfile::TempDir::new().unwrap();
+    let (_, clients) = super::resolve_local_parse_request(&inventory_options(
+        home.path(),
+        &["opencode", "codex", "opencode"],
+    ))
+    .unwrap();
+
+    assert_eq!(clients, vec![ClientId::Codex, ClientId::OpenCode]);
+}
+
 fn signature_for_test_units(
-    requested_clients: &[String],
+    requested_clients: &[ClientId],
     client: ClientId,
     units: Vec<crate::adapters::InputUnit>,
 ) -> super::InputInventorySignature {
@@ -1752,7 +1828,7 @@ fn prepared_test_group(
     units: Vec<crate::adapters::InputUnit>,
 ) -> crate::adapters::PreparedAdapterInputs {
     crate::adapters::PreparedAdapterInputs {
-        adapter: crate::adapters::adapter_for(client).unwrap(),
+        binding: crate::adapters::adapter_for(client).unwrap(),
         units: units
             .into_iter()
             .map(crate::adapters::InputUnit::prepare_snapshot)
@@ -1762,26 +1838,28 @@ fn prepared_test_group(
 }
 
 #[test]
-fn input_data_size_counts_related_inputs_once_by_file_identity() {
+fn input_footprint_counts_related_inputs_once_by_file_identity() {
     let dir = tempfile::TempDir::new().unwrap();
     let input = dir.path().join("input.jsonl");
     let dependency = dir.path().join("dependency.json");
     std::fs::write(&input, b"12345678").unwrap();
     std::fs::write(&dependency, b"12345").unwrap();
 
-    let with_dependency = crate::adapters::InputUnit::plain_file(ClientId::Amp, input.clone())
+    let with_dependency = plain_test_input(message_cache::DecoderId::Amp, input.clone())
         .with_dependency(dependency)
         .prepare_snapshot()
         .unwrap();
-    let duplicate = crate::adapters::InputUnit::plain_file(ClientId::Amp, input)
+    let duplicate = plain_test_input(message_cache::DecoderId::Amp, input)
         .prepare_snapshot()
         .unwrap();
 
-    assert_eq!(super::input_data_bytes([&with_dependency, &duplicate]), 13);
+    let group = prepared_test_group(ClientId::Amp, vec![with_dependency, duplicate]);
+    let footprint = super::prepared_input_footprint(&[ClientId::Amp], std::slice::from_ref(&group));
+    assert_eq!(footprint.bytes_for(ClientId::Amp), 13);
 }
 
 #[test]
-fn inventory_probe_refreshes_input_data_size_from_metadata() {
+fn inventory_probe_refreshes_input_footprint_from_metadata() {
     let home = tempfile::TempDir::new().unwrap();
     let amp_dir = home.path().join(".local/share/amp/threads");
     std::fs::create_dir_all(&amp_dir).unwrap();
@@ -1790,11 +1868,11 @@ fn inventory_probe_refreshes_input_data_size_from_metadata() {
 
     let mut prepared =
         super::prepare_local_inputs(inventory_options(home.path(), &["amp"])).unwrap();
-    assert_eq!(prepared.health.input_data_bytes(), 8);
+    assert_eq!(prepared.input_footprint().bytes_for(ClientId::Amp), 8);
 
     std::fs::write(&input, b"1234567890123").unwrap();
     prepared.refresh_input_inventory_signature().unwrap();
-    assert_eq!(prepared.health.input_data_bytes(), 13);
+    assert_eq!(prepared.input_footprint().bytes_for(ClientId::Amp), 13);
 }
 
 #[test]
@@ -1978,7 +2056,7 @@ fn prepared_diagnostics_returns_signature_revalidated_after_pricing_boundary() {
 
 #[test]
 #[serial_test::serial]
-fn prepared_tui_bundle_client_space_uses_confirmed_inventory() {
+fn prepared_tui_bundle_input_footprint_uses_confirmed_inventory() {
     let home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(home.path());
     let _pricing_guard = TestEnvGuard::set("TOKSCALE_PRICING_CACHE_ONLY", "1");
@@ -2014,8 +2092,10 @@ fn prepared_tui_bundle_client_space_uses_confirmed_inventory() {
 
     assert_ne!(stale_signature, result.input_inventory_signature);
     assert_eq!(confirmed_signature, result.input_inventory_signature);
-    assert_eq!(result.client_space.get("amp"), Some(&confirmed_bytes));
-    assert_eq!(result.health.input_data_bytes(), confirmed_bytes);
+    assert_eq!(
+        result.input_footprint.bytes_for(ClientId::Amp),
+        confirmed_bytes
+    );
     assert_eq!(
         result.accumulator.project(&GroupBy::Model).total_tokens,
         113
@@ -2036,58 +2116,58 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     std::fs::write(&first, b"first").unwrap();
     std::fs::write(&second, b"second").unwrap();
     std::fs::write(&wal, b"wal-one").unwrap();
-    let clients = vec!["zed".to_string(), "amp".to_string()];
+    let clients = vec![ClientId::Zed, ClientId::Amp];
 
     let ordered = signature_for_test_units(
         &clients,
         ClientId::Amp,
         vec![
-            crate::adapters::InputUnit::plain_file(ClientId::Amp, first.clone()),
-            crate::adapters::InputUnit::plain_file(ClientId::Amp, second.clone()),
+            plain_test_input(message_cache::DecoderId::Amp, first.clone()),
+            plain_test_input(message_cache::DecoderId::Amp, second.clone()),
         ],
     );
     let reordered = signature_for_test_units(
         &clients,
         ClientId::Amp,
         vec![
-            crate::adapters::InputUnit::plain_file(ClientId::Amp, second),
-            crate::adapters::InputUnit::plain_file(ClientId::Amp, first.clone()),
+            plain_test_input(message_cache::DecoderId::Amp, second),
+            plain_test_input(message_cache::DecoderId::Amp, first.clone()),
         ],
     );
     assert_ne!(ordered, reordered, "unit discovery order is significant");
 
     let canonical_clients = signature_for_test_units(
-        &["amp".to_string(), "zed".to_string()],
+        &[ClientId::Amp, ClientId::Zed],
         ClientId::Amp,
-        vec![crate::adapters::InputUnit::plain_file(
-            ClientId::Amp,
+        vec![plain_test_input(
+            message_cache::DecoderId::Amp,
             first.clone(),
         )],
     );
     let reversed_clients = signature_for_test_units(
-        &["zed".to_string(), "amp".to_string()],
+        &[ClientId::Zed, ClientId::Amp],
         ClientId::Amp,
-        vec![crate::adapters::InputUnit::plain_file(
-            ClientId::Amp,
+        vec![plain_test_input(
+            message_cache::DecoderId::Amp,
             first.clone(),
         )],
     );
     assert_eq!(canonical_clients, reversed_clients);
 
     let sqlite_before = signature_for_test_units(
-        &["zed".to_string()],
+        &[ClientId::Zed],
         ClientId::Zed,
-        vec![crate::adapters::InputUnit::sqlite_with_wal(
-            ClientId::Zed,
+        vec![sqlite_test_input(
+            message_cache::DecoderId::Zed,
             first.clone(),
         )],
     );
     std::fs::write(&wal, b"wal-two-and-longer").unwrap();
     let sqlite_after = signature_for_test_units(
-        &["zed".to_string()],
+        &[ClientId::Zed],
         ClientId::Zed,
-        vec![crate::adapters::InputUnit::sqlite_with_wal(
-            ClientId::Zed,
+        vec![sqlite_test_input(
+            message_cache::DecoderId::Zed,
             first.clone(),
         )],
     );
@@ -2096,53 +2176,56 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
         "related WAL stamp is significant"
     );
 
-    let parser_changed = signature_for_test_units(
-        &["amp".to_string()],
+    let decoder_changed = signature_for_test_units(
+        &[ClientId::Amp],
         ClientId::Amp,
-        vec![
-            crate::adapters::InputUnit::plain_file(ClientId::Amp, first).with_parser_version(
-                message_cache::ParserVersion::new(message_cache::ParserId::Amp, 999),
-            ),
-        ],
+        vec![crate::adapters::InputUnit::plain_file(
+            first,
+            crate::adapters::DecoderSpec::plain(message_cache::DecoderId::Amp, 999),
+        )],
     );
-    assert_ne!(canonical_clients, parser_changed);
+    assert_ne!(canonical_clients, decoder_changed);
 
     let codebuddy_path = dir.path().join("codebuddy.jsonl");
     std::fs::write(&codebuddy_path, b"codebuddy").unwrap();
-    let jsonl_meta = signature_for_test_units(
-        &["codebuddy".to_string()],
-        ClientId::CodeBuddy,
-        vec![
-            crate::adapters::InputUnit::plain_file(ClientId::CodeBuddy, codebuddy_path.clone())
-                .with_meta(crate::adapters::InputUnitMeta::CodeBuddyJsonl),
-        ],
-    );
-    let extension_meta = signature_for_test_units(
-        &["codebuddy".to_string()],
-        ClientId::CodeBuddy,
-        vec![
-            crate::adapters::InputUnit::plain_file(ClientId::CodeBuddy, codebuddy_path.clone())
-                .with_meta(crate::adapters::InputUnitMeta::CodeBuddyExtensionLog {
-                    origin: crate::adapters::CodeBuddyLogOrigin::Extension,
-                }),
-        ],
-    );
-    assert_ne!(jsonl_meta, extension_meta, "unit subtype is significant");
-
-    let plain_policy = signature_for_test_units(
-        &["codebuddy".to_string()],
+    let jsonl_decoder = signature_for_test_units(
+        &[ClientId::CodeBuddy],
         ClientId::CodeBuddy,
         vec![crate::adapters::InputUnit::plain_file(
-            ClientId::CodeBuddy,
             codebuddy_path.clone(),
+            crate::adapters::DecoderSpec::codebuddy_jsonl(0),
+        )],
+    );
+    let extension_decoder = signature_for_test_units(
+        &[ClientId::CodeBuddy],
+        ClientId::CodeBuddy,
+        vec![crate::adapters::InputUnit::plain_file(
+            codebuddy_path.clone(),
+            crate::adapters::DecoderSpec::codebuddy_extension_log(
+                0,
+                crate::adapters::CodeBuddyLogOrigin::Extension,
+            ),
+        )],
+    );
+    assert_ne!(
+        jsonl_decoder, extension_decoder,
+        "decoder route is significant"
+    );
+
+    let plain_policy = signature_for_test_units(
+        &[ClientId::CodeBuddy],
+        ClientId::CodeBuddy,
+        vec![crate::adapters::InputUnit::plain_file(
+            codebuddy_path.clone(),
+            crate::adapters::DecoderSpec::codebuddy_jsonl(0),
         )],
     );
     let no_cache_policy = signature_for_test_units(
-        &["codebuddy".to_string()],
+        &[ClientId::CodeBuddy],
         ClientId::CodeBuddy,
         vec![crate::adapters::InputUnit::no_message_cache(
-            ClientId::CodeBuddy,
             codebuddy_path,
+            crate::adapters::DecoderSpec::codebuddy_jsonl(0),
         )],
     );
     assert_ne!(plain_policy, no_cache_policy, "input policy is significant");
@@ -2154,8 +2237,8 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
     let amp_group = || {
         prepared_test_group(
             ClientId::Amp,
-            vec![crate::adapters::InputUnit::plain_file(
-                ClientId::Amp,
+            vec![plain_test_input(
+                message_cache::DecoderId::Amp,
                 amp_group_path.clone(),
             )],
         )
@@ -2164,17 +2247,17 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
         prepared_test_group(
             ClientId::CodeBuddy,
             vec![crate::adapters::InputUnit::plain_file(
-                ClientId::CodeBuddy,
                 codebuddy_group_path.clone(),
+                crate::adapters::DecoderSpec::codebuddy_jsonl(0),
             )],
         )
     };
     let group_order = super::input_inventory_signature(
-        &["amp".to_string(), "codebuddy".to_string()],
+        &[ClientId::Amp, ClientId::CodeBuddy],
         &[amp_group(), codebuddy_group()],
     );
     let reversed_group_order = super::input_inventory_signature(
-        &["amp".to_string(), "codebuddy".to_string()],
+        &[ClientId::Amp, ClientId::CodeBuddy],
         &[codebuddy_group(), amp_group()],
     );
     assert_ne!(
@@ -2187,7 +2270,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
 fn inventory_preparation_rejects_unavailable_primary_snapshots() {
     let dir = tempfile::TempDir::new().unwrap();
     let missing_a = dir.path().join("missing-a.json");
-    let error = crate::adapters::InputUnit::plain_file(ClientId::Amp, missing_a.clone())
+    let error = plain_test_input(message_cache::DecoderId::Amp, missing_a.clone())
         .prepare_snapshot()
         .expect_err("missing primary inputs must fail before inventory hashing");
     assert!(error.to_string().contains(missing_a.to_str().unwrap()));
@@ -2210,17 +2293,14 @@ fn inventory_signature_hashes_native_non_utf8_paths() {
     std::fs::write(&second, b"same").unwrap();
 
     let first_signature = signature_for_test_units(
-        &["amp".to_string()],
+        &[ClientId::Amp],
         ClientId::Amp,
-        vec![crate::adapters::InputUnit::plain_file(ClientId::Amp, first)],
+        vec![plain_test_input(message_cache::DecoderId::Amp, first)],
     );
     let second_signature = signature_for_test_units(
-        &["amp".to_string()],
+        &[ClientId::Amp],
         ClientId::Amp,
-        vec![crate::adapters::InputUnit::plain_file(
-            ClientId::Amp,
-            second,
-        )],
+        vec![plain_test_input(message_cache::DecoderId::Amp, second)],
     );
     assert_ne!(first_signature, second_signature);
 }
@@ -2347,8 +2427,7 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
             r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
         );
         drop(conn);
-        let unit = crate::adapters::InputUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
-            .with_meta(crate::adapters::InputUnitMeta::OpenCodeSqlite);
+        let unit = opencode_test_input(path.clone());
 
         let home = input_home.path().to_str().unwrap();
         let clients = ["opencode".to_string()];
@@ -2370,7 +2449,7 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
             cache
                 .take_messages(&message_cache::CacheReadPlan::new(
                     &path,
-                    unit.parser_version,
+                    unit.decoder.version(),
                     fingerprint.clone(),
                 ))
                 .expect("saved warm cache shard must remain readable")
@@ -2381,7 +2460,7 @@ fn test_warm_parse_taking_messages_keeps_outputs_and_cache_stable() {
         assert!(matches!(
             cache.take_messages(&message_cache::CacheReadPlan::new(
                 std::path::Path::new("/nonexistent/opencode.db"),
-                unit.parser_version,
+                unit.decoder.version(),
                 fingerprint,
             )),
             Err(message_cache::CacheReadFailure {
@@ -2403,8 +2482,7 @@ fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
     {
         let path = input_home.path().join(".local/share/opencode/opencode.db");
         std::fs::create_dir_all(&path).unwrap();
-        let unit = crate::adapters::InputUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
-            .with_meta(crate::adapters::InputUnitMeta::OpenCodeSqlite);
+        let unit = opencode_test_input(path.clone());
         let scanner_settings = scanner::ScannerSettings {
             opencode_db_paths: vec![path.clone()],
             ..scanner::ScannerSettings::default()
@@ -2439,7 +2517,7 @@ fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
 
         let cache = message_cache::InputMessageCache::load().unwrap();
         assert!(cache
-            .get_meta(&path, unit.parser_version)
+            .get_meta(&path, unit.decoder.version())
             .unwrap()
             .is_none());
 
@@ -2483,8 +2561,7 @@ fn test_clean_empty_opencode_scan_result_is_not_cached() {
         let conn = create_opencode_sqlite_db(&path);
         drop(conn);
 
-        let unit = crate::adapters::InputUnit::sqlite_with_wal(ClientId::OpenCode, path.clone())
-            .with_meta(crate::adapters::InputUnitMeta::OpenCodeSqlite);
+        let unit = opencode_test_input(path.clone());
 
         let first_messages = parse_all_messages_with_pricing(
             input_home.path().to_str().unwrap(),
@@ -2496,7 +2573,7 @@ fn test_clean_empty_opencode_scan_result_is_not_cached() {
 
         let cache = message_cache::InputMessageCache::load().unwrap();
         assert!(cache
-            .get_meta(&path, unit.parser_version)
+            .get_meta(&path, unit.decoder.version())
             .unwrap()
             .is_none());
 
@@ -3237,8 +3314,8 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
         assert!(input_cache_for_test_home(input_home.path())
             .get_meta(
                 &path,
-                message_cache::ParserVersion::new(
-                    message_cache::ParserId::Codex,
+                message_cache::DecoderVersion::new(
+                    message_cache::DecoderId::Codex,
                     crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
@@ -3334,8 +3411,8 @@ fn test_codex_untimestamped_token_row_is_partial_without_cache_shard() {
             .unwrap()
             .get_meta(
                 &path,
-                message_cache::ParserVersion::new(
-                    message_cache::ParserId::Codex,
+                message_cache::DecoderVersion::new(
+                    message_cache::DecoderId::Codex,
                     crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
@@ -3402,8 +3479,8 @@ fn test_codex_malformed_json_suffix_keeps_prefix_without_cache_shard() {
             .unwrap()
             .get_meta(
                 &path,
-                message_cache::ParserVersion::new(
-                    message_cache::ParserId::Codex,
+                message_cache::DecoderVersion::new(
+                    message_cache::DecoderId::Codex,
                     crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
@@ -3470,8 +3547,8 @@ fn test_codex_invalid_utf8_suffix_keeps_prefix_without_cache_shard() {
         assert!(cache
             .get_meta(
                 &path,
-                message_cache::ParserVersion::new(
-                    message_cache::ParserId::Codex,
+                message_cache::DecoderVersion::new(
+                    message_cache::DecoderId::Codex,
                     crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
@@ -3535,8 +3612,8 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
         assert!(input_cache_for_test_home(input_home.path())
             .get_meta(
                 &path,
-                message_cache::ParserVersion::new(
-                    message_cache::ParserId::Codex,
+                message_cache::DecoderVersion::new(
+                    message_cache::DecoderId::Codex,
                     crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
@@ -3578,8 +3655,8 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
         assert!(input_cache_for_test_home(input_home.path())
             .get_meta(
                 &path,
-                message_cache::ParserVersion::new(
-                    message_cache::ParserId::Codex,
+                message_cache::DecoderVersion::new(
+                    message_cache::DecoderId::Codex,
                     crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
@@ -3622,8 +3699,8 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
             .unwrap()
             .get_meta(
                 &path,
-                message_cache::ParserVersion::new(
-                    message_cache::ParserId::Codex,
+                message_cache::DecoderVersion::new(
+                    message_cache::DecoderId::Codex,
                     crate::adapters::CODEX_EXEC_IDENTITY_REVISION
                 )
             )
@@ -3721,7 +3798,7 @@ fn test_input_cache_does_not_reuse_priced_cost_without_pricing_service() {
 #[test]
 fn test_apply_token_pricing_clears_existing_cost_without_pricing() {
     let mut msg = UnifiedMessage::new_with_agent(
-        "roocode",
+        ClientId::RooCode,
         "gpt-4o",
         "provider",
         "session-1",
@@ -3833,7 +3910,7 @@ fn test_finalize_token_priced_messages_drops_rows_without_positive_tokens() {
 
     let mut messages = vec![
         UnifiedMessage::new(
-            "gemini",
+            ClientId::Gemini,
             "gpt-4o",
             "openai",
             "zero",
@@ -3842,7 +3919,7 @@ fn test_finalize_token_priced_messages_drops_rows_without_positive_tokens() {
             0.42,
         ),
         UnifiedMessage::new(
-            "gemini",
+            ClientId::Gemini,
             "gpt-4o",
             "openai",
             "negative",
@@ -3857,7 +3934,7 @@ fn test_finalize_token_priced_messages_drops_rows_without_positive_tokens() {
             0.42,
         ),
         UnifiedMessage::new(
-            "gemini",
+            ClientId::Gemini,
             "gpt-4o",
             "openai",
             "mixed",
@@ -3886,7 +3963,7 @@ fn test_finalize_token_priced_messages_drops_rows_without_positive_tokens() {
 fn test_finalize_token_priced_messages_canonicalizes_provider() {
     let mut messages = vec![
         UnifiedMessage::new(
-            "pi",
+            ClientId::Pi,
             "gpt-5.5",
             "",
             "missing-provider",
@@ -3901,7 +3978,7 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
             0.0,
         ),
         UnifiedMessage::new(
-            "mux",
+            ClientId::Mux,
             "some-model",
             "fireworks",
             "canonical-provider",
@@ -3916,7 +3993,7 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
             0.0,
         ),
         UnifiedMessage::new(
-            "opencode",
+            ClientId::OpenCode,
             "grok-code-fast-1",
             "xai-oauth",
             "xai-oauth-provider",
@@ -3931,7 +4008,7 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
             0.0,
         ),
         UnifiedMessage::new(
-            "opencode",
+            ClientId::OpenCode,
             "grok-code-fast-1",
             "grok-oauth",
             "grok-oauth-provider",
@@ -3946,7 +4023,7 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
             0.0,
         ),
         UnifiedMessage::new(
-            "claude",
+            ClientId::Claude,
             "kimi-for-coding",
             "moonshotai",
             "moonshot-provider",
@@ -3961,7 +4038,7 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
             0.0,
         ),
         UnifiedMessage::new(
-            "copilot",
+            ClientId::Copilot,
             "claude-sonnet-4.5",
             "github-copilot",
             "copilot-provider",
@@ -3976,7 +4053,7 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
             0.0,
         ),
         UnifiedMessage::new(
-            "codex",
+            ClientId::Codex,
             "gpt-5.2",
             "azure",
             "azure-provider",
@@ -3991,7 +4068,7 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
             0.0,
         ),
         UnifiedMessage::new(
-            "google-antigravity",
+            ClientId::Antigravity,
             "gemini-2.5-pro",
             "vertex",
             "vertex-provider",
@@ -4006,7 +4083,7 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
             0.0,
         ),
         UnifiedMessage::new(
-            "opencode",
+            ClientId::OpenCode,
             "glm-5.1",
             "open.bigmodel.cn",
             "bigmodel-provider",
@@ -4021,7 +4098,7 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
             0.0,
         ),
         UnifiedMessage::new(
-            "claude",
+            ClientId::Claude,
             "hy3-preview-agent",
             "",
             "hy3-missing-provider",
@@ -4036,7 +4113,7 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
             0.0,
         ),
         UnifiedMessage::new(
-            "file",
+            ClientId::Gemini,
             "Jamba-1.5-Large",
             "unknown",
             "jamba-unknown-provider",
@@ -4051,7 +4128,7 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
             0.0,
         ),
         UnifiedMessage::new(
-            "file",
+            ClientId::Gemini,
             "perplexity/llama-3",
             "",
             "route-prefix-must-not-drive-provider",
@@ -4108,7 +4185,7 @@ fn test_finalize_token_priced_messages_preserves_custom_provider_literal_tag() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut messages = vec![UnifiedMessage::new(
-        "claude",
+        ClientId::Claude,
         "claude-sonnet-4.5",
         "venice",
         "custom-provider",
@@ -4132,7 +4209,7 @@ fn test_finalize_token_priced_messages_preserves_custom_provider_literal_tag() {
 #[test]
 fn test_finalize_token_priced_messages_preserves_owl_provider_identity() {
     let mut messages = vec![UnifiedMessage::new(
-        "opencode",
+        ClientId::OpenCode,
         "gpt-5.2",
         "openai-owl",
         "owl-provider",
@@ -4184,7 +4261,7 @@ fn test_token_breakdown_total_rejects_overflow() {
 fn test_tui_model_aggregation_uses_unsigned_token_capacity() {
     let message = || {
         UnifiedMessage::new(
-            "antigravity",
+            ClientId::Antigravity,
             "gemini-3-pro",
             "google",
             "overflow-session",
@@ -4220,7 +4297,7 @@ fn test_apply_token_pricing_overrides_cost_when_pricing_exists() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "codex",
+        ClientId::Codex,
         "gpt-4o",
         "provider",
         "session-1",
@@ -4254,7 +4331,7 @@ fn test_apply_token_pricing_resolves_canonical_longcat_model() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "claudecode",
+        ClientId::Claude,
         "longcat-flash-3b",
         "meituan",
         "session-1",
@@ -4295,7 +4372,7 @@ fn test_apply_token_pricing_uses_same_price_for_zed_and_other_clients() {
         reasoning: 0,
     };
     let mut zed_msg = UnifiedMessage::new(
-        "zed",
+        ClientId::Zed,
         "claude-sonnet-4-5",
         crate::sessions::zed::ZED_HOSTED_PROVIDER,
         "session-1",
@@ -4304,7 +4381,7 @@ fn test_apply_token_pricing_uses_same_price_for_zed_and_other_clients() {
         0.0,
     );
     let mut claude_msg = UnifiedMessage::new(
-        "claudecode",
+        ClientId::Claude,
         "claude-sonnet-4-5",
         crate::sessions::zed::ZED_HOSTED_PROVIDER,
         "session-1",
@@ -4338,7 +4415,7 @@ fn test_apply_token_pricing_custom_zed_price_is_final_price() {
     );
 
     let mut msg = UnifiedMessage::new(
-        "zed",
+        ClientId::Zed,
         "claude-sonnet-4-5",
         crate::sessions::zed::ZED_HOSTED_PROVIDER,
         "session-1",
@@ -4372,7 +4449,7 @@ fn test_apply_token_pricing_uses_upstream_provider_for_zed_byok() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "zed",
+        ClientId::Zed,
         "claude-sonnet-4-5",
         "anthropic",
         "session-1",
@@ -4406,7 +4483,7 @@ fn test_apply_token_pricing_uses_reasoning_for_gemini() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "gemini",
+        ClientId::Gemini,
         "gemini-2.5-pro",
         "google",
         "session-1",
@@ -4441,7 +4518,7 @@ fn test_apply_token_pricing_uses_cache_read_pricing_for_gemini() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "gemini",
+        ClientId::Gemini,
         "gemini-2.5-pro",
         "google",
         "session-1",
@@ -4475,7 +4552,7 @@ fn test_finalize_token_pricing_cleans_free_variant_before_lookup() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let msg = UnifiedMessage::new(
-        "opencode",
+        ClientId::OpenCode,
         "nemotron-3-ultra-free",
         "nvidia",
         "session-1",
@@ -4512,7 +4589,7 @@ fn test_finalize_token_pricing_cleans_date_variant_before_lookup() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let msg = UnifiedMessage::new(
-        "copilot",
+        ClientId::Copilot,
         "gpt-4o-mini-2024-07-18",
         "openai",
         "session-1",
@@ -4550,7 +4627,7 @@ fn test_finalize_token_pricing_cleans_repeated_date_variant_before_lookup() {
 
     let mut messages = vec![
         UnifiedMessage::new(
-            "copilot",
+            ClientId::Copilot,
             "gpt-4o-mini-2024-07-18",
             "openai",
             "session-1",
@@ -4565,7 +4642,7 @@ fn test_finalize_token_pricing_cleans_repeated_date_variant_before_lookup() {
             0.0,
         ),
         UnifiedMessage::new(
-            "copilot",
+            ClientId::Copilot,
             "gpt-4o-mini-2024-07-18",
             "openai",
             "session-2",
@@ -4612,7 +4689,7 @@ fn test_apply_token_pricing_prefers_provider_aware_match() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "opencode",
+        ClientId::OpenCode,
         "grok-code",
         "azure",
         "session-1",
@@ -4654,7 +4731,7 @@ fn test_apply_token_pricing_uses_nested_reseller_exact_match() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "opencode",
+        ClientId::OpenCode,
         "gpt-4",
         "azure",
         "session-1",
@@ -4698,7 +4775,7 @@ fn test_apply_token_pricing_clears_cost_without_exact_pricing() {
 
     let pricing = pricing::PricingService::new(litellm, openrouter);
     let mut msg = UnifiedMessage::new(
-        "opencode",
+        ClientId::OpenCode,
         "accounts/fireworks/models/deepseek-v4-pro",
         "fireworks",
         "session-1",
@@ -4745,7 +4822,7 @@ fn test_apply_token_pricing_prefers_provider_specific_exact_match_over_plain_exa
     let pricing = pricing::PricingService::new(litellm, openrouter);
 
     let mut msg = UnifiedMessage::new(
-        "opencode",
+        ClientId::OpenCode,
         "gemini-2.5-pro",
         "google",
         "session-1",
@@ -4787,7 +4864,7 @@ fn test_apply_token_pricing_normalizes_openai_codex_provider() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "openclaw",
+        ClientId::OpenClaw,
         "gpt-5.2",
         "openai-codex",
         "session-1",
@@ -4821,7 +4898,7 @@ fn test_apply_token_pricing_normalizes_openai_pro_provider() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "kimi",
+        ClientId::Kimi,
         "gpt-5.2",
         "openai-pro",
         "session-1",
@@ -4855,7 +4932,7 @@ fn test_apply_token_pricing_honors_observed_owl_scope_for_gpt() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "opencode",
+        ClientId::OpenCode,
         "gpt-5.2",
         "owl",
         "session-1",
@@ -4889,7 +4966,7 @@ fn test_apply_token_pricing_honors_observed_owl_scope_for_claude() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "opencode",
+        ClientId::OpenCode,
         "claude-sonnet-4-5",
         "owl",
         "session-1",
@@ -4923,7 +5000,7 @@ fn test_apply_token_pricing_honors_observed_owl_scope_for_minimax() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "opencode",
+        ClientId::OpenCode,
         "MiniMax-M2.1",
         "owl",
         "session-1",
@@ -4958,7 +5035,7 @@ fn test_apply_token_pricing_prices_claude_code_gpt_5_3_codex() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "claude",
+        ClientId::Claude,
         "gpt-5.3-codex",
         "openai",
         "session-1",
@@ -4993,7 +5070,7 @@ fn test_apply_token_pricing_prices_claude_code_minimax_model() {
     let pricing = pricing::PricingService::new(litellm, HashMap::new());
 
     let mut msg = UnifiedMessage::new(
-        "claude",
+        ClientId::Claude,
         "MiniMax-M2.1",
         "minimax",
         "session-1",
@@ -5027,7 +5104,7 @@ fn test_apply_token_pricing_prices_canonical_kimi_k2_6() {
     let pricing = pricing::PricingService::new(HashMap::new(), openrouter);
 
     let mut msg = UnifiedMessage::new(
-        "kimi",
+        ClientId::Kimi,
         "kimi-k2.6",
         "kimi",
         "session-1",
@@ -5065,7 +5142,7 @@ fn test_select_local_parse_pricing_prefers_fresh_service_for_new_models() {
     let selected = select_local_parse_pricing(Ok(Arc::clone(&fresh)), || Some(stale)).unwrap();
 
     let mut msg = UnifiedMessage::new(
-        "opencode",
+        ClientId::OpenCode,
         "gpt-5.4",
         "openai",
         "session-1",
@@ -5144,7 +5221,7 @@ fn test_parse_all_messages_with_pricing_keeps_gateway_message_under_real_client_
     .unwrap();
 
     assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].client.as_ref(), "opencode");
+    assert_eq!(messages[0].client, ClientId::OpenCode);
     assert_eq!(messages[0].model_id.as_ref(), "deepseek-v3");
     assert_eq!(messages[0].provider_id.as_ref(), "deepseek");
 }
@@ -5175,7 +5252,7 @@ fn test_local_message_loader_preserves_gateway_message_client_counts() {
 
     assert_eq!(parsed.counts.get(ClientId::OpenCode), 1);
     assert_eq!(parsed.messages.len(), 1);
-    assert_eq!(parsed.messages[0].client.as_ref(), "opencode");
+    assert_eq!(parsed.messages[0].client, ClientId::OpenCode);
     assert_eq!(parsed.messages[0].model_id.as_ref(), "deepseek-v3");
     assert_eq!(parsed.messages[0].provider_id.as_ref(), "fireworks");
 }
@@ -5256,7 +5333,7 @@ fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
         "scanner.opencodeDbPaths must reach the local message loading path"
     );
     assert_eq!(parsed_with_settings.messages.len(), 1);
-    assert_eq!(parsed_with_settings.messages[0].client.as_ref(), "opencode");
+    assert_eq!(parsed_with_settings.messages[0].client, ClientId::OpenCode);
     assert_eq!(
         parsed_with_settings.messages[0].model_id.as_ref(),
         "claude-sonnet-4"
@@ -5297,11 +5374,10 @@ fn test_missing_configured_opencode_database_is_an_explicit_error() {
         "failure must identify the failed input operation: {failure:?}"
     );
 
-    let unit = crate::adapters::InputUnit::sqlite_with_wal(ClientId::OpenCode, missing_db.clone())
-        .with_meta(crate::adapters::InputUnitMeta::OpenCodeSqlite);
+    let unit = opencode_test_input(missing_db.clone());
     assert!(message_cache::InputMessageCache::load()
         .unwrap()
-        .get_meta(&missing_db, unit.parser_version)
+        .get_meta(&missing_db, unit.decoder.version())
         .unwrap()
         .is_none());
 }
@@ -5365,6 +5441,11 @@ fn public_raw_message_report_preserves_input_health_and_metadata() {
         report.metadata.input_inventory_signature.as_bytes(),
         &[0_u8; 32]
     );
+    assert!(report
+        .metadata
+        .input_footprint
+        .contains_client(ClientId::OpenCode));
+    assert_eq!(report.metadata.input_footprint.total_bytes().unwrap(), 0);
 }
 
 #[test]
@@ -5384,7 +5465,9 @@ fn test_opencode_auto_discovery_error_reaches_public_loader() {
 
     assert!(loaded.messages.is_empty());
     assert_eq!(loaded.health.failed_inputs(), 1);
-    let failure = loaded.health.inputs()[0].status.failure().unwrap();
+    let input_health = &loaded.health.inputs()[0];
+    assert_eq!(input_health.client, ClientId::OpenCode);
+    let failure = input_health.status.failure().unwrap();
     assert!(
         failure
             .message
@@ -5445,7 +5528,7 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_hermes_profile_
 
     assert_eq!(parsed_with_settings.counts.get(ClientId::Hermes), 2);
     assert_eq!(parsed_with_settings.messages.len(), 1);
-    assert_eq!(parsed_with_settings.messages[0].client.as_ref(), "hermes");
+    assert_eq!(parsed_with_settings.messages[0].client, ClientId::Hermes);
     assert_eq!(
         parsed_with_settings.messages[0].agent.as_deref(),
         Some("Hermes Agent")
@@ -5502,7 +5585,7 @@ fn test_local_message_loader_honors_scanner_extra_scan_paths_for_zed_threads_db(
 
     assert_eq!(parsed_with_settings.counts.get(ClientId::Zed), 1);
     assert_eq!(parsed_with_settings.messages.len(), 1);
-    assert_eq!(parsed_with_settings.messages[0].client.as_ref(), "zed");
+    assert_eq!(parsed_with_settings.messages[0].client, ClientId::Zed);
     assert_eq!(
         parsed_with_settings.messages[0].session_id.as_ref(),
         "zed-extra-thread"
@@ -5636,7 +5719,7 @@ fn test_driver_uses_zed_adapter_when_only_zed_requested() {
         "an explicit Zed-only request must not scan OpenCode SQLite"
     );
     assert_eq!(parsed.messages.len(), 1);
-    assert_eq!(parsed.messages[0].client.as_ref(), "zed");
+    assert_eq!(parsed.messages[0].client, ClientId::Zed);
     assert_eq!(parsed.messages[0].session_id.as_ref(), "zed-only-thread");
 }
 
@@ -5687,7 +5770,7 @@ fn test_driver_uses_simple_file_adapter_when_only_amp_requested() {
         "an explicit Amp-only request must not scan OpenCode SQLite"
     );
     assert_eq!(parsed.messages.len(), 1);
-    assert_eq!(parsed.messages[0].client.as_ref(), "amp");
+    assert_eq!(parsed.messages[0].client, ClientId::Amp);
     assert_eq!(parsed.messages[0].model_id.as_ref(), "claude-opus-4.7");
 }
 
@@ -5736,7 +5819,7 @@ fn test_driver_uses_custom_file_adapter_when_only_codebuff_requested() {
         "an explicit Codebuff-only request must not scan OpenCode SQLite"
     );
     assert_eq!(parsed.messages.len(), 1);
-    assert_eq!(parsed.messages[0].client.as_ref(), "codebuff");
+    assert_eq!(parsed.messages[0].client, ClientId::Codebuff);
     assert_eq!(parsed.messages[0].model_id.as_ref(), "claude-sonnet-4");
 }
 
@@ -5767,13 +5850,11 @@ fn test_driver_uses_pi_and_omp_adapters_when_requested() {
 
     assert_eq!(parsed.counts.get(ClientId::Pi), 1);
     assert_eq!(parsed.counts.get(ClientId::Omp), 2);
-    assert!(parsed
-        .messages
-        .iter()
-        .any(|message| message.client.as_ref() == "pi"
-            && message.session_id.as_ref() == "pi_ses_001"));
+    assert!(parsed.messages.iter().any(
+        |message| message.client == ClientId::Pi && message.session_id.as_ref() == "pi_ses_001"
+    ));
     assert!(parsed.messages.iter().any(|message| {
-        message.client.as_ref() == "omp"
+        message.client == ClientId::Omp
             && message.session_id.as_ref() == "child-session"
             && message.agent.as_deref() == Some("OMP Reviewer")
     }));
@@ -5809,7 +5890,7 @@ fn test_driver_all_clients_includes_each_adapter_without_duplicate() {
         parsed
             .messages
             .iter()
-            .filter(|message| message.client.as_ref() == "zed")
+            .filter(|message| message.client == ClientId::Zed)
             .count(),
         1
     );
@@ -5958,12 +6039,12 @@ fn test_local_message_loader_claude_filter_ignores_scanner_settings_opencode_db_
         "Claude message must still be counted"
     );
     assert_eq!(parsed.messages.len(), 1);
-    assert_eq!(parsed.messages[0].client.as_ref(), "claude");
+    assert_eq!(parsed.messages[0].client, ClientId::Claude);
     assert!(
         parsed
             .messages
             .iter()
-            .all(|m| m.client.as_ref() != "opencode"),
+            .all(|m| m.client != ClientId::OpenCode),
         "no OpenCode messages may leak into a Claude-only result, got {:?}",
         parsed.messages
     );
@@ -6003,7 +6084,7 @@ fn test_local_message_loader_claude_transcripts_count_only_usage_metadata() {
 
     assert_eq!(parsed.counts.get(ClientId::Claude), 1);
     assert_eq!(parsed.messages.len(), 1);
-    assert_eq!(parsed.messages[0].client.as_ref(), "claude");
+    assert_eq!(parsed.messages[0].client, ClientId::Claude);
     assert_eq!(
         parsed.messages[0].session_id.as_ref(),
         "ses_123456789012345678901234567"
@@ -6054,7 +6135,7 @@ fn test_local_message_loader_amp_reads_current_thread_files() {
 
     assert_eq!(parsed.counts.get(ClientId::Amp), 1);
     assert_eq!(parsed.messages.len(), 1);
-    assert_eq!(parsed.messages[0].client.as_ref(), "amp");
+    assert_eq!(parsed.messages[0].client, ClientId::Amp);
     assert_eq!(parsed.messages[0].model_id.as_ref(), "claude-opus-4.7");
     assert_eq!(parsed.messages[0].provider_id.as_ref(), "anthropic");
     assert_eq!(parsed.messages[0].tokens.input, 10);

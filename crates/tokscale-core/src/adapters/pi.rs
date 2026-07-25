@@ -3,11 +3,13 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
-    LocalInputAdapter, MessageSink, ParseContext, ParsedUnit,
+    AdapterScanContext, BoundMessageSink, DecoderSpec, FingerprintPolicy, FoldContext,
+    InputDiscoveryError, InputUnit, LocalInputAdapter, ParseContext, ParsedUnit,
 };
 use crate::clients::ClientId;
-use crate::message_cache::{ParserId, ParserVersion};
+use crate::message_cache::DecoderId;
+#[cfg(test)]
+use crate::message_cache::DecoderVersion;
 use crate::sessions;
 
 pub(crate) struct PiAdapter;
@@ -19,27 +21,17 @@ pub(crate) static PI_ADAPTER: PiAdapter = PiAdapter;
 const PI_RECORD_REJECTION_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZATION_REVISION + 5;
 
 impl LocalInputAdapter for PiAdapter {
-    fn client(&self) -> ClientId {
-        ClientId::Pi
-    }
-
     fn discover_checked(
         &self,
+        client: ClientId,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let units = adapter_discover::discover_default_scanned_units(
-            ClientId::Pi,
+            client,
             ctx,
             FingerprintPolicy::PlainFile,
-        )?
-        .into_iter()
-        .map(|unit| {
-            unit.with_parser_version(ParserVersion::new(
-                ParserId::Pi,
-                PI_RECORD_REJECTION_REVISION,
-            ))
-        })
-        .collect();
+            DecoderSpec::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
+        )?;
         Ok(units)
     }
 
@@ -66,7 +58,7 @@ impl LocalInputAdapter for PiAdapter {
         &self,
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), crate::adapters::InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
@@ -124,12 +116,13 @@ mod tests {
     ) -> Vec<crate::UnifiedMessage> {
         let parsed = adapter.parse_checked(units, &ParseContext { pricing: None });
         let mut sink = Vec::new();
+        let binding = crate::adapters::AdapterBinding::new(ClientId::Pi, adapter);
+        let mut fold_ctx = FoldContext::new(binding, cache, None);
+        let mut bound_sink = BoundMessageSink::new(binding, &mut sink);
         adapter
-            .fold(parsed, &mut FoldContext::new(cache, None), &mut sink)
+            .fold(parsed, &mut fold_ctx, &mut bound_sink)
             .unwrap();
-        assert!(sink
-            .iter()
-            .all(|message| message.client.as_ref() == adapter.client().as_str()));
+        assert!(sink.iter().all(|message| message.client == ClientId::Pi));
         sink
     }
 
@@ -151,7 +144,7 @@ mod tests {
         };
         let ctx = scan_context(home.path(), &settings);
 
-        let units = PI_ADAPTER.discover_checked(&ctx).unwrap();
+        let units = PI_ADAPTER.discover_checked(ClientId::Pi, &ctx).unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
         let mut expected = vec![default_path, extra_path];
         expected.sort_unstable();
@@ -161,7 +154,8 @@ mod tests {
             .iter()
             .all(|unit| unit.fingerprint_policy == FingerprintPolicy::PlainFile));
         assert!(units.iter().all(|unit| {
-            unit.parser_version == ParserVersion::new(ParserId::Pi, PI_RECORD_REJECTION_REVISION)
+            unit.decoder.version()
+                == DecoderVersion::new(DecoderId::Pi, PI_RECORD_REJECTION_REVISION)
         }));
     }
 
@@ -170,7 +164,10 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("pi.jsonl");
         write_file(&path, PI_CONTENT);
-        let units = vec![InputUnit::plain_file(ClientId::Pi, path.clone())];
+        let units = vec![InputUnit::plain_file(
+            path.clone(),
+            DecoderSpec::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
+        )];
         let mut cache = message_cache::InputMessageCache::default();
 
         let actual = fold_with_adapter(&PI_ADAPTER, units, &mut cache);
@@ -185,14 +182,16 @@ mod tests {
         let path = dir.path().join("missing.jsonl");
 
         let parsed = PI_ADAPTER.parse_checked(
-            vec![InputUnit::plain_file(ClientId::Pi, path.clone())],
+            vec![InputUnit::plain_file(
+                path.clone(),
+                DecoderSpec::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
+            )],
             &ParseContext { pricing: None },
         );
 
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].input_health();
-        assert_eq!(health.client, ClientId::Pi);
-        assert_eq!(health.path, path);
+        let health = &parsed[0].health;
+        assert_eq!(parsed[0].unit.path, path);
         let failure = health.status.failure().expect("input must be unavailable");
         assert_eq!(failure.operation, "snapshot input metadata and content");
         assert!(failure.message.contains(path.to_str().unwrap()));
@@ -211,14 +210,16 @@ mod tests {
         );
 
         let parsed = PI_ADAPTER.parse_checked(
-            vec![InputUnit::plain_file(ClientId::Pi, path.clone())],
+            vec![InputUnit::plain_file(
+                path.clone(),
+                DecoderSpec::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
+            )],
             &ParseContext { pricing: None },
         );
 
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].input_health();
-        assert_eq!(health.client, ClientId::Pi);
-        assert_eq!(health.path, path);
+        let health = &parsed[0].health;
+        assert_eq!(parsed[0].unit.path, path);
         assert!(matches!(
             &health.status,
             crate::input_health::InputStatus::Complete
@@ -231,8 +232,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("partial.jsonl");
         write_file(&path, PI_CONTENT);
-        let unit = InputUnit::plain_file(ClientId::Pi, path.clone()).with_parser_version(
-            ParserVersion::new(ParserId::Pi, PI_RECORD_REJECTION_REVISION),
+        let unit = InputUnit::plain_file(
+            path.clone(),
+            DecoderSpec::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
         );
 
         let parsed = adapter_cache::load_or_scan_unit_with(
@@ -248,9 +250,9 @@ mod tests {
             },
         );
 
-        assert_eq!(parsed.input_health().path, path);
+        assert_eq!(parsed.unit.path, path);
         assert!(matches!(
-            &parsed.input_health().status,
+            &parsed.health.status,
             crate::input_health::InputStatus::Partial { .. }
         ));
         assert!(matches!(
@@ -271,7 +273,10 @@ mod tests {
 
         let path = dir.path().join("pi.jsonl");
         write_file(&path, PI_CONTENT);
-        let units = vec![InputUnit::plain_file(ClientId::Pi, path.clone())];
+        let units = vec![InputUnit::plain_file(
+            path.clone(),
+            DecoderSpec::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
+        )];
         let mut cache = message_cache::InputMessageCache::load().unwrap();
 
         let first = fold_with_adapter(&PI_ADAPTER, units.clone(), &mut cache);
@@ -288,13 +293,14 @@ mod tests {
         ));
 
         let mut second = Vec::new();
+        let binding = crate::adapters::adapter_for(ClientId::Pi).unwrap();
+        let mut fold_ctx = FoldContext::new(binding, &mut cache, None);
+        let mut bound_sink = BoundMessageSink::new(binding, &mut second);
         PI_ADAPTER
-            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut second)
+            .fold(parsed, &mut fold_ctx, &mut bound_sink)
             .unwrap();
 
-        assert!(second
-            .iter()
-            .all(|message| message.client.as_ref() == ClientId::Pi.as_str()));
+        assert!(second.iter().all(|message| message.client == ClientId::Pi));
         assert_eq!(second, first);
         restore_env_var("TOKSCALE_CONFIG_DIR", previous_config_dir);
     }
@@ -302,7 +308,10 @@ mod tests {
     #[test]
     fn input_unit_plain_file_digest_is_just_path() {
         let path = PathBuf::from("/tmp/pi.jsonl");
-        let unit = InputUnit::plain_file(ClientId::Pi, path.clone());
+        let unit = InputUnit::plain_file(
+            path.clone(),
+            DecoderSpec::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
+        );
 
         assert_eq!(unit.digest_paths(), vec![path]);
     }

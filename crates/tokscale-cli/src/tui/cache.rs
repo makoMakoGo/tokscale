@@ -17,7 +17,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use tokscale_core::usage_views::ContributionGrade;
-use tokscale_core::{GroupBy, InputInventorySignature, TuiAcc, TuiSessionEntry};
+use tokscale_core::{GroupBy, InputFootprint, InputInventorySignature, TuiAcc, TuiSessionEntry};
 
 use tokscale_core::ClientId;
 
@@ -29,7 +29,7 @@ use super::data::{
 
 /// Cache staleness threshold: 5 minutes (matches TS implementation)
 const CACHE_STALE_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-const CACHE_SCHEMA_VERSION: u32 = 51;
+const CACHE_SCHEMA_VERSION: u32 = 52;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -92,7 +92,7 @@ mod bundle_tests {
         HashSet<ClientId>,
         CacheReportScope,
         Vec<TuiSessionEntry>,
-        BTreeMap<String, u64>,
+        InputFootprint,
     ) {
         let temp = TempDir::new().unwrap();
         let guard = EnvVarGuard::set("TOKSCALE_CONFIG_DIR", temp.path().as_os_str());
@@ -118,21 +118,19 @@ mod bundle_tests {
             first_seen: 100,
             last_seen: 200,
         }];
-        let client_space = BTreeMap::from([("claude".into(), 4096)]);
-        (temp, guard, clients, scope, sessions, client_space)
+        let input_footprint =
+            InputFootprint::from_client_bytes([(ClientId::Claude, 4096)]).unwrap();
+        (temp, guard, clients, scope, sessions, input_footprint)
     }
 
     fn signature() -> InputInventorySignature {
         InputInventorySignature::from_bytes([0x39; 32])
     }
 
-    fn health_for_client_space(
-        client_space: &BTreeMap<String, u64>,
+    fn health_for_input_footprint(
+        _input_footprint: &InputFootprint,
     ) -> tokscale_core::input_health::HealthReport {
-        tokscale_core::input_health::HealthReport {
-            input_data_bytes: client_space.values().copied().sum(),
-            ..Default::default()
-        }
+        tokscale_core::input_health::HealthReport::default()
     }
 
     fn nonempty_accumulator(home: &std::path::Path) -> TuiAcc {
@@ -214,7 +212,7 @@ mod bundle_tests {
         };
         let messages = [
             UnifiedMessage::new_with_agent(
-                "opencode",
+                ClientId::OpenCode,
                 "gpt-5.5",
                 "openai",
                 "open-session",
@@ -224,7 +222,7 @@ mod bundle_tests {
                 Some("Builder".into()),
             ),
             UnifiedMessage::new_with_agent(
-                "roocode",
+                ClientId::RooCode,
                 "gpt-5.5",
                 "openai",
                 "roo-session",
@@ -240,19 +238,18 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn bundle_round_trips_sessions_and_metadata() {
-        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
+        let (_temp, _guard, clients, scope, sessions, input_footprint) = fixture();
         let accumulator = TuiAcc::new();
         let expected_signature = signature();
         let health = tokscale_core::input_health::HealthReport {
             clean_inputs: 1,
-            input_data_bytes: 4096,
             ..Default::default()
         };
 
         let store = save_tui_bundle_cache(
             &accumulator,
             &sessions,
-            &client_space,
+            &input_footprint,
             &health,
             &clients,
             &scope,
@@ -263,7 +260,7 @@ mod bundle_tests {
             .load_snapshot(&clients, &GroupBy::Model, &scope)
             .unwrap();
         assert_eq!(saved.sessions, sessions);
-        assert_eq!(saved.client_space, client_space);
+        assert_eq!(saved.input_footprint, input_footprint);
         assert_eq!(saved.data.health, health);
         assert_eq!(
             saved.input_inventory_signature.process_digest(),
@@ -277,7 +274,7 @@ mod bundle_tests {
         assert!(raw.get("sourceUniverse").is_none());
         assert!(raw.get("sourceSpace").is_none());
         assert!(raw["sessions"][0].get("source").is_none());
-        assert_eq!(raw["health"]["inputDataBytes"], 4096);
+        assert!(raw["health"].get("inputDataBytes").is_none());
         assert_eq!(raw["canonicalDigest"].as_str().unwrap().len(), 64);
         assert!(raw["common"].get("health").is_none());
         assert!(raw["common"].get("models").is_none());
@@ -288,69 +285,27 @@ mod bundle_tests {
             panic!("expected a fresh cache bundle");
         };
         assert_eq!(loaded.sessions, sessions);
-        assert_eq!(loaded.client_space, client_space);
+        assert_eq!(loaded.input_footprint, input_footprint);
         assert_eq!(loaded.data.health, health);
     }
 
     #[test]
     #[serial]
-    fn bundle_rejects_data_size_outside_client_space_invariant() {
-        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
-        let invalid_health = tokscale_core::input_health::HealthReport::default();
-
-        let error = save_tui_bundle_cache(
-            &TuiAcc::new(),
-            &sessions,
-            &client_space,
-            &invalid_health,
-            &clients,
-            &scope,
-            signature(),
-        )
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("TUI Data Size 0 does not match client-space total 4096"));
-
-        save_tui_bundle_cache(
-            &TuiAcc::new(),
-            &sessions,
-            &client_space,
-            &health_for_client_space(&client_space),
-            &clients,
-            &scope,
-            signature(),
-        )
-        .unwrap();
-        let path = cache_file().unwrap();
-        let mut value: serde_json::Value =
-            serde_json::from_reader(File::open(&path).unwrap()).unwrap();
-        value["health"]["inputDataBytes"] = serde_json::Value::from(1_u64);
-        tokscale_core::fs_atomic::write_atomic(&path, &serde_json::to_vec(&value).unwrap())
-            .unwrap();
-
-        assert!(matches!(
-            load_cache(&clients, &GroupBy::Model, &scope),
-            CacheResult::Miss
-        ));
-    }
-
-    #[test]
-    #[serial]
     fn bundle_keeps_same_named_agents_separate_across_clients() {
-        let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let (_temp, _guard, _fixture_clients, scope, _sessions, _input_footprint) = fixture();
         let accumulator = same_named_cross_client_agent_accumulator();
         let clients = HashSet::from([ClientId::OpenCode, ClientId::RooCode]);
-        let client_space = BTreeMap::from([
-            ("opencode".to_string(), 1024),
-            ("roocode".to_string(), 2048),
-        ]);
+        let input_footprint = InputFootprint::from_client_bytes([
+            (ClientId::OpenCode, 1024),
+            (ClientId::RooCode, 2048),
+        ])
+        .unwrap();
 
         save_tui_bundle_cache(
             &accumulator,
             &[],
-            &client_space,
-            &health_for_client_space(&client_space),
+            &input_footprint,
+            &health_for_input_footprint(&input_footprint),
             &clients,
             &scope,
             signature(),
@@ -384,15 +339,15 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn missing_or_null_projection_graph_is_an_explicit_miss() {
-        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
+        let (_temp, _guard, clients, scope, sessions, input_footprint) = fixture();
         let path = cache_file().unwrap();
 
         for graph in [None, Some(serde_json::Value::Null)] {
             save_tui_bundle_cache(
                 &TuiAcc::new(),
                 &sessions,
-                &client_space,
-                &health_for_client_space(&client_space),
+                &input_footprint,
+                &health_for_input_footprint(&input_footprint),
                 &clients,
                 &scope,
                 signature(),
@@ -419,7 +374,7 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn nonempty_bundle_round_trips_all_four_public_groupings() {
-        let (temp, _guard, _clients, scope, _sessions, _client_space) = fixture();
+        let (temp, _guard, _clients, scope, _sessions, _input_footprint) = fixture();
         let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
         let accumulator = nonempty_accumulator(temp.path());
         let clients = HashSet::from([ClientId::Claude, ClientId::OpenCode]);
@@ -443,11 +398,13 @@ mod bundle_tests {
                 ..Default::default()
             },
         ];
-        let client_space =
-            BTreeMap::from([("claude".to_string(), 8192), ("opencode".to_string(), 4096)]);
+        let input_footprint = InputFootprint::from_client_bytes([
+            (ClientId::Claude, 8192),
+            (ClientId::OpenCode, 4096),
+        ])
+        .unwrap();
         let mut health = tokscale_core::input_health::HealthReport {
             clean_inputs: 2,
-            input_data_bytes: 12_288,
             ..Default::default()
         };
         health.record_unavailable_input("unrelated-test-client");
@@ -478,7 +435,7 @@ mod bundle_tests {
         let mut store = save_tui_bundle_cache(
             &accumulator,
             &sessions,
-            &client_space,
+            &input_footprint,
             &health,
             &clients,
             &scope,
@@ -534,7 +491,7 @@ mod bundle_tests {
             assert_projection_eq(&loaded.data, &expected);
             assert_eq!(loaded.data.health, health);
             assert_eq!(loaded.sessions, sessions);
-            assert_eq!(loaded.client_space, client_space);
+            assert_eq!(loaded.input_footprint, input_footprint);
             assert!(loaded.data.error.is_none());
         }
         let claude_only = HashSet::from([ClientId::Claude]);
@@ -607,12 +564,15 @@ mod bundle_tests {
             day["grade"] = serde_json::Value::from("peak");
         }
 
-        let (temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let (temp, _guard, _fixture_clients, scope, _sessions, _input_footprint) = fixture();
         let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
         let accumulator = nonempty_accumulator(temp.path());
         let clients = HashSet::from([ClientId::Claude, ClientId::OpenCode]);
-        let client_space =
-            BTreeMap::from([("claude".to_string(), 8192), ("opencode".to_string(), 4096)]);
+        let input_footprint = InputFootprint::from_client_bytes([
+            (ClientId::Claude, 8192),
+            (ClientId::OpenCode, 4096),
+        ])
+        .unwrap();
         let path = cache_file().unwrap();
 
         for (boundary, mutate) in [
@@ -635,8 +595,8 @@ mod bundle_tests {
             save_tui_bundle_cache(
                 &accumulator,
                 &[],
-                &client_space,
-                &health_for_client_space(&client_space),
+                &input_footprint,
+                &health_for_input_footprint(&input_footprint),
                 &clients,
                 &scope,
                 signature(),
@@ -675,12 +635,15 @@ mod bundle_tests {
                 .remove("modelId");
         }
 
-        let (temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let (temp, _guard, _fixture_clients, scope, _sessions, _input_footprint) = fixture();
         let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
         let accumulator = nonempty_accumulator(temp.path());
         let clients = HashSet::from([ClientId::Claude, ClientId::OpenCode]);
-        let client_space =
-            BTreeMap::from([("claude".to_string(), 8192), ("opencode".to_string(), 4096)]);
+        let input_footprint = InputFootprint::from_client_bytes([
+            (ClientId::Claude, 8192),
+            (ClientId::OpenCode, 4096),
+        ])
+        .unwrap();
         let path = cache_file().unwrap();
 
         for (boundary, mutate) in [
@@ -696,8 +659,8 @@ mod bundle_tests {
             save_tui_bundle_cache(
                 &accumulator,
                 &[],
-                &client_space,
-                &health_for_client_space(&client_space),
+                &input_footprint,
+                &health_for_input_footprint(&input_footprint),
                 &clients,
                 &scope,
                 signature(),
@@ -722,21 +685,22 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn bundle_rejects_model_clients_outside_universe_in_active_and_inactive_projections() {
-        let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let (_temp, _guard, _fixture_clients, scope, _sessions, _input_footprint) = fixture();
         let accumulator = same_named_cross_client_agent_accumulator();
         let clients = HashSet::from([ClientId::OpenCode, ClientId::RooCode]);
-        let client_space = BTreeMap::from([
-            ("opencode".to_string(), 1024),
-            ("roocode".to_string(), 2048),
-        ]);
+        let input_footprint = InputFootprint::from_client_bytes([
+            (ClientId::OpenCode, 1024),
+            (ClientId::RooCode, 2048),
+        ])
+        .unwrap();
         let path = cache_file().unwrap();
 
         for (boundary, projection) in [("active", "model"), ("inactive", "workspaceModel")] {
             save_tui_bundle_cache(
                 &accumulator,
                 &[],
-                &client_space,
-                &health_for_client_space(&client_space),
+                &input_footprint,
+                &health_for_input_footprint(&input_footprint),
                 &clients,
                 &scope,
                 signature(),
@@ -803,12 +767,15 @@ mod bundle_tests {
                 .remove("modelId");
         }
 
-        let (temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let (temp, _guard, _fixture_clients, scope, _sessions, _input_footprint) = fixture();
         let _pricing_guard = EnvVarGuard::set("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1"));
         let accumulator = nonempty_accumulator(temp.path());
         let clients = HashSet::from([ClientId::Claude, ClientId::OpenCode]);
-        let client_space =
-            BTreeMap::from([("claude".to_string(), 8192), ("opencode".to_string(), 4096)]);
+        let input_footprint = InputFootprint::from_client_bytes([
+            (ClientId::Claude, 8192),
+            (ClientId::OpenCode, 4096),
+        ])
+        .unwrap();
         let path = cache_file().unwrap();
 
         for (field, mutate) in [
@@ -827,8 +794,8 @@ mod bundle_tests {
             save_tui_bundle_cache(
                 &accumulator,
                 &[],
-                &client_space,
-                &health_for_client_space(&client_space),
+                &input_footprint,
+                &health_for_input_footprint(&input_footprint),
                 &clients,
                 &scope,
                 signature(),
@@ -853,19 +820,20 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn bundle_rejects_duplicate_client_agent_identity() {
-        let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let (_temp, _guard, _fixture_clients, scope, _sessions, _input_footprint) = fixture();
         let accumulator = same_named_cross_client_agent_accumulator();
         let clients = HashSet::from([ClientId::OpenCode, ClientId::RooCode]);
-        let client_space = BTreeMap::from([
-            ("opencode".to_string(), 1024),
-            ("roocode".to_string(), 2048),
-        ]);
+        let input_footprint = InputFootprint::from_client_bytes([
+            (ClientId::OpenCode, 1024),
+            (ClientId::RooCode, 2048),
+        ])
+        .unwrap();
 
         save_tui_bundle_cache(
             &accumulator,
             &[],
-            &client_space,
-            &health_for_client_space(&client_space),
+            &input_footprint,
+            &health_for_input_footprint(&input_footprint),
             &clients,
             &scope,
             signature(),
@@ -891,19 +859,20 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn bundle_rejects_agent_outside_client_universe() {
-        let (_temp, _guard, _fixture_clients, scope, _sessions, _client_space) = fixture();
+        let (_temp, _guard, _fixture_clients, scope, _sessions, _input_footprint) = fixture();
         let accumulator = same_named_cross_client_agent_accumulator();
         let clients = HashSet::from([ClientId::OpenCode, ClientId::RooCode]);
-        let client_space = BTreeMap::from([
-            ("opencode".to_string(), 1024),
-            ("roocode".to_string(), 2048),
-        ]);
+        let input_footprint = InputFootprint::from_client_bytes([
+            (ClientId::OpenCode, 1024),
+            (ClientId::RooCode, 2048),
+        ])
+        .unwrap();
 
         save_tui_bundle_cache(
             &accumulator,
             &[],
-            &client_space,
-            &health_for_client_space(&client_space),
+            &input_footprint,
+            &health_for_input_footprint(&input_footprint),
             &clients,
             &scope,
             signature(),
@@ -925,12 +894,12 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn unsupported_schema_version_is_an_explicit_miss() {
-        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
+        let (_temp, _guard, clients, scope, sessions, input_footprint) = fixture();
         save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &client_space,
-            &health_for_client_space(&client_space),
+            &input_footprint,
+            &health_for_input_footprint(&input_footprint),
             &clients,
             &scope,
             signature(),
@@ -953,15 +922,15 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn missing_or_incomplete_canonical_state_is_an_explicit_miss() {
-        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
+        let (_temp, _guard, clients, scope, sessions, input_footprint) = fixture();
         let path = cache_file().unwrap();
 
         for replacement in [None, Some(serde_json::json!({ "model_map": [] }))] {
             save_tui_bundle_cache(
                 &TuiAcc::new(),
                 &sessions,
-                &client_space,
-                &health_for_client_space(&client_space),
+                &input_footprint,
+                &health_for_input_footprint(&input_footprint),
                 &clients,
                 &scope,
                 signature(),
@@ -987,8 +956,8 @@ mod bundle_tests {
         save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &client_space,
-            &health_for_client_space(&client_space),
+            &input_footprint,
+            &health_for_input_footprint(&input_footprint),
             &clients,
             &scope,
             signature(),
@@ -1015,8 +984,8 @@ mod bundle_tests {
         save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &client_space,
-            &health_for_client_space(&client_space),
+            &input_footprint,
+            &health_for_input_footprint(&input_footprint),
             &clients,
             &scope,
             signature(),
@@ -1036,12 +1005,12 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn canonical_content_corruption_is_an_explicit_miss() {
-        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
+        let (_temp, _guard, clients, scope, sessions, input_footprint) = fixture();
         save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &client_space,
-            &health_for_client_space(&client_space),
+            &input_footprint,
+            &health_for_input_footprint(&input_footprint),
             &clients,
             &scope,
             signature(),
@@ -1063,14 +1032,14 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn partial_or_foreign_client_membership_is_a_miss() {
-        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
+        let (_temp, _guard, clients, scope, sessions, input_footprint) = fixture();
         let path = cache_file().unwrap();
 
         save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &client_space,
-            &health_for_client_space(&client_space),
+            &input_footprint,
+            &health_for_input_footprint(&input_footprint),
             &clients,
             &scope,
             signature(),
@@ -1090,8 +1059,8 @@ mod bundle_tests {
         save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &client_space,
-            &health_for_client_space(&client_space),
+            &input_footprint,
+            &health_for_input_footprint(&input_footprint),
             &clients,
             &scope,
             signature(),
@@ -1112,12 +1081,12 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn writer_is_atomic_and_projection_store_pins_the_old_inode() {
-        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
+        let (_temp, _guard, clients, scope, sessions, input_footprint) = fixture();
         let mut store = save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &client_space,
-            &health_for_client_space(&client_space),
+            &input_footprint,
+            &health_for_input_footprint(&input_footprint),
             &clients,
             &scope,
             signature(),
@@ -1139,12 +1108,12 @@ mod bundle_tests {
     #[test]
     #[serial]
     fn fresh_and_stale_are_derived_from_the_bundle_timestamp() {
-        let (_temp, _guard, clients, scope, sessions, client_space) = fixture();
+        let (_temp, _guard, clients, scope, sessions, input_footprint) = fixture();
         save_tui_bundle_cache(
             &TuiAcc::new(),
             &sessions,
-            &client_space,
-            &health_for_client_space(&client_space),
+            &input_footprint,
+            &health_for_input_footprint(&input_footprint),
             &clients,
             &scope,
             signature(),
@@ -2240,32 +2209,14 @@ fn cache_clients_match_exact(
     cached.len() == cached_clients.len() && enabled == cached
 }
 
-fn cache_client_space_matches_exact(
+fn cache_input_footprint_matches_exact(
     client_universe: &HashSet<ClientId>,
-    client_space: &BTreeMap<String, u64>,
+    input_footprint: &InputFootprint,
 ) -> bool {
-    client_space.len() == client_universe.len()
+    input_footprint.len() == client_universe.len()
         && client_universe
             .iter()
-            .all(|client| client_space.contains_key(client.as_str()))
-}
-
-fn validate_data_size_matches_client_space(
-    client_space: &BTreeMap<String, u64>,
-    health: &tokscale_core::input_health::HealthReport,
-) -> anyhow::Result<()> {
-    let total = client_space
-        .values()
-        .copied()
-        .try_fold(0_u64, u64::checked_add)
-        .ok_or_else(|| anyhow::anyhow!("TUI client-space total exceeds u64::MAX"))?;
-    if health.input_data_bytes != total {
-        anyhow::bail!(
-            "TUI Data Size {} does not match client-space total {total}",
-            health.input_data_bytes
-        );
-    }
-    Ok(())
+            .all(|client| input_footprint.contains_client(*client))
 }
 
 fn cache_session_clients_are_enabled(
@@ -2314,7 +2265,7 @@ fn cache_usage_clients_are_enabled(client_universe: &HashSet<ClientId>, data: &U
 pub struct LoadedTuiCache {
     pub data: UsageData,
     pub sessions: Vec<TuiSessionEntry>,
-    pub client_space: BTreeMap<String, u64>,
+    pub input_footprint: InputFootprint,
     pub projection_store: ProjectionStore,
     pub input_inventory_signature: InputInventorySignature,
 }
@@ -2426,7 +2377,8 @@ struct CachedTuiBundleRef<'a> {
     input_inventory_signature: &'a InputInventorySignature,
     health: &'a tokscale_core::input_health::HealthReport,
     sessions: &'a [TuiSessionEntry],
-    client_space: &'a BTreeMap<String, u64>,
+    #[serde(rename = "clientSpace")]
+    input_footprint: &'a InputFootprint,
     canonical_digest: &'a str,
     canonical: &'a RawValue,
     common: CachedCommonProjectionRef<'a>,
@@ -2750,7 +2702,7 @@ struct ParsedTuiBundle {
     input_inventory_signature: InputInventorySignature,
     health: tokscale_core::input_health::HealthReport,
     sessions: Vec<TuiSessionEntry>,
-    client_space: BTreeMap<String, u64>,
+    input_footprint: InputFootprint,
     common: UsageCommonData,
     grouped: UsageGroupedData,
 }
@@ -2863,7 +2815,7 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
         let mut input_inventory_signature = None;
         let mut health = None;
         let mut sessions = None;
-        let mut client_space = None;
+        let mut input_footprint = None;
         let mut expected_canonical_digest: Option<String> = None;
         let mut actual_canonical_digest: Option<String> = None;
         let mut common: Option<CachedUsageCommonData> = None;
@@ -2886,7 +2838,7 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
                 )?,
                 "health" => set_once(&mut health, map.next_value()?, "health")?,
                 "sessions" => set_once(&mut sessions, map.next_value()?, "sessions")?,
-                "clientSpace" => set_once(&mut client_space, map.next_value()?, "clientSpace")?,
+                "clientSpace" => set_once(&mut input_footprint, map.next_value()?, "clientSpace")?,
                 "canonicalDigest" => set_once(
                     &mut expected_canonical_digest,
                     map.next_value()?,
@@ -2958,7 +2910,7 @@ impl<'de> Visitor<'de> for FullBundleVisitor<'_> {
             )?,
             health: required(health, "health")?,
             sessions: required(sessions, "sessions")?,
-            client_space: required(client_space, "clientSpace")?,
+            input_footprint: required(input_footprint, "clientSpace")?,
             common,
             grouped: grouped.selected,
         })
@@ -3134,10 +3086,9 @@ fn load_bundle_from_file(
     if !cache_clients_match_exact(client_universe, &parsed.client_universe) {
         anyhow::bail!("cached TUI client universe does not match the request");
     }
-    if !cache_client_space_matches_exact(client_universe, &parsed.client_space) {
-        anyhow::bail!("cached TUI client-space keys do not match the client universe");
+    if !cache_input_footprint_matches_exact(client_universe, &parsed.input_footprint) {
+        anyhow::bail!("cached TUI input-footprint keys do not match the client universe");
     }
-    validate_data_size_matches_client_space(&parsed.client_space, &parsed.health)?;
     if !cache_session_clients_are_enabled(client_universe, &parsed.sessions) {
         anyhow::bail!("cached TUI Sessions contain a client outside the client universe");
     }
@@ -3156,7 +3107,7 @@ fn load_bundle_from_file(
         loaded: LoadedTuiCache {
             data,
             sessions: parsed.sessions,
-            client_space: parsed.client_space,
+            input_footprint: parsed.input_footprint,
             projection_store: ProjectionStore {
                 file,
                 health: parsed.health,
@@ -3213,16 +3164,15 @@ pub fn load_cache(
 pub fn save_tui_bundle_cache(
     accumulator: &TuiAcc,
     sessions: &[TuiSessionEntry],
-    client_space: &BTreeMap<String, u64>,
+    input_footprint: &InputFootprint,
     health: &tokscale_core::input_health::HealthReport,
     client_universe: &HashSet<ClientId>,
     report_scope: &CacheReportScope,
     input_inventory_signature: InputInventorySignature,
 ) -> anyhow::Result<ProjectionStore> {
-    if !cache_client_space_matches_exact(client_universe, client_space) {
-        anyhow::bail!("TUI client-space keys do not match the client universe");
+    if !cache_input_footprint_matches_exact(client_universe, input_footprint) {
+        anyhow::bail!("TUI input-footprint keys do not match the client universe");
     }
-    validate_data_size_matches_client_space(client_space, health)?;
     if !cache_session_clients_are_enabled(client_universe, sessions) {
         anyhow::bail!("TUI Sessions contain a client outside the client universe");
     }
@@ -3246,7 +3196,7 @@ pub fn save_tui_bundle_cache(
         input_inventory_signature: &input_inventory_signature,
         health,
         sessions,
-        client_space,
+        input_footprint,
         canonical_digest: &canonical_digest,
         canonical: canonical.as_ref(),
         common: CachedCommonProjectionRef(accumulator),

@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::UnifiedMessage;
+use crate::{ClientId, UnifiedMessage};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,7 +68,7 @@ pub struct TuiSessionEntry {
 
 #[derive(Default)]
 pub(crate) struct TuiSessionAcc {
-    sessions: HashMap<(Arc<str>, Arc<str>), TuiSessionBucket>,
+    sessions: HashMap<(ClientId, Arc<str>), TuiSessionBucket>,
 }
 
 struct TuiSessionBucket {
@@ -93,7 +93,7 @@ impl TuiSessionAcc {
         let timestamp = timestamp_seconds(message.timestamp);
         let entry = self
             .sessions
-            .entry((Arc::clone(&message.client), Arc::clone(&message.session_id)))
+            .entry((message.client, Arc::clone(&message.session_id)))
             .or_insert_with(|| TuiSessionBucket {
                 is_main_session: false,
                 workspace_key: message.workspace_key.as_ref().map(Arc::clone),
@@ -174,9 +174,9 @@ fn timestamp_seconds(timestamp: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AggregationConfig, DateRange, GroupBy, TokenBreakdown, ViewSet};
+    use crate::{AggregationConfig, ClientId, DateRange, GroupBy, TokenBreakdown, ViewSet};
 
-    fn message(client: &str, session_id: &str, timestamp: i64) -> UnifiedMessage {
+    fn message(client: ClientId, session_id: &str, timestamp: i64) -> UnifiedMessage {
         UnifiedMessage::new(
             client,
             "gpt-5.6",
@@ -196,13 +196,13 @@ mod tests {
 
     #[test]
     fn aggregates_sessions_with_incomplete_workspace_and_counter_values() {
-        let mut first = message("codex", "session-a", 1_700_000_000_000);
+        let mut first = message(ClientId::Codex, "session-a", 1_700_000_000_000);
         first.is_main_session = false;
         first.workspace_key = Some(Arc::from(""));
         first.workspace_label = None;
         first.message_count = -3;
 
-        let mut second = message("codex", "session-a", 1_700_000_010);
+        let mut second = message(ClientId::Codex, "session-a", 1_700_000_010);
         second.model_id = Arc::from("o3");
         second.is_main_session = true;
         second.workspace_key = Some(Arc::from("later-key"));
@@ -238,10 +238,10 @@ mod tests {
     #[test]
     fn sorts_by_recent_then_client_then_session() {
         let mut acc = TuiSessionAcc::new();
-        acc.push(&message("zed", "b", 9));
-        acc.push(&message("codex", "z", 9));
-        acc.push(&message("codex", "a", 9));
-        acc.push(&message("amp", "old", 8));
+        acc.push(&message(ClientId::Zed, "b", 9));
+        acc.push(&message(ClientId::Codex, "z", 9));
+        acc.push(&message(ClientId::Codex, "a", 9));
+        acc.push(&message(ClientId::Amp, "old", 8));
 
         let keys = acc
             .finish()
@@ -269,8 +269,8 @@ mod tests {
             },
             views: ViewSet::TUI | ViewSet::TUI_SESSIONS,
         });
-        engine.push(&message("codex", "kept", 1_704_110_400_000));
-        engine.push(&message("codex", "filtered", 1_735_732_800_000));
+        engine.push(&message(ClientId::Codex, "kept", 1_704_110_400_000));
+        engine.push(&message(ClientId::Codex, "filtered", 1_735_732_800_000));
 
         let (usage, sessions) = engine.into_tui_bundle();
         let sessions = sessions.expect("tui sessions view requested");

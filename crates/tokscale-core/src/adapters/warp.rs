@@ -3,12 +3,14 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
-    LocalInputAdapter, MessageSink, ParseContext, ParsedUnit,
+    AdapterScanContext, BoundMessageSink, DecoderSpec, FingerprintPolicy, FoldContext,
+    InputDiscoveryError, InputUnit, LocalInputAdapter, ParseContext, ParsedUnit,
 };
 use crate::clients::ClientId;
 use crate::local_clients;
-use crate::message_cache::{ParserId, ParserVersion};
+use crate::message_cache::DecoderId;
+#[cfg(test)]
+use crate::message_cache::DecoderVersion;
 use crate::sessions;
 
 const WARP_RECORD_REJECTION_REVISION: u32 = 5;
@@ -16,43 +18,33 @@ const WARP_RECORD_REJECTION_REVISION: u32 = 5;
 pub(crate) struct WarpAdapter;
 
 impl LocalInputAdapter for WarpAdapter {
-    fn client(&self) -> ClientId {
-        ClientId::Warp
-    }
-
     fn discover_checked(
         &self,
+        client: ClientId,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
-        let def = ClientId::Warp
+        let def = client
             .local_def()
             .expect("Warp adapter must have local scan policy");
 
         let mut paths = adapter_discover::scan_roots(
-            ClientId::Warp,
+            client,
             local_clients::warp_sqlite_roots(ctx.home_dir),
             def.pattern,
         )?;
         paths.extend(adapter_discover::scan_roots(
-            ClientId::Warp,
-            adapter_discover::extra_roots_for_client(ClientId::Warp, ctx)?,
+            client,
+            adapter_discover::extra_roots_for_client(client, ctx)?,
             def.pattern,
         )?);
 
         let units = adapter_discover::input_units_from_paths(
-            ClientId::Warp,
+            client,
             paths,
             FingerprintPolicy::SqliteWithWal,
+            DecoderSpec::plain(DecoderId::Warp, WARP_RECORD_REJECTION_REVISION),
         )?;
-        Ok(units
-            .into_iter()
-            .map(|unit| {
-                unit.with_parser_version(ParserVersion::new(
-                    ParserId::Warp,
-                    WARP_RECORD_REJECTION_REVISION,
-                ))
-            })
-            .collect())
+        Ok(units)
     }
 
     fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
@@ -68,7 +60,7 @@ impl LocalInputAdapter for WarpAdapter {
         &self,
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), crate::adapters::InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
@@ -102,7 +94,7 @@ mod tests {
             scanner_settings: &settings,
         };
 
-        let units = WARP_ADAPTER.discover_checked(&ctx).unwrap();
+        let units = WARP_ADAPTER.discover_checked(ClientId::Warp, &ctx).unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
 
         assert_eq!(paths, vec![default_db, extra_db]);
@@ -110,8 +102,8 @@ mod tests {
             .iter()
             .all(|unit| unit.fingerprint_policy == FingerprintPolicy::SqliteWithWal));
         assert!(units.iter().all(|unit| {
-            unit.parser_version
-                == ParserVersion::new(ParserId::Warp, WARP_RECORD_REJECTION_REVISION)
+            unit.decoder.version()
+                == DecoderVersion::new(DecoderId::Warp, WARP_RECORD_REJECTION_REVISION)
         }));
     }
 }

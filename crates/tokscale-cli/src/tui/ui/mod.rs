@@ -274,13 +274,22 @@ mod tests {
         app: &mut App,
         clients: &[ClientId],
         data: UsageData,
-        client_space: BTreeMap<String, u64>,
+        client_bytes: BTreeMap<String, u64>,
     ) {
+        let input_footprint = tokscale_core::InputFootprint::from_client_bytes(
+            client_bytes.into_iter().map(|(client, bytes)| {
+                (
+                    ClientId::from_str(&client).expect("test client must be canonical"),
+                    bytes,
+                )
+            }),
+        )
+        .unwrap();
         *app.selected_clients.borrow_mut() = clients.iter().copied().collect();
         app.install_tui_snapshot(
             data,
             Vec::new(),
-            client_space,
+            input_footprint,
             ProjectionBackend::Memory(TuiAcc::default()),
             GroupBy::Model,
         );

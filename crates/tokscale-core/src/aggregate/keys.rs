@@ -4,7 +4,7 @@ use std::{collections::HashSet, hash::Hash, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{sessions, GroupBy, UnifiedMessage};
+use crate::{sessions, ClientId, GroupBy, UnifiedMessage};
 
 pub const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
 
@@ -129,11 +129,11 @@ impl WorkspaceKey {
 pub(crate) enum GroupedModelKey {
     Model(Arc<str>),
     ClientModel {
-        client: Arc<str>,
+        client: ClientId,
         model: Arc<str>,
     },
     ClientProviderModel {
-        client: Arc<str>,
+        client: ClientId,
         provider: Arc<str>,
         model: Arc<str>,
     },
@@ -150,11 +150,11 @@ impl GroupedModelKey {
         match group_by {
             GroupBy::Model => Self::Model(Arc::clone(&msg.model_id)),
             GroupBy::ClientModel => Self::ClientModel {
-                client: Arc::clone(&msg.client),
+                client: msg.client,
                 model: Arc::clone(&msg.model_id),
             },
             GroupBy::ClientProviderModel => Self::ClientProviderModel {
-                client: Arc::clone(&msg.client),
+                client: msg.client,
                 provider: Arc::clone(&msg.provider_id),
                 model: Arc::clone(&msg.model_id),
             },
@@ -182,7 +182,7 @@ impl GroupedModelKey {
             }
             Self::ClientModel { client, model } => {
                 output.push_str("cm|");
-                push_len_prefixed(&mut output, client);
+                push_len_prefixed(&mut output, client.as_str());
                 push_len_prefixed(&mut output, model);
             }
             Self::ClientProviderModel {
@@ -191,7 +191,7 @@ impl GroupedModelKey {
                 model,
             } => {
                 output.push_str("cpm|");
-                push_len_prefixed(&mut output, client);
+                push_len_prefixed(&mut output, client.as_str());
                 push_len_prefixed(&mut output, provider);
                 push_len_prefixed(&mut output, model);
             }
@@ -240,7 +240,7 @@ impl HourlyModelKey {
 /// switching groupings is an in-memory re-fold instead of a rescan.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FineModelKey {
-    pub(crate) client: Arc<str>,
+    pub(crate) client: ClientId,
     pub(crate) provider: Arc<str>,
     pub(crate) workspace: WorkspaceKey,
     pub(crate) session: Arc<str>,
@@ -250,7 +250,7 @@ pub(crate) struct FineModelKey {
 impl FineModelKey {
     pub(crate) fn from_message(msg: &UnifiedMessage) -> Self {
         Self {
-            client: Arc::clone(&msg.client),
+            client: msg.client,
             provider: Arc::clone(&msg.provider_id),
             workspace: WorkspaceKey::from_message(msg),
             session: Arc::clone(&msg.session_id),
@@ -263,11 +263,11 @@ impl FineModelKey {
         match group_by {
             GroupBy::Model => GroupedModelKey::Model(Arc::clone(&self.model)),
             GroupBy::ClientModel => GroupedModelKey::ClientModel {
-                client: Arc::clone(&self.client),
+                client: self.client,
                 model: Arc::clone(&self.model),
             },
             GroupBy::ClientProviderModel => GroupedModelKey::ClientProviderModel {
-                client: Arc::clone(&self.client),
+                client: self.client,
                 provider: Arc::clone(&self.provider),
                 model: Arc::clone(&self.model),
             },
@@ -328,26 +328,20 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::TokenBreakdown;
+    use crate::{ClientId, TokenBreakdown};
 
     fn message() -> UnifiedMessage {
-        UnifiedMessage {
-            client: Arc::from("client"),
-            model_id: Arc::from("model"),
-            provider_id: Arc::from("provider"),
-            session_id: Arc::from("session"),
-            is_main_session: true,
-            workspace_key: Some(Arc::from("workspace")),
-            workspace_label: Some(Arc::from("Workspace")),
-            timestamp: 0,
-            tokens: TokenBreakdown::default(),
-            cost: 0.0,
-            message_count: 1,
-            agent: None,
-            agent_instance: None,
-            dedup_key: None,
-            is_turn_start: false,
-        }
+        let mut message = UnifiedMessage::new(
+            ClientId::Codex,
+            "model",
+            "provider",
+            "session",
+            0,
+            TokenBreakdown::default(),
+            0.0,
+        );
+        message.set_workspace(Some("workspace".to_string()), Some("Workspace".to_string()));
+        message
     }
 
     #[test]
@@ -372,37 +366,44 @@ mod tests {
     }
 
     #[test]
-    fn structured_keys_do_not_alias_separator_collisions() {
+    fn structured_keys_include_typed_client_identity() {
         let mut left = message();
-        left.client = Arc::from("a:b");
+        left.client = ClientId::Amp;
         left.model_id = Arc::from("c");
         let mut right = message();
-        right.client = Arc::from("a");
-        right.model_id = Arc::from("b:c");
+        right.client = ClientId::Codex;
+        right.model_id = Arc::from("c");
 
         let left = GroupedModelKey::from_message(&GroupBy::ClientModel, &left);
         let right = GroupedModelKey::from_message(&GroupBy::ClientModel, &right);
         assert_ne!(left, right);
         assert_ne!(left.map_key(), right.map_key());
-        assert_eq!(left.map_key(), "v1|cm|3:a:b1:c");
-        assert_eq!(right.map_key(), "v1|cm|1:a3:b:c");
+        assert_eq!(left.map_key(), "v1|cm|3:amp1:c");
+        assert_eq!(right.map_key(), "v1|cm|5:codex1:c");
     }
 
     #[test]
-    fn keys_compare_string_values_instead_of_arc_addresses() {
+    fn model_keys_compare_string_values_instead_of_arc_addresses() {
         let mut left = message();
-        left.client = Arc::from(String::from("same-client"));
         left.model_id = Arc::from(String::from("same-model"));
         let mut right = message();
-        right.client = Arc::from(String::from("same-client"));
         right.model_id = Arc::from(String::from("same-model"));
-        assert!(!Arc::ptr_eq(&left.client, &right.client));
         assert!(!Arc::ptr_eq(&left.model_id, &right.model_id));
 
         assert_eq!(
             GroupedModelKey::from_message(&GroupBy::ClientModel, &left),
             GroupedModelKey::from_message(&GroupBy::ClientModel, &right)
         );
+    }
+
+    #[test]
+    fn fine_model_key_persists_client_as_stable_catalog_id() {
+        let key = FineModelKey::from_message(&message());
+        let encoded = serde_json::to_value(&key).unwrap();
+        assert_eq!(encoded["client"], "codex");
+
+        let restored: FineModelKey = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored.client, ClientId::Codex);
     }
 
     #[test]
@@ -466,7 +467,9 @@ mod tests {
 
     #[test]
     fn unrelated_grouping_does_not_clone_workspace_or_session() {
-        let msg = message();
+        let mut msg = message();
+        msg.workspace_key = Some(Arc::from(String::from("unique-workspace")));
+        msg.session_id = Arc::from(String::from("unique-session"));
         let workspace = Arc::clone(msg.workspace_key.as_ref().expect("workspace"));
         let session = Arc::clone(&msg.session_id);
         let workspace_before = Arc::strong_count(&workspace);

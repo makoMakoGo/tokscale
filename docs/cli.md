@@ -110,14 +110,20 @@ All local Models JSON uses this top-level envelope:
     "rejectedRecords": 0,
     "partialInputs": 0,
     "failedInputs": 0,
-    "inputDataBytes": 0,
     "issues": []
   },
   "metadata": {
+    "inputFootprint": {
+      "codex": 0
+    },
     "processingTimeMs": 0
   }
 }
 ```
+
+`metadata.inputFootprint` is the confirmed byte count keyed by canonical Client
+ID. Its checked sum is the report's Data Size; the report does not persist a
+second total.
 
 Stdout contains only the table or JSON document. Progress, `--benchmark`
 timing, Data Health summaries, warnings, and errors go to stderr. A degraded
@@ -200,7 +206,7 @@ tokscale cache prune
 Models never writes that aggregate cache. Scan-input message shards remain an
 internal derived cache and are written while parsing.
 
-`cache prune` removes orphaned Inputs and superseded parser revisions.
+`cache prune` removes orphaned Inputs and superseded decoder revisions.
 Unreadable or unclassifiable shards make the explicit maintenance command fail
 instead of reporting partial success.
 

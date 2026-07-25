@@ -2,8 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::clients::ClientId;
-use crate::message_cache::ParserId;
+use crate::message_cache::DecoderId;
 use crate::message_cache::{CacheLookupFailure, CacheReadFailure, InputCacheError};
 use crate::sessions::error::SessionParseError;
 
@@ -11,7 +10,6 @@ type BoxInputError = Box<dyn Error + Send + Sync + 'static>;
 
 #[derive(Debug)]
 pub(crate) struct InputDiscoveryError {
-    pub(crate) client: ClientId,
     pub(crate) path: PathBuf,
     pub(crate) operation: &'static str,
     source: BoxInputError,
@@ -19,13 +17,11 @@ pub(crate) struct InputDiscoveryError {
 
 impl InputDiscoveryError {
     pub(crate) fn new(
-        client: ClientId,
         path: impl Into<PathBuf>,
         operation: &'static str,
         source: impl Error + Send + Sync + 'static,
     ) -> Self {
         Self {
-            client,
             path: path.into(),
             operation,
             source: Box::new(source),
@@ -37,8 +33,7 @@ impl fmt::Display for InputDiscoveryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{} input discovery failed to {} `{}`: {}",
-            self.client.as_str(),
+            "input discovery failed to {} `{}`: {}",
             self.operation,
             self.path.display(),
             self.source
@@ -54,38 +49,30 @@ impl Error for InputDiscoveryError {
 
 #[derive(Debug)]
 pub(crate) struct InputParseError {
-    pub(crate) client: ClientId,
     pub(crate) path: PathBuf,
-    pub(crate) parser: ParserId,
+    pub(crate) decoder: DecoderId,
     pub(crate) operation: &'static str,
     source: BoxInputError,
 }
 
 impl InputParseError {
     pub(crate) fn new(
-        client: ClientId,
         path: impl Into<PathBuf>,
-        parser: ParserId,
+        decoder: DecoderId,
         operation: &'static str,
         source: impl Error + Send + Sync + 'static,
     ) -> Self {
         Self {
-            client,
             path: path.into(),
-            parser,
+            decoder,
             operation,
             source: Box::new(source),
         }
     }
 
-    pub(crate) fn from_session(
-        client: ClientId,
-        path: &Path,
-        parser: ParserId,
-        source: SessionParseError,
-    ) -> Self {
+    pub(crate) fn from_session(path: &Path, decoder: DecoderId, source: SessionParseError) -> Self {
         let input_path = source.path().unwrap_or(path).to_path_buf();
-        Self::new(client, input_path, parser, source.operation(), source)
+        Self::new(input_path, decoder, source.operation(), source)
     }
 }
 
@@ -93,9 +80,8 @@ impl fmt::Display for InputParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{} parser `{}` failed to {} input `{}`: {}",
-            self.client.as_str(),
-            self.parser.stable_name(),
+            "decoder `{}` failed to {} input `{}`: {}",
+            self.decoder.stable_name(),
             self.operation,
             self.path.display(),
             self.source
@@ -154,5 +140,40 @@ impl InputPipelineError {
             primary: Box::new(primary),
             finalization,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn discovery_diagnostic_is_source_neutral() {
+        let error = InputDiscoveryError::new(
+            "/inputs/history",
+            "walk directory",
+            io::Error::new(io::ErrorKind::PermissionDenied, "permission denied"),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "input discovery failed to walk directory `/inputs/history`: permission denied"
+        );
+    }
+
+    #[test]
+    fn parse_diagnostic_identifies_the_decoder_not_a_client() {
+        let error = InputParseError::new(
+            "/inputs/session.jsonl",
+            DecoderId::Codex,
+            "decode session",
+            io::Error::new(io::ErrorKind::InvalidData, "invalid record"),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "decoder `codex` failed to decode session input `/inputs/session.jsonl`: invalid record"
+        );
     }
 }

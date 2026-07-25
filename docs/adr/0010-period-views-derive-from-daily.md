@@ -62,7 +62,7 @@ reinterpret runtime labels. Agent aggregation uses the structured
 `(client, agent)` identity and every public Agent entry carries exactly one
 Client, so equal labels from different Clients never merge. Identity-semantic
 changes invalidate affected message shards and the persisted TUI generation
-through the appropriate parser revision and schema/version change.
+through the appropriate decoder revision and schema/version change.
 
 ### Group By projections
 

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) use tokscale_core::TuiSessionEntry as SessionEntry;
+use tokscale_core::{ClientId, InputFootprint};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ClientSummary {
@@ -22,6 +23,7 @@ pub(crate) struct SessionSnapshot {
     sessions: Vec<SessionEntry>,
     client_summaries: Vec<ClientSummary>,
     session_indices_by_client: BTreeMap<String, Vec<usize>>,
+    input_footprint: InputFootprint,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -38,10 +40,7 @@ pub(crate) enum SessionProjectionStatus {
 }
 
 impl SessionSnapshot {
-    pub(crate) fn new(
-        mut sessions: Vec<SessionEntry>,
-        client_space: BTreeMap<String, u64>,
-    ) -> Self {
+    pub(crate) fn new(mut sessions: Vec<SessionEntry>, input_footprint: InputFootprint) -> Self {
         sessions.sort_by(|left, right| {
             right
                 .last_seen
@@ -81,9 +80,9 @@ impl SessionSnapshot {
             entry.3 = entry.3.max(session.last_seen);
         }
 
-        for client in client_space.keys() {
+        for (client, _) in input_footprint.iter() {
             summaries
-                .entry(client.clone())
+                .entry(client.as_str().to_string())
                 .or_insert_with(|| (0, 0, BTreeSet::new(), 0));
         }
 
@@ -92,7 +91,9 @@ impl SessionSnapshot {
             .map(
                 |(client, (session_count, main_session_count, workspaces, last_seen))| {
                     ClientSummary {
-                        space_bytes: client_space.get(&client).copied().unwrap_or(0),
+                        space_bytes: ClientId::from_str(&client)
+                            .map(|client| input_footprint.bytes_for(client))
+                            .unwrap_or(0),
                         client,
                         main_session_count,
                         session_count,
@@ -107,7 +108,14 @@ impl SessionSnapshot {
             sessions,
             client_summaries,
             session_indices_by_client,
+            input_footprint,
         }
+    }
+
+    pub(crate) fn total_input_bytes(&self) -> u64 {
+        self.input_footprint
+            .total_bytes()
+            .expect("validated input footprint must fit in u64")
     }
 
     #[cfg(test)]
@@ -179,7 +187,7 @@ mod tests {
                 session("opencode", "o-new", true, Some("repo-b"), None, 30),
                 session("codex", "c-new", false, Some("repo-a"), None, 30),
             ],
-            BTreeMap::new(),
+            InputFootprint::default(),
         );
 
         assert_eq!(
@@ -211,11 +219,12 @@ mod tests {
                 session("codex", "c-2", false, Some("repo-a"), None, 30),
                 session("opencode", "o-1", true, Some(""), Some("repo-b"), 20),
             ],
-            BTreeMap::from([
-                ("claude".to_string(), 7),
-                ("codex".to_string(), 42),
-                ("opencode".to_string(), 99),
-            ]),
+            InputFootprint::from_client_bytes([
+                (ClientId::Claude, 7),
+                (ClientId::Codex, 42),
+                (ClientId::OpenCode, 99),
+            ])
+            .unwrap(),
         );
 
         let codex = snapshot

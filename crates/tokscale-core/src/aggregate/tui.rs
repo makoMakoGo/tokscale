@@ -493,7 +493,7 @@ pub fn find_peak_hour(hourly: &[HourlyUsage]) -> Option<(u32, u64, f64)> {
 #[derive(Default, Serialize, Deserialize)]
 pub struct TuiAcc {
     #[serde(with = "map_as_vec")]
-    usage_totals_by_client: HashMap<Arc<str>, UsageTotalsBucket>,
+    usage_totals_by_client: HashMap<ClientId, UsageTotalsBucket>,
     #[serde(with = "map_as_vec")]
     model_map: HashMap<FineModelKey, FineModelBucket>,
     #[serde(with = "map_as_vec")]
@@ -675,27 +675,27 @@ struct FineModelBucket {
 struct TuiModelBucket {
     model: Arc<str>,
     providers: IdentitySet<Arc<str>>,
-    client: Arc<str>,
+    client: ClientId,
     workspace_key: Option<Arc<str>>,
     workspace_label: Option<Arc<str>>,
     tokens: UsageTokenBreakdown,
     cost: f64,
-    sessions: IdentitySet<(Arc<str>, Arc<str>)>,
+    sessions: IdentitySet<(ClientId, Arc<str>)>,
     // Boxed only for grouping modes that merge clients; keeps client-scoped
     // high-cardinality buckets free of an inline HashMap.
     #[allow(clippy::box_collection)]
-    client_totals: Option<Box<HashMap<Arc<str>, ClientContributionOrder>>>,
+    client_totals: Option<Box<HashMap<ClientId, ClientContributionOrder>>>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 enum AgentInstanceKey {
     Explicit(Arc<str>),
-    Derived { client: Arc<str>, session: Arc<str> },
+    Derived { client: ClientId, session: Arc<str> },
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 struct AgentKey {
-    client: Arc<str>,
+    client: ClientId,
     agent: Arc<str>,
 }
 
@@ -710,7 +710,7 @@ struct AgentBucket {
 #[derive(Serialize, Deserialize)]
 struct DailyBucket {
     date: NaiveDate,
-    clients: HashMap<Arc<str>, DailyClientBucket>,
+    clients: HashMap<ClientId, DailyClientBucket>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -748,7 +748,7 @@ struct DailyModelBucket {
 #[derive(Serialize, Deserialize)]
 struct HourlyBucket {
     datetime: NaiveDateTime,
-    clients: HashMap<Arc<str>, HourlyClientBucket>,
+    clients: HashMap<ClientId, HourlyClientBucket>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -791,7 +791,7 @@ fn materialize_tui_model(bucket: TuiModelBucket) -> UsageModelEntry {
         });
         clients
             .iter()
-            .map(|(client, _)| client.as_ref())
+            .map(|(client, _)| client.as_str())
             .collect::<Vec<_>>()
             .join(crate::usage_views::MODEL_CLIENT_SEPARATOR)
     } else {
@@ -833,8 +833,8 @@ fn materialize_daily_model(model: DailyModelBucket) -> DailyModelInfo {
 /// floating-point sums stay deterministic; the first-created bucket in the group
 /// attributes the provider and workspace label (its first message is the
 /// group's first message, matching a direct grouped fold).
-fn client_is_selected(client: &str, selected: Option<&HashSet<ClientId>>) -> bool {
-    selected.is_none_or(|selected| crate::selected_client_ids_include(client, selected))
+fn client_is_selected(client: ClientId, selected: Option<&HashSet<ClientId>>) -> bool {
+    selected.is_none_or(|selected| selected.contains(&client))
 }
 
 fn materialize_daily_common(
@@ -850,9 +850,9 @@ fn materialize_daily_common(
     let mut selected_clients: Vec<_> = bucket
         .clients
         .iter()
-        .filter(|(client, _)| client_is_selected(client, selected))
+        .filter(|(client, _)| client_is_selected(**client, selected))
         .collect();
-    selected_clients.sort_by_key(|(client, _)| *client);
+    selected_clients.sort_by_key(|(client, _)| **client);
 
     for (client, client_bucket) in selected_clients {
         clients.insert(
@@ -938,7 +938,7 @@ fn materialize_daily_models(
     let client_models: BTreeMap<_, _> = bucket
         .clients
         .iter()
-        .filter(|(client, _)| client_is_selected(client, selected))
+        .filter(|(client, _)| client_is_selected(**client, selected))
         .map(|(client, client_bucket)| {
             (
                 client.to_string(),
@@ -980,9 +980,9 @@ fn materialize_hourly_common(
     let mut selected_clients: Vec<_> = bucket
         .clients
         .iter()
-        .filter(|(client, _)| client_is_selected(client, selected))
+        .filter(|(client, _)| client_is_selected(**client, selected))
         .collect();
-    selected_clients.sort_by_key(|(client, _)| *client);
+    selected_clients.sort_by_key(|(client, _)| **client);
 
     for (client, client_bucket) in selected_clients {
         clients.insert(client.to_string());
@@ -1011,7 +1011,7 @@ fn materialize_hourly_models(
 ) -> Option<HourlyModelProjection> {
     let mut fine_models = Vec::new();
     for (client, client_bucket) in &bucket.clients {
-        if client_is_selected(client, selected) {
+        if client_is_selected(*client, selected) {
             fine_models.extend(client_bucket.models.iter());
         }
     }
@@ -1055,9 +1055,10 @@ impl TuiAcc {
             .expect("TUI aggregation sequence exceeds usize::MAX");
 
         let msg_cost = sane_cost(msg.cost);
+        let client = msg.client;
 
         self.usage_totals_by_client
-            .entry(Arc::clone(&msg.client))
+            .entry(client)
             .or_default()
             .push(msg, msg_cost);
 
@@ -1082,7 +1083,7 @@ impl TuiAcc {
             let agent_entry = self
                 .agent_map
                 .entry(AgentKey {
-                    client: Arc::clone(&msg.client),
+                    client,
                     agent: Arc::clone(agent),
                 })
                 .or_insert_with(|| AgentBucket {
@@ -1098,7 +1099,7 @@ impl TuiAcc {
                 .saturating_add(msg.message_count.max(0) as u32);
             let instance_key = msg.agent_instance.as_ref().map_or_else(
                 || AgentInstanceKey::Derived {
-                    client: Arc::clone(&msg.client),
+                    client,
                     session: Arc::clone(&msg.session_id),
                 },
                 |instance| AgentInstanceKey::Explicit(Arc::clone(instance)),
@@ -1112,16 +1113,17 @@ impl TuiAcc {
                 clients: HashMap::new(),
             });
 
-            let client_entry = daily_entry
-                .clients
-                .entry(Arc::clone(&msg.client))
-                .or_insert_with(|| DailyClientBucket {
-                    tokens: UsageTokenBreakdown::default(),
-                    cost: 0.0,
-                    message_count: 0,
-                    turn_count: 0,
-                    models: HashMap::new(),
-                });
+            let client_entry =
+                daily_entry
+                    .clients
+                    .entry(client)
+                    .or_insert_with(|| DailyClientBucket {
+                        tokens: UsageTokenBreakdown::default(),
+                        cost: 0.0,
+                        message_count: 0,
+                        turn_count: 0,
+                        models: HashMap::new(),
+                    });
             add_unified_tokens(&mut client_entry.tokens, &msg.tokens);
             client_entry.cost += msg_cost;
             client_entry.message_count = client_entry
@@ -1156,16 +1158,17 @@ impl TuiAcc {
                     datetime: bucket,
                     clients: HashMap::new(),
                 });
-            let client_entry = hourly_entry
-                .clients
-                .entry(Arc::clone(&msg.client))
-                .or_insert_with(|| HourlyClientBucket {
-                    tokens: UsageTokenBreakdown::default(),
-                    cost: 0.0,
-                    models: HashMap::new(),
-                    message_count: 0,
-                    turn_count: 0,
-                });
+            let client_entry =
+                hourly_entry
+                    .clients
+                    .entry(client)
+                    .or_insert_with(|| HourlyClientBucket {
+                        tokens: UsageTokenBreakdown::default(),
+                        cost: 0.0,
+                        models: HashMap::new(),
+                        message_count: 0,
+                        turn_count: 0,
+                    });
             add_unified_tokens(&mut client_entry.tokens, &msg.tokens);
             client_entry.cost += msg_cost;
             client_entry.message_count = client_entry
@@ -1203,7 +1206,7 @@ impl TuiAcc {
             OneOrMany<(&FineModelKey, &FineModelBucket)>,
         > = HashMap::new();
         for (fine_key, fine_model) in &self.model_map {
-            if !client_is_selected(&fine_key.client, selected) {
+            if !client_is_selected(fine_key.client, selected) {
                 continue;
             }
             let fine_bucket = (fine_key, fine_model);
@@ -1232,7 +1235,7 @@ impl TuiAcc {
                     TuiModelBucket {
                         model: Arc::clone(&fine_key.model),
                         providers: IdentitySet::default(),
-                        client: Arc::clone(&fine_key.client),
+                        client: fine_key.client,
                         workspace_key,
                         workspace_label,
                         tokens: UsageTokenBreakdown::default(),
@@ -1247,7 +1250,7 @@ impl TuiAcc {
                         .client_totals
                         .as_mut()
                         .expect("merge-client TUI grouping has client totals")
-                        .entry(Arc::clone(&fine_key.client))
+                        .entry(fine_key.client)
                         .or_insert_with(|| ClientContributionOrder {
                             first_seen: fine_model.first_seen,
                             total_tokens: 0,
@@ -1265,7 +1268,7 @@ impl TuiAcc {
 
                 model_entry
                     .sessions
-                    .insert((Arc::clone(&fine_key.client), Arc::clone(&fine_key.session)));
+                    .insert((fine_key.client, Arc::clone(&fine_key.session)));
             }
             model_buckets.push((
                 key,
@@ -1314,7 +1317,7 @@ impl TuiAcc {
             .agent_map
             .iter()
             .filter_map(|(key, agent)| {
-                if !client_is_selected(&key.client, selected) {
+                if !client_is_selected(key.client, selected) {
                     return None;
                 }
                 Some(AgentEntry {
@@ -1360,9 +1363,9 @@ impl TuiAcc {
         let mut client_totals: Vec<_> = self
             .usage_totals_by_client
             .iter()
-            .filter(|(client, _)| client_is_selected(client, selected))
+            .filter(|(client, _)| client_is_selected(**client, selected))
             .collect();
-        client_totals.sort_by_key(|(client, _)| *client);
+        client_totals.sort_by_key(|(client, _)| **client);
 
         let mut total_token_breakdown = UsageTokenBreakdown::default();
         let mut total_cost = 0.0;
@@ -1475,7 +1478,7 @@ mod tests {
     }
 
     fn make_workspace_message(
-        client: &str,
+        client: ClientId,
         model_id: &str,
         provider_id: &str,
         session_id: &str,
@@ -1507,7 +1510,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn make_message_with_tokens(
-        client: &str,
+        client: ClientId,
         model_id: &str,
         provider_id: &str,
         session_id: &str,
@@ -1775,7 +1778,7 @@ mod tests {
             .aggregate_messages(
                 vec![
                     make_workspace_message(
-                        "opencode",
+                        ClientId::OpenCode,
                         "mimo-v2.5-pro",
                         "xiaomi",
                         "session-1",
@@ -1784,7 +1787,7 @@ mod tests {
                         None,
                     ),
                     make_workspace_message(
-                        "opencode",
+                        ClientId::OpenCode,
                         "mimo-v2.5-pro",
                         "xiaomi",
                         "session-2",
@@ -1811,7 +1814,7 @@ mod tests {
             .aggregate_messages(
                 vec![
                     make_workspace_message(
-                        "opencode",
+                        ClientId::OpenCode,
                         "mimo-v2.5-pro",
                         "xiaomi",
                         "session-1",
@@ -1820,7 +1823,7 @@ mod tests {
                         None,
                     ),
                     make_workspace_message(
-                        "opencode",
+                        ClientId::OpenCode,
                         "mimo-v2.5-pro",
                         "xiaomi",
                         "session-2",
@@ -1852,7 +1855,7 @@ mod tests {
         let usage = loader
             .aggregate_messages(
                 vec![make_workspace_message(
-                    "opencode",
+                    ClientId::OpenCode,
                     "gpt-5.5",
                     "openai",
                     "session-1",
@@ -1885,7 +1888,7 @@ mod tests {
             .aggregate_messages(
                 vec![
                     make_workspace_message(
-                        "opencode",
+                        ClientId::OpenCode,
                         "gpt-5.5",
                         "openai",
                         "session-1",
@@ -1894,7 +1897,7 @@ mod tests {
                         None,
                     ),
                     make_workspace_message(
-                        "opencode",
+                        ClientId::OpenCode,
                         "gpt-5.5",
                         "microsoft",
                         "session-2",
@@ -1925,7 +1928,7 @@ mod tests {
             .aggregate_messages(
                 vec![
                     make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "kimi-for-coding",
                         "kimi",
                         "session-1",
@@ -1934,7 +1937,7 @@ mod tests {
                         None,
                     ),
                     make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "kimi-for-coding",
                         "kimi",
                         "session-2",
@@ -1957,7 +1960,7 @@ mod tests {
         let loader = TuiUsageHarness;
         let messages = vec![
             UnifiedMessage::new_with_agent(
-                "opencode",
+                ClientId::OpenCode,
                 "claude-sonnet-4",
                 "anthropic",
                 "session-1",
@@ -1973,7 +1976,7 @@ mod tests {
                 Some("Builder".to_string()),
             ),
             UnifiedMessage::new_with_agent(
-                "roocode",
+                ClientId::RooCode,
                 "claude-sonnet-4",
                 "anthropic",
                 "session-2",
@@ -2023,7 +2026,7 @@ mod tests {
             .aggregate_messages(
                 vec![
                     make_message_with_tokens(
-                        "opencode",
+                        ClientId::OpenCode,
                         "gpt-5.5",
                         "openai",
                         "session-opencode",
@@ -2034,7 +2037,7 @@ mod tests {
                         0,
                     ),
                     make_message_with_tokens(
-                        "codex",
+                        ClientId::Codex,
                         "gpt-5.5",
                         "openai",
                         "session-codex",
@@ -2045,7 +2048,7 @@ mod tests {
                         0,
                     ),
                     make_message_with_tokens(
-                        "pi",
+                        ClientId::Pi,
                         "gpt-5.5",
                         "openai",
                         "session-pi",
@@ -2071,7 +2074,7 @@ mod tests {
             .aggregate_messages(
                 vec![
                     make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
@@ -2080,7 +2083,7 @@ mod tests {
                         Some("repo-a"),
                     ),
                     make_workspace_message(
-                        "qwen",
+                        ClientId::Qwen,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-2",
@@ -2110,7 +2113,7 @@ mod tests {
             .aggregate_messages(
                 vec![
                     make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
@@ -2119,7 +2122,7 @@ mod tests {
                         None,
                     ),
                     make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-2",
@@ -2149,7 +2152,7 @@ mod tests {
             .aggregate_messages(
                 vec![
                     make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
@@ -2158,7 +2161,7 @@ mod tests {
                         Some("unknown-workspace"),
                     ),
                     make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-2",
@@ -2191,7 +2194,7 @@ mod tests {
             .aggregate_messages(
                 vec![
                     make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
@@ -2200,7 +2203,7 @@ mod tests {
                         Some("repo-a"),
                     ),
                     make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-2",
@@ -2259,7 +2262,7 @@ mod tests {
             .aggregate_messages(
                 vec![
                     make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
@@ -2268,7 +2271,7 @@ mod tests {
                         Some("demo"),
                     ),
                     make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-2",
@@ -2328,7 +2331,7 @@ mod tests {
             let usage = loader
                 .aggregate_messages(
                     vec![make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
@@ -2369,7 +2372,7 @@ mod tests {
             .aggregate_messages(
                 vec![
                     make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "c",
                         "anthropic",
                         "session-1",
@@ -2378,7 +2381,7 @@ mod tests {
                         Some("workspace-ab"),
                     ),
                     make_workspace_message(
-                        "claude",
+                        ClientId::Claude,
                         "b:c",
                         "anthropic",
                         "session-2",
@@ -2414,7 +2417,7 @@ mod tests {
             .aggregate_messages(
                 vec![
                     UnifiedMessage::new(
-                        "claude",
+                        ClientId::Claude,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
@@ -2429,7 +2432,7 @@ mod tests {
                         1.0,
                     ),
                     UnifiedMessage::new(
-                        "claude",
+                        ClientId::Claude,
                         "claude-sonnet-4.5",
                         "microsoft",
                         "session-2",
@@ -2474,7 +2477,7 @@ mod tests {
             .aggregate_messages(
                 vec![
                     UnifiedMessage::new(
-                        "claude",
+                        ClientId::Claude,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-1",
@@ -2489,7 +2492,7 @@ mod tests {
                         1.0,
                     ),
                     UnifiedMessage::new(
-                        "gemini",
+                        ClientId::Gemini,
                         "claude-sonnet-4.5",
                         "anthropic",
                         "session-2",
@@ -2531,7 +2534,7 @@ mod tests {
         let loader = TuiUsageHarness;
         let messages = vec![
             UnifiedMessage::new_with_agent(
-                "opencode",
+                ClientId::OpenCode,
                 "claude-opus-4.6",
                 "anthropic",
                 "session-1",
@@ -2547,7 +2550,7 @@ mod tests {
                 Some("Sisyphus".to_string()),
             ),
             UnifiedMessage::new_with_agent(
-                "opencode",
+                ClientId::OpenCode,
                 "claude-opus-4.6",
                 "anthropic",
                 "session-2",
@@ -2584,7 +2587,7 @@ mod tests {
         let loader = TuiUsageHarness;
         let messages = vec![
             UnifiedMessage::new_with_agent(
-                "opencode",
+                ClientId::OpenCode,
                 "claude-opus-4.6",
                 "anthropic",
                 "session-1",
@@ -2600,7 +2603,7 @@ mod tests {
                 Some("Hephaestus".to_string()),
             ),
             UnifiedMessage::new_with_agent(
-                "opencode",
+                ClientId::OpenCode,
                 "claude-opus-4.6",
                 "anthropic",
                 "session-2",
@@ -2631,7 +2634,7 @@ mod tests {
         let loader = TuiUsageHarness;
         let messages = vec![
             UnifiedMessage::new_with_agent(
-                "claude",
+                ClientId::Claude,
                 "claude-opus-4.6",
                 "anthropic",
                 "session-1",
@@ -2647,7 +2650,7 @@ mod tests {
                 Some("Sisyphus".to_string()),
             ),
             UnifiedMessage::new_with_agent(
-                "claude",
+                ClientId::Claude,
                 "claude-opus-4.6",
                 "anthropic",
                 "session-2",
@@ -2677,7 +2680,7 @@ mod tests {
     }
 
     fn collision_message(
-        client: &str,
+        client: ClientId,
         provider: &str,
         session: &str,
         model: &str,
@@ -2704,13 +2707,13 @@ mod tests {
         let cases = [
             (
                 GroupBy::ClientModel,
-                collision_message("a:b", "first", "same", "c", 10, timestamp),
-                collision_message("a", "second", "same", "b:c", 20, timestamp),
+                collision_message(ClientId::Codex, "first", "same", "c", 10, timestamp),
+                collision_message(ClientId::Amp, "second", "same", "b:c", 20, timestamp),
             ),
             (
                 GroupBy::ClientProviderModel,
-                collision_message("a", "b:c", "same", "d", 10, timestamp),
-                collision_message("a", "b", "same", "c:d", 20, timestamp),
+                collision_message(ClientId::Amp, "b:c", "same", "d", 10, timestamp),
+                collision_message(ClientId::Amp, "b", "same", "c:d", 20, timestamp),
             ),
         ];
 
@@ -2730,23 +2733,23 @@ mod tests {
     #[test]
     fn daily_and_hourly_maps_use_collision_free_structured_keys() {
         let timestamp = 1_735_689_600_000;
-        let first = collision_message("a", "b:c", "same", "d", 10, timestamp);
-        let second = collision_message("a", "b", "same", "c:d", 20, timestamp);
+        let first = collision_message(ClientId::Amp, "b:c", "same", "d", 10, timestamp);
+        let second = collision_message(ClientId::Amp, "b", "same", "c:d", 20, timestamp);
         let mut acc = TuiAcc::new();
         acc.push(&first);
         acc.push(&second);
         let usage = acc.project(&GroupBy::ClientProviderModel);
 
-        let daily = &usage.daily[0].client_breakdown["a"].models;
+        let daily = &usage.daily[0].client_breakdown["amp"].models;
         assert_eq!(daily.len(), 2);
-        let first_daily = &daily["v1|cpm|1:a3:b:c1:d"];
+        let first_daily = &daily["v1|cpm|3:amp3:b:c1:d"];
         assert_eq!(first_daily.provider, "b:c");
         assert_eq!(first_daily.model_id, "d");
         assert_eq!(first_daily.display_name, "d");
         assert_eq!(first_daily.tokens.total(), 10);
         assert_eq!(first_daily.cost, 10.0);
         assert_eq!(first_daily.messages, 1);
-        let second_daily = &daily["v1|cpm|1:a1:b3:c:d"];
+        let second_daily = &daily["v1|cpm|3:amp1:b3:c:d"];
         assert_eq!(second_daily.provider, "b");
         assert_eq!(second_daily.model_id, "c:d");
         assert_eq!(second_daily.display_name, "c:d");
@@ -2775,7 +2778,7 @@ mod tests {
         let timestamp = 1_735_689_600_000;
         let mut acc = TuiAcc::new();
         acc.push(&collision_message(
-            "z-client",
+            ClientId::Zed,
             "provider",
             "session-z",
             "model",
@@ -2783,7 +2786,7 @@ mod tests {
             timestamp,
         ));
         acc.push(&collision_message(
-            "a-client",
+            ClientId::Amp,
             "provider",
             "session-a",
             "model",
@@ -2799,18 +2802,31 @@ mod tests {
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["a-client", "z-client"]
+            ["amp", "zed"]
         );
     }
 
     #[test]
     fn workspace_maps_tag_unknown_and_known_keys_separately() {
         let timestamp = 1_735_689_600_000;
-        let mut unknown =
-            collision_message("client", "provider", "session", "model", 10, timestamp);
+        let mut unknown = collision_message(
+            ClientId::Codex,
+            "provider",
+            "session",
+            "model",
+            10,
+            timestamp,
+        );
         unknown.workspace_key = None;
         unknown.workspace_label = None;
-        let mut known = collision_message("client", "provider", "session", "model", 20, timestamp);
+        let mut known = collision_message(
+            ClientId::Codex,
+            "provider",
+            "session",
+            "model",
+            20,
+            timestamp,
+        );
         known.workspace_key = Some(Arc::from(""));
         known.workspace_label = Some(Arc::from("Empty workspace key"));
 
@@ -2820,7 +2836,7 @@ mod tests {
         let usage = acc.project(&GroupBy::WorkspaceModel);
 
         assert_eq!(usage.models.len(), 2);
-        let daily_models = &usage.daily[0].client_breakdown["client"].models;
+        let daily_models = &usage.daily[0].client_breakdown["codex"].models;
         assert_eq!(daily_models.len(), 2);
         assert!(daily_models.contains_key("v1|wmu|5:model"));
         assert!(daily_models.contains_key("v1|wmk|0:5:model"));
@@ -2830,8 +2846,8 @@ mod tests {
     fn structured_session_and_agent_instance_identities_do_not_alias_delimiters() {
         let timestamp = 1_735_689_600_000;
         let model_messages = [
-            collision_message("a:b", "provider", "c", "model", 10, timestamp),
-            collision_message("a", "provider", "b:c", "model", 20, timestamp),
+            collision_message(ClientId::Codex, "provider", "c", "model", 10, timestamp),
+            collision_message(ClientId::Amp, "provider", "b:c", "model", 20, timestamp),
         ];
         let mut model_acc = TuiAcc::new();
         for message in &model_messages {
@@ -2843,7 +2859,7 @@ mod tests {
         );
 
         let mut explicit = UnifiedMessage::new_with_agent(
-            "a",
+            ClientId::Amp,
             "model",
             "provider",
             "session",
@@ -2854,7 +2870,7 @@ mod tests {
         );
         explicit.set_agent_instance(Some("a:b:c".to_string()));
         let derived_left = UnifiedMessage::new_with_agent(
-            "a",
+            ClientId::Amp,
             "model",
             "provider",
             "c",
@@ -2864,7 +2880,7 @@ mod tests {
             Some("builder".to_string()),
         );
         let derived_right = UnifiedMessage::new_with_agent(
-            "a",
+            ClientId::Amp,
             "model",
             "provider",
             "b:c",
@@ -2887,7 +2903,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn reprojection_message(
-        client: &str,
+        client: ClientId,
         model: &str,
         provider: &str,
         session: &str,
@@ -2937,7 +2953,7 @@ mod tests {
     fn reprojection_corpus() -> Vec<UnifiedMessage> {
         vec![
             reprojection_message(
-                "claude",
+                ClientId::Claude,
                 "gpt-5.5",
                 "openai",
                 "s1",
@@ -2951,7 +2967,7 @@ mod tests {
                 Some("builder"),
             ),
             reprojection_message(
-                "codex",
+                ClientId::Codex,
                 "gpt-5.5",
                 "openai",
                 "s2",
@@ -2965,7 +2981,7 @@ mod tests {
                 None,
             ),
             reprojection_message(
-                "claude",
+                ClientId::Claude,
                 "gpt-5.5",
                 "azure",
                 "s1",
@@ -2979,7 +2995,7 @@ mod tests {
                 None,
             ),
             reprojection_message(
-                "claude",
+                ClientId::Claude,
                 "claude-sonnet-4.5",
                 "anthropic",
                 "s3",
@@ -2993,7 +3009,7 @@ mod tests {
                 None,
             ),
             reprojection_message(
-                "qwen",
+                ClientId::Qwen,
                 "gpt-5.5",
                 "openai",
                 "s4",
@@ -3263,7 +3279,7 @@ mod tests {
         ] {
             let mut expected = TuiAcc::new();
             for message in &corpus {
-                if crate::selected_client_ids_include(&message.client, &selected) {
+                if selected.contains(&message.client) {
                     expected.push(message);
                 }
             }

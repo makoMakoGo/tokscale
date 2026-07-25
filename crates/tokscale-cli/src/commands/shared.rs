@@ -277,6 +277,7 @@ pub(crate) struct ReportEnvelope<T> {
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReportMetadata {
+    pub(crate) input_footprint: tokscale_core::InputFootprint,
     pub(crate) processing_time_ms: u64,
 }
 
@@ -284,12 +285,14 @@ impl<T> ReportEnvelope<T> {
     pub(crate) fn new(
         data: T,
         health: tokscale_core::input_health::HealthReport,
+        input_footprint: tokscale_core::InputFootprint,
         processing_time_ms: impl Into<u64>,
     ) -> Self {
         Self {
             data,
             health,
             metadata: ReportMetadata {
+                input_footprint,
                 processing_time_ms: processing_time_ms.into(),
             },
         }

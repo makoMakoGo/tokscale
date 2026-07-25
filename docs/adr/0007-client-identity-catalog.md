@@ -40,26 +40,33 @@ model names, providers, or display labels.
 
 ### Local-input authority
 
-Every catalog entry has exactly one registered local-input adapter and one scan
+Every catalog entry has exactly one registry `AdapterBinding` and one scan
 definition. These three sets must have exact parity and no duplicate entries.
 
-The scan definition and the adapter's discovery implementation are the sole
-authority for fixed default roots beneath the selected home, filename
-selection, companion files, database sidecars, custom-root support, and source
-identity. An adapter stamps its generated `InputUnit` with its catalog
-`ClientId`; that value is the only source identity carried through acquisition.
-Additional roots come only from `scanner.extraScanPaths`; OpenCode database
-files come only from `scanner.opencodeDbPaths`.
+The adapter registry stores an `AdapterBinding` containing one typed `ClientId`
+and one adapter. This binding is the sole authority associating discovered
+inputs and emitted usage with a client. The scan definition and adapter
+discovery implementation remain authoritative for fixed default roots beneath
+the selected home, filename selection, companion files, database sidecars, and
+custom-root support. Additional roots come only from
+`scanner.extraScanPaths`; OpenCode database files come only from
+`scanner.opencodeDbPaths`.
 
-The adapter's session schema/parser is the sole authority for accepted
+The adapter's session decoder and schema are the sole authority for accepted
 envelopes, database schemas, required fields, record semantics, deduplication,
-and token interpretation, but not source identity. Parsers produce
-source-neutral `ParsedMessage` values. Derived message-cache shards also store
-only source-neutral messages. The sequential adapter fold attributes each
-message from `InputUnit.client` when it emits the final `UnifiedMessage`; parser
-modules do not repeat catalog IDs as message data. Before any adapter executes,
-the pipeline verifies that every discovered unit carries that adapter's
-`ClientId` and rejects a mismatched batch as a contract error.
+and token interpretation, but not source identity. Each source-neutral
+`InputUnit` contains a `DecoderSpec` that atomically binds decoder ID, semantic
+revision, and decode route. There is no client-to-decoder default mapping that
+can drift from the selected route.
+
+Decoders produce one source-neutral `UsageRecord` representation. Derived
+message-cache shards store that same type. The runner constructs a
+`BoundMessageSink` from the registry binding; the sink accepts only
+`UsageRecord` and attaches the binding's typed `ClientId` to construct a
+`UnifiedMessage`. `UnifiedMessage` composes client attribution with a
+`UsageRecord` instead of duplicating the usage fields. Neither an input,
+decoder, adapter fold, nor cache shard can supply a competing client identity,
+so mismatched source attribution is not representable.
 
 `docs/clients.md` is the user-facing discovery map generated from that contract.
 It does not create a second path or schema authority.
@@ -74,7 +81,7 @@ An absent automatically discovered root means that the client has no input at
 that location. Once a root or configured input exists, discovery, open, query,
 snapshot, and parse failures remain visible through Data Health. Record-level
 schema failures reject the affected records and preserve valid records from the
-same input when the parser can continue. A failure for one client does not abort
+same input when the decoder can continue. A failure for one client does not abort
 unrelated clients.
 
 Accepted usage records preserve their observed token values and canonical model
@@ -102,22 +109,24 @@ Adding a client requires one atomic contract change containing:
 
 1. one catalog identity;
 2. one scan definition;
-3. one registered local-input adapter;
-4. one current source-neutral session schema/parser;
-5. focused discovery, parser, and health tests;
+3. one registered `AdapterBinding`;
+4. one current source-neutral decoder specification and session schema;
+5. focused discovery, decoder, and health tests;
 6. catalog/scan/adapter parity checks; and
 7. a current discovery row in `docs/clients.md`.
 
 Changing a root, filename rule, companion dependency, database schema, or record
 envelope requires an adapter/schema change with focused tests and a matching
-documentation update. A parser behavior change that affects cached output also
-requires a parser revision change.
+documentation update. A decoder behavior change that affects cached output also
+requires a decoder revision change.
 
 ## Consequences
 
 Each accepted local integration has one public identity and one executable
 input contract. Reports, filters, scanner configuration, caches, and TUI views
-therefore share the same client namespace. A parser cannot silently create a
-second source namespace because its output and persisted cache representation
-have no client field; path and format evolution stays owned by the adapter and
-schema that can validate it.
+therefore share the same client namespace. The production pipeline gives only
+the registry binding authority to attach `ClientId`; the source-neutral input,
+decoder output, persisted shard, and diagnostic errors carry no competing
+client field. Decoder identity, revision, and route cannot disagree because
+they are one `DecoderSpec`; path and format evolution stays owned by the adapter
+and schema that can validate it.

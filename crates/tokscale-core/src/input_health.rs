@@ -180,7 +180,6 @@ impl InputHealth {
 pub struct DataHealth {
     inputs: Vec<InputHealth>,
     examined_inputs: usize,
-    input_data_bytes: u64,
 }
 
 impl DataHealth {
@@ -195,18 +194,6 @@ impl DataHealth {
     pub fn merge(&mut self, other: DataHealth) {
         self.inputs.extend(other.inputs);
         self.examined_inputs += other.examined_inputs;
-        self.input_data_bytes = self
-            .input_data_bytes
-            .checked_add(other.input_data_bytes)
-            .expect("input data size must fit in u64");
-    }
-
-    pub fn set_input_data_bytes(&mut self, input_data_bytes: u64) {
-        self.input_data_bytes = input_data_bytes;
-    }
-
-    pub fn input_data_bytes(&self) -> u64 {
-        self.input_data_bytes
     }
 
     pub fn inputs(&self) -> &[InputHealth] {
@@ -325,7 +312,6 @@ impl DataHealth {
             rejected_records: self.rejected_records(),
             partial_inputs: self.partial_inputs(),
             failed_inputs: self.failed_inputs(),
-            input_data_bytes: self.input_data_bytes,
             issues: grouped.into_values().collect(),
         }
     }
@@ -342,10 +328,6 @@ pub struct HealthReport {
     pub rejected_records: u64,
     pub partial_inputs: usize,
     pub failed_inputs: usize,
-    /// Sum of per-client input bytes at the latest inventory snapshot,
-    /// deduplicated within each client. Tokscale's own cache files are not
-    /// included.
-    pub input_data_bytes: u64,
     #[serde(default)]
     pub issues: Vec<HealthIssueReport>,
 }
@@ -359,7 +341,6 @@ impl Default for HealthReport {
             rejected_records: 0,
             partial_inputs: 0,
             failed_inputs: 0,
-            input_data_bytes: 0,
             issues: Vec::new(),
         }
     }
@@ -491,16 +472,7 @@ mod tests {
         assert_eq!(report.rejected_records, 0);
         assert_eq!(report.partial_inputs, 0);
         assert_eq!(report.failed_inputs, 0);
-        assert_eq!(report.input_data_bytes, 0);
         assert!(report.issues.is_empty());
-    }
-
-    #[test]
-    fn report_projection_preserves_nonzero_input_data_bytes() {
-        let mut health = DataHealth::default();
-        health.set_input_data_bytes(3_072);
-
-        assert_eq!(health.to_report().input_data_bytes, 3_072);
     }
 
     #[test]
@@ -521,7 +493,7 @@ mod tests {
         assert_eq!(value["rejectedRecords"], 0);
         assert_eq!(value["partialInputs"], 0);
         assert_eq!(value["failedInputs"], 0);
-        assert_eq!(value["inputDataBytes"], 0);
+        assert!(value.get("inputDataBytes").is_none());
         assert_eq!(value["issues"], serde_json::json!([]));
     }
 
@@ -541,7 +513,6 @@ mod tests {
             rejected_records: 3,
             partial_inputs: 2,
             failed_inputs: 1,
-            input_data_bytes: 1_024,
             issues: Vec::new(),
         };
 
@@ -594,14 +565,12 @@ mod tests {
     #[test]
     fn merging_data_health_preserves_clean_and_degraded_input_counts() {
         let mut left = DataHealth::default();
-        left.set_input_data_bytes(1_024);
         left.record(health(InputStatus::Complete, RejectionSummary::default()));
         let mut rejected = RejectionSummary::default();
         rejected.record(RecordRejectionReason::MissingModel);
         left.record(health(InputStatus::Complete, rejected));
 
         let mut right = DataHealth::default();
-        right.set_input_data_bytes(2_048);
         right.record(health(InputStatus::Complete, RejectionSummary::default()));
         right.record(health(
             InputStatus::Unavailable {
@@ -617,7 +586,6 @@ mod tests {
         assert_eq!(left.inputs().len(), 2);
         assert_eq!(left.failed_inputs(), 1);
         assert_eq!(left.rejected_records(), 1);
-        assert_eq!(left.input_data_bytes(), 3_072);
     }
 
     #[test]

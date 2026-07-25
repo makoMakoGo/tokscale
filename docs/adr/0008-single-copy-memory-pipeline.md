@@ -19,8 +19,9 @@ current formats, and ADR 0028 owns the TUI lifecycle built on this pipeline.
 
 ### Acquisition authority
 
-Selected client adapters own input discovery, input identity, parsing, and
-error attribution. Public report paths do not use a central `ScanResult`,
+Selected registry `AdapterBinding` values own client attribution, while their
+adapters own input discovery, input identity, parsing, and error attribution.
+Public report paths do not use a central `ScanResult`,
 `scan_all_clients*`, generic scanner error, or dead per-client database slots.
 `ScannerSettings` and focused scanner primitives remain adapter and test seams;
 they do not define another product command or discovery authority.
@@ -29,17 +30,20 @@ Discovery produces one consumptive `PreparedLocalInputs` inventory. It records:
 
 - requested clients in canonical order;
 - selected-adapter and per-adapter unit order;
-- parser and unit identity;
-- one `InputPolicy` per unit, including its primary and parser-relevant related
+- decoder and unit identity;
+- one `InputPolicy` per unit, including its primary and decoder-relevant related
   inputs; and
 - compact pre-execution metadata snapshots.
 
-Each `InputUnit.client` is adapter-issued provenance from ADR 0007. Session
-parsers produce `ParsedMessage`, which intentionally has no source identity, and
-message-cache bodies persist that same source-neutral type. After cache writes,
-adapter-specific enrichment, filtering, and deduplication, the sequential fold
-combines each parsed message with the unit's `ClientId` and emits a
-`UnifiedMessage`. No parser or cache shard can override that attribution.
+`InputUnit` is source-neutral. Its `DecoderSpec` atomically binds decoder ID,
+semantic revision, and decode route; decoder selection is never reconstructed
+from a client default. Session decoders produce `UsageRecord`, and message-cache
+bodies persist that same source-neutral type. Each adapter's fold owns its cache
+and enrichment order, then applies filtering and deduplication before sending
+accepted records through the binding's `BoundMessageSink`. The sink alone
+combines its typed `ClientId` with the record and emits a `UnifiedMessage`. No
+production pipeline path lets an input, decoder, adapter fold, or cache shard
+override that attribution.
 
 Freshness probing and execution consume the same inventory and never rediscover
 inputs. A file added after preparation belongs to the next inventory. Related
@@ -71,7 +75,7 @@ matches the prepared snapshot.
 Each inventory has two freshness keys:
 
 - a versioned SHA-256 `InputInventorySignature` over canonical clients, adapter
-  and unit order, parser/unit identity, and every declared input's native path,
+  and unit order, decoder/unit identity, and every declared input's native path,
   label, presence, size, mtime, and native identity; and
 - a process-local `u64` digest over those stable signature bytes, which is never
   persisted.
@@ -83,7 +87,7 @@ fresh TUI generation establishes the initial process digest from its persisted
 signature without startup discovery; stale or missing generations prepare and
 execute in the background.
 
-Codex computes its full digest during the parser's read. Append handling verifies
+Codex computes its full digest during the decoder's read. Append handling verifies
 the previous full digest as the expected prefix, then continues the same hasher
 across the tail. Exact hits require stamp and cached-digest consistency without
 another input-byte pass.
@@ -119,12 +123,12 @@ hit bodies before that index is built, and then folds hits and misses in bounded
 order. Codex retains its dedicated exact-hit, stale, append, and recovery path
 because its incremental parse state is not the generic adapter contract.
 
-Codex cold parses, append merges, and race reparses own one raw
-`ParsedMessage` vector.
+Codex cold parses, append merges, and race reparses own one raw `UsageRecord`
+vector.
 When cacheable, the fold serializes a borrowed raw slice before applying
 timestamp completion, token normalization/filtering, canonical identity,
 pricing, and exec-session attribution in place. Client attribution occurs only
-after those operations when the adapter emits the messages.
+after those operations when the bound sink emits the messages.
 
 OpenCode borrows potentially large message TEXT. It stream-validates the full
 JSON document and required role envelope, then fully decodes assistant payloads
@@ -133,14 +137,16 @@ instead of becoming empty usage.
 
 ### Message representation and aggregation
 
-`ParsedMessage` is the source-neutral parser and shard representation.
-`UnifiedMessage` adds the adapter-attributed client for public aggregation and
-otherwise stores no redundant derivable value:
+`UsageRecord` is the single source-neutral decoder, shard, and enrichment
+representation. `UnifiedMessage` composes a typed adapter-attributed `ClientId`
+with one `UsageRecord` for public aggregation; it does not repeat the record's
+fields or accept an untyped client string. The record otherwise stores no
+redundant derivable value:
 
 - date is derived from timestamp;
 - `dedup_key` is a 64-bit hash rather than a formatted string; and
-- repeated client, model, provider, session, workspace, and agent identities
-  use interned `Arc<str>`.
+- repeated model, provider, session, workspace, and agent identities use
+  interned `Arc<str>`.
 
 The process interner indexes `Weak<str>`, confirms hash matches with full string
 equality, and is swept after transient messages and Arc-backed accumulators are
@@ -154,16 +160,15 @@ buckets. Composite identities never use delimiter-concatenated public keys.
 Persisted map keys are versioned, variant-tagged, byte-length-prefixed values
 with a distinct unknown-workspace tag.
 
-Session client-space accounting is the byte size of the input snapshots
-confirmed at the final cache-decision/fold boundary, deduplicated within each
-client inventory. Overview Data Size is exactly the checked sum of that
-per-client map; it does not apply a second cross-client physical-file
-deduplication rule. The TUI generation schema changes with this accounting
-contract so an older generation cannot preserve the previous total alongside
-current per-client values. Current-schema cache writes and reads both reject a
-Data Size that differs from the checked sum of `clientSpace`. Usage, Sessions,
-Data Health, input space, and the inventory signature all derive from those same
-confirmed snapshots.
+`InputFootprint` is the sole input-space fact. It maps typed `ClientId` values to
+the byte size of snapshots confirmed at the final cache-decision/fold boundary,
+deduplicated within each binding's inventory. Overview derives Data Size as its
+checked sum; there is no separately stored total. Data Health does not store
+input bytes. The TUI generation persists the footprint map (`clientSpace`) once,
+and Sessions and Overview project their values from it. Headless local reports
+expose the same confirmed map as `metadata.inputFootprint`. Usage, Sessions,
+Data Health, input footprint, and the inventory signature all derive from the
+same confirmed snapshots.
 
 ### Shard contract and recovery
 
@@ -172,7 +177,7 @@ and body. Header discovery does not materialize the body. A planned hit succeeds
 only after the body is opened, its identity is checked, it decodes, and its
 message count matches the header.
 
-Body failures retain the input, parser revision, shard path, and root cause.
+Body failures retain the input, decoder revision, shard path, and root cause.
 The CLI emits an explicit diagnostic and reparses the authoritative current
 input through its registered adapter. A successful cacheable reparse atomically
 replaces the shard.
@@ -184,9 +189,9 @@ bypassed, but a potentially valid replacement shard remains unless the reparse
 independently proves it invalid or non-cacheable. Partial and unavailable input
 never publishes a shard.
 
-Cache writes serialize borrowed source-neutral `ParsedMessage` slices and do
+Cache writes serialize borrowed source-neutral `UsageRecord` slices and do
 not clone messages merely to construct a cache representation.
-Parser-semantic changes bump the owning parser revision;
+Decoder-semantic changes bump the owning decoder revision;
 serialization-layout changes bump the shard format.
 
 The message-shard envelope is the `TOKSHRD\0` magic, a little-endian format
@@ -201,16 +206,17 @@ truncated envelope, malformed header, undecodable header, oversized shard, or
 filesystem inspection failure aborts the operation before deletion begins.
 After successful classification, pruning removes a shard only when its
 authoritative input is absent, its path is not the canonical path
-derived from the input and parser key, or a higher parser revision exists for
-the same live input and parser. Once deletion begins, an unlink failure is
+derived from the input and decoder key, or a higher decoder revision exists for
+the same live input and decoder. Once deletion begins, an unlink failure is
 reported explicitly; already completed removals are not rolled back.
 
 ### Atomic TUI generation storage
 
-One local fold produces health data, client-space accounting, sessions,
+One local fold produces health data, one `InputFootprint`, sessions,
 client-aware canonical accumulator, one group-agnostic Common projection, and
 four full-universe Grouped projections. The current TUI cache schema stores them
-in one atomic JSON bundle.
+in one atomic JSON bundle. It stores only the per-client footprint map for input
+space; Overview derives its total and Health carries no duplicate byte count.
 
 Common stores Agents, daily and hourly totals with Client membership, the
 contribution graph, report totals, and streaks exactly once. Each Grouped
@@ -256,5 +262,5 @@ indexes, and the consumer's required aggregate rather than an adapter-wide
 message collection. Exact warm hits read no authoritative input bytes, while
 native file identity prevents same-size/same-mtime path replacement from
 reusing stale data. Cache faults remain visible and recover from authoritative
-input, and explicit pruning deletes shards outside the current input and parser
+input, and explicit pruning deletes shards outside the current input and decoder
 inventory.
