@@ -4,6 +4,7 @@ mod adapters;
 mod client_catalog;
 pub mod clients;
 pub mod fs_atomic;
+mod input_footprint;
 pub mod input_health;
 mod local_clients;
 mod local_report_error;
@@ -28,6 +29,7 @@ pub use aggregate::{
 pub use clients::{
     cline_session_data_dir, warp_sqlite_roots, ClientId, ClientIdentity, LocalClientDef, PathRoot,
 };
+pub use input_footprint::{InputFootprint, InputFootprintOverflow};
 pub use input_health::{
     DataHealth, InputFailure, InputHealth, InputStatus, RecordRejectionReason, RejectionEntry,
     RejectionSummary, ScannedInput,
@@ -37,7 +39,7 @@ pub use message_cache::{prune_input_message_cache, InputCachePruneError, InputCa
 pub use provider_identity::{inferred_provider_from_model, normalize_provider_for_grouping};
 pub use sessions::UnifiedMessage;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 use std::sync::Arc;
 
@@ -80,23 +82,6 @@ pub fn build_tui_accumulator(messages: &[UnifiedMessage], date_range: DateRange)
     engine
         .into_tui_accumulator()
         .expect("TUI view must create a TUI accumulator")
-}
-
-fn retain_for_requested_clients(
-    client: &str,
-    _model_id: &str,
-    _provider_id: &str,
-    requested: &HashSet<&str>,
-) -> bool {
-    requested_clients_include(client, requested)
-}
-
-pub(crate) fn requested_clients_include(client: &str, requested: &HashSet<&str>) -> bool {
-    requested.contains(client)
-}
-
-pub(crate) fn selected_client_ids_include(client: &str, selected: &HashSet<ClientId>) -> bool {
-    ClientId::from_str(client).is_some_and(|client_id| selected.contains(&client_id))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
@@ -217,6 +202,8 @@ pub(crate) fn checked_token_sum(values: impl IntoIterator<Item = i64>) -> i64 {
 #[derive(Debug, Clone)]
 pub struct LocalLoadMetadata {
     pub input_inventory_signature: InputInventorySignature,
+    /// Confirmed input bytes keyed by the canonical client that owns them.
+    pub input_footprint: InputFootprint,
 }
 
 #[derive(Debug)]
@@ -271,9 +258,10 @@ impl InputInventorySignature {
 /// the exact units whose signature was compared by the caller.
 pub struct PreparedLocalInputs {
     options: LocalParseOptions,
-    clients: Vec<String>,
+    clients: Vec<ClientId>,
     groups: Vec<adapters::PreparedAdapterInputs>,
     signature: InputInventorySignature,
+    input_footprint: InputFootprint,
     health: DataHealth,
     #[cfg(test)]
     input_cache_dir: std::path::PathBuf,
@@ -288,14 +276,18 @@ impl PreparedLocalInputs {
         self.signature.process_digest()
     }
 
+    pub fn input_footprint(&self) -> &InputFootprint {
+        &self.input_footprint
+    }
+
     /// Refresh metadata and stable identity without rediscovering inputs or
     /// reading their bodies. This is the narrow probe used by TUI auto-refresh
     /// before it decides that a prepared inventory is unchanged.
     pub fn refresh_input_inventory_signature(&mut self) -> Result<InputInventorySignature, String> {
         let mut unavailable = Vec::new();
         for group in &mut self.groups {
+            let client = group.binding.client();
             group.units.retain_mut(|unit| {
-                let client = unit.client();
                 let path = unit.path.clone();
                 match unit.refresh_prepared_snapshot_for_inventory_probe() {
                     Ok(()) => true,
@@ -319,62 +311,53 @@ impl PreparedLocalInputs {
         for health in unavailable {
             self.health.record(health);
         }
-        self.health.set_input_data_bytes(input_data_bytes(
-            self.groups.iter().flat_map(|group| group.units.iter()),
-        ));
+        self.input_footprint = prepared_input_footprint(&self.clients, &self.groups);
         self.signature = input_inventory_signature(&self.clients, &self.groups);
         Ok(self.signature)
     }
 }
 
-fn input_data_bytes<'a>(units: impl IntoIterator<Item = &'a adapters::InputUnit>) -> u64 {
-    let mut seen_by_client = HashMap::<ClientId, HashSet<_>>::new();
-    let mut total = 0_u64;
-    for unit in units {
-        let seen = seen_by_client.entry(unit.client()).or_default();
-        let snapshot = unit
-            .prepared_input_snapshot()
-            .expect("prepared input unit must carry an inventory snapshot");
-        snapshot.visit_present_files(|identity, size| {
-            if seen.insert(identity) {
-                total = total
-                    .checked_add(size)
-                    .expect("input data size must fit in u64");
-            }
-        });
-    }
-    total
+fn selected_client_footprint(clients: &[ClientId]) -> InputFootprint {
+    InputFootprint::for_clients(clients.iter().copied())
 }
 
-fn confirmed_client_space(
-    clients: &[String],
-    groups: &[adapters::ConfirmedAdapterInputs],
-) -> BTreeMap<String, u64> {
-    let mut totals = clients
-        .iter()
-        .cloned()
-        .map(|client| (client, 0_u64))
-        .collect::<BTreeMap<_, _>>();
-
+fn prepared_input_footprint(
+    clients: &[ClientId],
+    groups: &[adapters::PreparedAdapterInputs],
+) -> InputFootprint {
+    let mut footprint = selected_client_footprint(clients);
     for group in groups {
-        let client = group.client.as_str().to_string();
-        let total = totals.entry(client).or_default();
-        for &(_, size) in &group.present_files {
-            *total = total
-                .checked_add(size)
-                .expect("per-client input data size must fit in u64");
+        let client = group.binding.client();
+        let mut seen = HashSet::new();
+        for unit in &group.units {
+            let snapshot = unit
+                .prepared_input_snapshot()
+                .expect("prepared input unit must carry an inventory snapshot");
+            snapshot.visit_present_files(|identity, size| {
+                if seen.insert(identity) {
+                    footprint
+                        .add_bytes(client, size)
+                        .expect("input data size must fit in u64");
+                }
+            });
         }
     }
-
-    totals
+    footprint
 }
 
-fn client_space_total(client_space: &BTreeMap<String, u64>) -> u64 {
-    client_space.values().copied().fold(0_u64, |total, size| {
-        total
-            .checked_add(size)
-            .expect("input data size must fit in u64")
-    })
+fn confirmed_input_footprint(
+    clients: &[ClientId],
+    groups: &[adapters::ConfirmedAdapterInputs],
+) -> InputFootprint {
+    let mut footprint = selected_client_footprint(clients);
+    for group in groups {
+        for &(_, size) in &group.present_files {
+            footprint
+                .add_bytes(group.client, size)
+                .expect("input data size must fit in u64");
+        }
+    }
+    footprint
 }
 
 #[derive(Debug, Clone, Default)]
@@ -461,7 +444,7 @@ fn parse_all_messages_with_health_with_settings(
 
 struct FoldOutcome {
     input_inventory_signature: InputInventorySignature,
-    client_space: BTreeMap<String, u64>,
+    input_footprint: InputFootprint,
     health: DataHealth,
 }
 
@@ -473,7 +456,7 @@ fn input_cache_dir_for_test_home(home_dir: &str) -> std::path::PathBuf {
 fn fold_prepared_local_inputs_with_pricing(
     prepared: PreparedLocalInputs,
     pricing: Option<&pricing::PricingService>,
-    sink: &mut dyn adapters::MessageSink,
+    sink: &mut dyn adapters::UnifiedMessageSink,
 ) -> Result<FoldOutcome, LocalReportError> {
     #[cfg(test)]
     let input_cache_dir = prepared.input_cache_dir.clone();
@@ -499,7 +482,7 @@ fn fold_prepared_local_inputs_with_pricing(
             &mut health,
         )
     } else {
-        let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
+        let requested: HashSet<ClientId> = clients.iter().copied().collect();
         let mut filtered_sink = RequestedClientFilterSink {
             requested: &requested,
             inner: sink,
@@ -526,11 +509,10 @@ fn fold_prepared_local_inputs_with_pricing(
         .map(|confirmed| {
             let input_inventory_signature =
                 confirmed_input_inventory_signature(&clients, &confirmed);
-            let client_space = confirmed_client_space(&clients, &confirmed);
-            health.set_input_data_bytes(client_space_total(&client_space));
+            let input_footprint = confirmed_input_footprint(&clients, &confirmed);
             FoldOutcome {
                 input_inventory_signature,
-                client_space,
+                input_footprint,
                 health,
             }
         })
@@ -538,18 +520,13 @@ fn fold_prepared_local_inputs_with_pricing(
 }
 
 struct RequestedClientFilterSink<'a> {
-    requested: &'a HashSet<&'a str>,
-    inner: &'a mut dyn adapters::MessageSink,
+    requested: &'a HashSet<ClientId>,
+    inner: &'a mut dyn adapters::UnifiedMessageSink,
 }
 
-impl adapters::MessageSink for RequestedClientFilterSink<'_> {
+impl adapters::UnifiedMessageSink for RequestedClientFilterSink<'_> {
     fn push_message(&mut self, message: UnifiedMessage) {
-        if retain_for_requested_clients(
-            &message.client,
-            &message.model_id,
-            &message.provider_id,
-            self.requested,
-        ) {
+        if self.requested.contains(&message.client) {
             self.inner.push_message(message);
         }
     }
@@ -557,7 +534,7 @@ impl adapters::MessageSink for RequestedClientFilterSink<'_> {
 
 struct AggregationSink<'a>(&'a mut crate::aggregate::AggregationEngine);
 
-impl adapters::MessageSink for AggregationSink<'_> {
+impl adapters::UnifiedMessageSink for AggregationSink<'_> {
     fn push_message(&mut self, message: UnifiedMessage) {
         self.0.push(&message);
     }
@@ -589,16 +566,19 @@ pub fn prepare_local_inputs(
     let mut health = DataHealth::default();
     let groups: Vec<_> = selected_adapters
         .into_iter()
-        .map(|adapter| -> Result<_, LocalReportError> {
+        .map(|binding| -> Result<_, LocalReportError> {
             #[cfg(test)]
             PREPARE_DISCOVERY_COUNT.with(|count| count.set(count.get() + 1));
             // Third-party input and snapshot failures stay inside their
             // input's failure domain.
-            let units = match adapter.discover_checked(&scan_ctx) {
+            let units = match binding
+                .adapter()
+                .discover_checked(binding.client(), &scan_ctx)
+            {
                 Ok(units) => units,
                 Err(error) => {
                     health.record(InputHealth {
-                        client: error.client,
+                        client: binding.client(),
                         path: error.path.clone(),
                         status: InputStatus::Unavailable {
                             failure: InputFailure::new(error.operation, error.to_string()),
@@ -606,17 +586,15 @@ pub fn prepare_local_inputs(
                         rejections: RejectionSummary::default(),
                     });
                     return Ok(adapters::PreparedAdapterInputs {
-                        adapter,
+                        binding,
                         units: Vec::new(),
                     });
                 }
             };
-            adapters::validate_discovered_unit_sources(adapter, &units)
-                .map_err(LocalReportError::operational)?;
             let units = units
                 .into_iter()
                 .filter_map(|unit| {
-                    let client = unit.client();
+                    let client = binding.client();
                     let path = unit.path.clone();
                     match unit.prepare_snapshot() {
                         Ok(unit) => Some(unit),
@@ -637,18 +615,17 @@ pub fn prepare_local_inputs(
                     }
                 })
                 .collect();
-            Ok(adapters::PreparedAdapterInputs { adapter, units })
+            Ok(adapters::PreparedAdapterInputs { binding, units })
         })
         .collect::<Result<_, _>>()?;
-    health.set_input_data_bytes(input_data_bytes(
-        groups.iter().flat_map(|group| group.units.iter()),
-    ));
+    let input_footprint = prepared_input_footprint(&clients, &groups);
     let signature = input_inventory_signature(&clients, &groups);
     Ok(PreparedLocalInputs {
         options,
         clients,
         groups,
         signature,
+        input_footprint,
         health,
         #[cfg(test)]
         input_cache_dir: input_cache_dir_for_test_home(&home_dir),
@@ -671,24 +648,24 @@ fn prepare_discovery_count() -> usize {
 }
 
 fn input_inventory_signature(
-    clients: &[String],
+    clients: &[ClientId],
     groups: &[adapters::PreparedAdapterInputs],
 ) -> InputInventorySignature {
     let mut hasher = Sha256::new();
     message_cache::hash_inventory_bytes(&mut hasher, b"tokscale/local-input-inventory");
-    hasher.update(2_u32.to_le_bytes());
-    let mut sorted_clients: Vec<&str> = clients.iter().map(String::as_str).collect();
+    hasher.update(3_u32.to_le_bytes());
+    let mut sorted_clients = clients.to_vec();
     sorted_clients.sort_unstable();
     sorted_clients.dedup();
     message_cache::hash_inventory_len(&mut hasher, sorted_clients.len());
     for client in sorted_clients {
-        message_cache::hash_inventory_bytes(&mut hasher, client.as_bytes());
+        message_cache::hash_inventory_bytes(&mut hasher, client.as_str().as_bytes());
     }
     message_cache::hash_inventory_len(&mut hasher, groups.len());
     for group in groups {
         message_cache::hash_inventory_bytes(
             &mut hasher,
-            group.adapter.client().as_str().as_bytes(),
+            group.binding.client().as_str().as_bytes(),
         );
         message_cache::hash_inventory_len(&mut hasher, group.units.len());
         for unit in &group.units {
@@ -699,18 +676,18 @@ fn input_inventory_signature(
 }
 
 fn confirmed_input_inventory_signature(
-    clients: &[String],
+    clients: &[ClientId],
     groups: &[adapters::ConfirmedAdapterInputs],
 ) -> InputInventorySignature {
     let mut hasher = Sha256::new();
     message_cache::hash_inventory_bytes(&mut hasher, b"tokscale/local-input-inventory");
-    hasher.update(2_u32.to_le_bytes());
-    let mut sorted_clients: Vec<&str> = clients.iter().map(String::as_str).collect();
+    hasher.update(3_u32.to_le_bytes());
+    let mut sorted_clients = clients.to_vec();
     sorted_clients.sort_unstable();
     sorted_clients.dedup();
     message_cache::hash_inventory_len(&mut hasher, sorted_clients.len());
     for client in sorted_clients {
-        message_cache::hash_inventory_bytes(&mut hasher, client.as_bytes());
+        message_cache::hash_inventory_bytes(&mut hasher, client.as_str().as_bytes());
     }
     message_cache::hash_inventory_len(&mut hasher, groups.len());
     for group in groups {
@@ -813,7 +790,7 @@ struct ResolvedAggregationRequest<'a> {
 
 fn load_aggregated_views_resolved(
     request: ResolvedAggregationRequest<'_>,
-) -> Result<AggregatedViews, LocalReportError> {
+) -> Result<(AggregatedViews, LocalLoadMetadata), LocalReportError> {
     let prepared = prepare_local_inputs(LocalParseOptions {
         home_dir: Some(request.home_dir.to_string()),
         clients: Some(request.clients.to_vec()),
@@ -829,7 +806,6 @@ fn load_aggregated_views_resolved(
         request.views,
         request.pricing,
     )
-    .map(|(views, _)| views)
 }
 
 fn load_prepared_aggregated_views(
@@ -838,7 +814,7 @@ fn load_prepared_aggregated_views(
     date_range: DateRange,
     views: ViewSet,
     pricing: Option<&pricing::PricingService>,
-) -> Result<(AggregatedViews, InputInventorySignature), LocalReportError> {
+) -> Result<(AggregatedViews, LocalLoadMetadata), LocalReportError> {
     let mut engine = crate::aggregate::AggregationEngine::new(AggregationConfig {
         group_by,
         date_range,
@@ -846,8 +822,8 @@ fn load_prepared_aggregated_views(
     });
     let FoldOutcome {
         input_inventory_signature,
+        input_footprint,
         health,
-        ..
     } = match stream_local_inputs_into_engine(prepared, pricing, &mut engine) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -863,7 +839,13 @@ fn load_prepared_aggregated_views(
     // is the narrow lifecycle seam where dead weak identity indices can be
     // reclaimed without sweeping caller-owned generic message slices.
     sessions::intern::prune_dead();
-    Ok((views, input_inventory_signature))
+    Ok((
+        views,
+        LocalLoadMetadata {
+            input_inventory_signature,
+            input_footprint,
+        },
+    ))
 }
 
 fn load_aggregated_views_for_resolved_report(
@@ -882,6 +864,7 @@ fn load_aggregated_views_for_resolved_report(
         views,
         pricing,
     })
+    .map(|(views, _)| views)
 }
 
 /// Build any requested union of aggregation views with one adapter fold.
@@ -904,116 +887,89 @@ pub fn load_aggregated_views_with_pricing(
 ///
 /// Headless renderers select fields from this value instead of maintaining
 /// command-specific aggregation rules.
+pub async fn get_usage_report(
+    options: ReportOptions,
+) -> Result<LocalReport<usage_views::UsageData>, LocalReportError> {
+    let (home_dir, clients) = resolve_report_request(&options)?;
+    let pricing = load_pricing_for_local_parse().await;
+    let (mut views, metadata) = load_aggregated_views_resolved(ResolvedAggregationRequest {
+        home_dir: &home_dir,
+        clients: &clients,
+        group_by: options.group_by.clone(),
+        date_range: DateRange::from_options(&options),
+        scanner_settings: &options.scanner_settings,
+        views: ViewSet::TUI,
+        pricing: pricing.as_deref(),
+    })?;
+    let health = views.health.to_report();
+    let mut data = views.tui_usage.take().expect("tui view requested");
+    // Preserve the established UsageData envelope while exposing the same
+    // report health beside load metadata for generic report consumers.
+    data.health = health.clone();
+    Ok(LocalReport {
+        data,
+        health,
+        metadata,
+    })
+}
+
+/// Build the canonical TUI usage projection without its generic report
+/// envelope.
+///
+/// New callers that also need confirmed input attribution should prefer
+/// [`get_usage_report`].
 pub async fn get_usage_data(
     options: ReportOptions,
 ) -> Result<usage_views::UsageData, LocalReportError> {
-    let (home_dir, clients) = resolve_report_request(&options)?;
-    let pricing = load_pricing_for_local_parse().await;
-    let mut views = load_aggregated_views_for_resolved_report(
-        &options,
-        &home_dir,
-        &clients,
-        ViewSet::TUI,
-        pricing.as_deref(),
-    )?;
-    let mut data = views.tui_usage.take().expect("tui view requested");
-    data.health = views.health.to_report();
-    Ok(data)
+    get_usage_report(options).await.map(|report| report.data)
 }
 
-trait FinalizableMessage {
-    fn model_id(&self) -> &Arc<str>;
-    fn set_model_id(&mut self, model_id: Arc<str>);
-    fn provider_id(&self) -> &Arc<str>;
-    fn set_provider_id(&mut self, provider_id: Arc<str>);
-    fn tokens(&self) -> &TokenBreakdown;
-    fn tokens_mut(&mut self) -> &mut TokenBreakdown;
-    fn set_cost(&mut self, cost: f64);
-}
-
-macro_rules! impl_finalizable_message {
-    ($message:ty) => {
-        impl FinalizableMessage for $message {
-            fn model_id(&self) -> &Arc<str> {
-                &self.model_id
-            }
-
-            fn set_model_id(&mut self, model_id: Arc<str>) {
-                self.model_id = model_id;
-            }
-
-            fn provider_id(&self) -> &Arc<str> {
-                &self.provider_id
-            }
-
-            fn set_provider_id(&mut self, provider_id: Arc<str>) {
-                self.provider_id = provider_id;
-            }
-
-            fn tokens(&self) -> &TokenBreakdown {
-                &self.tokens
-            }
-
-            fn tokens_mut(&mut self) -> &mut TokenBreakdown {
-                &mut self.tokens
-            }
-
-            fn set_cost(&mut self, cost: f64) {
-                self.cost = cost;
-            }
-        }
-    };
-}
-
-impl_finalizable_message!(ParsedMessage);
-impl_finalizable_message!(UnifiedMessage);
-
-fn apply_token_pricing<M: FinalizableMessage>(
-    message: &mut M,
+fn apply_token_pricing(
+    message: &mut sessions::UsageRecord,
     pricing: Option<&pricing::PricingService>,
 ) {
-    message.set_cost(0.0);
+    message.cost = 0.0;
 
     let Some(pricing) = pricing else {
         return;
     };
 
     let calculated_cost = pricing.calculate_cost_with_provider(
-        message.model_id(),
-        Some(message.provider_id().as_ref()),
-        message.tokens(),
+        &message.model_id,
+        Some(message.provider_id.as_ref()),
+        &message.tokens,
     );
 
     if calculated_cost > 0.0 {
-        message.set_cost(calculated_cost);
+        message.cost = calculated_cost;
     }
 }
 
-fn refresh_derived_message_fields<M: FinalizableMessage>(message: &mut M) {
+fn refresh_derived_message_fields(message: &mut sessions::UsageRecord) {
     if let Some(provider) = provider_identity::provider_override_from_model_and_provider(
-        message.model_id(),
-        message.provider_id(),
+        &message.model_id,
+        &message.provider_id,
     ) {
-        message.set_provider_id(sessions::intern::intern(provider));
+        message.provider_id = sessions::intern::intern(provider);
     }
 }
 
-fn canonicalize_message_provider<M: FinalizableMessage>(message: &mut M) {
+fn canonicalize_message_provider(message: &mut sessions::UsageRecord) {
     let provider =
-        provider_identity::finalized_provider_id(message.provider_id(), message.model_id());
-    message.set_provider_id(sessions::intern::intern(&provider));
+        provider_identity::finalized_provider_id(&message.provider_id, &message.model_id);
+    message.provider_id = sessions::intern::intern(&provider);
 }
 
-fn canonicalize_message_model<M: FinalizableMessage>(
-    message: &mut M,
+fn canonicalize_message_model(
+    message: &mut sessions::UsageRecord,
     model_cache: &mut HashMap<Arc<str>, Arc<str>>,
 ) {
-    if let Some(canonical) = model_cache.get(message.model_id()) {
-        message.set_model_id(Arc::clone(canonical));
+    if let Some(canonical) = model_cache.get(&message.model_id) {
+        message.model_id = Arc::clone(canonical);
         return;
     }
 
-    let raw = Arc::clone(message.model_id());
+    let raw = Arc::clone(&message.model_id);
     let canonical = model_aliases::canonicalize_model_id(raw.as_ref());
     let canonical = if canonical == raw.as_ref() {
         Arc::clone(&raw)
@@ -1022,21 +978,22 @@ fn canonicalize_message_model<M: FinalizableMessage>(
     };
 
     model_cache.insert(raw, Arc::clone(&canonical));
-    message.set_model_id(canonical);
+    message.model_id = canonical;
 }
 
-fn finalize_token_priced_messages<M: FinalizableMessage>(
+fn finalize_token_priced_messages<M: AsMut<sessions::UsageRecord>>(
     messages: &mut Vec<M>,
     pricing: Option<&pricing::PricingService>,
 ) {
     let mut model_cache = HashMap::new();
 
     messages.retain_mut(|message| {
-        normalize_token_breakdown(message.tokens_mut());
+        let message = message.as_mut();
+        normalize_token_breakdown(&mut message.tokens);
         canonicalize_message_model(message, &mut model_cache);
         refresh_derived_message_fields(message);
         canonicalize_message_provider(message);
-        if !has_positive_tokens(message.tokens()) {
+        if !has_positive_tokens(&message.tokens) {
             return false;
         }
         apply_token_pricing(message, pricing);
@@ -1118,18 +1075,24 @@ async fn load_pricing_for_local_parse_with_diagnostics(
 
 fn resolve_local_parse_request(
     options: &LocalParseOptions,
-) -> Result<(String, Vec<String>), LocalReportError> {
+) -> Result<(String, Vec<ClientId>), LocalReportError> {
     let home_dir = get_home_dir_string(&options.home_dir)
         .map_err(LocalReportError::invalid_environment_message)?;
-    let clients = options
-        .clients
-        .clone()
-        .unwrap_or_else(|| ClientId::iter().map(|c| c.as_str().to_string()).collect());
-    for client in &clients {
-        ClientId::from_str(client).ok_or_else(|| {
-            LocalReportError::invalid_request_message(format!("unknown local client `{client}`"))
-        })?;
-    }
+    let mut clients: Vec<ClientId> = match options.clients.as_ref() {
+        Some(clients) => clients
+            .iter()
+            .map(|client| {
+                ClientId::from_str(client).ok_or_else(|| {
+                    LocalReportError::invalid_request_message(format!(
+                        "unknown local client `{client}`"
+                    ))
+                })
+            })
+            .collect::<Result<_, _>>()?,
+        None => ClientId::iter().collect(),
+    };
+    clients.sort_unstable();
+    clients.dedup();
     Ok((home_dir, clients))
 }
 
@@ -1141,14 +1104,15 @@ fn parse_prepared_local_unified_messages(
     let mut messages = Vec::new();
     let FoldOutcome {
         input_inventory_signature,
+        input_footprint,
         health,
-        ..
     } = fold_prepared_local_inputs_with_pricing(prepared, pricing, &mut messages)?;
     Ok(LocalReport {
         data: filter_unified_messages(messages, &filters),
         health: health.to_report(),
         metadata: LocalLoadMetadata {
             input_inventory_signature,
+            input_footprint,
         },
     })
 }
@@ -1218,7 +1182,7 @@ pub struct TuiBundleWithDiagnostics {
     pub accumulator: TuiAcc,
     pub sessions: Vec<TuiSessionEntry>,
     /// Confirmed input bytes keyed by canonical local client id.
-    pub client_space: BTreeMap<String, u64>,
+    pub input_footprint: InputFootprint,
     pub pricing_diagnostics: pricing::PricingDiagnostics,
     pub input_inventory_signature: InputInventorySignature,
     pub health: DataHealth,
@@ -1243,7 +1207,7 @@ pub async fn load_prepared_tui_bundle_with_diagnostics(
     });
     let FoldOutcome {
         input_inventory_signature,
-        client_space,
+        input_footprint,
         health,
     } = match stream_local_inputs_into_engine(prepared, pricing.as_deref(), &mut engine) {
         Ok(outcome) => outcome,
@@ -1258,7 +1222,7 @@ pub async fn load_prepared_tui_bundle_with_diagnostics(
     Ok(TuiBundleWithDiagnostics {
         accumulator: accumulator.expect("tui usage view requested"),
         sessions: sessions.expect("tui sessions view requested"),
-        client_space,
+        input_footprint,
         pricing_diagnostics,
         input_inventory_signature,
         health,

@@ -8,15 +8,15 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
-    LocalInputAdapter, MessageSink, ParseContext, ParsedBatchInput, ParsedUnit,
+    AdapterScanContext, BoundMessageSink, DecoderSpec, FingerprintPolicy, FoldContext,
+    InputDiscoveryError, InputUnit, LocalInputAdapter, ParseContext, ParsedBatchInput, ParsedUnit,
     MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
-use crate::message_cache::{ParserId, ParserVersion};
+use crate::message_cache::DecoderId;
 use crate::sessions;
 
-const CLAUDE_PARSER_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 10;
+const CLAUDE_DECODER_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 10;
 
 static CLAUDE_PROJECT_RESOLVERS: LazyLock<
     Mutex<HashMap<PathBuf, Arc<sessions::claudecode::ClaudeProjectResolver>>>,
@@ -56,42 +56,34 @@ fn claude_project_resolver(
 pub(crate) struct ClaudeAdapter;
 
 impl LocalInputAdapter for ClaudeAdapter {
-    fn client(&self) -> ClientId {
-        ClientId::Claude
-    }
-
     fn discover_checked(
         &self,
+        client: ClientId,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         reset_claude_project_resolver(Path::new(ctx.home_dir));
-        let def = ClientId::Claude
+        let def = client
             .local_def()
             .expect("Claude adapter must have local scan policy");
         let mut roots = vec![def.resolve_path(ctx.home_dir)];
 
-        roots.extend(adapter_discover::extra_roots_for_client(
-            ClientId::Claude,
-            ctx,
-        )?);
+        roots.extend(adapter_discover::extra_roots_for_client(client, ctx)?);
         roots.push(PathBuf::from(format!(
             "{}/.claude/transcripts",
             ctx.home_dir
         )));
 
         let units = adapter_discover::input_units_from_paths(
-            ClientId::Claude,
-            adapter_discover::scan_roots(ClientId::Claude, roots, def.pattern)?,
+            client,
+            adapter_discover::scan_roots(client, roots, def.pattern)?,
             FingerprintPolicy::ClaudeCodeWithHome {
                 home_dir: PathBuf::from(ctx.home_dir),
                 parent_session_path: None,
             },
+            DecoderSpec::plain(DecoderId::Claude, CLAUDE_DECODER_REVISION),
         )?
         .into_iter()
         .map(configure_claude_parent_dependency)
-        .map(|unit| {
-            unit.with_parser_version(ParserVersion::new(ParserId::Claude, CLAUDE_PARSER_REVISION))
-        })
         .collect();
         Ok(units)
     }
@@ -144,7 +136,7 @@ impl LocalInputAdapter for ClaudeAdapter {
         &self,
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), crate::adapters::InputPipelineError> {
         let mut seen_keys = HashSet::new();
         fold_claude_units(parsed, ctx, sink, &mut seen_keys)
@@ -154,7 +146,7 @@ impl LocalInputAdapter for ClaudeAdapter {
         &self,
         batches: &mut ParsedBatchInput<'_>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), crate::adapters::InputPipelineError> {
         let mut seen_keys = HashSet::new();
         while let Some(parsed) = batches.next(ctx)? {
@@ -250,7 +242,7 @@ fn resolve_flat_parent_dependency(path: &std::path::Path) -> FlatParentResolutio
 fn fold_claude_units(
     parsed: Vec<ParsedUnit>,
     ctx: &mut FoldContext<'_>,
-    sink: &mut dyn MessageSink,
+    sink: &mut BoundMessageSink<'_>,
     seen_keys: &mut HashSet<u64>,
 ) -> Result<(), crate::adapters::InputPipelineError> {
     for parsed_unit in parsed {
@@ -262,20 +254,14 @@ fn fold_claude_units(
             status,
             rejections,
         } = adapter_cache::resolve_unit(parsed_unit, ctx)?;
-        ctx.health.record(crate::input_health::InputHealth {
-            client: unit.client,
-            path: unit.path.clone(),
-            status,
-            rejections,
-        });
+        ctx.record_health(unit.path.clone(), status, rejections);
         let path = unit.path.clone();
         let cache_write_outcome = adapter_cache::write_cache(cache_write, ctx, &messages);
         if cache_write_outcome.is_err() && invalidate_cache {
-            ctx.input_cache.remove(&path, unit.parser_version);
+            ctx.input_cache.remove(&path, unit.decoder.version());
         }
         let cache_write_outcome = cache_write_outcome?;
         adapter_cache::emit_messages(
-            unit.client,
             messages
                 .into_iter()
                 .filter(|message| crate::should_keep_deduped_message(seen_keys, message)),
@@ -283,7 +269,7 @@ fn fold_claude_units(
         );
 
         if cache_write_outcome == adapter_cache::CacheWriteOutcome::NotPlanned && invalidate_cache {
-            ctx.input_cache.remove(&path, unit.parser_version);
+            ctx.input_cache.remove(&path, unit.decoder.version());
         }
     }
     Ok(())
@@ -294,9 +280,10 @@ pub(crate) static CLAUDE_ADAPTER: ClaudeAdapter = ClaudeAdapter;
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use super::*;
+    use crate::adapters::{adapter_for, AdapterBinding};
     use crate::input_health::InputHealth;
     use crate::message_cache;
 
@@ -318,11 +305,52 @@ mod tests {
     fn discover_unit(home_dir: &Path, path: &Path) -> InputUnit {
         let settings = crate::scanner::ScannerSettings::default();
         CLAUDE_ADAPTER
-            .discover_checked(&scan_context(home_dir, &settings))
+            .discover_checked(ClientId::Claude, &scan_context(home_dir, &settings))
             .unwrap()
             .into_iter()
             .find(|unit| unit.path == path)
             .unwrap_or_else(|| panic!("Claude input was not discovered: {}", path.display()))
+    }
+
+    fn binding() -> AdapterBinding<'static> {
+        adapter_for(ClientId::Claude).expect("Claude must have an adapter binding")
+    }
+
+    fn decoder() -> DecoderSpec {
+        DecoderSpec::plain(DecoderId::Claude, CLAUDE_DECODER_REVISION)
+    }
+
+    fn input_unit(path: PathBuf, home_dir: PathBuf) -> InputUnit {
+        InputUnit::claude_code(path, home_dir, decoder())
+    }
+
+    fn input_health(parsed: &ParsedUnit) -> InputHealth {
+        InputHealth {
+            client: ClientId::Claude,
+            path: parsed.unit.path.clone(),
+            status: parsed.health.status.clone(),
+            rejections: parsed.health.rejections.clone(),
+        }
+    }
+
+    fn fold_parsed(
+        parsed: Vec<ParsedUnit>,
+        cache: &mut message_cache::InputMessageCache,
+    ) -> Vec<crate::UnifiedMessage> {
+        let binding = binding();
+        let mut messages = Vec::new();
+        let mut sink = BoundMessageSink::new(binding, &mut messages);
+        CLAUDE_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext::new(binding, cache, None),
+                &mut sink,
+            )
+            .unwrap();
+        assert!(messages
+            .iter()
+            .all(|message| message.client == ClientId::Claude));
+        messages
     }
 
     fn scan_and_fold(
@@ -330,14 +358,8 @@ mod tests {
         cache: &mut message_cache::InputMessageCache,
     ) -> (Vec<crate::UnifiedMessage>, InputHealth) {
         let parsed = CLAUDE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
-        let health = parsed[0].input_health();
-        let mut messages = Vec::new();
-        CLAUDE_ADAPTER
-            .fold(parsed, &mut FoldContext::new(cache, None), &mut messages)
-            .unwrap();
-        assert!(messages
-            .iter()
-            .all(|message| message.client.as_ref() == ClientId::Claude.as_str()));
+        let health = input_health(&parsed[0]);
+        let messages = fold_parsed(parsed, cache);
         (messages, health)
     }
 
@@ -345,18 +367,8 @@ mod tests {
         parsed: ParsedUnit,
         cache: &mut message_cache::InputMessageCache,
     ) -> (Vec<crate::UnifiedMessage>, InputHealth) {
-        let health = parsed.input_health();
-        let mut messages = Vec::new();
-        CLAUDE_ADAPTER
-            .fold(
-                vec![parsed],
-                &mut FoldContext::new(cache, None),
-                &mut messages,
-            )
-            .unwrap();
-        assert!(messages
-            .iter()
-            .all(|message| message.client.as_ref() == ClientId::Claude.as_str()));
+        let health = input_health(&parsed);
+        let messages = fold_parsed(vec![parsed], cache);
         (messages, health)
     }
 
@@ -404,7 +416,7 @@ mod tests {
         };
 
         let units = CLAUDE_ADAPTER
-            .discover_checked(&scan_context(home.path(), &settings))
+            .discover_checked(ClientId::Claude, &scan_context(home.path(), &settings))
             .unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
         let mut expected = vec![default_file, workflow_file, transcript_file, extra_file];
@@ -424,11 +436,7 @@ mod tests {
             .path()
             .join(".claude/projects/project-a/session-1.jsonl");
         write_file(&session_path, "");
-        let unit = InputUnit::claude_code(
-            ClientId::Claude,
-            session_path.clone(),
-            home.path().to_path_buf(),
-        );
+        let unit = input_unit(session_path.clone(), home.path().to_path_buf());
 
         let mut digest_paths = unit.digest_paths();
         digest_paths.sort_unstable();
@@ -473,16 +481,9 @@ mod tests {
         );
 
         let mut cache = message_cache::InputMessageCache::default();
-        let unit = InputUnit::claude_code(
-            ClientId::Claude,
-            session_path.clone(),
-            home.path().to_path_buf(),
-        );
+        let unit = input_unit(session_path.clone(), home.path().to_path_buf());
         let parsed = CLAUDE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
-        let mut actual = Vec::new();
-        CLAUDE_ADAPTER
-            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut actual)
-            .unwrap();
+        let actual = fold_parsed(parsed, &mut cache);
 
         let expected = finalized(
             sessions::claudecode::parse_claude_file_with_home(&session_path, Some(home.path()))
@@ -491,7 +492,7 @@ mod tests {
         );
         assert!(actual
             .iter()
-            .all(|message| message.client.as_ref() == ClientId::Claude.as_str()));
+            .all(|message| message.client == ClientId::Claude));
         assert_eq!(actual, expected);
         assert_eq!(actual.len(), 1);
     }
@@ -506,17 +507,13 @@ mod tests {
 {not-json
 "#,
         );
-        let unit = InputUnit::claude_code(
-            ClientId::Claude,
-            session_path.clone(),
-            home.path().to_path_buf(),
-        );
-        let parser_version = unit.parser_version;
+        let unit = input_unit(session_path.clone(), home.path().to_path_buf());
+        let decoder_version = unit.decoder.version();
 
         let parsed = CLAUDE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
 
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].input_health();
+        let health = input_health(&parsed[0]);
         assert_eq!(health.client, ClientId::Claude);
         assert_eq!(health.path, session_path);
         assert!(matches!(
@@ -533,19 +530,12 @@ mod tests {
         assert!(failure.message.contains("line 2"));
 
         let mut cache = message_cache::InputMessageCache::default();
-        let mut messages = Vec::new();
-        CLAUDE_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext::new(&mut cache, None),
-                &mut messages,
-            )
-            .unwrap();
+        let messages = fold_parsed(parsed, &mut cache);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), ClientId::Claude.as_str());
+        assert_eq!(messages[0].client, ClientId::Claude);
         assert_eq!(messages[0].tokens.input, 10);
         assert!(cache
-            .get_meta(&session_path, parser_version)
+            .get_meta(&session_path, decoder_version)
             .unwrap()
             .is_none());
     }
@@ -561,23 +551,15 @@ mod tests {
 {"type":"assistant","timestamp":"2026-07-14T00:00:01Z","message":{"usage":{"input_tokens":99,"output_tokens":9}}}
 {"type":"assistant","timestamp":"2026-07-14T00:00:02Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":20,"output_tokens":2}}}"#,
         );
-        let unit = InputUnit::claude_code(
-            ClientId::Claude,
-            session_path.clone(),
-            home.path().to_path_buf(),
-        )
-        .with_parser_version(ParserVersion::new(ParserId::Claude, CLAUDE_PARSER_REVISION))
-        .prepare_snapshot()
-        .unwrap();
+        let unit = input_unit(session_path.clone(), home.path().to_path_buf())
+            .prepare_snapshot()
+            .unwrap();
         let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
 
         let cold =
             CLAUDE_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
-        assert_eq!(cold[0].input_health().rejections.total(), 1);
-        let mut messages = Vec::new();
-        CLAUDE_ADAPTER
-            .fold(cold, &mut FoldContext::new(&mut cache, None), &mut messages)
-            .unwrap();
+        assert_eq!(cold[0].health.rejections.total(), 1);
+        let messages = fold_parsed(cold, &mut cache);
         assert_eq!(messages.len(), 2);
         cache.save_if_dirty().unwrap();
 
@@ -586,7 +568,7 @@ mod tests {
         let crate::adapters::CacheHitPlan::Hit(warm) = planned else {
             panic!("unchanged Claude input must use its complete cached scan");
         };
-        let health = warm.input_health();
+        let health = input_health(&warm);
         assert!(matches!(
             health.status,
             crate::input_health::InputStatus::Complete
@@ -610,7 +592,7 @@ mod tests {
         );
 
         let unit = discover_unit(home.path(), &session_path);
-        let parser_version = unit.parser_version;
+        let decoder_version = unit.decoder.version();
         let mut cache = message_cache::InputMessageCache::default();
         let (unresolved, _) = scan_and_fold(unit, &mut cache);
         assert_eq!(
@@ -618,7 +600,7 @@ mod tests {
             Some("-home-travis-external-project")
         );
         assert!(cache
-            .get_meta(&session_path, parser_version)
+            .get_meta(&session_path, decoder_version)
             .unwrap()
             .is_none());
 
@@ -638,7 +620,7 @@ mod tests {
             Some("/home/travis/external-project")
         );
         assert!(cache
-            .get_meta(&session_path, parser_version)
+            .get_meta(&session_path, decoder_version)
             .unwrap()
             .is_none());
     }
@@ -787,7 +769,7 @@ mod tests {
 
         let unit = discover_unit(home.path(), &child_path);
         assert!(!unit.digest_paths().contains(&parent_path));
-        let parser_version = unit.parser_version;
+        let decoder_version = unit.decoder.version();
         let mut cache = message_cache::InputMessageCache::default();
         let (unresolved, _) = scan_and_fold(unit, &mut cache);
         assert_eq!(
@@ -795,7 +777,7 @@ mod tests {
             Some("-home-travis-parent-project")
         );
         assert!(cache
-            .get_meta(&child_path, parser_version)
+            .get_meta(&child_path, decoder_version)
             .unwrap()
             .is_none());
 
@@ -815,7 +797,7 @@ mod tests {
             Some("/home/travis/parent-project")
         );
         assert!(cache
-            .get_meta(&child_path, parser_version)
+            .get_meta(&child_path, decoder_version)
             .unwrap()
             .is_none());
     }
@@ -855,7 +837,7 @@ mod tests {
 
         let settings = crate::scanner::ScannerSettings::default();
         let units = CLAUDE_ADAPTER
-            .discover_checked(&scan_context(home.path(), &settings))
+            .discover_checked(ClientId::Claude, &scan_context(home.path(), &settings))
             .expect("one unresolved flat sidechain must not fail Claude discovery");
         let unresolved_unit = units.iter().find(|unit| unit.path == unresolved).unwrap();
         let regular_unit = units.iter().find(|unit| unit.path == regular).unwrap();

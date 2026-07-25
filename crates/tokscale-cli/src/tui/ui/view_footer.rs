@@ -154,7 +154,7 @@ mod tests {
     use chrono::NaiveDate;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{backend::TestBackend, Terminal};
-    use tokscale_core::{GroupBy, TuiAcc, TuiSessionEntry};
+    use tokscale_core::{GroupBy, InputFootprint, TuiAcc, TuiSessionEntry};
     use unicode_width::UnicodeWidthStr;
 
     fn make_app(width: u16) -> App {
@@ -187,7 +187,7 @@ mod tests {
                 session_id: "session-1".to_string(),
                 ..TuiSessionEntry::default()
             }],
-            BTreeMap::new(),
+            InputFootprint::default(),
             ProjectionBackend::Memory(TuiAcc::default()),
             GroupBy::Model,
         );

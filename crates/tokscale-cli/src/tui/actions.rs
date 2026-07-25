@@ -245,7 +245,7 @@ mod tests {
 
     use chrono::{NaiveDate, NaiveDateTime};
     use crossterm::event::KeyModifiers;
-    use tokscale_core::{GroupBy, TuiAcc, TuiSessionEntry};
+    use tokscale_core::{ClientId, GroupBy, InputFootprint, TuiAcc, TuiSessionEntry};
 
     use super::*;
     use crate::tui::app::{ProjectionBackend, SortDirection, TuiConfig};
@@ -279,7 +279,7 @@ mod tests {
             app.install_tui_snapshot(
                 data,
                 Vec::new(),
-                BTreeMap::new(),
+                InputFootprint::default(),
                 ProjectionBackend::Memory(accumulator),
                 GroupBy::Model,
             );
@@ -401,8 +401,10 @@ mod tests {
     #[test]
     fn zero_session_client_row_cannot_open_detail() {
         let mut app = make_app(Tab::Sessions, true);
-        app.session_snapshot =
-            SessionSnapshot::new(Vec::new(), BTreeMap::from([("codex".to_string(), 0)]));
+        app.session_snapshot = SessionSnapshot::new(
+            Vec::new(),
+            tokscale_core::InputFootprint::from_client_bytes([(ClientId::Codex, 0)]).unwrap(),
+        );
         let set = action_set(&app, &ViewState::default());
         assert!(!set.is_empty_view());
         assert!(!set.contains(Action::OpenDetails));
@@ -514,7 +516,7 @@ mod tests {
                 session_id: "session-1".to_string(),
                 ..TuiSessionEntry::default()
             }],
-            BTreeMap::new(),
+            tokscale_core::InputFootprint::default(),
         );
         let set = action_set(&app, &ViewState::default());
 
@@ -533,7 +535,7 @@ mod tests {
                 session_id: "session-1".to_string(),
                 ..TuiSessionEntry::default()
             }],
-            BTreeMap::from([("codex".to_string(), 0)]),
+            tokscale_core::InputFootprint::from_client_bytes([(ClientId::Codex, 0)]).unwrap(),
         );
         app.sort_field = SortField::Tokens;
         app.sort_direction = SortDirection::Ascending;

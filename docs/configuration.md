@@ -92,11 +92,11 @@ want a fresh local rebuild:
 - `images/`
 
 Scan-input message cache writes use the current shard envelope and stable
-explicit parser keys. Ordinary reports and `tokscale cache prune` accept only
+explicit decoder keys. Ordinary reports and `tokscale cache prune` accept only
 shards in the format supported by the running binary. Pruning explicitly
 traverses the shard directory and removes current shards whose authoritative
-input is absent, whose path is not canonical for the input and parser key, or
-whose parser revision has been superseded.
+input is absent, whose path is not canonical for the input and decoder key, or
+whose decoder revision has been superseded.
 Traversal and classification complete before deletion; an unknown, future,
 truncated, malformed, undecodable, or oversized shard aborts pruning without
 deleting anything.

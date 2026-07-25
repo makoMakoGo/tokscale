@@ -5,13 +5,15 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputPipelineError,
-    InputUnit, LocalInputAdapter, MessageSink, ParseContext, ParsedUnit,
-    MODEL_ID_CANONICALIZATION_REVISION,
+    AdapterScanContext, BoundMessageSink, DecoderSpec, FingerprintPolicy, FoldContext,
+    InputDiscoveryError, InputPipelineError, InputUnit, LocalInputAdapter, ParseContext,
+    ParsedUnit, MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
 use crate::input_health::ScannedInput;
-use crate::message_cache::{ParserId, ParserVersion, RelatedInputFailurePolicy};
+#[cfg(test)]
+use crate::message_cache::DecoderVersion;
+use crate::message_cache::{DecoderId, RelatedInputFailurePolicy};
 use crate::sessions;
 use crate::sessions::error::SessionParseResult;
 use crate::sessions::{ParsedMessage, WorkspaceMetadata};
@@ -37,8 +39,7 @@ const DROID_AGENT_ATTRIBUTION_REVISION: u32 = DROID_RECORD_REJECTION_REVISION + 
 const GROK_RELATED_METADATA_SIBLINGS: &[&str] = &["summary.json", "events.jsonl"];
 
 pub(crate) struct CachedFileAdapter {
-    client: ClientId,
-    parser_version: ParserVersion,
+    decoder: DecoderSpec,
     fingerprint_policy: FingerprintPolicy,
     dependency_failure_policy: RelatedInputFailurePolicy,
     dependency_path: Option<fn(&Path) -> Option<PathBuf>>,
@@ -48,14 +49,12 @@ pub(crate) struct CachedFileAdapter {
 
 impl CachedFileAdapter {
     pub(crate) const fn new(
-        client: ClientId,
-        parser_id: ParserId,
+        decoder_id: DecoderId,
         revision: u32,
         parse: fn(&Path) -> SessionParseResult<ScannedInput>,
     ) -> Self {
         Self {
-            client,
-            parser_version: ParserVersion::new(parser_id, revision),
+            decoder: DecoderSpec::plain(decoder_id, revision),
             fingerprint_policy: FingerprintPolicy::PlainFile,
             dependency_failure_policy: RelatedInputFailurePolicy::FailInput,
             dependency_path: None,
@@ -65,15 +64,13 @@ impl CachedFileAdapter {
     }
 
     pub(crate) const fn new_with_required_dependency(
-        client: ClientId,
-        parser_id: ParserId,
+        decoder_id: DecoderId,
         revision: u32,
         dependency_path: fn(&Path) -> Option<PathBuf>,
         parse: fn(&Path) -> SessionParseResult<ScannedInput>,
     ) -> Self {
         Self {
-            client,
-            parser_version: ParserVersion::new(parser_id, revision),
+            decoder: DecoderSpec::plain(decoder_id, revision),
             fingerprint_policy: FingerprintPolicy::PlainFile,
             dependency_failure_policy: RelatedInputFailurePolicy::FailInput,
             dependency_path: Some(dependency_path),
@@ -83,15 +80,13 @@ impl CachedFileAdapter {
     }
 
     pub(crate) const fn new_with_optional_dependency(
-        client: ClientId,
-        parser_id: ParserId,
+        decoder_id: DecoderId,
         revision: u32,
         dependency_path: fn(&Path) -> Option<PathBuf>,
         parse: fn(&Path) -> SessionParseResult<ScannedInput>,
     ) -> Self {
         Self {
-            client,
-            parser_version: ParserVersion::new(parser_id, revision),
+            decoder: DecoderSpec::plain(decoder_id, revision),
             fingerprint_policy: FingerprintPolicy::PlainFile,
             dependency_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
             dependency_path: Some(dependency_path),
@@ -101,15 +96,13 @@ impl CachedFileAdapter {
     }
 
     pub(crate) const fn new_with_optional_siblings(
-        client: ClientId,
-        parser_id: ParserId,
+        decoder_id: DecoderId,
         revision: u32,
         sibling_names: &'static [&'static str],
         parse: fn(&Path) -> SessionParseResult<ScannedInput>,
     ) -> Self {
         Self {
-            client,
-            parser_version: ParserVersion::new(parser_id, revision),
+            decoder: DecoderSpec::plain(decoder_id, revision),
             fingerprint_policy: FingerprintPolicy::PrimaryWithSiblings {
                 sibling_names,
                 related_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
@@ -128,25 +121,23 @@ impl CachedFileAdapter {
 }
 
 impl LocalInputAdapter for CachedFileAdapter {
-    fn client(&self) -> ClientId {
-        self.client
-    }
-
     fn discover_checked(
         &self,
+        client: ClientId,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         Ok(adapter_discover::discover_default_scanned_units(
-            self.client,
+            client,
             ctx,
             self.fingerprint_policy.clone(),
+            self.decoder,
         )?
         .into_iter()
         .map(|unit| {
             let dependency_path = self
                 .dependency_path
                 .and_then(|dependency_path| dependency_path(&unit.path));
-            let unit = match dependency_path {
+            match dependency_path {
                 Some(dependency_path)
                     if self.dependency_failure_policy
                         == RelatedInputFailurePolicy::PreservePrimary =>
@@ -155,8 +146,7 @@ impl LocalInputAdapter for CachedFileAdapter {
                 }
                 Some(dependency_path) => unit.with_dependency(dependency_path),
                 None => unit,
-            };
-            unit.with_parser_version(self.parser_version)
+            }
         })
         .collect())
     }
@@ -181,7 +171,7 @@ impl LocalInputAdapter for CachedFileAdapter {
         &self,
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), InputPipelineError> {
         let workspace_enrichment = self.workspace_enrichment;
         // Companion workspace metadata is projected after cache resolution so
@@ -220,40 +210,29 @@ fn enrich_gemini_workspace(path: &Path, messages: &mut [ParsedMessage]) {
 pub(crate) struct CopilotAdapter;
 
 impl LocalInputAdapter for CopilotAdapter {
-    fn client(&self) -> ClientId {
-        ClientId::Copilot
-    }
-
     fn discover_checked(
         &self,
+        client: ClientId,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
-        let def = ClientId::Copilot
+        let def = client
             .local_def()
             .expect("Copilot adapter must have local scan policy");
         let default_root = def.resolve_path(ctx.home_dir);
 
-        let mut paths =
-            adapter_discover::scan_roots(ClientId::Copilot, [default_root], def.pattern)?;
+        let mut paths = adapter_discover::scan_roots(client, [default_root], def.pattern)?;
         paths.extend(adapter_discover::scan_roots(
-            ClientId::Copilot,
-            adapter_discover::extra_roots_for_client(ClientId::Copilot, ctx)?,
+            client,
+            adapter_discover::extra_roots_for_client(client, ctx)?,
             def.pattern,
         )?);
 
-        Ok(adapter_discover::input_units_from_paths(
-            ClientId::Copilot,
+        adapter_discover::input_units_from_paths(
+            client,
             paths,
             FingerprintPolicy::PlainFile,
-        )?
-        .into_iter()
-        .map(|unit| {
-            unit.with_parser_version(ParserVersion::new(
-                ParserId::Copilot,
-                COPILOT_AGENT_IDENTITY_REVISION,
-            ))
-        })
-        .collect())
+            DecoderSpec::plain(DecoderId::Copilot, COPILOT_AGENT_IDENTITY_REVISION),
+        )
     }
 
     fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
@@ -285,7 +264,7 @@ impl LocalInputAdapter for CopilotAdapter {
         &self,
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
@@ -293,29 +272,25 @@ impl LocalInputAdapter for CopilotAdapter {
 
 pub(crate) static COPILOT_ADAPTER: CopilotAdapter = CopilotAdapter;
 pub(crate) static GEMINI_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
-    ClientId::Gemini,
-    ParserId::Gemini,
+    DecoderId::Gemini,
     GEMINI_RECORD_REJECTION_REVISION,
     sessions::gemini::parse_gemini_file,
 )
 .with_workspace_enrichment(enrich_gemini_workspace);
 pub(crate) static GROK_ADAPTER: CachedFileAdapter = CachedFileAdapter::new_with_optional_siblings(
-    ClientId::Grok,
-    ParserId::Grok,
+    DecoderId::Grok,
     GROK_RELATED_METADATA_REVISION,
     GROK_RELATED_METADATA_SIBLINGS,
     sessions::grok::parse_grok_updates_file,
 );
 pub(crate) static AMP_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
-    ClientId::Amp,
-    ParserId::Amp,
+    DecoderId::Amp,
     AMP_RECORD_REJECTION_REVISION,
     sessions::amp::parse_amp_file,
 );
 pub(crate) static DROID_ADAPTER: CachedFileAdapter =
     CachedFileAdapter::new_with_optional_dependency(
-        ClientId::Droid,
-        ParserId::Droid,
+        DecoderId::Droid,
         DROID_AGENT_ATTRIBUTION_REVISION,
         sessions::droid::droid_agent_dependency_path,
         sessions::droid::parse_droid_file,
@@ -323,36 +298,31 @@ pub(crate) static DROID_ADAPTER: CachedFileAdapter =
     .with_workspace_enrichment(enrich_droid_metadata);
 pub(crate) static KIMI_ADAPTER: CachedFileAdapter =
     CachedFileAdapter::new_with_optional_dependency(
-        ClientId::Kimi,
-        ParserId::Kimi,
+        DecoderId::Kimi,
         KIMI_RECORD_REJECTION_REVISION,
         sessions::kimi::kimi_config_dependency_path,
         sessions::kimi::parse_kimi_file,
     )
     .with_workspace_enrichment(enrich_kimi_workspace);
 pub(crate) static QWEN_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
-    ClientId::Qwen,
-    ParserId::Qwen,
+    DecoderId::Qwen,
     QWEN_RECORD_REJECTION_REVISION,
     sessions::qwen::parse_qwen_file,
 );
 pub(crate) static MUX_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
-    ClientId::Mux,
-    ParserId::Mux,
+    DecoderId::Mux,
     MUX_RECORD_REJECTION_REVISION,
     sessions::mux::parse_mux_file,
 );
 pub(crate) static COMMANDCODE_ADAPTER: CachedFileAdapter =
     CachedFileAdapter::new_with_required_dependency(
-        ClientId::CommandCode,
-        ParserId::CommandCode,
+        DecoderId::CommandCode,
         COMMANDCODE_WORKSPACE_REVISION,
         sessions::commandcode::commandcode_config_dependency_path,
         sessions::commandcode::parse_commandcode_file,
     );
 pub(crate) static ZCODE_ADAPTER: CachedFileAdapter = CachedFileAdapter::new(
-    ClientId::Zcode,
-    ParserId::Zcode,
+    DecoderId::Zcode,
     ZCODE_RECORD_REJECTION_REVISION,
     sessions::zcode::parse_zcode_file,
 );
@@ -396,26 +366,36 @@ not-json
             .into_iter()
             .map(|message| message.attribute(client))
             .collect();
-        assert!(messages
-            .iter()
-            .all(|message| message.client.as_ref() == client.as_str()));
+        assert!(messages.iter().all(|message| message.client == client));
         messages
     }
 
     fn fold_with_adapter(
+        client: ClientId,
         adapter: &'static dyn LocalInputAdapter,
         units: Vec<InputUnit>,
         cache: &mut message_cache::InputMessageCache,
     ) -> Vec<UnifiedMessage> {
         let parsed = adapter.parse_checked(units, &ParseContext { pricing: None });
-        let mut sink = Vec::new();
-        adapter
-            .fold(parsed, &mut FoldContext::new(cache, None), &mut sink)
-            .unwrap();
-        assert!(sink
-            .iter()
-            .all(|message| message.client.as_ref() == adapter.client().as_str()));
+        let (sink, _) = fold_parsed(client, adapter, parsed, cache);
+        assert!(sink.iter().all(|message| message.client == client));
         sink
+    }
+
+    fn fold_parsed(
+        client: ClientId,
+        adapter: &'static dyn LocalInputAdapter,
+        parsed: Vec<ParsedUnit>,
+        cache: &mut message_cache::InputMessageCache,
+    ) -> (Vec<UnifiedMessage>, crate::input_health::DataHealth) {
+        let mut sink = Vec::new();
+        let binding = crate::adapters::AdapterBinding::new(client, adapter);
+        let mut fold_ctx = FoldContext::new(binding, cache, None);
+        let mut bound_sink = BoundMessageSink::new(binding, &mut sink);
+        adapter
+            .fold(parsed, &mut fold_ctx, &mut bound_sink)
+            .unwrap();
+        (sink, fold_ctx.take_health())
     }
 
     #[test]
@@ -436,7 +416,7 @@ not-json
         };
         let ctx = scan_context(home.path(), &settings);
 
-        let units = AMP_ADAPTER.discover_checked(&ctx).unwrap();
+        let units = AMP_ADAPTER.discover_checked(ClientId::Amp, &ctx).unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
         let mut expected = vec![default_path, extra_path];
         expected.sort_unstable();
@@ -452,10 +432,13 @@ not-json
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("T-test.json");
         write_file(&path, AMP_CONTENT);
-        let units = vec![InputUnit::plain_file(ClientId::Amp, path.clone())];
+        let units = vec![InputUnit::plain_file(
+            path.clone(),
+            DecoderSpec::plain(DecoderId::Amp, AMP_RECORD_REJECTION_REVISION),
+        )];
         let mut cache = message_cache::InputMessageCache::default();
 
-        let actual = fold_with_adapter(&AMP_ADAPTER, units, &mut cache);
+        let actual = fold_with_adapter(ClientId::Amp, &AMP_ADAPTER, units, &mut cache);
         let expected = finalized(
             ClientId::Amp,
             sessions::amp::parse_amp_file(&path).unwrap().messages,
@@ -486,7 +469,11 @@ model = "gpt-5"
         let ctx = scan_context(home.path(), &settings);
         let mut cache = message_cache::InputMessageCache::default();
 
-        let cold_unit = KIMI_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let cold_unit = KIMI_ADAPTER
+            .discover_checked(ClientId::Kimi, &ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
         assert_eq!(
             cold_unit.fingerprint_policy,
             FingerprintPolicy::PrimaryWithDependency {
@@ -494,7 +481,8 @@ model = "gpt-5"
                 related_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
             }
         );
-        let cold_messages = fold_with_adapter(&KIMI_ADAPTER, vec![cold_unit], &mut cache);
+        let cold_messages =
+            fold_with_adapter(ClientId::Kimi, &KIMI_ADAPTER, vec![cold_unit], &mut cache);
         assert_eq!(cold_messages.len(), 1);
         assert_eq!(cold_messages[0].model_id.as_ref(), "gpt-5");
         assert_eq!(cold_messages[0].provider_id.as_ref(), "openai");
@@ -506,14 +494,23 @@ provider = "anthropic"
 model = "claude-sonnet-4"
 "#,
         );
-        let changed_unit = KIMI_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let changed_unit = KIMI_ADAPTER
+            .discover_checked(ClientId::Kimi, &ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
         let changed_unit = match KIMI_ADAPTER.plan_cache_hit(changed_unit, &cache).unwrap() {
             crate::adapters::CacheHitPlan::Miss(unit) => unit,
             crate::adapters::CacheHitPlan::Hit(_) => {
                 panic!("changed Kimi config must invalidate the usage cache")
             }
         };
-        let changed_messages = fold_with_adapter(&KIMI_ADAPTER, vec![changed_unit], &mut cache);
+        let changed_messages = fold_with_adapter(
+            ClientId::Kimi,
+            &KIMI_ADAPTER,
+            vec![changed_unit],
+            &mut cache,
+        );
         assert_eq!(changed_messages.len(), 1);
         assert_eq!(changed_messages[0].model_id.as_ref(), "claude-sonnet-4");
         assert_eq!(changed_messages[0].provider_id.as_ref(), "anthropic");
@@ -533,30 +530,30 @@ model = "claude-sonnet-4"
         std::fs::create_dir(&config_path).unwrap();
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
-        let unit = KIMI_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let unit = KIMI_ADAPTER
+            .discover_checked(ClientId::Kimi, &ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
         let mut cache = message_cache::InputMessageCache::default();
 
         let parsed = KIMI_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
-            parsed[0].input_health().status,
+            parsed[0].health.status,
             crate::input_health::InputStatus::Partial { .. }
         ));
         assert!(parsed[0].cache_write.is_none());
 
-        let mut messages = Vec::new();
-        let mut fold_ctx = FoldContext::new(&mut cache, None);
-        KIMI_ADAPTER
-            .fold(parsed, &mut fold_ctx, &mut messages)
-            .unwrap();
+        let (messages, health) = fold_parsed(ClientId::Kimi, &KIMI_ADAPTER, parsed, &mut cache);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "active-model");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 2);
-        assert_eq!(fold_ctx.health.partial_inputs(), 1);
+        assert_eq!(health.partial_inputs(), 1);
         assert!(cache
-            .get_meta(&wire_path, KIMI_ADAPTER.parser_version)
+            .get_meta(&wire_path, KIMI_ADAPTER.decoder.version())
             .unwrap()
             .is_none());
     }
@@ -575,17 +572,21 @@ model = "claude-sonnet-4"
         assert!(!config_path.exists());
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
-        let unit = KIMI_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let unit = KIMI_ADAPTER
+            .discover_checked(ClientId::Kimi, &ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
         let mut cache = message_cache::InputMessageCache::default();
 
-        let messages = fold_with_adapter(&KIMI_ADAPTER, vec![unit], &mut cache);
+        let messages = fold_with_adapter(ClientId::Kimi, &KIMI_ADAPTER, vec![unit], &mut cache);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "active-model");
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 2);
         assert!(cache
-            .get_meta(&wire_path, KIMI_ADAPTER.parser_version)
+            .get_meta(&wire_path, KIMI_ADAPTER.decoder.version())
             .unwrap()
             .is_some());
     }
@@ -611,7 +612,7 @@ model = "claude-sonnet-4"
         let mut cache = message_cache::InputMessageCache::default();
 
         let cold_unit = COMMANDCODE_ADAPTER
-            .discover_checked(&ctx)
+            .discover_checked(ClientId::CommandCode, &ctx)
             .unwrap()
             .pop()
             .unwrap();
@@ -622,14 +623,19 @@ model = "claude-sonnet-4"
                 related_failure_policy: RelatedInputFailurePolicy::FailInput,
             }
         );
-        let cold_messages = fold_with_adapter(&COMMANDCODE_ADAPTER, vec![cold_unit], &mut cache);
+        let cold_messages = fold_with_adapter(
+            ClientId::CommandCode,
+            &COMMANDCODE_ADAPTER,
+            vec![cold_unit],
+            &mut cache,
+        );
         assert_eq!(cold_messages.len(), 1);
         assert_eq!(cold_messages[0].model_id.as_ref(), "gpt-5");
         assert_eq!(cold_messages[0].provider_id.as_ref(), "openai");
 
         write_file(&config_path, r#"{"model":"private-preview"}"#);
         let changed_unit = COMMANDCODE_ADAPTER
-            .discover_checked(&ctx)
+            .discover_checked(ClientId::CommandCode, &ctx)
             .unwrap()
             .pop()
             .unwrap();
@@ -642,8 +648,12 @@ model = "claude-sonnet-4"
                 panic!("changed Command Code config must invalidate the usage cache")
             }
         };
-        let changed_messages =
-            fold_with_adapter(&COMMANDCODE_ADAPTER, vec![changed_unit], &mut cache);
+        let changed_messages = fold_with_adapter(
+            ClientId::CommandCode,
+            &COMMANDCODE_ADAPTER,
+            vec![changed_unit],
+            &mut cache,
+        );
         assert_eq!(changed_messages.len(), 1);
         assert_eq!(changed_messages[0].model_id.as_ref(), "private-preview");
         assert_eq!(changed_messages[0].provider_id.as_ref(), "unknown");
@@ -663,7 +673,9 @@ model = "claude-sonnet-4"
 
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
-        let units = COMMANDCODE_ADAPTER.discover_checked(&ctx).unwrap();
+        let units = COMMANDCODE_ADAPTER
+            .discover_checked(ClientId::CommandCode, &ctx)
+            .unwrap();
 
         assert!(units.is_empty());
     }
@@ -687,7 +699,7 @@ model = "claude-sonnet-4"
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
         let unit = COMMANDCODE_ADAPTER
-            .discover_checked(&ctx)
+            .discover_checked(ClientId::CommandCode, &ctx)
             .unwrap()
             .pop()
             .unwrap();
@@ -696,22 +708,20 @@ model = "claude-sonnet-4"
         let parsed = COMMANDCODE_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
-            parsed[0].input_health().status,
+            parsed[0].health.status,
             crate::input_health::InputStatus::Unavailable { .. }
         ));
         assert!(parsed[0].cache_write.is_none());
 
-        let mut messages = Vec::new();
-        COMMANDCODE_ADAPTER
-            .fold(
-                parsed,
-                &mut FoldContext::new(&mut cache, None),
-                &mut messages,
-            )
-            .unwrap();
+        let (messages, _) = fold_parsed(
+            ClientId::CommandCode,
+            &COMMANDCODE_ADAPTER,
+            parsed,
+            &mut cache,
+        );
         assert!(messages.is_empty());
         assert!(cache
-            .get_meta(&session_path, COMMANDCODE_ADAPTER.parser_version)
+            .get_meta(&session_path, COMMANDCODE_ADAPTER.decoder.version())
             .unwrap()
             .is_none());
     }
@@ -722,19 +732,18 @@ model = "claude-sonnet-4"
         let cache_dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, QWEN_MIXED_CONTENT);
-        let unit = InputUnit::plain_file(ClientId::Qwen, path.clone())
-            .with_parser_version(ParserVersion::new(
-                ParserId::Qwen,
-                QWEN_RECORD_REJECTION_REVISION,
-            ))
-            .prepare_snapshot()
-            .unwrap();
+        let unit = InputUnit::plain_file(
+            path.clone(),
+            DecoderSpec::plain(DecoderId::Qwen, QWEN_RECORD_REJECTION_REVISION),
+        )
+        .prepare_snapshot()
+        .unwrap();
         let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
 
         let parsed =
             QWEN_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].input_health();
+        let health = &parsed[0].health;
         assert!(matches!(
             health.status,
             crate::input_health::InputStatus::Complete
@@ -745,11 +754,9 @@ model = "claude-sonnet-4"
             "malformed-record"
         );
 
-        let mut sink = Vec::new();
-        let mut fold_ctx = FoldContext::new(&mut cache, None);
-        QWEN_ADAPTER.fold(parsed, &mut fold_ctx, &mut sink).unwrap();
+        let (sink, health) = fold_parsed(ClientId::Qwen, &QWEN_ADAPTER, parsed, &mut cache);
         assert_eq!(sink.len(), 2);
-        assert_eq!(fold_ctx.health.rejected_records(), 1);
+        assert_eq!(health.rejected_records(), 1);
         cache.save_if_dirty().unwrap();
 
         let warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
@@ -757,7 +764,7 @@ model = "claude-sonnet-4"
         let crate::adapters::CacheHitPlan::Hit(hit) = planned else {
             panic!("unchanged Qwen input must use its cached complete scan");
         };
-        let warm_health = hit.input_health();
+        let warm_health = &hit.health;
         assert_eq!(warm_health.rejections.total(), 1);
         assert_eq!(
             warm_health.rejections.entries().next().unwrap().key,
@@ -777,12 +784,16 @@ model = "claude-sonnet-4"
         write_file(&summary_path, "not-json");
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
-        let unit = GROK_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let unit = GROK_ADAPTER
+            .discover_checked(ClientId::Grok, &ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
         let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
 
         let parsed =
             GROK_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
-        let health = parsed[0].input_health();
+        let health = &parsed[0].health;
         assert!(matches!(
             health.status,
             crate::input_health::InputStatus::Complete
@@ -793,12 +804,9 @@ model = "claude-sonnet-4"
             "malformed-record"
         );
 
-        let mut sink = Vec::new();
-        let mut fold_ctx = FoldContext::new(&mut cache, None);
-        GROK_ADAPTER.fold(parsed, &mut fold_ctx, &mut sink).unwrap();
+        let (sink, health) = fold_parsed(ClientId::Grok, &GROK_ADAPTER, parsed, &mut cache);
         assert_eq!(sink.len(), 1);
-        assert_eq!(fold_ctx.health.rejected_records(), 1);
-        drop(fold_ctx);
+        assert_eq!(health.rejected_records(), 1);
         cache.save_if_dirty().unwrap();
 
         let warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
@@ -806,7 +814,7 @@ model = "claude-sonnet-4"
         let crate::adapters::CacheHitPlan::Hit(hit) = planned else {
             panic!("unchanged Grok siblings must restore the complete cached scan");
         };
-        let warm_health = hit.input_health();
+        let warm_health = &hit.health;
         assert_eq!(warm_health.rejections.total(), 1);
         assert_eq!(
             warm_health.rejections.entries().next().unwrap().key,
@@ -828,14 +836,15 @@ model = "claude-sonnet-4"
         );
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
-        let unit = GROK_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let unit = GROK_ADAPTER
+            .discover_checked(ClientId::Grok, &ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
         let mut cache = message_cache::InputMessageCache::default();
         let parsed =
             GROK_ADAPTER.parse_checked(vec![unit.clone()], &ParseContext { pricing: None });
-        let mut sink = Vec::new();
-        GROK_ADAPTER
-            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut sink)
-            .unwrap();
+        let (sink, _) = fold_parsed(ClientId::Grok, &GROK_ADAPTER, parsed, &mut cache);
         assert_eq!(sink.len(), 1);
 
         write_file(
@@ -846,7 +855,11 @@ model = "claude-sonnet-4"
             std::fs::read_to_string(&updates_path).unwrap(),
             GROK_SELF_CONTAINED_UPDATES
         );
-        let changed_unit = GROK_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let changed_unit = GROK_ADAPTER
+            .discover_checked(ClientId::Grok, &ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
 
         assert!(matches!(
             GROK_ADAPTER.plan_cache_hit(changed_unit, &cache).unwrap(),
@@ -865,11 +878,15 @@ model = "claude-sonnet-4"
         std::fs::create_dir(&events_path).unwrap();
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
-        let unit = GROK_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let unit = GROK_ADAPTER
+            .discover_checked(ClientId::Grok, &ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
         let mut cache = message_cache::InputMessageCache::default();
 
         let parsed = GROK_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
-        let health = parsed[0].input_health();
+        let health = &parsed[0].health;
         assert!(matches!(
             health.status,
             crate::input_health::InputStatus::Partial { .. }
@@ -878,15 +895,13 @@ model = "claude-sonnet-4"
         assert_eq!(failure.operation, "read related events line");
         assert!(failure.message.contains(&events_path.display().to_string()));
 
-        let mut sink = Vec::new();
-        let mut fold_ctx = FoldContext::new(&mut cache, None);
-        GROK_ADAPTER.fold(parsed, &mut fold_ctx, &mut sink).unwrap();
+        let (sink, health) = fold_parsed(ClientId::Grok, &GROK_ADAPTER, parsed, &mut cache);
         assert_eq!(sink.len(), 1);
-        assert_eq!(fold_ctx.health.partial_inputs(), 1);
-        assert_eq!(fold_ctx.health.failed_inputs(), 0);
-        assert_eq!(fold_ctx.health.rejected_records(), 1);
+        assert_eq!(health.partial_inputs(), 1);
+        assert_eq!(health.failed_inputs(), 0);
+        assert_eq!(health.rejected_records(), 1);
         assert!(cache
-            .get_meta(&updates_path, GROK_ADAPTER.parser_version)
+            .get_meta(&updates_path, GROK_ADAPTER.decoder.version())
             .unwrap()
             .is_none());
     }
@@ -903,15 +918,16 @@ model = "claude-sonnet-4"
                 "tokenUsage": {"inputTokens": 10}
             }"#,
         );
-        let unit = InputUnit::plain_file(ClientId::Droid, path.clone()).with_parser_version(
-            ParserVersion::new(ParserId::Droid, DROID_RECORD_REJECTION_REVISION),
+        let unit = InputUnit::plain_file(
+            path.clone(),
+            DecoderSpec::plain(DecoderId::Droid, DROID_RECORD_REJECTION_REVISION),
         );
         let mut cache = message_cache::InputMessageCache::default();
 
         let parsed = DROID_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
 
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].input_health();
+        let health = &parsed[0].health;
         assert!(matches!(
             health.status,
             crate::input_health::InputStatus::Complete
@@ -920,14 +936,10 @@ model = "claude-sonnet-4"
         assert_eq!(rejection.key, "missing-model");
         assert_eq!(rejection.count, 1);
 
-        let mut sink = Vec::new();
-        let mut fold_ctx = FoldContext::new(&mut cache, None);
-        DROID_ADAPTER
-            .fold(parsed, &mut fold_ctx, &mut sink)
-            .unwrap();
+        let (sink, health) = fold_parsed(ClientId::Droid, &DROID_ADAPTER, parsed, &mut cache);
         assert!(sink.is_empty());
-        assert_eq!(fold_ctx.health.rejected_records(), 1);
-        assert_eq!(fold_ctx.health.failed_inputs(), 0);
+        assert_eq!(health.rejected_records(), 1);
+        assert_eq!(health.failed_inputs(), 0);
     }
 
     #[test]
@@ -954,8 +966,13 @@ model = "claude-sonnet-4"
         let ctx = scan_context(home.path(), &settings);
         let mut cache = message_cache::InputMessageCache::default();
 
-        let cold_unit = DROID_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
-        let cold_messages = fold_with_adapter(&DROID_ADAPTER, vec![cold_unit], &mut cache);
+        let cold_unit = DROID_ADAPTER
+            .discover_checked(ClientId::Droid, &ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let cold_messages =
+            fold_with_adapter(ClientId::Droid, &DROID_ADAPTER, vec![cold_unit], &mut cache);
         assert_eq!(
             cold_messages[0].workspace_key.as_deref(),
             Some("/home/travis/01-workspace/tokscale")
@@ -971,20 +988,18 @@ model = "claude-sonnet-4"
             r#"{"type":"session_start","cwd":"/home/travis/02-workspace/oh-my-openagent"}
 "#,
         );
-        let warm_unit = DROID_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let warm_unit = DROID_ADAPTER
+            .discover_checked(ClientId::Droid, &ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
         let crate::adapters::CacheHitPlan::Hit(warm_hit) =
             DROID_ADAPTER.plan_cache_hit(warm_unit, &cache).unwrap()
         else {
             panic!("unchanged Droid settings must retain the usage-cache hit");
         };
-        let mut warm_messages = Vec::new();
-        DROID_ADAPTER
-            .fold(
-                vec![warm_hit],
-                &mut FoldContext::new(&mut cache, None),
-                &mut warm_messages,
-            )
-            .unwrap();
+        let (warm_messages, _) =
+            fold_parsed(ClientId::Droid, &DROID_ADAPTER, vec![warm_hit], &mut cache);
 
         assert_eq!(
             warm_messages[0].workspace_key.as_deref(),
@@ -1027,7 +1042,11 @@ model = "claude-sonnet-4"
         );
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
-        let unit = DROID_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let unit = DROID_ADAPTER
+            .discover_checked(ClientId::Droid, &ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
         assert_eq!(
             unit.fingerprint_policy,
             FingerprintPolicy::PrimaryWithDependency {
@@ -1037,7 +1056,8 @@ model = "claude-sonnet-4"
         );
 
         let mut cache = message_cache::InputMessageCache::default();
-        let worker_messages = fold_with_adapter(&DROID_ADAPTER, vec![unit], &mut cache);
+        let worker_messages =
+            fold_with_adapter(ClientId::Droid, &DROID_ADAPTER, vec![unit], &mut cache);
         assert_eq!(worker_messages.len(), 1);
         assert_eq!(worker_messages[0].agent.as_deref(), Some("Droid Worker"));
 
@@ -1045,14 +1065,23 @@ model = "claude-sonnet-4"
             &features_path,
             r#"{"features":[{"id":"scrutiny","skillName":"scrutiny-validator","workerSessionIds":["mission-worker"]}]}"#,
         );
-        let changed_unit = DROID_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let changed_unit = DROID_ADAPTER
+            .discover_checked(ClientId::Droid, &ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
         let changed_unit = match DROID_ADAPTER.plan_cache_hit(changed_unit, &cache).unwrap() {
             crate::adapters::CacheHitPlan::Miss(unit) => unit,
             crate::adapters::CacheHitPlan::Hit(_) => {
                 panic!("changed Mission feature must invalidate the Droid input cache")
             }
         };
-        let validator_messages = fold_with_adapter(&DROID_ADAPTER, vec![changed_unit], &mut cache);
+        let validator_messages = fold_with_adapter(
+            ClientId::Droid,
+            &DROID_ADAPTER,
+            vec![changed_unit],
+            &mut cache,
+        );
         assert_eq!(validator_messages.len(), 1);
         assert_eq!(
             validator_messages[0].agent.as_deref(),
@@ -1089,84 +1118,84 @@ model = "claude-sonnet-4"
         std::fs::create_dir_all(&features_path).unwrap();
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
-        let unit = DROID_ADAPTER.discover_checked(&ctx).unwrap().pop().unwrap();
+        let unit = DROID_ADAPTER
+            .discover_checked(ClientId::Droid, &ctx)
+            .unwrap()
+            .pop()
+            .unwrap();
         let mut cache = message_cache::InputMessageCache::default();
 
         let parsed = DROID_ADAPTER.parse_checked(vec![unit], &ParseContext { pricing: None });
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
-            parsed[0].input_health().status,
+            parsed[0].health.status,
             crate::input_health::InputStatus::Partial { .. }
         ));
         assert!(parsed[0].cache_write.is_none());
 
-        let mut messages = Vec::new();
-        let mut fold_ctx = FoldContext::new(&mut cache, None);
-        DROID_ADAPTER
-            .fold(parsed, &mut fold_ctx, &mut messages)
-            .unwrap();
+        let (messages, health) = fold_parsed(ClientId::Droid, &DROID_ADAPTER, parsed, &mut cache);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 10);
         assert_eq!(messages[0].tokens.output, 5);
         assert_eq!(messages[0].agent.as_deref(), Some("Droid Worker"));
-        assert_eq!(fold_ctx.health.partial_inputs(), 1);
+        assert_eq!(health.partial_inputs(), 1);
         assert!(cache
-            .get_meta(&settings_path, DROID_ADAPTER.parser_version)
+            .get_meta(&settings_path, DROID_ADAPTER.decoder.version())
             .unwrap()
             .is_none());
     }
 
     #[test]
     fn cached_file_adapters_use_their_actual_record_rejection_revisions() {
-        for (actual, parser_id, revision) in [
+        for (actual, decoder_id, revision) in [
             (
-                GEMINI_ADAPTER.parser_version,
-                ParserId::Gemini,
+                GEMINI_ADAPTER.decoder.version(),
+                DecoderId::Gemini,
                 GEMINI_RECORD_REJECTION_REVISION,
             ),
             (
-                GROK_ADAPTER.parser_version,
-                ParserId::Grok,
+                GROK_ADAPTER.decoder.version(),
+                DecoderId::Grok,
                 GROK_RELATED_METADATA_REVISION,
             ),
             (
-                AMP_ADAPTER.parser_version,
-                ParserId::Amp,
+                AMP_ADAPTER.decoder.version(),
+                DecoderId::Amp,
                 AMP_RECORD_REJECTION_REVISION,
             ),
             (
-                DROID_ADAPTER.parser_version,
-                ParserId::Droid,
+                DROID_ADAPTER.decoder.version(),
+                DecoderId::Droid,
                 DROID_AGENT_ATTRIBUTION_REVISION,
             ),
             (
-                KIMI_ADAPTER.parser_version,
-                ParserId::Kimi,
+                KIMI_ADAPTER.decoder.version(),
+                DecoderId::Kimi,
                 KIMI_RECORD_REJECTION_REVISION,
             ),
             (
-                QWEN_ADAPTER.parser_version,
-                ParserId::Qwen,
+                QWEN_ADAPTER.decoder.version(),
+                DecoderId::Qwen,
                 QWEN_RECORD_REJECTION_REVISION,
             ),
             (
-                MUX_ADAPTER.parser_version,
-                ParserId::Mux,
+                MUX_ADAPTER.decoder.version(),
+                DecoderId::Mux,
                 MUX_RECORD_REJECTION_REVISION,
             ),
             (
-                COMMANDCODE_ADAPTER.parser_version,
-                ParserId::CommandCode,
+                COMMANDCODE_ADAPTER.decoder.version(),
+                DecoderId::CommandCode,
                 COMMANDCODE_WORKSPACE_REVISION,
             ),
             (
-                ZCODE_ADAPTER.parser_version,
-                ParserId::Zcode,
+                ZCODE_ADAPTER.decoder.version(),
+                DecoderId::Zcode,
                 ZCODE_RECORD_REJECTION_REVISION,
             ),
         ] {
-            assert_eq!(actual, ParserVersion::new(parser_id, revision));
+            assert_eq!(actual, DecoderVersion::new(decoder_id, revision));
         }
     }
 
@@ -1187,7 +1216,9 @@ model = "claude-sonnet-4"
         };
         let ctx = scan_context(home.path(), &settings);
 
-        let units = COPILOT_ADAPTER.discover_checked(&ctx).unwrap();
+        let units = COPILOT_ADAPTER
+            .discover_checked(ClientId::Copilot, &ctx)
+            .unwrap();
         assert_eq!(
             units
                 .iter()
@@ -1195,8 +1226,8 @@ model = "claude-sonnet-4"
                 .collect::<Vec<_>>(),
             vec![default_path, extra_path]
         );
-        assert!(units.iter().all(|unit| unit.parser_version
-            == ParserVersion::new(ParserId::Copilot, COPILOT_AGENT_IDENTITY_REVISION)));
+        assert!(units.iter().all(|unit| unit.decoder.version()
+            == DecoderVersion::new(DecoderId::Copilot, COPILOT_AGENT_IDENTITY_REVISION)));
     }
 
     #[test]
@@ -1207,12 +1238,14 @@ model = "claude-sonnet-4"
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
 
-        let units = ZCODE_ADAPTER.discover_checked(&ctx).unwrap();
+        let units = ZCODE_ADAPTER
+            .discover_checked(ClientId::Zcode, &ctx)
+            .unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
 
         assert_eq!(paths, vec![default_path]);
-        assert!(units.iter().all(|unit| unit.parser_version
-            == ParserVersion::new(ParserId::Zcode, ZCODE_RECORD_REJECTION_REVISION)));
+        assert!(units.iter().all(|unit| unit.decoder.version()
+            == DecoderVersion::new(DecoderId::Zcode, ZCODE_RECORD_REJECTION_REVISION)));
     }
 
     #[test]
@@ -1225,16 +1258,16 @@ model = "claude-sonnet-4"
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
 
-        let units = GROK_ADAPTER.discover_checked(&ctx).unwrap();
+        let units = GROK_ADAPTER.discover_checked(ClientId::Grok, &ctx).unwrap();
 
         assert_eq!(units.len(), 1);
         assert_eq!(
-            units[0].parser_version,
-            ParserVersion::new(ParserId::Grok, GROK_RELATED_METADATA_REVISION)
+            units[0].decoder.version(),
+            DecoderVersion::new(DecoderId::Grok, GROK_RELATED_METADATA_REVISION)
         );
         assert_ne!(
-            units[0].parser_version,
-            ParserVersion::new(ParserId::Grok, GROK_RECORD_REJECTION_REVISION)
+            units[0].decoder.version(),
+            DecoderVersion::new(DecoderId::Grok, GROK_RECORD_REJECTION_REVISION)
         );
         assert_eq!(
             units[0].fingerprint_policy,
@@ -1250,14 +1283,13 @@ model = "claude-sonnet-4"
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, ZCODE_CONTENT);
-        let units = vec![
-            InputUnit::plain_file(ClientId::Zcode, path.clone()).with_parser_version(
-                ParserVersion::new(ParserId::Zcode, ZCODE_RECORD_REJECTION_REVISION),
-            ),
-        ];
+        let units = vec![InputUnit::plain_file(
+            path.clone(),
+            DecoderSpec::plain(DecoderId::Zcode, ZCODE_RECORD_REJECTION_REVISION),
+        )];
         let mut cache = message_cache::InputMessageCache::default();
 
-        let actual = fold_with_adapter(&ZCODE_ADAPTER, units, &mut cache);
+        let actual = fold_with_adapter(ClientId::Zcode, &ZCODE_ADAPTER, units, &mut cache);
         let expected = finalized(
             ClientId::Zcode,
             sessions::zcode::parse_zcode_file(&path).unwrap().messages,
@@ -1274,13 +1306,15 @@ model = "claude-sonnet-4"
             &path,
             "{\"type\":\"init\",\"model\":\"gemini-2.5-pro\",\"session_id\":\"session-1\"}\nnot-json\n{\"type\":\"result\",\"stats\":{\"input_tokens\":10,\"output_tokens\":20}}\n",
         );
-        let units = vec![InputUnit::plain_file(ClientId::Gemini, path.clone())];
+        let units = vec![InputUnit::plain_file(
+            path.clone(),
+            DecoderSpec::plain(DecoderId::Gemini, GEMINI_RECORD_REJECTION_REVISION),
+        )];
         let parsed = GEMINI_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
 
         assert_eq!(parsed.len(), 1);
-        let health = parsed[0].input_health();
-        assert_eq!(health.client, ClientId::Gemini);
-        assert_eq!(health.path, path);
+        let health = &parsed[0].health;
+        assert_eq!(parsed[0].unit.path, path);
         let failure = health.status.failure().expect("input must be partial");
         assert_eq!(failure.operation, "decode JSONL line");
         assert!(matches!(

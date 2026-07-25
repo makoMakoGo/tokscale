@@ -142,7 +142,7 @@ mod tests {
     use crate::tui::app::{ProjectionBackend, TuiConfig};
     use crate::tui::settings::Settings;
     use tokscale_core::{
-        build_tui_accumulator, DateRange, GroupBy, TokenBreakdown, TuiAcc, UnifiedMessage,
+        build_tui_accumulator, ClientId, DateRange, GroupBy, TokenBreakdown, TuiAcc, UnifiedMessage,
     };
 
     fn app(tab: Tab, installed: bool) -> App {
@@ -187,7 +187,7 @@ mod tests {
     fn populated_accumulator() -> TuiAcc {
         build_tui_accumulator(
             &[UnifiedMessage::new(
-                "codex",
+                ClientId::Codex,
                 "gpt-5",
                 "openai",
                 "session-1",

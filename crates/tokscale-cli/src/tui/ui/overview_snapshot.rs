@@ -170,7 +170,7 @@ fn render_core(frame: &mut Frame, app: &App, area: Rect, data: &OverviewSummary)
         metric_line(
             app,
             "Data Size",
-            format_bytes(app.data.health.input_data_bytes),
+            format_bytes(app.session_snapshot.total_input_bytes()),
             app.theme.text.primary,
         ),
     ];
@@ -681,7 +681,7 @@ fn left_lines(
             metric_line(
                 app,
                 "Input Data",
-                format_bytes(app.data.health.input_data_bytes),
+                format_bytes(app.session_snapshot.total_input_bytes()),
                 app.theme.text.primary,
             ),
             // The narrow fallback omits input health; Active Days keeps this

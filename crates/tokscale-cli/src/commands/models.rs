@@ -60,8 +60,8 @@ pub(crate) fn run_models_report(
     let scanner_settings = tui::settings::load_scanner_settings_for_home(&home_dir)?;
     let start = Instant::now();
     let rt = Runtime::new()?;
-    let data = rt
-        .block_on(tokscale_core::get_usage_data(ReportOptions {
+    let report = rt
+        .block_on(tokscale_core::get_usage_report(ReportOptions {
             home_dir: home_dir.clone(),
             clients: clients.clone(),
             since,
@@ -71,6 +71,8 @@ pub(crate) fn run_models_report(
             scanner_settings,
         }))
         .map_err(anyhow::Error::new)?;
+    let data = report.data;
+    let input_footprint = report.metadata.input_footprint;
 
     if let Some(spinner) = spinner {
         spinner.stop();
@@ -96,7 +98,12 @@ pub(crate) fn run_models_report(
     if json {
         let health = data.health.clone();
         let report_data = crate::tui::build_models_export_value(&data, &group_by);
-        let output = ReportEnvelope::new(report_data, health, processing_time_ms as u64);
+        let output = ReportEnvelope::new(
+            report_data,
+            health,
+            input_footprint,
+            processing_time_ms as u64,
+        );
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         render_models_table(&data, &group_by, date_range.as_deref())?;

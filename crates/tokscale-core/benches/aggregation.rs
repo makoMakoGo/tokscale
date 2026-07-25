@@ -10,7 +10,12 @@ use tokscale_core::{
 
 const MESSAGE_COUNT: usize = 100_000;
 
-const CLIENTS: &[&str] = &["opencode", "claude", "codex", "zed"];
+const CLIENTS: &[ClientId] = &[
+    ClientId::OpenCode,
+    ClientId::Claude,
+    ClientId::Codex,
+    ClientId::Zed,
+];
 const MODELS: &[&str] = &["gpt-5.5", "claude-sonnet-4.5", "qwen3-coder", "kimi-k2.5"];
 const PROVIDERS: &[&str] = &["openai", "anthropic", "qwen", "kimi"];
 const WORKSPACES: &[&str] = &[

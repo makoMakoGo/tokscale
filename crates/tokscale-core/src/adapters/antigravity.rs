@@ -6,11 +6,11 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
-    InputUnitMeta, LocalInputAdapter, MessageSink, ParseContext, ParsedBatchInput, ParsedUnit,
+    AdapterScanContext, BoundMessageSink, DecoderRoute, DecoderSpec, FingerprintPolicy,
+    FoldContext, InputDiscoveryError, InputUnit, LocalInputAdapter, ParseContext, ParsedBatchInput,
+    ParsedUnit,
 };
 use crate::clients::ClientId;
-use crate::message_cache::{ParserId, ParserVersion};
 use crate::sessions;
 
 const ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION: u32 =
@@ -19,53 +19,42 @@ const ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION: u32 =
 pub(crate) struct AntigravityAdapter;
 
 impl LocalInputAdapter for AntigravityAdapter {
-    fn client(&self) -> ClientId {
-        ClientId::Antigravity
-    }
-
     fn discover_checked(
         &self,
+        client: ClientId,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
-        let def = ClientId::Antigravity
+        let def = client
             .local_def()
             .expect("Antigravity adapter requires a local scan policy");
         let mut roots = vec![def.resolve_path(ctx.home_dir)];
-        roots.extend(antigravity_extra_roots(ctx)?);
+        roots.extend(antigravity_extra_roots(client, ctx)?);
 
-        Ok(adapter_discover::input_units_from_paths(
-            ClientId::Antigravity,
-            adapter_discover::scan_roots(ClientId::Antigravity, roots, def.pattern)?,
+        adapter_discover::input_units_from_paths(
+            client,
+            adapter_discover::scan_roots(client, roots, def.pattern)?,
             FingerprintPolicy::SqliteWithWal,
-        )?
-        .into_iter()
-        .map(|unit| {
-            unit.with_meta(InputUnitMeta::AntigravityCliSqlite)
-                .with_parser_version(ParserVersion::new(
-                    ParserId::AntigravityCliSqlite,
-                    ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION,
-                ))
-        })
-        .collect())
+            DecoderSpec::antigravity_cli_sqlite(ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION),
+        )
     }
 
     fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
-            .map(|unit| match unit.meta {
-                InputUnitMeta::AntigravityCliSqlite => adapter_cache::load_or_scan_unit_with(
+            .map(|unit| match unit.decoder.route() {
+                DecoderRoute::AntigravityCliSqlite => adapter_cache::load_or_scan_unit_with(
                     unit,
                     ctx,
                     sessions::antigravity_cli::parse_antigravity_cli_file,
                 ),
-                InputUnitMeta::None
-                | InputUnitMeta::OpenCodeSqlite
-                | InputUnitMeta::KiroFile
-                | InputUnitMeta::KiroSqlite
-                | InputUnitMeta::KiroGlobalStorage
-                | InputUnitMeta::CodeBuddyJsonl
-                | InputUnitMeta::CodeBuddyExtensionLog { .. }
-                | InputUnitMeta::Codex => {
+                DecoderRoute::None
+                | DecoderRoute::OpenCodeSqlite
+                | DecoderRoute::KiroFile
+                | DecoderRoute::KiroSqlite
+                | DecoderRoute::KiroGlobalStorage
+                | DecoderRoute::CodeBuddyJsonl
+                | DecoderRoute::CodeBuddyExtensionLog { .. }
+                | DecoderRoute::Codex => {
                     unreachable!("unexpected Antigravity input unit meta")
                 }
             })
@@ -84,7 +73,7 @@ impl LocalInputAdapter for AntigravityAdapter {
         &self,
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), crate::adapters::InputPipelineError> {
         let mut seen = HashSet::new();
         fold_antigravity_units(parsed, ctx, sink, &mut seen)
@@ -94,7 +83,7 @@ impl LocalInputAdapter for AntigravityAdapter {
         &self,
         batches: &mut ParsedBatchInput<'_>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), crate::adapters::InputPipelineError> {
         let mut seen = HashSet::new();
         while let Some(parsed) = batches.next(ctx)? {
@@ -107,7 +96,7 @@ impl LocalInputAdapter for AntigravityAdapter {
 fn fold_antigravity_units(
     parsed: Vec<ParsedUnit>,
     ctx: &mut FoldContext<'_>,
-    sink: &mut dyn MessageSink,
+    sink: &mut BoundMessageSink<'_>,
     seen: &mut HashSet<u64>,
 ) -> Result<(), crate::adapters::InputPipelineError> {
     for parsed_unit in parsed {
@@ -119,20 +108,14 @@ fn fold_antigravity_units(
             status,
             rejections,
         } = adapter_cache::resolve_unit(parsed_unit, ctx)?;
-        ctx.health.record(crate::input_health::InputHealth {
-            client: unit.client,
-            path: unit.path.clone(),
-            status,
-            rejections,
-        });
+        ctx.record_health(unit.path.clone(), status, rejections);
         let path = unit.path.clone();
         let cache_write_outcome = adapter_cache::write_cache(cache_write, ctx, &messages);
         if cache_write_outcome.is_err() && invalidate_cache {
-            ctx.input_cache.remove(&path, unit.parser_version);
+            ctx.input_cache.remove(&path, unit.decoder.version());
         }
         let cache_write_outcome = cache_write_outcome?;
         adapter_cache::emit_messages(
-            unit.client,
             messages
                 .into_iter()
                 .filter(|message| crate::should_keep_deduped_message(seen, message)),
@@ -140,7 +123,7 @@ fn fold_antigravity_units(
         );
 
         if cache_write_outcome == adapter_cache::CacheWriteOutcome::NotPlanned && invalidate_cache {
-            ctx.input_cache.remove(&path, unit.parser_version);
+            ctx.input_cache.remove(&path, unit.decoder.version());
         }
     }
     Ok(())
@@ -149,12 +132,13 @@ fn fold_antigravity_units(
 pub(crate) static ANTIGRAVITY_ADAPTER: AntigravityAdapter = AntigravityAdapter;
 
 fn antigravity_extra_roots(
+    client: ClientId,
     ctx: &AdapterScanContext<'_>,
 ) -> Result<Vec<PathBuf>, InputDiscoveryError> {
     let mut roots = Vec::new();
     let mut seen = HashSet::new();
 
-    for root in adapter_discover::extra_roots_for_client(ClientId::Antigravity, ctx)? {
+    for root in adapter_discover::extra_roots_for_client(client, ctx)? {
         push_unique_root(&mut roots, &mut seen, root)?;
     }
 
@@ -171,7 +155,6 @@ fn push_unique_root(
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
             return Err(InputDiscoveryError::new(
-                ClientId::Antigravity,
                 &root,
                 "canonicalize configured scan root",
                 source,
@@ -188,6 +171,7 @@ fn push_unique_root(
 mod tests {
     use super::*;
     use crate::adapters::UnitMessagePayload;
+    use crate::message_cache::{DecoderId, DecoderVersion};
     use crate::scanner::ScannerSettings;
     use crate::sessions::ParsedMessage;
     use crate::{message_cache, TokenBreakdown};
@@ -215,22 +199,24 @@ mod tests {
 
         let settings = ScannerSettings::default();
         let units = ANTIGRAVITY_ADAPTER
-            .discover_checked(&scan_context(home.path(), &settings))
+            .discover_checked(ClientId::Antigravity, &scan_context(home.path(), &settings))
             .unwrap();
 
         assert_eq!(units.len(), 1);
         let unit = &units[0];
-        assert_eq!(unit.client, ClientId::Antigravity);
         assert_eq!(unit.path, cli_path);
         assert_eq!(unit.fingerprint_policy, FingerprintPolicy::SqliteWithWal);
         assert_eq!(
-            unit.parser_version,
-            ParserVersion::new(
-                ParserId::AntigravityCliSqlite,
+            unit.decoder.version(),
+            DecoderVersion::new(
+                DecoderId::AntigravityCliSqlite,
                 ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION,
             )
         );
-        assert!(matches!(unit.meta, InputUnitMeta::AntigravityCliSqlite));
+        assert!(matches!(
+            unit.decoder.route(),
+            DecoderRoute::AntigravityCliSqlite
+        ));
     }
 
     #[test]
@@ -249,7 +235,7 @@ mod tests {
             ..ScannerSettings::default()
         };
         let units = ANTIGRAVITY_ADAPTER
-            .discover_checked(&scan_context(home.path(), &settings))
+            .discover_checked(ClientId::Antigravity, &scan_context(home.path(), &settings))
             .unwrap();
 
         assert_eq!(units.len(), 1);
@@ -258,7 +244,10 @@ mod tests {
             units[0].fingerprint_policy,
             FingerprintPolicy::SqliteWithWal
         );
-        assert!(matches!(units[0].meta, InputUnitMeta::AntigravityCliSqlite));
+        assert!(matches!(
+            units[0].decoder.route(),
+            DecoderRoute::AntigravityCliSqlite
+        ));
         assert!(!units.iter().any(|unit| unit.path == jsonl_path));
     }
 
@@ -274,15 +263,19 @@ mod tests {
         };
 
         let units = ANTIGRAVITY_ADAPTER
-            .discover_checked(&scan_context(home.path(), &settings))
+            .discover_checked(ClientId::Antigravity, &scan_context(home.path(), &settings))
             .unwrap();
 
         assert!(units.is_empty());
     }
 
-    fn parsed_unit(path: &Path, meta: InputUnitMeta, message: ParsedMessage) -> ParsedUnit {
+    fn parsed_unit(path: &Path, route: DecoderRoute, message: ParsedMessage) -> ParsedUnit {
+        assert_eq!(route, DecoderRoute::AntigravityCliSqlite);
         ParsedUnit::healthy(
-            InputUnit::plain_file(ClientId::Antigravity, path.to_path_buf()).with_meta(meta),
+            InputUnit::plain_file(
+                path.to_path_buf(),
+                DecoderSpec::antigravity_cli_sqlite(ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION),
+            ),
             UnitMessagePayload::Fresh(vec![message]),
             None,
             false,
@@ -313,27 +306,26 @@ mod tests {
         let dedup_key = sessions::antigravity_cli::response_dedup_key("resp-shared");
         let first = parsed_unit(
             &dir.path().join("first.db"),
-            InputUnitMeta::AntigravityCliSqlite,
+            DecoderRoute::AntigravityCliSqlite,
             antigravity_message("first-session", Some(dedup_key)),
         );
         let second = parsed_unit(
             &dir.path().join("second.db"),
-            InputUnitMeta::AntigravityCliSqlite,
+            DecoderRoute::AntigravityCliSqlite,
             antigravity_message("second-session", Some(dedup_key)),
         );
         let mut cache = message_cache::InputMessageCache::default();
         let mut messages = Vec::new();
+        let binding = crate::adapters::adapter_for(ClientId::Antigravity).unwrap();
+        let mut fold_ctx = FoldContext::new(binding, &mut cache, None);
+        let mut sink = BoundMessageSink::new(binding, &mut messages);
 
         ANTIGRAVITY_ADAPTER
-            .fold(
-                vec![first, second],
-                &mut FoldContext::new(&mut cache, None),
-                &mut messages,
-            )
+            .fold(vec![first, second], &mut fold_ctx, &mut sink)
             .unwrap();
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].client.as_ref(), ClientId::Antigravity.as_str());
+        assert_eq!(messages[0].client, ClientId::Antigravity);
         assert_eq!(messages[0].session_id.as_ref(), "first-session");
     }
 }

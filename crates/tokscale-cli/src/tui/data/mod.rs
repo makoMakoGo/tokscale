@@ -10,7 +10,8 @@ use chrono::NaiveDate;
 use tokscale_core::GroupBy;
 use tokscale_core::{
     load_prepared_tui_bundle_with_diagnostics, prepare_local_inputs, ClientId, DataHealth,
-    InputInventorySignature, LocalParseOptions, PreparedLocalInputs, TuiAcc, TuiSessionEntry,
+    InputFootprint, InputInventorySignature, LocalParseOptions, PreparedLocalInputs, TuiAcc,
+    TuiSessionEntry,
 };
 
 mod overview;
@@ -84,7 +85,7 @@ pub struct DataLoader {
 pub struct TuiBundleLoadResult {
     pub accumulator: TuiAcc,
     pub sessions: Vec<TuiSessionEntry>,
-    pub client_space: std::collections::BTreeMap<String, u64>,
+    pub input_footprint: InputFootprint,
     pub pricing_diagnostics: Vec<String>,
     pub input_inventory_signature: InputInventorySignature,
     pub input_digest: u64,
@@ -170,7 +171,7 @@ impl DataLoader {
         bundle.map(|result| TuiBundleLoadResult {
             accumulator: result.accumulator,
             sessions: result.sessions,
-            client_space: result.client_space,
+            input_footprint: result.input_footprint,
             pricing_diagnostics: result.pricing_diagnostics,
             input_inventory_signature: result.input_inventory_signature,
             input_digest: result.input_inventory_signature.process_digest(),

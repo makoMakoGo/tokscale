@@ -3,10 +3,13 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputUnit,
-    LocalInputAdapter, MessageSink, ParseContext, ParsedUnit, EXPLICIT_TOKEN_OVERFLOW_REVISION,
+    AdapterScanContext, BoundMessageSink, DecoderSpec, FingerprintPolicy, FoldContext,
+    InputDiscoveryError, InputUnit, LocalInputAdapter, ParseContext, ParsedUnit,
+    EXPLICIT_TOKEN_OVERFLOW_REVISION,
 };
-use crate::message_cache::{ParserId, ParserVersion};
+use crate::message_cache::DecoderId;
+#[cfg(test)]
+use crate::message_cache::DecoderVersion;
 use crate::{sessions, ClientId};
 
 pub(crate) struct JunieAdapter;
@@ -14,27 +17,17 @@ pub(crate) struct JunieAdapter;
 const JUNIE_RECORD_REJECTION_REVISION: u32 = EXPLICIT_TOKEN_OVERFLOW_REVISION + 3;
 
 impl LocalInputAdapter for JunieAdapter {
-    fn client(&self) -> ClientId {
-        ClientId::Junie
-    }
-
     fn discover_checked(
         &self,
+        client: ClientId,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let units = adapter_discover::discover_default_scanned_units(
-            ClientId::Junie,
+            client,
             ctx,
             FingerprintPolicy::PlainFile,
-        )?
-        .into_iter()
-        .map(|unit| {
-            unit.with_parser_version(ParserVersion::new(
-                ParserId::Junie,
-                JUNIE_RECORD_REJECTION_REVISION,
-            ))
-        })
-        .collect();
+            DecoderSpec::plain(DecoderId::Junie, JUNIE_RECORD_REJECTION_REVISION),
+        )?;
         Ok(units)
     }
 
@@ -61,7 +54,7 @@ impl LocalInputAdapter for JunieAdapter {
         &self,
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), crate::adapters::InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
@@ -116,12 +109,15 @@ mod tests {
     ) -> Vec<crate::UnifiedMessage> {
         let parsed = JUNIE_ADAPTER.parse_checked(units, &ParseContext { pricing });
         let mut messages = Vec::new();
+        let binding = crate::adapters::adapter_for(ClientId::Junie).unwrap();
+        let mut fold_ctx = FoldContext::new(binding, cache, pricing);
+        let mut sink = BoundMessageSink::new(binding, &mut messages);
         JUNIE_ADAPTER
-            .fold(parsed, &mut FoldContext::new(cache, pricing), &mut messages)
+            .fold(parsed, &mut fold_ctx, &mut sink)
             .unwrap();
         assert!(messages
             .iter()
-            .all(|message| message.client.as_ref() == ClientId::Junie.as_str()));
+            .all(|message| message.client == ClientId::Junie));
         messages
     }
 
@@ -155,16 +151,15 @@ mod tests {
         let settings = ScannerSettings::default();
 
         let units = JUNIE_ADAPTER
-            .discover_checked(&scan_context(home.path(), &settings))
+            .discover_checked(ClientId::Junie, &scan_context(home.path(), &settings))
             .unwrap();
 
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].client, ClientId::Junie);
         assert_eq!(units[0].path, path);
         assert_eq!(units[0].fingerprint_policy, FingerprintPolicy::PlainFile);
         assert_eq!(
-            units[0].parser_version,
-            ParserVersion::new(ParserId::Junie, JUNIE_RECORD_REJECTION_REVISION)
+            units[0].decoder.version(),
+            DecoderVersion::new(DecoderId::Junie, JUNIE_RECORD_REJECTION_REVISION)
         );
     }
 
@@ -175,7 +170,10 @@ mod tests {
         let mut cache = message_cache::InputMessageCache::default();
 
         let actual = fold_with_adapter(
-            vec![InputUnit::plain_file(ClientId::Junie, path.clone())],
+            vec![InputUnit::plain_file(
+                path.clone(),
+                DecoderSpec::plain(DecoderId::Junie, JUNIE_RECORD_REJECTION_REVISION),
+            )],
             &mut cache,
             None,
         );
@@ -183,7 +181,7 @@ mod tests {
 
         assert!(actual
             .iter()
-            .all(|message| message.client.as_ref() == ClientId::Junie.as_str()));
+            .all(|message| message.client == ClientId::Junie));
         assert_eq!(actual, expected);
     }
 
@@ -197,7 +195,10 @@ mod tests {
 
         let path = write_session(home.path());
         let mut cache = message_cache::InputMessageCache::load().unwrap();
-        let units = vec![InputUnit::plain_file(ClientId::Junie, path.clone())];
+        let units = vec![InputUnit::plain_file(
+            path.clone(),
+            DecoderSpec::plain(DecoderId::Junie, JUNIE_RECORD_REJECTION_REVISION),
+        )];
 
         let fresh = fold_with_adapter(units.clone(), &mut cache, None);
         let planned = JUNIE_ADAPTER
@@ -209,13 +210,16 @@ mod tests {
         };
 
         let mut cached = Vec::new();
+        let binding = crate::adapters::adapter_for(ClientId::Junie).unwrap();
+        let mut fold_ctx = FoldContext::new(binding, &mut cache, None);
+        let mut sink = BoundMessageSink::new(binding, &mut cached);
         JUNIE_ADAPTER
-            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut cached)
+            .fold(parsed, &mut fold_ctx, &mut sink)
             .unwrap();
 
         assert!(cached
             .iter()
-            .all(|message| message.client.as_ref() == ClientId::Junie.as_str()));
+            .all(|message| message.client == ClientId::Junie));
         assert_eq!(cached, fresh);
         restore_env_var("TOKSCALE_CONFIG_DIR", previous_config_dir);
     }
@@ -237,7 +241,10 @@ mod tests {
         let mut cache = message_cache::InputMessageCache::default();
 
         let messages = fold_with_adapter(
-            vec![InputUnit::plain_file(ClientId::Junie, path)],
+            vec![InputUnit::plain_file(
+                path,
+                DecoderSpec::plain(DecoderId::Junie, JUNIE_RECORD_REJECTION_REVISION),
+            )],
             &mut cache,
             Some(&pricing),
         );

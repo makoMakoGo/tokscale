@@ -647,7 +647,7 @@ mod tests {
     fn make_model_detail_app(group_by: GroupBy) -> App {
         let messages = [
             tokscale_core::UnifiedMessage::new(
-                "claude",
+                tokscale_core::ClientId::Claude,
                 "shared-model",
                 "anthropic",
                 "anthropic-session",
@@ -659,7 +659,7 @@ mod tests {
                 0.1,
             ),
             tokscale_core::UnifiedMessage::new(
-                "claude",
+                tokscale_core::ClientId::Claude,
                 "shared-model",
                 "openrouter",
                 "openrouter-session",

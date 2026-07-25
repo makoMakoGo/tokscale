@@ -1021,11 +1021,11 @@ impl App {
         &mut self,
         data: UsageData,
         sessions: Vec<tokscale_core::TuiSessionEntry>,
-        client_space: BTreeMap<String, u64>,
+        input_footprint: tokscale_core::InputFootprint,
         projection_backend: ProjectionBackend,
         group_by: tokscale_core::GroupBy,
     ) {
-        let session_snapshot = SessionSnapshot::new(sessions, client_space);
+        let session_snapshot = SessionSnapshot::new(sessions, input_footprint);
         let overview_summary = OverviewSummary::derive(
             &data,
             self.selected_main_session_count_for(&session_snapshot),
@@ -3312,21 +3312,33 @@ mod tests {
     fn model_detail_accumulator() -> tokscale_core::TuiAcc {
         let messages = [
             (
-                "claude",
+                tokscale_core::ClientId::Claude,
                 "shared-model",
                 "anthropic",
                 "claude-anthropic",
                 11,
             ),
             (
-                "claude",
+                tokscale_core::ClientId::Claude,
                 "shared-model",
                 "openrouter",
                 "claude-openrouter",
                 22,
             ),
-            ("codex", "shared-model", "openai", "codex-openai", 33),
-            ("claude", "other-model", "anthropic", "claude-other", 7),
+            (
+                tokscale_core::ClientId::Codex,
+                "shared-model",
+                "openai",
+                "codex-openai",
+                33,
+            ),
+            (
+                tokscale_core::ClientId::Claude,
+                "other-model",
+                "anthropic",
+                "claude-other",
+                7,
+            ),
         ]
         .map(|(client, model, provider, session, input)| {
             tokscale_core::UnifiedMessage::new(

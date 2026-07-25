@@ -3,12 +3,14 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FingerprintPolicy, FoldContext, InputDiscoveryError, InputPipelineError,
-    InputUnit, LocalInputAdapter, MessageSink, ParseContext, ParsedUnit,
-    MODEL_ID_CANONICALIZATION_REVISION,
+    AdapterScanContext, BoundMessageSink, DecoderSpec, FingerprintPolicy, FoldContext,
+    InputDiscoveryError, InputPipelineError, InputUnit, LocalInputAdapter, ParseContext,
+    ParsedUnit, MODEL_ID_CANONICALIZATION_REVISION,
 };
 use crate::clients::ClientId;
-use crate::message_cache::{ParserId, ParserVersion};
+use crate::message_cache::DecoderId;
+#[cfg(test)]
+use crate::message_cache::DecoderVersion;
 use crate::{local_clients, sessions};
 
 const CLINE_SDK_V1_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 4;
@@ -16,36 +18,30 @@ const CLINE_SDK_V1_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 4;
 pub(crate) struct ClineAdapter;
 
 impl LocalInputAdapter for ClineAdapter {
-    fn client(&self) -> ClientId {
-        ClientId::Cline
-    }
-
     fn discover_checked(
         &self,
+        client: ClientId,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
-        let def = ClientId::Cline
+        let def = client
             .local_def()
             .expect("Cline adapter must have local scan policy");
         let mut roots = vec![local_clients::cline_session_data_dir(ctx.home_dir)];
-        roots.extend(adapter_discover::extra_roots_for_client(
-            ClientId::Cline,
-            ctx,
-        )?);
+        roots.extend(adapter_discover::extra_roots_for_client(client, ctx)?);
 
         Ok(adapter_discover::input_units_from_paths(
-            ClientId::Cline,
-            adapter_discover::scan_roots(ClientId::Cline, roots, def.pattern)?,
+            client,
+            adapter_discover::scan_roots(client, roots, def.pattern)?,
             FingerprintPolicy::PlainFile,
+            DecoderSpec::plain(DecoderId::Cline, CLINE_SDK_V1_REVISION),
         )?
         .into_iter()
-        .map(|unit| {
-            let unit = match sessions::cline::cline_manifest_dependency_path(&unit.path) {
+        .map(
+            |unit| match sessions::cline::cline_manifest_dependency_path(&unit.path) {
                 Some(manifest) => unit.with_optional_dependency(manifest),
                 None => unit,
-            };
-            unit.with_parser_version(ParserVersion::new(ParserId::Cline, CLINE_SDK_V1_REVISION))
-        })
+            },
+        )
         .collect())
     }
 
@@ -70,7 +66,7 @@ impl LocalInputAdapter for ClineAdapter {
         &self,
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
@@ -109,14 +105,14 @@ mod tests {
 
         let settings = crate::scanner::ScannerSettings::default();
         let units = CLINE_ADAPTER
-            .discover_checked(&scan_context(home.path(), &settings))
+            .discover_checked(ClientId::Cline, &scan_context(home.path(), &settings))
             .unwrap();
 
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].path, current);
         assert_eq!(
-            units[0].parser_version,
-            ParserVersion::new(ParserId::Cline, CLINE_SDK_V1_REVISION)
+            units[0].decoder.version(),
+            DecoderVersion::new(DecoderId::Cline, CLINE_SDK_V1_REVISION)
         );
         assert_eq!(
             units[0].fingerprint_policy,
@@ -150,7 +146,7 @@ mod tests {
             ],
         );
         let units = CLINE_ADAPTER
-            .discover_checked(&scan_context(home.path(), &settings))
+            .discover_checked(ClientId::Cline, &scan_context(home.path(), &settings))
             .unwrap();
         let paths: Vec<PathBuf> = units.into_iter().map(|unit| unit.path).collect();
 
@@ -169,7 +165,7 @@ mod tests {
 
         let settings = crate::scanner::ScannerSettings::default();
         let first = CLINE_ADAPTER
-            .discover_checked(&scan_context(home.path(), &settings))
+            .discover_checked(ClientId::Cline, &scan_context(home.path(), &settings))
             .unwrap()
             .remove(0)
             .input_policy()
@@ -178,7 +174,7 @@ mod tests {
 
         write_file(&manifest, r#"{"workspace_root":"/tmp/project-b"}"#);
         let second = CLINE_ADAPTER
-            .discover_checked(&scan_context(home.path(), &settings))
+            .discover_checked(ClientId::Cline, &scan_context(home.path(), &settings))
             .unwrap()
             .remove(0)
             .input_policy()

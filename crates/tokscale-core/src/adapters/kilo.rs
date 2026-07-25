@@ -3,11 +3,13 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, FoldContext, InputDiscoveryError, InputUnit, LocalInputAdapter,
-    MessageSink, ParseContext, ParsedUnit,
+    AdapterScanContext, BoundMessageSink, DecoderSpec, FoldContext, InputDiscoveryError, InputUnit,
+    LocalInputAdapter, ParseContext, ParsedUnit,
 };
 use crate::clients::ClientId;
-use crate::message_cache::{ParserId, ParserVersion};
+use crate::message_cache::DecoderId;
+#[cfg(test)]
+use crate::message_cache::DecoderVersion;
 use crate::sessions;
 
 const KILO_RECORD_REJECTION_REVISION: u32 = 6;
@@ -15,42 +17,28 @@ const KILO_RECORD_REJECTION_REVISION: u32 = 6;
 pub(crate) struct KiloAdapter;
 
 impl LocalInputAdapter for KiloAdapter {
-    fn client(&self) -> ClientId {
-        ClientId::Kilo
-    }
-
     fn discover_checked(
         &self,
+        client: ClientId,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
-        let def = ClientId::Kilo
+        let def = client
             .local_def()
             .expect("Kilo adapter must have local scan policy");
         let mut paths = Vec::new();
-        adapter_discover::push_existing_file(
-            ClientId::Kilo,
-            def.resolve_path(ctx.home_dir),
-            &mut paths,
-        )?;
+        adapter_discover::push_existing_file(client, def.resolve_path(ctx.home_dir), &mut paths)?;
         paths.extend(adapter_discover::scan_roots(
-            ClientId::Kilo,
-            adapter_discover::extra_roots_for_client(ClientId::Kilo, ctx)?,
+            client,
+            adapter_discover::extra_roots_for_client(client, ctx)?,
             def.pattern,
         )?);
 
-        Ok(adapter_discover::input_units_from_paths_preserving_order(
-            ClientId::Kilo,
+        adapter_discover::input_units_from_paths_preserving_order(
+            client,
             paths,
             crate::adapters::FingerprintPolicy::SqliteWithWal,
-        )?
-        .into_iter()
-        .map(|unit| {
-            unit.with_parser_version(ParserVersion::new(
-                ParserId::Kilo,
-                KILO_RECORD_REJECTION_REVISION,
-            ))
-        })
-        .collect())
+            DecoderSpec::plain(DecoderId::Kilo, KILO_RECORD_REJECTION_REVISION),
+        )
     }
 
     fn parse_checked(&self, units: Vec<InputUnit>, ctx: &ParseContext<'_>) -> Vec<ParsedUnit> {
@@ -66,7 +54,7 @@ impl LocalInputAdapter for KiloAdapter {
         &self,
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), crate::adapters::InputPipelineError> {
         adapter_cache::fold_units(parsed, ctx, sink)
     }
@@ -110,7 +98,7 @@ mod tests {
             scanner_settings: &settings,
         };
 
-        let units = KILO_ADAPTER.discover_checked(&ctx).unwrap();
+        let units = KILO_ADAPTER.discover_checked(ClientId::Kilo, &ctx).unwrap();
 
         assert_eq!(
             units
@@ -120,8 +108,8 @@ mod tests {
             vec![default_db, first_extra_db, second_extra_db]
         );
         assert!(units.iter().all(|unit| {
-            unit.parser_version
-                == ParserVersion::new(ParserId::Kilo, KILO_RECORD_REJECTION_REVISION)
+            unit.decoder.version()
+                == DecoderVersion::new(DecoderId::Kilo, KILO_RECORD_REJECTION_REVISION)
                 && unit.fingerprint_policy == crate::adapters::FingerprintPolicy::SqliteWithWal
         }));
     }

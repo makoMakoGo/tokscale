@@ -6,12 +6,14 @@ use rayon::prelude::*;
 use crate::adapters::cache as adapter_cache;
 use crate::adapters::discover as adapter_discover;
 use crate::adapters::{
-    AdapterScanContext, CacheHitPlan, FingerprintPolicy, FoldContext, InputDiscoveryError,
-    InputPipelineError, InputPlanningError, InputUnit, LocalInputAdapter, MessageSink,
-    ParseContext, ParsedBatchInput, ParsedUnit,
+    AdapterScanContext, BoundMessageSink, CacheHitPlan, DecoderSpec, FingerprintPolicy,
+    FoldContext, InputDiscoveryError, InputPipelineError, InputPlanningError, InputUnit,
+    LocalInputAdapter, ParseContext, ParsedBatchInput, ParsedUnit,
 };
 use crate::clients::ClientId;
-use crate::message_cache::{ParserId, ParserVersion};
+use crate::message_cache::DecoderId;
+#[cfg(test)]
+use crate::message_cache::DecoderVersion;
 use crate::sessions;
 
 pub(crate) struct OmpAdapter;
@@ -25,28 +27,22 @@ const OMP_RECORD_REJECTION_REVISION: u32 = crate::adapters::MODEL_ID_CANONICALIZ
 const OMP_PARENT_HEALTH_REVISION: u32 = 2;
 
 impl LocalInputAdapter for OmpAdapter {
-    fn client(&self) -> ClientId {
-        ClientId::Omp
-    }
-
     fn discover_checked(
         &self,
+        client: ClientId,
         ctx: &AdapterScanContext<'_>,
     ) -> Result<Vec<InputUnit>, InputDiscoveryError> {
         let units = adapter_discover::discover_default_scanned_units(
-            ClientId::Omp,
+            client,
             ctx,
             FingerprintPolicy::PlainFile,
+            DecoderSpec::plain(DecoderId::Omp, OMP_RECORD_REJECTION_REVISION),
         )?
         .into_iter()
         .map(|unit| {
             let dependency_path = sessions::pi::omp_parent_candidate_path(&unit.path)
                 .expect("discovered OMP input must have a parent directory");
             unit.with_optional_dependency(dependency_path)
-                .with_parser_version(ParserVersion::new(
-                    ParserId::Omp,
-                    OMP_RECORD_REJECTION_REVISION,
-                ))
         })
         .collect();
         Ok(units)
@@ -76,7 +72,7 @@ impl LocalInputAdapter for OmpAdapter {
         &self,
         parsed: Vec<ParsedUnit>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), InputPipelineError> {
         let mut hit_units = Vec::new();
         let mut parsed_misses = Vec::new();
@@ -91,7 +87,7 @@ impl LocalInputAdapter for OmpAdapter {
             }
         }
 
-        let failed_hits = fold_omp_cache_hits(hit_units, ctx, sink)?;
+        let (failed_hits, _) = fold_omp_cache_hits(hit_units, ctx, Some(sink))?;
         if !failed_hits.is_empty() {
             let failed_hit_count = failed_hits.len();
             let recovery_invalidations: Vec<_> = failed_hits
@@ -134,7 +130,7 @@ impl LocalInputAdapter for OmpAdapter {
         &self,
         batches: &mut ParsedBatchInput<'_>,
         ctx: &mut FoldContext<'_>,
-        sink: &mut dyn MessageSink,
+        sink: &mut BoundMessageSink<'_>,
     ) -> Result<(), InputPipelineError> {
         let mut hit_units = Vec::new();
         let mut miss_units = Vec::new();
@@ -149,7 +145,7 @@ impl LocalInputAdapter for OmpAdapter {
             plan_parent_health_cache(parent_health_candidates, ctx.input_cache)?;
 
         let batch_width = batches.batch_width();
-        let failed_hits = fold_omp_cache_hits(hit_units, ctx, sink)?;
+        let (failed_hits, _) = fold_omp_cache_hits(hit_units, ctx, Some(sink))?;
         let mut remaining_failed_hits = failed_hits.len();
         let recovery_invalidations: Vec<_> = failed_hits
             .iter()
@@ -167,10 +163,9 @@ impl LocalInputAdapter for OmpAdapter {
                 hit.parsed
             })
             .collect();
-        let mut parent_health_messages = Vec::new();
-        let failed_parent_hits =
-            fold_omp_cache_hits(parent_hit_units, ctx, &mut parent_health_messages)?;
-        if !parent_health_messages.is_empty() {
+        let (failed_parent_hits, parent_health_message_count) =
+            fold_omp_cache_hits(parent_hit_units, ctx, None)?;
+        if parent_health_message_count != 0 {
             return Err(InputPipelineError::contract(
                 "OMP parent-health cache contained usage messages",
             ));
@@ -309,15 +304,12 @@ fn child_only_parent_health_candidates(
 }
 
 fn omp_parent_health_unit(path: PathBuf, cacheable: bool) -> InputUnit {
-    let unit = if cacheable {
-        InputUnit::plain_file(ClientId::Omp, path)
+    let decoder = DecoderSpec::plain(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION);
+    if cacheable {
+        InputUnit::plain_file(path, decoder)
     } else {
-        InputUnit::no_message_cache(ClientId::Omp, path)
-    };
-    unit.with_parser_version(ParserVersion::new(
-        ParserId::OmpParentHealth,
-        OMP_PARENT_HEALTH_REVISION,
-    ))
+        InputUnit::no_message_cache(path, decoder)
+    }
 }
 
 fn plan_parent_health_cache(
@@ -436,9 +428,10 @@ fn parse_parent_health_cache_misses(
 fn fold_omp_cache_hits(
     hit_units: Vec<ParsedUnit>,
     ctx: &mut FoldContext<'_>,
-    sink: &mut dyn MessageSink,
-) -> Result<Vec<OmpFailedCacheHit>, InputPipelineError> {
+    mut sink: Option<&mut BoundMessageSink<'_>>,
+) -> Result<(Vec<OmpFailedCacheHit>, usize), InputPipelineError> {
     let mut failed_units = Vec::new();
+    let mut message_count = 0;
     for parsed in hit_units {
         let ParsedUnit {
             mut unit,
@@ -455,26 +448,24 @@ fn fold_omp_cache_hits(
         match adapter_cache::resolve_messages(messages, ctx) {
             Ok(messages) => {
                 let crate::adapters::UnitScanHealth { status, rejections } = *health;
-                ctx.health.record(crate::input_health::InputHealth {
-                    client: unit.client,
-                    path: unit.path.clone(),
-                    status,
-                    rejections,
-                });
-                adapter_cache::emit_messages(unit.client, messages, sink);
+                ctx.record_health(unit.path.clone(), status, rejections);
+                message_count += messages.len();
+                if let Some(sink) = sink.as_deref_mut() {
+                    adapter_cache::emit_messages(messages, sink);
+                }
             }
             Err(failure) => {
                 if !failure.can_reparse_input() {
                     return Err(failure.into());
                 }
                 debug_assert_eq!(failure.input_path, unit.path);
-                debug_assert_eq!(failure.parser_version, unit.parser_version);
+                debug_assert_eq!(failure.decoder_version, unit.decoder.version());
                 let remove_failed_shard = failure.requires_shard_removal();
                 if remove_failed_shard {
-                    ctx.input_cache.remove(&unit.path, unit.parser_version);
+                    ctx.input_cache.remove(&unit.path, unit.decoder.version());
                 } else {
                     ctx.input_cache
-                        .invalidate_read(&unit.path, unit.parser_version);
+                        .invalidate_read(&unit.path, unit.decoder.version());
                 }
                 unit.mark_cache_lookup_completed_no_hit();
                 failed_units.push(OmpFailedCacheHit {
@@ -484,7 +475,7 @@ fn fold_omp_cache_hits(
             }
         }
     }
-    Ok(failed_units)
+    Ok((failed_units, message_count))
 }
 
 fn parse_omp_miss_units(
@@ -536,8 +527,9 @@ fn omp_parent_health_units(
         .into_iter()
         .filter(|health| !owned_paths.contains(&health.path))
         .map(|health| {
-            let unit = InputUnit::no_message_cache(ClientId::Omp, health.path).with_parser_version(
-                ParserVersion::new(ParserId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION),
+            let unit = InputUnit::no_message_cache(
+                health.path,
+                DecoderSpec::plain(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION),
             );
             let mut parsed = ParsedUnit::healthy(
                 unit,
@@ -584,6 +576,39 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
+    fn binding() -> crate::adapters::AdapterBinding<'static> {
+        crate::adapters::adapter_for(ClientId::Omp).expect("OMP adapter must be registered")
+    }
+
+    fn decoder() -> DecoderSpec {
+        DecoderSpec::plain(DecoderId::Omp, OMP_RECORD_REJECTION_REVISION)
+    }
+
+    fn unit(path: PathBuf) -> InputUnit {
+        InputUnit::plain_file(path, decoder())
+    }
+
+    fn unit_with_parent(path: PathBuf, parent_path: PathBuf) -> InputUnit {
+        unit(path).with_optional_dependency(parent_path)
+    }
+
+    fn fold_parsed(
+        parsed: Vec<ParsedUnit>,
+        cache: &mut message_cache::InputMessageCache,
+    ) -> Vec<crate::UnifiedMessage> {
+        let binding = binding();
+        let mut messages = Vec::new();
+        let mut sink = crate::adapters::BoundMessageSink::new(binding, &mut messages);
+        OMP_ADAPTER
+            .fold(
+                parsed,
+                &mut FoldContext::new(binding, cache, None),
+                &mut sink,
+            )
+            .unwrap();
+        messages
+    }
+
     fn finalized(mut messages: Vec<crate::sessions::ParsedMessage>) -> Vec<crate::UnifiedMessage> {
         crate::finalize_token_priced_messages(&mut messages, None);
         messages
@@ -597,30 +622,38 @@ mod tests {
         cache: &mut message_cache::InputMessageCache,
     ) -> Vec<crate::UnifiedMessage> {
         let parsed = OMP_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
-        let mut sink = Vec::new();
+        let mut messages = Vec::new();
+        let binding = binding();
+        let mut sink = crate::adapters::BoundMessageSink::new(binding, &mut messages);
         OMP_ADAPTER
-            .fold(parsed, &mut FoldContext::new(cache, None), &mut sink)
+            .fold(
+                parsed,
+                &mut FoldContext::new(binding, cache, None),
+                &mut sink,
+            )
             .unwrap();
-        assert!(sink
+        assert!(messages
             .iter()
-            .all(|message| message.client.as_ref() == ClientId::Omp.as_str()));
-        sink
+            .all(|message| message.client == ClientId::Omp));
+        messages
     }
 
     fn fold_batches_with_omp_adapter(
         units: Vec<InputUnit>,
         cache: &mut message_cache::InputMessageCache,
     ) -> (Vec<crate::UnifiedMessage>, crate::input_health::DataHealth) {
-        let mut sink = Vec::new();
-        let mut batches = crate::adapters::ParsedBatchInput::new(&OMP_ADAPTER, units);
-        let mut ctx = FoldContext::new(cache, None);
+        let binding = binding();
+        let mut messages = Vec::new();
+        let mut sink = crate::adapters::BoundMessageSink::new(binding, &mut messages);
+        let mut batches = crate::adapters::ParsedBatchInput::new(binding, units);
+        let mut ctx = FoldContext::new(binding, cache, None);
         OMP_ADAPTER
             .fold_batches(&mut batches, &mut ctx, &mut sink)
             .unwrap();
-        assert!(sink
+        assert!(messages
             .iter()
-            .all(|message| message.client.as_ref() == ClientId::Omp.as_str()));
-        (sink, std::mem::take(&mut ctx.health))
+            .all(|message| message.client == ClientId::Omp));
+        (messages, ctx.take_health())
     }
 
     fn omp_content(session_id: &str) -> String {
@@ -631,7 +664,7 @@ mod tests {
         let mut cache = message_cache::InputMessageCache::with_cache_dir(cache_dir);
         cache.insert(message_cache::CachedInputEntry::new_with_version(
             &unit.path,
-            unit.parser_version,
+            unit.decoder.version(),
             unit.input_policy().fingerprint().unwrap(),
             vec![crate::sessions::ParsedMessage::new(
                 "gpt-5.5",
@@ -669,7 +702,7 @@ mod tests {
         };
         let ctx = scan_context(home.path(), &settings);
 
-        let units = OMP_ADAPTER.discover_checked(&ctx).unwrap();
+        let units = OMP_ADAPTER.discover_checked(ClientId::Omp, &ctx).unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
         let mut expected = vec![default_path, extra_path];
         expected.sort_unstable();
@@ -686,7 +719,8 @@ mod tests {
             )
         }));
         assert!(units.iter().all(|unit| {
-            unit.parser_version == ParserVersion::new(ParserId::Omp, OMP_RECORD_REJECTION_REVISION)
+            unit.decoder.version()
+                == DecoderVersion::new(DecoderId::Omp, OMP_RECORD_REJECTION_REVISION)
         }));
     }
 
@@ -708,7 +742,7 @@ mod tests {
         };
         let ctx = scan_context(home.path(), &settings);
 
-        let units = OMP_ADAPTER.discover_checked(&ctx).unwrap();
+        let units = OMP_ADAPTER.discover_checked(ClientId::Omp, &ctx).unwrap();
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].path, artifact_path);
 
@@ -732,7 +766,7 @@ mod tests {
         write_file(&parent_path, OMP_PARENT_CONTENT);
         write_file(&child_path, OMP_CHILD_CONTENT);
 
-        let units = vec![InputUnit::plain_file(ClientId::Omp, child_path.clone())];
+        let units = vec![unit(child_path.clone())];
         let mut cache = message_cache::InputMessageCache::default();
         let actual = fold_with_omp_adapter(units, &mut cache);
 
@@ -760,7 +794,7 @@ mod tests {
         let settings = crate::scanner::ScannerSettings::default();
         let ctx = scan_context(home.path(), &settings);
         let child_unit = OMP_ADAPTER
-            .discover_checked(&ctx)
+            .discover_checked(ClientId::Omp, &ctx)
             .unwrap()
             .into_iter()
             .find(|unit| unit.path == child_path)
@@ -768,10 +802,7 @@ mod tests {
         let mut cache = message_cache::InputMessageCache::default();
         let parsed =
             OMP_ADAPTER.parse_checked(vec![child_unit.clone()], &ParseContext { pricing: None });
-        let mut first = Vec::new();
-        OMP_ADAPTER
-            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut first)
-            .unwrap();
+        let first = fold_parsed(parsed, &mut cache);
         assert_eq!(first[0].session_id.as_ref(), "child-session");
         assert_eq!(first[0].agent.as_deref(), Some("OMP Reviewer"));
 
@@ -779,14 +810,7 @@ mod tests {
             CacheHitPlan::Hit(hit) => hit,
             CacheHitPlan::Miss(_) => panic!("unchanged OMP child and parent must use warm cache"),
         };
-        let mut warm_messages = Vec::new();
-        OMP_ADAPTER
-            .fold(
-                vec![warm],
-                &mut FoldContext::new(&mut cache, None),
-                &mut warm_messages,
-            )
-            .unwrap();
+        let warm_messages = fold_parsed(vec![warm], &mut cache);
         assert_eq!(warm_messages[0].agent.as_deref(), Some("OMP Reviewer"));
 
         write_file(
@@ -794,7 +818,7 @@ mod tests {
             &OMP_PARENT_CONTENT.replace(r#""agent":"reviewer""#, r#""agent":"oracle""#),
         );
         let refreshed_child_unit = OMP_ADAPTER
-            .discover_checked(&ctx)
+            .discover_checked(ClientId::Omp, &ctx)
             .unwrap()
             .into_iter()
             .find(|unit| unit.path == child_path)
@@ -808,10 +832,7 @@ mod tests {
             CacheHitPlan::Hit(_) => panic!("parent-only change must invalidate child cache"),
         };
         let parsed = OMP_ADAPTER.parse_checked(vec![miss], &ParseContext { pricing: None });
-        let mut second = Vec::new();
-        OMP_ADAPTER
-            .fold(parsed, &mut FoldContext::new(&mut cache, None), &mut second)
-            .unwrap();
+        let second = fold_parsed(parsed, &mut cache);
         assert_eq!(second[0].session_id.as_ref(), "child-session");
         assert_eq!(second[0].agent.as_deref(), Some("OMP Oracle"));
     }
@@ -827,14 +848,9 @@ mod tests {
         write_file(&first_child_path, &omp_content("first-child"));
         write_file(&second_child_path, &omp_content("second-child"));
 
-        let parser_version = ParserVersion::new(ParserId::Omp, OMP_RECORD_REJECTION_REVISION);
         let units = [first_child_path, second_child_path]
             .into_iter()
-            .map(|path| {
-                InputUnit::plain_file(ClientId::Omp, path)
-                    .with_optional_dependency(parent_path.clone())
-                    .with_parser_version(parser_version)
-            })
+            .map(|path| unit_with_parent(path, parent_path.clone()))
             .collect();
         let mut cache = message_cache::InputMessageCache::default();
         message_cache::reset_input_read_stats(&parent_path);
@@ -865,12 +881,7 @@ mod tests {
             &parent_path,
             &OMP_PARENT_CONTENT.replace(r#""agent":"reviewer""#, r#""agent":"new-reviewer""#),
         );
-        let unit = InputUnit::plain_file(ClientId::Omp, child_path)
-            .with_optional_dependency(parent_path)
-            .with_parser_version(ParserVersion::new(
-                ParserId::Omp,
-                OMP_RECORD_REJECTION_REVISION,
-            ));
+        let unit = unit_with_parent(child_path, parent_path);
 
         let parsed =
             parse_omp_miss_units(vec![unit], &ParseContext { pricing: None }, &parent_index);
@@ -929,19 +940,14 @@ mod tests {
         write_file(&child_path, OMP_CHILD_CONTENT);
         write_file(&cached_path, OMP_CHILD_CONTENT);
 
-        let parser_version = ParserVersion::new(ParserId::Omp, OMP_RECORD_REJECTION_REVISION);
-        let child_unit =
-            InputUnit::plain_file(ClientId::Omp, child_path).with_parser_version(parser_version);
-        let cached_unit = InputUnit::plain_file(ClientId::Omp, cached_path.clone())
-            .with_parser_version(parser_version)
-            .prepare_snapshot()
-            .unwrap();
-        let parent_unit =
-            InputUnit::plain_file(ClientId::Omp, parent_path).with_parser_version(parser_version);
+        let decoder_version = decoder().version();
+        let child_unit = unit(child_path);
+        let cached_unit = unit(cached_path.clone()).prepare_snapshot().unwrap();
+        let parent_unit = unit(parent_path);
         let mut cache = message_cache::InputMessageCache::default();
         cache.insert(message_cache::CachedInputEntry::new_with_version(
             &cached_path,
-            parser_version,
+            decoder_version,
             cached_unit.input_policy().fingerprint().unwrap(),
             vec![crate::sessions::ParsedMessage::new(
                 "gpt-5.5",
@@ -962,19 +968,21 @@ mod tests {
             .build()
             .unwrap()
             .install(|| {
-                let mut sink = Vec::new();
+                let binding = binding();
+                let mut messages = Vec::new();
+                let mut sink = crate::adapters::BoundMessageSink::new(binding, &mut messages);
                 let mut batches = crate::adapters::ParsedBatchInput::new(
-                    &OMP_ADAPTER,
+                    binding,
                     vec![child_unit, cached_unit, parent_unit],
                 );
                 OMP_ADAPTER
                     .fold_batches(
                         &mut batches,
-                        &mut FoldContext::new(&mut cache, None),
+                        &mut FoldContext::new(binding, &mut cache, None),
                         &mut sink,
                     )
                     .unwrap();
-                sink
+                messages
             });
 
         let sessions: Vec<_> = messages
@@ -997,30 +1005,27 @@ mod tests {
         write_file(&parent_path, &format!("{{not-json\n{OMP_PARENT_CONTENT}"));
         write_file(&child_path, OMP_CHILD_CONTENT);
 
-        let unit = InputUnit::plain_file(ClientId::Omp, child_path)
-            .with_optional_dependency(parent_path)
-            .with_parser_version(ParserVersion::new(
-                ParserId::Omp,
-                OMP_RECORD_REJECTION_REVISION,
-            ));
+        let unit = unit_with_parent(child_path, parent_path);
         let mut cache = message_cache::InputMessageCache::default();
-        let mut sink = Vec::new();
-        let mut batches = crate::adapters::ParsedBatchInput::new(&OMP_ADAPTER, vec![unit]);
-        let mut ctx = FoldContext::new(&mut cache, None);
+        let binding = binding();
+        let mut messages = Vec::new();
+        let mut sink = crate::adapters::BoundMessageSink::new(binding, &mut messages);
+        let mut batches = crate::adapters::ParsedBatchInput::new(binding, vec![unit]);
+        let mut ctx = FoldContext::new(binding, &mut cache, None);
 
         OMP_ADAPTER
             .fold_batches(&mut batches, &mut ctx, &mut sink)
             .expect("a malformed parent record must stay inside the OMP input health domain");
 
-        assert_eq!(sink.len(), 1);
-        assert_eq!(sink[0].agent.as_deref(), Some("OMP Reviewer"));
-        assert_eq!(ctx.health.rejected_records(), 1);
-        assert_eq!(ctx.health.partial_inputs(), 0);
-        assert_eq!(ctx.health.failed_inputs(), 0);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].agent.as_deref(), Some("OMP Reviewer"));
+        assert_eq!(ctx.health().rejected_records(), 1);
+        assert_eq!(ctx.health().partial_inputs(), 0);
+        assert_eq!(ctx.health().failed_inputs(), 0);
     }
 
     #[test]
-    fn unowned_parent_health_uses_parent_health_parser_version() {
+    fn unowned_parent_health_uses_parent_health_decoder_version() {
         let dir = tempfile::TempDir::new().unwrap();
         let session_root = dir.path().join(".omp/agent/sessions/project/root-session");
         let parent_path = session_root.with_extension("jsonl");
@@ -1033,8 +1038,8 @@ mod tests {
 
         assert_eq!(units.len(), 1);
         assert_eq!(
-            units[0].unit.parser_version,
-            ParserVersion::new(ParserId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION)
+            units[0].unit.decoder.version(),
+            DecoderVersion::new(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION)
         );
     }
 
@@ -1056,7 +1061,9 @@ mod tests {
             ..Default::default()
         };
         let scan_ctx = scan_context(home.path(), &settings);
-        let cold_units = OMP_ADAPTER.discover_checked(&scan_ctx).unwrap();
+        let cold_units = OMP_ADAPTER
+            .discover_checked(ClientId::Omp, &scan_ctx)
+            .unwrap();
         assert_eq!(
             cold_units
                 .iter()
@@ -1073,7 +1080,9 @@ mod tests {
         assert_eq!(sessions::pi::omp_parent_scan_count(&parent_path), 1);
 
         sessions::pi::reset_omp_parent_scan_count(&parent_path);
-        let warm_units = OMP_ADAPTER.discover_checked(&scan_ctx).unwrap();
+        let warm_units = OMP_ADAPTER
+            .discover_checked(ClientId::Omp, &scan_ctx)
+            .unwrap();
         assert!(warm_units.iter().cloned().all(|unit| matches!(
             OMP_ADAPTER.plan_cache_hit(unit, &cache).unwrap(),
             CacheHitPlan::Hit(_)
@@ -1097,7 +1106,9 @@ mod tests {
             &OMP_PARENT_CONTENT.replace(r#""agent":"reviewer""#, r#""agent":"oracle""#),
         );
         sessions::pi::reset_omp_parent_scan_count(&parent_path);
-        let changed_units = OMP_ADAPTER.discover_checked(&scan_ctx).unwrap();
+        let changed_units = OMP_ADAPTER
+            .discover_checked(ClientId::Omp, &scan_ctx)
+            .unwrap();
         assert!(changed_units.iter().cloned().all(|unit| matches!(
             OMP_ADAPTER.plan_cache_hit(unit, &cache).unwrap(),
             CacheHitPlan::Miss(_)
@@ -1132,11 +1143,13 @@ mod tests {
             ..Default::default()
         };
         let scan_ctx = scan_context(home.path(), &settings);
-        let parent_parser_version =
-            ParserVersion::new(ParserId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION);
+        let parent_decoder_version =
+            DecoderVersion::new(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION);
 
         let mut cold_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
-        let cold_units = OMP_ADAPTER.discover_checked(&scan_ctx).unwrap();
+        let cold_units = OMP_ADAPTER
+            .discover_checked(ClientId::Omp, &scan_ctx)
+            .unwrap();
         let (_, cold_health) = fold_batches_with_omp_adapter(cold_units, &mut cold_cache);
         assert_eq!(cold_health.issue_count(), 1);
         drop(cold_cache);
@@ -1144,11 +1157,13 @@ mod tests {
         message_cache::truncate_shard_after_header_for_test(
             cache_dir.path(),
             &parent_path,
-            parent_parser_version,
+            parent_decoder_version,
         );
         sessions::pi::reset_omp_parent_scan_count(&parent_path);
         let mut repair_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
-        let repair_units = OMP_ADAPTER.discover_checked(&scan_ctx).unwrap();
+        let repair_units = OMP_ADAPTER
+            .discover_checked(ClientId::Omp, &scan_ctx)
+            .unwrap();
         let (_, repair_health) = fold_batches_with_omp_adapter(repair_units, &mut repair_cache);
         assert_eq!(repair_health.issue_count(), 1);
         assert_eq!(sessions::pi::omp_parent_scan_count(&parent_path), 1);
@@ -1156,7 +1171,9 @@ mod tests {
 
         sessions::pi::reset_omp_parent_scan_count(&parent_path);
         let mut warm_cache = message_cache::InputMessageCache::with_cache_dir(cache_dir.path());
-        let warm_units = OMP_ADAPTER.discover_checked(&scan_ctx).unwrap();
+        let warm_units = OMP_ADAPTER
+            .discover_checked(ClientId::Omp, &scan_ctx)
+            .unwrap();
         let (_, warm_health) = fold_batches_with_omp_adapter(warm_units, &mut warm_cache);
         assert_eq!(warm_health.issue_count(), 1);
         assert_eq!(sessions::pi::omp_parent_scan_count(&parent_path), 0);
@@ -1184,7 +1201,7 @@ mod tests {
         message_cache::mark_current_key_shard_as_unsupported_format_for_test(
             unsupported_cache_dir.path(),
             &parent_path,
-            parent_unit.parser_version,
+            parent_unit.decoder.version(),
         );
         let unsupported_cache =
             message_cache::InputMessageCache::with_cache_dir(unsupported_cache_dir.path());
@@ -1202,7 +1219,7 @@ mod tests {
         message_cache::mark_current_key_shard_as_future_format_for_test(
             future_cache_dir.path(),
             &parent_path,
-            parent_unit.parser_version,
+            parent_unit.decoder.version(),
         );
         let future_cache =
             message_cache::InputMessageCache::with_cache_dir(future_cache_dir.path());
@@ -1229,20 +1246,24 @@ mod tests {
         let scan_ctx = scan_context(home.path(), &settings);
         let mut cache = message_cache::InputMessageCache::default();
 
-        let cold_units = OMP_ADAPTER.discover_checked(&scan_ctx).unwrap();
+        let cold_units = OMP_ADAPTER
+            .discover_checked(ClientId::Omp, &scan_ctx)
+            .unwrap();
         let (cold_messages, cold_health) = fold_batches_with_omp_adapter(cold_units, &mut cache);
         assert_eq!(cold_health.issue_count(), 0);
         assert_eq!(sessions::pi::omp_parent_scan_count(&parent_path), 1);
         assert!(cache
             .get_meta(
                 &parent_path,
-                ParserVersion::new(ParserId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION),
+                DecoderVersion::new(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION),
             )
             .unwrap()
             .is_some());
 
         sessions::pi::reset_omp_parent_scan_count(&parent_path);
-        let warm_units = OMP_ADAPTER.discover_checked(&scan_ctx).unwrap();
+        let warm_units = OMP_ADAPTER
+            .discover_checked(ClientId::Omp, &scan_ctx)
+            .unwrap();
         assert!(warm_units.iter().cloned().all(|unit| matches!(
             OMP_ADAPTER.plan_cache_hit(unit, &cache).unwrap(),
             CacheHitPlan::Hit(_)
@@ -1271,12 +1292,16 @@ mod tests {
         };
         let scan_ctx = scan_context(home.path(), &settings);
         let mut cache = message_cache::InputMessageCache::default();
-        let cold_units = OMP_ADAPTER.discover_checked(&scan_ctx).unwrap();
+        let cold_units = OMP_ADAPTER
+            .discover_checked(ClientId::Omp, &scan_ctx)
+            .unwrap();
         fold_batches_with_omp_adapter(cold_units, &mut cache);
 
         write_file(&child_path, &omp_content("changed-child-with-longer-id"));
         sessions::pi::reset_omp_parent_scan_count(&parent_path);
-        let changed_units = OMP_ADAPTER.discover_checked(&scan_ctx).unwrap();
+        let changed_units = OMP_ADAPTER
+            .discover_checked(ClientId::Omp, &scan_ctx)
+            .unwrap();
         let (messages, health) = fold_batches_with_omp_adapter(changed_units, &mut cache);
 
         assert_eq!(messages.len(), 1);
@@ -1298,14 +1323,7 @@ mod tests {
         std::fs::create_dir_all(&parent_path).unwrap();
         write_file(&child_path, OMP_CHILD_CONTENT);
 
-        let make_unit = || {
-            InputUnit::plain_file(ClientId::Omp, child_path.clone())
-                .with_optional_dependency(parent_path.clone())
-                .with_parser_version(ParserVersion::new(
-                    ParserId::Omp,
-                    OMP_RECORD_REJECTION_REVISION,
-                ))
-        };
+        let make_unit = || unit_with_parent(child_path.clone(), parent_path.clone());
         let mut cache = message_cache::InputMessageCache::default();
         let (cold_messages, cold_health) =
             fold_batches_with_omp_adapter(vec![make_unit()], &mut cache);
@@ -1317,7 +1335,7 @@ mod tests {
         assert!(cache
             .get_meta(
                 &parent_path,
-                ParserVersion::new(ParserId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION),
+                DecoderVersion::new(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION),
             )
             .unwrap()
             .is_none());
@@ -1347,13 +1365,15 @@ mod tests {
             ..Default::default()
         };
         let scan_ctx = scan_context(home.path(), &settings);
-        let parent_parser_version =
-            ParserVersion::new(ParserId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION);
+        let parent_decoder_version =
+            DecoderVersion::new(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION);
         let mut cache = message_cache::InputMessageCache::default();
-        let cold_units = OMP_ADAPTER.discover_checked(&scan_ctx).unwrap();
+        let cold_units = OMP_ADAPTER
+            .discover_checked(ClientId::Omp, &scan_ctx)
+            .unwrap();
         fold_batches_with_omp_adapter(cold_units, &mut cache);
         let old_fingerprint = cache
-            .get_meta(&parent_path, parent_parser_version)
+            .get_meta(&parent_path, parent_decoder_version)
             .unwrap()
             .unwrap()
             .fingerprint;
@@ -1364,7 +1384,9 @@ mod tests {
         );
         sessions::pi::force_omp_parent_open_failure(&parent_path, true);
         sessions::pi::reset_omp_parent_scan_count(&parent_path);
-        let unavailable_units = OMP_ADAPTER.discover_checked(&scan_ctx).unwrap();
+        let unavailable_units = OMP_ADAPTER
+            .discover_checked(ClientId::Omp, &scan_ctx)
+            .unwrap();
         let (unavailable_messages, unavailable_health) =
             fold_batches_with_omp_adapter(unavailable_units, &mut cache);
 
@@ -1375,7 +1397,7 @@ mod tests {
         assert_eq!(sessions::pi::omp_parent_scan_count(&parent_path), 1);
         assert_eq!(
             cache
-                .get_meta(&parent_path, parent_parser_version)
+                .get_meta(&parent_path, parent_decoder_version)
                 .unwrap()
                 .unwrap()
                 .fingerprint,
@@ -1393,7 +1415,9 @@ mod tests {
 
         sessions::pi::force_omp_parent_open_failure(&parent_path, false);
         sessions::pi::reset_omp_parent_scan_count(&parent_path);
-        let retry_units = OMP_ADAPTER.discover_checked(&scan_ctx).unwrap();
+        let retry_units = OMP_ADAPTER
+            .discover_checked(ClientId::Omp, &scan_ctx)
+            .unwrap();
         let (retry_messages, retry_health) = fold_batches_with_omp_adapter(retry_units, &mut cache);
         assert_eq!(retry_health.issue_count(), 0);
         assert_eq!(retry_messages[0].agent.as_deref(), Some("OMP Oracle"));
@@ -1415,7 +1439,6 @@ mod tests {
         write_file(&first_child, &omp_content("first-child"));
         write_file(&second_child, &omp_content("second-child"));
 
-        let parser_version = ParserVersion::new(ParserId::Omp, OMP_RECORD_REJECTION_REVISION);
         let make_units = || {
             vec![
                 parent_path.clone(),
@@ -1425,9 +1448,7 @@ mod tests {
             .into_iter()
             .map(|path| {
                 let dependency_path = sessions::pi::omp_parent_candidate_path(&path).unwrap();
-                InputUnit::plain_file(ClientId::Omp, path)
-                    .with_optional_dependency(dependency_path)
-                    .with_parser_version(parser_version)
+                unit_with_parent(path, dependency_path)
             })
             .collect()
         };
@@ -1451,7 +1472,7 @@ mod tests {
         assert!(cache
             .get_meta(
                 &parent_path,
-                ParserVersion::new(ParserId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION),
+                DecoderVersion::new(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION),
             )
             .unwrap()
             .is_none());
@@ -1476,27 +1497,24 @@ mod tests {
         write_file(&first_child, &omp_content("first-child"));
         write_file(&second_child, &omp_content("second-child"));
 
-        let parser_version = ParserVersion::new(ParserId::Omp, OMP_RECORD_REJECTION_REVISION);
         let units = vec![first_child, second_child]
             .into_iter()
-            .map(|path| {
-                InputUnit::plain_file(ClientId::Omp, path)
-                    .with_optional_dependency(parent_path.clone())
-                    .with_parser_version(parser_version)
-            })
+            .map(|path| unit_with_parent(path, parent_path.clone()))
             .collect();
         let mut cache = message_cache::InputMessageCache::default();
         let parsed = OMP_ADAPTER.parse_checked(units, &ParseContext { pricing: None });
-        let mut sink = Vec::new();
-        let mut ctx = FoldContext::new(&mut cache, None);
+        let binding = binding();
+        let mut messages = Vec::new();
+        let mut sink = crate::adapters::BoundMessageSink::new(binding, &mut messages);
+        let mut ctx = FoldContext::new(binding, &mut cache, None);
 
         OMP_ADAPTER.fold(parsed, &mut ctx, &mut sink).unwrap();
 
-        assert_eq!(sink.len(), 2);
-        assert_eq!(ctx.health.partial_inputs(), 1);
-        assert_eq!(ctx.health.failed_inputs(), 0);
-        assert_eq!(ctx.health.inputs()[0].path, parent_path);
-        let failure = ctx.health.inputs()[0].status.failure().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(ctx.health().partial_inputs(), 1);
+        assert_eq!(ctx.health().failed_inputs(), 0);
+        assert_eq!(ctx.health().inputs()[0].path, parent_path);
+        let failure = ctx.health().inputs()[0].status.failure().unwrap();
         assert_eq!(failure.operation, "read OMP parent JSONL line");
     }
 
@@ -1505,16 +1523,14 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("cached.jsonl");
         write_file(&path, OMP_CHILD_CONTENT);
-        let parser_version = ParserVersion::new(ParserId::Omp, OMP_RECORD_REJECTION_REVISION);
+        let decoder_version = DecoderVersion::new(DecoderId::Omp, OMP_RECORD_REJECTION_REVISION);
         let dependency_path = path.parent().unwrap().with_extension("jsonl");
-        let unit = InputUnit::plain_file(ClientId::Omp, path.clone())
-            .with_optional_dependency(dependency_path)
-            .with_parser_version(parser_version)
+        let unit = unit_with_parent(path.clone(), dependency_path)
             .prepare_snapshot()
             .unwrap();
         let mut entry = message_cache::CachedInputEntry::new_with_version(
             &path,
-            parser_version,
+            decoder_version,
             unit.input_policy().fingerprint().unwrap(),
             vec![crate::sessions::ParsedMessage::new(
                 "gpt-5.5",
@@ -1538,14 +1554,16 @@ mod tests {
             CacheHitPlan::Hit(hit) => hit,
             CacheHitPlan::Miss(_) => panic!("unchanged OMP dependency cache must hit"),
         };
-        let mut sink = Vec::new();
-        let mut ctx = FoldContext::new(&mut cache, None);
+        let binding = binding();
+        let mut messages = Vec::new();
+        let mut sink = crate::adapters::BoundMessageSink::new(binding, &mut messages);
+        let mut ctx = FoldContext::new(binding, &mut cache, None);
 
         OMP_ADAPTER.fold(vec![hit], &mut ctx, &mut sink).unwrap();
 
-        assert_eq!(sink.len(), 1);
-        assert_eq!(sink[0].session_id.as_ref(), "cached-session");
-        assert_eq!(ctx.health.rejected_records(), 1);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id.as_ref(), "cached-session");
+        assert_eq!(ctx.health().rejected_records(), 1);
     }
 
     #[test]
@@ -1572,12 +1590,7 @@ mod tests {
         write_file(&ordinary_a, &omp_content("ordinary-a"));
         write_file(&ordinary_b, &omp_content("ordinary-b"));
 
-        let make_unit = |path: PathBuf| {
-            InputUnit::plain_file(ClientId::Omp, path).with_parser_version(ParserVersion::new(
-                ParserId::Omp,
-                OMP_RECORD_REJECTION_REVISION,
-            ))
-        };
+        let make_unit = |path: PathBuf| unit(path);
         let first_child_unit = make_unit(first_child.clone());
         let second_child_unit = make_unit(second_child.clone());
         let successful_unit = make_unit(successful_path.clone());
@@ -1587,12 +1600,12 @@ mod tests {
         message_cache::truncate_shard_after_header_for_test(
             cache_dir.path(),
             &first_child,
-            first_child_unit.parser_version,
+            first_child_unit.decoder.version(),
         );
         message_cache::truncate_shard_after_header_for_test(
             cache_dir.path(),
             &second_child,
-            second_child_unit.parser_version,
+            second_child_unit.decoder.version(),
         );
 
         let units = vec![
@@ -1608,16 +1621,18 @@ mod tests {
             .build()
             .unwrap()
             .install(|| {
-                let mut sink = Vec::new();
-                let mut batches = crate::adapters::ParsedBatchInput::new(&OMP_ADAPTER, units);
+                let binding = binding();
+                let mut messages = Vec::new();
+                let mut sink = crate::adapters::BoundMessageSink::new(binding, &mut messages);
+                let mut batches = crate::adapters::ParsedBatchInput::new(binding, units);
                 OMP_ADAPTER
                     .fold_batches(
                         &mut batches,
-                        &mut FoldContext::new(&mut cache, None),
+                        &mut FoldContext::new(binding, &mut cache, None),
                         &mut sink,
                     )
                     .unwrap();
-                sink
+                messages
             });
 
         let sessions: Vec<_> = messages

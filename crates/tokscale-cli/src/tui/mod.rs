@@ -58,7 +58,7 @@ use crossterm::{
     },
 };
 use ratatui::prelude::*;
-use tokscale_core::ClientId;
+use tokscale_core::{ClientId, InputFootprint};
 
 fn decide_initial_data(load_result: CacheResult) -> (Option<LoadedTuiCache>, bool, Option<u64>) {
     match load_result {
@@ -99,7 +99,7 @@ enum BackgroundLoad {
     Loaded {
         data: Box<UsageData>,
         sessions: Vec<tokscale_core::TuiSessionEntry>,
-        client_space: std::collections::BTreeMap<String, u64>,
+        input_footprint: InputFootprint,
         projection_backend: Box<ProjectionBackend>,
         digest: u64,
         /// The grouping this `data` projection was aggregated with; the App
@@ -143,7 +143,7 @@ fn load_background_data(
         BackgroundLoad::Loaded {
             data: Box::new(data),
             sessions: result.sessions,
-            client_space: result.client_space,
+            input_footprint: result.input_footprint,
             projection_backend: Box::new(ProjectionBackend::Memory(result.accumulator)),
             digest: result.input_digest,
             group_by: group_by.clone(),
@@ -163,7 +163,7 @@ fn persist_background_load(
     let BackgroundLoad::Loaded {
         data,
         sessions,
-        client_space,
+        input_footprint,
         projection_backend,
         digest,
         group_by,
@@ -188,7 +188,7 @@ fn persist_background_load(
     match save_tui_bundle_cache(
         &accumulator,
         &sessions,
-        &client_space,
+        &input_footprint,
         &health,
         client_universe,
         report_scope,
@@ -201,7 +201,7 @@ fn persist_background_load(
             // snapshot that will be published to the UI thread.
             drop(accumulator);
             drop(sessions);
-            drop(client_space);
+            drop(input_footprint);
             data::trim_allocator();
 
             Ok(BackgroundLoad::Persisted {
@@ -223,7 +223,7 @@ fn persist_background_load(
             Ok(BackgroundLoad::Loaded {
                 data: Box::new(data),
                 sessions,
-                client_space,
+                input_footprint,
                 projection_backend: Box::new(ProjectionBackend::Memory(accumulator)),
                 digest,
                 group_by,
@@ -273,7 +273,7 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
             app.install_tui_snapshot(
                 cached.data,
                 cached.sessions,
-                cached.client_space,
+                cached.input_footprint,
                 ProjectionBackend::Cache(cached.projection_store),
                 selected_group_by,
             );
@@ -285,7 +285,7 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
         Ok(BackgroundLoad::Loaded {
             data,
             sessions,
-            client_space,
+            input_footprint,
             mut projection_backend,
             digest,
             group_by,
@@ -315,7 +315,7 @@ fn apply_background_result(app: &mut App, result: Result<BackgroundLoad>) {
             app.install_tui_snapshot(
                 current_data,
                 sessions,
-                client_space,
+                input_footprint,
                 *projection_backend,
                 selected_group_by,
             );
@@ -462,7 +462,7 @@ pub fn run(
         app.install_tui_snapshot(
             cached.data,
             cached.sessions,
-            cached.client_space,
+            cached.input_footprint,
             ProjectionBackend::Cache(cached.projection_store),
             initial_group_by,
         );
@@ -1023,7 +1023,7 @@ mod tests {
         app.projection_backend = Some(ProjectionBackend::Memory(tokscale_core::TuiAcc::new()));
         app.session_snapshot = session_data::SessionSnapshot::new(
             Vec::new(),
-            std::collections::BTreeMap::from([("junie".to_string(), 0)]),
+            InputFootprint::from_client_bytes([(ClientId::Junie, 0)]).unwrap(),
         );
         let mut view_state = view_state::ViewState::default();
 
@@ -1043,7 +1043,7 @@ mod tests {
         let (mut app, mut view_state) = app_with_codex_session_detail();
         app.session_snapshot = session_data::SessionSnapshot::new(
             Vec::new(),
-            std::collections::BTreeMap::from([(ClientId::Codex.as_str().to_string(), 0)]),
+            InputFootprint::from_client_bytes([(ClientId::Codex, 0)]).unwrap(),
         );
 
         view_state.reconcile_session_snapshot(&app);
@@ -1100,7 +1100,7 @@ mod tests {
         }
     }
 
-    fn client_space_for(app: &App, client: &str) -> Option<u64> {
+    fn input_bytes_for(app: &App, client: &str) -> Option<u64> {
         app.session_snapshot
             .client_summaries()
             .iter()
@@ -1117,11 +1117,8 @@ mod tests {
         let store = save_tui_bundle_cache(
             &tokscale_core::TuiAcc::new(),
             &[session("amp", "cached-session")],
-            &std::collections::BTreeMap::from([("amp".to_string(), 512)]),
-            &tokscale_core::input_health::HealthReport {
-                input_data_bytes: 512,
-                ..Default::default()
-            },
+            &InputFootprint::from_client_bytes([(ClientId::Amp, 512)]).unwrap(),
+            &tokscale_core::input_health::HealthReport::default(),
             &clients,
             &scope,
             signature,
@@ -1133,18 +1130,25 @@ mod tests {
     }
 
     fn loaded_snapshot(
-        mut data: UsageData,
+        data: UsageData,
         sessions: Vec<tokscale_core::TuiSessionEntry>,
-        client_space: std::collections::BTreeMap<String, u64>,
+        client_bytes: std::collections::BTreeMap<String, u64>,
         accumulator: tokscale_core::TuiAcc,
         group_by: tokscale_core::GroupBy,
         signature: tokscale_core::InputInventorySignature,
     ) -> BackgroundLoad {
-        data.health.input_data_bytes = client_space.values().copied().sum();
+        let input_footprint =
+            InputFootprint::from_client_bytes(client_bytes.into_iter().map(|(client, bytes)| {
+                (
+                    ClientId::from_str(&client).expect("test client must be canonical"),
+                    bytes,
+                )
+            }))
+            .unwrap();
         BackgroundLoad::Loaded {
             data: Box::new(data),
             sessions,
-            client_space,
+            input_footprint,
             projection_backend: Box::new(ProjectionBackend::Memory(accumulator)),
             digest: signature.process_digest(),
             group_by,
@@ -1169,7 +1173,7 @@ mod tests {
         assert!(!needs_background_load);
         assert_eq!(digest, Some(signature.process_digest()));
         assert_eq!(cached_data.sessions[0].session_id, "cached-session");
-        assert_eq!(cached_data.client_space.get("amp"), Some(&512));
+        assert_eq!(cached_data.input_footprint.bytes_for(ClientId::Amp), 512);
     }
 
     #[test]
@@ -1380,7 +1384,7 @@ mod tests {
         assert!(!app.background_loading);
         assert_eq!(app.data.total_tokens, 99);
         assert_eq!(app.session_snapshot.sessions()[0].session_id, "new-session");
-        assert_eq!(client_space_for(&app, "codex"), Some(4096));
+        assert_eq!(input_bytes_for(&app, "codex"), Some(4096));
         assert!(matches!(
             app.projection_backend,
             Some(ProjectionBackend::Memory(_))
@@ -1420,7 +1424,7 @@ mod tests {
             app.session_snapshot.sessions()[0].session_id,
             "retained-session"
         );
-        assert_eq!(client_space_for(&app, "amp"), Some(2048));
+        assert_eq!(input_bytes_for(&app, "amp"), Some(2048));
         assert!(app.projection_backend.is_some());
         assert_eq!(app.last_input_digest, Some(signature.process_digest()));
         assert_eq!(
@@ -1520,14 +1524,14 @@ mod tests {
         apply_background_result(&mut app, Ok(loaded));
         let old_tokens = app.data.total_tokens;
         let old_sessions = app.session_snapshot.sessions().to_vec();
-        let old_client_space = client_space_for(&app, "amp");
+        let old_input_bytes = input_bytes_for(&app, "amp");
 
         apply_background_result(&mut app, Err(anyhow::anyhow!("load failed")));
 
         assert_eq!(app.data.total_tokens, old_tokens);
         assert_eq!(app.data.models[0].model_id, "retained-model");
         assert_eq!(app.session_snapshot.sessions(), old_sessions);
-        assert_eq!(client_space_for(&app, "amp"), old_client_space);
+        assert_eq!(input_bytes_for(&app, "amp"), old_input_bytes);
         assert!(app.projection_backend.is_some());
         assert!(matches!(
             app.session_projection_status,
@@ -1548,7 +1552,7 @@ mod tests {
         let digest = signature.process_digest();
         let accumulator = tokscale_core::build_tui_accumulator(
             &[tokscale_core::UnifiedMessage::new(
-                "amp",
+                tokscale_core::ClientId::Amp,
                 "test-model",
                 "test-provider",
                 "loaded-despite-cache-error",
@@ -1734,7 +1738,7 @@ mod tests {
                     ..UsageData::default()
                 }),
                 sessions: vec![session("amp", "warning-session")],
-                client_space: std::collections::BTreeMap::from([("amp".to_string(), 99)]),
+                input_footprint: InputFootprint::from_client_bytes([(ClientId::Amp, 99)]).unwrap(),
                 projection_backend: Box::new(ProjectionBackend::Memory(
                     tokscale_core::TuiAcc::new(),
                 )),
