@@ -134,7 +134,7 @@ mod tests {
     use crate::tui::data::{HourlyUsage, UsageTokenBreakdown};
     use chrono::NaiveDate;
     use ratatui::{backend::TestBackend, Terminal};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
     fn make_app() -> App {
         let config = TuiConfig {
@@ -160,7 +160,7 @@ mod tests {
             },
             cost,
             clients: BTreeSet::new(),
-            models: BTreeMap::new(),
+            models: Vec::new(),
             message_count: 1,
             turn_count: 1,
         }

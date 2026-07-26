@@ -32,7 +32,7 @@ impl SessionSnapshot {
         input_footprint: &InputFootprint,
     ) -> Self {
         let sessions = sessions.into();
-        let mut summaries = BTreeMap::<ClientId, (usize, usize, BTreeSet<String>, i64)>::new();
+        let mut summaries = BTreeMap::<ClientId, (usize, usize, BTreeSet<Arc<str>>, i64)>::new();
         let mut session_indices_by_client = BTreeMap::<ClientId, Vec<usize>>::new();
 
         for (index, session) in sessions.iter().enumerate() {
@@ -49,16 +49,16 @@ impl SessionSnapshot {
             }
             if let Some(workspace) = session
                 .workspace_key
-                .as_deref()
+                .as_ref()
                 .filter(|workspace| !workspace.is_empty())
                 .or_else(|| {
                     session
                         .workspace_label
-                        .as_deref()
+                        .as_ref()
                         .filter(|workspace| !workspace.is_empty())
                 })
             {
-                entry.2.insert(workspace.to_string());
+                entry.2.insert(Arc::clone(workspace));
             }
             entry.3 = entry.3.max(session.last_seen);
         }
@@ -142,20 +142,12 @@ mod tests {
         workspace_label: Option<&str>,
         last_seen: i64,
     ) -> SessionEntry {
-        SessionEntry {
-            client,
-            session_id: session_id.to_string(),
-            is_main_session,
-            workspace_key: workspace_key.map(str::to_string),
-            workspace_label: workspace_label.map(str::to_string),
-            models: BTreeSet::new(),
-            tokens: Default::default(),
-            cost: 0.0,
-            message_count: 0,
-            turn_count: 0,
-            first_seen: 0,
-            last_seen,
-        }
+        let mut session = SessionEntry::new(client, session_id);
+        session.is_main_session = is_main_session;
+        session.workspace_key = workspace_key.map(Arc::from);
+        session.workspace_label = workspace_label.map(Arc::from);
+        session.last_seen = last_seen;
+        session
     }
 
     #[test]
@@ -173,7 +165,7 @@ mod tests {
             snapshot
                 .sessions()
                 .iter()
-                .map(|entry| entry.session_id.as_str())
+                .map(|entry| entry.session_id.as_ref())
                 .collect::<Vec<_>>(),
             ["c-new", "o-new", "c-old"]
         );
@@ -184,7 +176,7 @@ mod tests {
         assert_eq!(
             snapshot
                 .session_refs_for_client(ClientId::Codex)
-                .map(|entry| entry.session_id.as_str())
+                .map(|entry| entry.session_id.as_ref())
                 .collect::<Vec<_>>(),
             ["c-new", "c-old"]
         );

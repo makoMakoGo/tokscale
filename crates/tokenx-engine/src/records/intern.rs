@@ -246,6 +246,17 @@ where
     Ok(value.map(|value| intern(&value)))
 }
 
+pub fn de_intern_btree_set<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::BTreeSet<Arc<str>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values =
+        <std::collections::BTreeSet<std::borrow::Cow<'_, str>>>::deserialize(deserializer)?;
+    Ok(values.into_iter().map(|value| intern(&value)).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{

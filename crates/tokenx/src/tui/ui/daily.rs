@@ -393,7 +393,7 @@ fn top_daily_model(day: &DailyUsage) -> Option<TopDailyModel> {
     let mut models: BTreeMap<String, TopDailyModel> = BTreeMap::new();
 
     for client in day.client_breakdown.values() {
-        for model in client.models.values() {
+        for model in &client.models {
             let tokens = model.tokens.total();
             // Rank by the bare canonical id (ADR 0010): grouping must not
             // split one model into several candidates, and the storage map
@@ -403,7 +403,7 @@ fn top_daily_model(day: &DailyUsage) -> Option<TopDailyModel> {
             }
 
             models
-                .entry(model.model_id.clone())
+                .entry(model.model_id.to_string())
                 .and_modify(|entry| {
                     entry.tokens = entry
                         .tokens
@@ -412,8 +412,8 @@ fn top_daily_model(day: &DailyUsage) -> Option<TopDailyModel> {
                     entry.cost += model.cost;
                 })
                 .or_insert_with(|| TopDailyModel {
-                    key: model.model_id.clone(),
-                    label: model.model_id.clone(),
+                    key: model.model_id.to_string(),
+                    label: model.model_id.to_string(),
                     tokens,
                     cost: model.cost,
                 });
@@ -947,9 +947,9 @@ mod tests {
         cost: f64,
     ) -> DailyModelInfo {
         DailyModelInfo {
-            provider: provider.to_string(),
-            model_id: model_id.to_string(),
-            display_name: display_name.to_string(),
+            provider: provider.into(),
+            model_id: model_id.into(),
+            display_name: display_name.into(),
             workspace_key: None,
             workspace_label: None,
             tokens: token_breakdown(tokens),
@@ -966,10 +966,7 @@ mod tests {
         DailyClientInfo {
             tokens: token_breakdown(tokens),
             cost,
-            models: models
-                .into_iter()
-                .map(|(key, model)| (key.to_string(), model))
-                .collect(),
+            models: models.into_iter().map(|(_, model)| model).collect(),
         }
     }
 
@@ -1210,11 +1207,11 @@ mod tests {
         cost: f64,
     ) -> DailyModelInfo {
         DailyModelInfo {
-            provider: provider.to_string(),
-            model_id: model_id.to_string(),
-            display_name: model_id.to_string(),
-            workspace_key: Some(format!("/work/{workspace}")),
-            workspace_label: Some(workspace.to_string()),
+            provider: provider.into(),
+            model_id: model_id.into(),
+            display_name: model_id.into(),
+            workspace_key: Some(format!("/work/{workspace}").into()),
+            workspace_label: Some(workspace.into()),
             tokens: token_breakdown(tokens),
             cost,
             messages: 1,

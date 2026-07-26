@@ -85,37 +85,153 @@ fn add_tokens(target: &mut UsageTokenBreakdown, addition: &UsageTokenBreakdown) 
         .expect("usage token buckets exceed u64::MAX while aggregating usage");
 }
 
-fn merge_daily_clients(
-    target: &mut BTreeMap<ClientId, DailyClientInfo>,
-    clients: &BTreeMap<ClientId, DailyClientInfo>,
-) {
-    for (client_key, client_info) in clients {
-        let target_client = target
-            .entry(*client_key)
-            .or_insert_with(|| DailyClientInfo {
-                tokens: UsageTokenBreakdown::default(),
-                cost: 0.0,
-                models: BTreeMap::new(),
-            });
-        add_tokens(&mut target_client.tokens, &client_info.tokens);
-        target_client.cost += client_info.cost;
-        for (model_key, model_info) in &client_info.models {
-            let target_model = target_client
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+enum PeriodWorkspaceIdentity {
+    Known(Arc<str>),
+    Unknown,
+}
+
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+enum PeriodModelIdentity {
+    Model(Arc<str>),
+    ProviderModel {
+        provider: Arc<str>,
+        model: Arc<str>,
+    },
+    WorkspaceModel {
+        workspace: PeriodWorkspaceIdentity,
+        model: Arc<str>,
+    },
+}
+
+impl PeriodModelIdentity {
+    fn from_model(model: &DailyModelInfo, group_by: GroupBy) -> Self {
+        match group_by {
+            GroupBy::Model | GroupBy::ClientModel => Self::Model(Arc::clone(&model.model_id)),
+            GroupBy::ClientProviderModel => Self::ProviderModel {
+                provider: Arc::clone(&model.provider),
+                model: Arc::clone(&model.model_id),
+            },
+            GroupBy::WorkspaceModel => Self::WorkspaceModel {
+                workspace: model
+                    .workspace_key
+                    .as_ref()
+                    .map_or(PeriodWorkspaceIdentity::Unknown, |workspace| {
+                        PeriodWorkspaceIdentity::Known(Arc::clone(workspace))
+                    }),
+                model: Arc::clone(&model.model_id),
+            },
+        }
+    }
+}
+
+#[derive(Default)]
+struct PeriodClientBucket {
+    tokens: UsageTokenBreakdown,
+    cost: f64,
+    models: BTreeMap<PeriodModelIdentity, DailyModelInfo>,
+}
+
+impl PeriodClientBucket {
+    fn merge(&mut self, client: &DailyClientInfo, group_by: GroupBy) {
+        add_tokens(&mut self.tokens, &client.tokens);
+        self.cost += client.cost;
+        for model in &client.models {
+            let target = self
                 .models
-                .entry(model_key.clone())
+                .entry(PeriodModelIdentity::from_model(model, group_by))
                 .or_insert_with(|| DailyModelInfo {
-                    provider: model_info.provider.clone(),
-                    model_id: model_info.model_id.clone(),
-                    display_name: model_info.display_name.clone(),
-                    workspace_key: model_info.workspace_key.clone(),
-                    workspace_label: model_info.workspace_label.clone(),
+                    provider: Arc::clone(&model.provider),
+                    model_id: Arc::clone(&model.model_id),
+                    display_name: Arc::clone(&model.display_name),
+                    workspace_key: model.workspace_key.clone(),
+                    workspace_label: model.workspace_label.clone(),
                     tokens: UsageTokenBreakdown::default(),
                     cost: 0.0,
                     messages: 0,
                 });
-            add_tokens(&mut target_model.tokens, &model_info.tokens);
-            target_model.cost += model_info.cost;
-            target_model.messages = target_model.messages.saturating_add(model_info.messages);
+            add_tokens(&mut target.tokens, &model.tokens);
+            target.cost += model.cost;
+            target.messages = target.messages.saturating_add(model.messages);
+        }
+    }
+
+    fn into_projection(self) -> DailyClientInfo {
+        DailyClientInfo {
+            tokens: self.tokens,
+            cost: self.cost,
+            models: self.models.into_values().collect(),
+        }
+    }
+}
+
+struct PeriodUsageBucket {
+    section_year: i32,
+    section_label: String,
+    label: String,
+    short_label: String,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    tokens: UsageTokenBreakdown,
+    cost: f64,
+    clients: BTreeMap<ClientId, PeriodClientBucket>,
+    message_count: u32,
+    turn_count: u32,
+    active_days: u32,
+}
+
+impl PeriodUsageBucket {
+    fn new(period: PeriodDescriptor) -> Self {
+        Self {
+            section_year: period.section_year,
+            section_label: period.section_year.to_string(),
+            label: period.label,
+            short_label: period.short_label,
+            start_date: period.start_date,
+            end_date: period.end_date,
+            tokens: UsageTokenBreakdown::default(),
+            cost: 0.0,
+            clients: BTreeMap::new(),
+            message_count: 0,
+            turn_count: 0,
+            active_days: 0,
+        }
+    }
+
+    fn merge(&mut self, day: &DailyUsage, group_by: GroupBy) {
+        add_tokens(&mut self.tokens, &day.tokens);
+        self.cost += day.cost;
+        self.message_count = self.message_count.saturating_add(day.message_count);
+        self.turn_count = self.turn_count.saturating_add(day.turn_count);
+        if day.message_count > 0 || day.turn_count > 0 || day.tokens.total() > 0 {
+            self.active_days = self.active_days.saturating_add(1);
+        }
+        for (client_id, client) in &day.client_breakdown {
+            self.clients
+                .entry(*client_id)
+                .or_default()
+                .merge(client, group_by);
+        }
+    }
+
+    fn into_projection(self) -> PeriodUsage {
+        PeriodUsage {
+            section_year: self.section_year,
+            section_label: self.section_label,
+            label: self.label,
+            short_label: self.short_label,
+            start_date: self.start_date,
+            end_date: self.end_date,
+            tokens: self.tokens,
+            cost: self.cost,
+            client_breakdown: self
+                .clients
+                .into_iter()
+                .map(|(client, bucket)| (client, bucket.into_projection()))
+                .collect(),
+            message_count: self.message_count,
+            turn_count: self.turn_count,
+            active_days: self.active_days,
         }
     }
 }
@@ -167,38 +283,21 @@ fn weekly_period_descriptor(date: NaiveDate) -> Option<PeriodDescriptor> {
 
 /// Build monthly or weekly usage by folding the already-aggregated `daily`
 /// buckets. See ADR 0010 for the coarse/fine boundary rationale.
-pub fn build_period_usage(daily: &[DailyUsage], kind: PeriodKind) -> Vec<PeriodUsage> {
-    let mut period_map: BTreeMap<(i32, u32), PeriodUsage> = BTreeMap::new();
-    for day in daily {
+pub fn build_period_usage(usage: &UsageProjection, kind: PeriodKind) -> Vec<PeriodUsage> {
+    let mut period_map: BTreeMap<(i32, u32), PeriodUsageBucket> = BTreeMap::new();
+    for day in &usage.daily {
         let Some(period) = period_descriptor(day.date, kind) else {
             continue;
         };
         let entry = period_map
             .entry((period.section_year, period.ordinal))
-            .or_insert_with(|| PeriodUsage {
-                section_year: period.section_year,
-                section_label: period.section_year.to_string(),
-                label: period.label,
-                short_label: period.short_label,
-                start_date: period.start_date,
-                end_date: period.end_date,
-                tokens: UsageTokenBreakdown::default(),
-                cost: 0.0,
-                client_breakdown: BTreeMap::new(),
-                message_count: 0,
-                turn_count: 0,
-                active_days: 0,
-            });
-        add_tokens(&mut entry.tokens, &day.tokens);
-        entry.cost += day.cost;
-        entry.message_count = entry.message_count.saturating_add(day.message_count);
-        entry.turn_count = entry.turn_count.saturating_add(day.turn_count);
-        if day.message_count > 0 || day.turn_count > 0 || day.tokens.total() > 0 {
-            entry.active_days = entry.active_days.saturating_add(1);
-        }
-        merge_daily_clients(&mut entry.client_breakdown, &day.client_breakdown);
+            .or_insert_with(|| PeriodUsageBucket::new(period));
+        entry.merge(day, usage.group_by);
     }
-    let mut periods: Vec<PeriodUsage> = period_map.into_values().collect();
+    let mut periods: Vec<PeriodUsage> = period_map
+        .into_values()
+        .map(PeriodUsageBucket::into_projection)
+        .collect();
     periods.sort_by_key(|period| std::cmp::Reverse(period.start_date));
     periods
 }
@@ -471,7 +570,7 @@ pub(crate) struct UsageIndexBuilder {
 /// The materialized maps preserve the single-fold projection performance
 /// design while excluding write-only lifecycle state such as the next
 /// first-seen sequence.
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Serialize)]
 pub struct FrozenUsageIndex {
     #[serde(with = "map_as_vec")]
     usage_totals_by_client: HashMap<ClientId, UsageTotalsBucket>,
@@ -483,6 +582,43 @@ pub struct FrozenUsageIndex {
     daily_map: HashMap<NaiveDate, DailyBucket>,
     #[serde(with = "map_as_vec")]
     hourly_map: HashMap<NaiveDateTime, HourlyBucket>,
+}
+
+/// Deserialization wire shape for [`FrozenUsageIndex`].
+///
+/// Keep this field order and each `map_as_vec` adapter aligned with the
+/// persisted format. Conversion into the installed index is the single
+/// deserialization boundary where all retained containers are compacted.
+#[derive(Deserialize)]
+struct FrozenUsageIndexWire {
+    #[serde(with = "map_as_vec")]
+    usage_totals_by_client: HashMap<ClientId, UsageTotalsBucket>,
+    #[serde(with = "map_as_vec")]
+    model_map: HashMap<FineModelKey, FineModelBucket>,
+    #[serde(with = "map_as_vec")]
+    agent_map: HashMap<AgentKey, AgentBucket>,
+    #[serde(with = "map_as_vec")]
+    daily_map: HashMap<NaiveDate, DailyBucket>,
+    #[serde(with = "map_as_vec")]
+    hourly_map: HashMap<NaiveDateTime, HourlyBucket>,
+}
+
+impl<'de> Deserialize<'de> for FrozenUsageIndex {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = FrozenUsageIndexWire::deserialize(deserializer)?;
+        let mut index = Self {
+            usage_totals_by_client: wire.usage_totals_by_client,
+            model_map: wire.model_map,
+            agent_map: wire.agent_map,
+            daily_map: wire.daily_map,
+            hourly_map: wire.hourly_map,
+        };
+        index.shrink_to_fit();
+        Ok(index)
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -708,6 +844,7 @@ mod one_or_many_tests {
 /// that first message).
 #[derive(Serialize, Deserialize)]
 struct FineModelBucket {
+    #[serde(deserialize_with = "crate::records::intern::de_intern")]
     workspace_label: Arc<str>,
     first_seen: usize,
     tokens: UsageTokenBreakdown,
@@ -741,13 +878,18 @@ struct ClientContributionOrder {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 enum AgentInstanceKey {
-    Explicit(Arc<str>),
-    Derived { client: ClientId, session: Arc<str> },
+    Explicit(#[serde(deserialize_with = "crate::records::intern::de_intern")] Arc<str>),
+    Derived {
+        client: ClientId,
+        #[serde(deserialize_with = "crate::records::intern::de_intern")]
+        session: Arc<str>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 struct AgentKey {
     client: ClientId,
+    #[serde(deserialize_with = "crate::records::intern::de_intern")]
     agent: Arc<str>,
 }
 
@@ -777,6 +919,7 @@ struct DailyClientBucket {
 
 #[derive(Serialize, Deserialize)]
 struct FineDailyModelBucket {
+    #[serde(deserialize_with = "crate::records::intern::de_intern")]
     workspace_label: Arc<str>,
     first_seen: usize,
     tokens: UsageTokenBreakdown,
@@ -831,7 +974,7 @@ struct HourlyModelBucket {
 }
 
 fn materialize_model(bucket: ModelBucket) -> UsageModelEntry {
-    let provider = bucket.providers.to_sorted_string();
+    let provider = bucket.providers.to_sorted_arc();
     let clients = if let Some(client_totals) = bucket.client_totals {
         let mut clients: Vec<_> = (*client_totals).into_iter().collect();
         clients.sort_by(|(left_client, left), (right_client, right)| {
@@ -845,13 +988,14 @@ fn materialize_model(bucket: ModelBucket) -> UsageModelEntry {
     } else {
         vec![bucket.client]
     };
+    let model_id = bucket.model;
     UsageModelEntry {
-        model_id: bucket.model.to_string(),
-        display_name: bucket.model.to_string(),
+        display_name: Arc::clone(&model_id),
+        model_id,
         provider,
         clients,
-        workspace_key: bucket.workspace_key.map(|key| key.to_string()),
-        workspace_label: bucket.workspace_label.map(|label| label.to_string()),
+        workspace_key: bucket.workspace_key,
+        workspace_label: bucket.workspace_label,
         tokens: bucket.tokens,
         cost: bucket.cost,
         session_count: bucket
@@ -863,13 +1007,13 @@ fn materialize_model(bucket: ModelBucket) -> UsageModelEntry {
 }
 
 fn materialize_daily_model(model: DailyModelBucket) -> DailyModelInfo {
-    let provider = model.provider.to_string();
+    let model_id = model.model;
     DailyModelInfo {
-        provider,
-        model_id: model.model.to_string(),
-        display_name: model.model.to_string(),
-        workspace_key: model.workspace_key.map(|key| key.to_string()),
-        workspace_label: model.workspace_label.map(|label| label.to_string()),
+        provider: model.provider,
+        display_name: Arc::clone(&model_id),
+        model_id,
+        workspace_key: model.workspace_key,
+        workspace_label: model.workspace_label,
         tokens: model.tokens,
         cost: model.cost,
         messages: model.messages,
@@ -930,7 +1074,7 @@ fn materialize_daily_usage(
 fn materialize_daily_client_models(
     client_bucket: &DailyClientBucket,
     group_by: &GroupBy,
-) -> BTreeMap<String, DailyModelInfo> {
+) -> Vec<DailyModelInfo> {
     let mut grouped_fine_models: HashMap<
         GroupedModelKey,
         OneOrMany<(&FineModelKey, &FineDailyModelBucket)>,
@@ -943,7 +1087,7 @@ fn materialize_daily_client_models(
             .or_insert(OneOrMany::One(fine_bucket));
     }
 
-    grouped_fine_models
+    let mut grouped_models: Vec<_> = grouped_fine_models
         .into_iter()
         .map(|(key, fine_models)| {
             let mut grouped_model: Option<DailyModelBucket> = None;
@@ -975,23 +1119,26 @@ fn materialize_daily_client_models(
             }
             let grouped_model =
                 grouped_model.expect("daily target group contains at least one fine model bucket");
-            (key.map_key(), materialize_daily_model(grouped_model))
+            (key, materialize_daily_model(grouped_model))
         })
-        .collect()
+        .collect();
+    grouped_models.sort_by(|(left, _), (right, _)| left.cmp(right));
+    grouped_models.into_iter().map(|(_, model)| model).collect()
 }
 
 fn materialize_hourly_model(model: HourlyModelBucket) -> HourlyModelInfo {
+    let model_id = model.model;
     HourlyModelInfo {
-        provider: model.provider.to_string(),
-        model_id: model.model.to_string(),
-        display_name: model.model.to_string(),
+        provider: model.provider,
+        display_name: Arc::clone(&model_id),
+        model_id,
         tokens: model.tokens,
         cost: model.cost,
     }
 }
 
 /// Re-fold one hour's `(provider, model)` buckets into `group_by`'s hourly
-/// models map. Only ClientProviderModel keeps the provider split; the other
+/// model vector. Only ClientProviderModel keeps the provider split; the other
 /// groupings merge providers, attributing the first-created bucket's
 /// provider (matching a direct grouped fold).
 fn materialize_hourly_usage(
@@ -1038,9 +1185,11 @@ fn materialize_hourly_usage(
         add_tokens(&mut grouped_model.tokens, &fine_model.tokens);
         grouped_model.cost += fine_model.cost;
     }
+    let mut grouped_models: Vec<_> = grouped_models.into_iter().collect();
+    grouped_models.sort_by(|(left, _), (right, _)| left.cmp(right));
     let models = grouped_models
         .into_iter()
-        .map(|(key, model)| (key.map_key(), materialize_hourly_model(model)))
+        .map(|(_, model)| materialize_hourly_model(model))
         .collect();
     Some(HourlyUsage {
         datetime: bucket.datetime,
@@ -1209,7 +1358,8 @@ impl UsageIndexBuilder {
         }
     }
 
-    pub(crate) fn finish(self) -> FrozenUsageIndex {
+    pub(crate) fn finish(mut self) -> FrozenUsageIndex {
+        self.index.shrink_to_fit();
         self.index
     }
 }
@@ -1217,6 +1367,30 @@ impl UsageIndexBuilder {
 impl FrozenUsageIndex {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.usage_totals_by_client.shrink_to_fit();
+        self.model_map.shrink_to_fit();
+        self.agent_map.shrink_to_fit();
+        self.daily_map.shrink_to_fit();
+        self.hourly_map.shrink_to_fit();
+
+        for agent in self.agent_map.values_mut() {
+            agent.instances.shrink_to_fit();
+        }
+        for daily in self.daily_map.values_mut() {
+            daily.clients.shrink_to_fit();
+            for client in daily.clients.values_mut() {
+                client.models.shrink_to_fit();
+            }
+        }
+        for hourly in self.hourly_map.values_mut() {
+            hourly.clients.shrink_to_fit();
+            for client in hourly.clients.values_mut() {
+                client.models.shrink_to_fit();
+            }
+        }
     }
 
     /// Validate persisted index semantics against the generation that owns it.
@@ -1569,7 +1743,7 @@ impl FrozenUsageIndex {
                     return None;
                 }
                 Some(AgentEntry {
-                    agent: key.agent.to_string(),
+                    agent: Arc::clone(&key.agent),
                     client: key.client,
                     tokens: agent.tokens.clone(),
                     cost: agent.cost,
@@ -1608,6 +1782,7 @@ impl FrozenUsageIndex {
         let (current_streak, longest_streak) = calculate_streaks_for_today(&daily, effective_date);
 
         UsageProjection {
+            group_by: *group_by,
             models,
             agents,
             daily,
@@ -1628,7 +1803,7 @@ mod tests {
     use chrono::NaiveDate;
 
     use super::*;
-    use crate::aggregate::keys::UNKNOWN_WORKSPACE_LABEL;
+    use crate::aggregate::keys::{WorkspaceKey, UNKNOWN_WORKSPACE_LABEL};
     use crate::records::AttributedUsageRecord;
 
     struct TuiUsageHarness;
@@ -2037,10 +2212,122 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.models.len(), 1);
-        assert_eq!(usage.models[0].model_id, "mimo-v2.5-pro");
-        assert_eq!(usage.models[0].display_name, "mimo-v2.5-pro");
-        assert_eq!(usage.models[0].provider, "xiaomi");
+        assert_eq!(usage.models[0].model_id.as_ref(), "mimo-v2.5-pro");
+        assert_eq!(usage.models[0].display_name.as_ref(), "mimo-v2.5-pro");
+        assert_eq!(usage.models[0].provider.as_ref(), "xiaomi");
         assert_eq!(usage.models[0].cost, 3.0);
+    }
+
+    #[test]
+    fn projection_identity_clones_canonical_arcs_without_copying_payloads() {
+        let message = make_workspace_message(
+            ClientId::OpenCode,
+            "mimo-v2.5-pro",
+            "xiaomi",
+            "session-1",
+            1.0,
+            Some("/repo-a"),
+            Some("repo-a"),
+        );
+        let canonical_model = Arc::clone(&message.model_id);
+        let canonical_provider = Arc::clone(&message.provider_id);
+        let mut builder = UsageIndexBuilder::new();
+        builder.push(&message);
+        let usage = builder
+            .finish()
+            .project_usage(&GroupBy::WorkspaceModel, projection_date());
+
+        let model = &usage.models[0];
+        let daily_model = &usage.daily[0].client_breakdown[&ClientId::OpenCode].models[0];
+        let hourly_model = &usage.hourly[0].models[0];
+        assert!(Arc::ptr_eq(&canonical_model, &model.model_id));
+        assert!(Arc::ptr_eq(&model.model_id, &model.display_name));
+        assert!(Arc::ptr_eq(&model.model_id, &daily_model.model_id));
+        assert!(Arc::ptr_eq(
+            &daily_model.model_id,
+            &daily_model.display_name
+        ));
+        assert!(Arc::ptr_eq(&model.model_id, &hourly_model.model_id));
+        assert!(Arc::ptr_eq(
+            &hourly_model.model_id,
+            &hourly_model.display_name
+        ));
+        assert!(Arc::ptr_eq(&canonical_provider, &model.provider));
+        assert!(Arc::ptr_eq(&model.provider, &daily_model.provider));
+        assert!(Arc::ptr_eq(&model.provider, &hourly_model.provider));
+    }
+
+    #[test]
+    fn period_projection_uses_explicit_grouping_identity() {
+        fn day(date: NaiveDate, provider: &str) -> DailyUsage {
+            DailyUsage {
+                date,
+                tokens: UsageTokenBreakdown {
+                    input: 1,
+                    ..UsageTokenBreakdown::default()
+                },
+                cost: 1.0,
+                client_breakdown: BTreeMap::from([(
+                    ClientId::Claude,
+                    DailyClientInfo {
+                        tokens: UsageTokenBreakdown {
+                            input: 1,
+                            ..UsageTokenBreakdown::default()
+                        },
+                        cost: 1.0,
+                        models: vec![DailyModelInfo {
+                            provider: Arc::from(provider),
+                            model_id: Arc::from("gpt-5.5"),
+                            display_name: Arc::from("gpt-5.5"),
+                            workspace_key: None,
+                            workspace_label: None,
+                            tokens: UsageTokenBreakdown {
+                                input: 1,
+                                ..UsageTokenBreakdown::default()
+                            },
+                            cost: 1.0,
+                            messages: 1,
+                        }],
+                    },
+                )]),
+                message_count: 1,
+                turn_count: 1,
+            }
+        }
+
+        let daily = [
+            day(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(), "openai"),
+            day(NaiveDate::from_ymd_opt(2026, 7, 2).unwrap(), "azure"),
+        ];
+        let merged = build_period_usage(
+            &UsageProjection {
+                group_by: GroupBy::Model,
+                daily: daily.to_vec(),
+                ..UsageProjection::default()
+            },
+            PeriodKind::Monthly,
+        );
+        assert_eq!(
+            merged[0].client_breakdown[&ClientId::Claude].models.len(),
+            1
+        );
+        assert_eq!(
+            merged[0].client_breakdown[&ClientId::Claude].models[0].messages,
+            2
+        );
+
+        let split = build_period_usage(
+            &UsageProjection {
+                group_by: GroupBy::ClientProviderModel,
+                daily: daily.to_vec(),
+                ..UsageProjection::default()
+            },
+            PeriodKind::Monthly,
+        );
+        let models = &split[0].client_breakdown[&ClientId::Claude].models;
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].provider.as_ref(), "azure");
+        assert_eq!(models[1].provider.as_ref(), "openai");
     }
 
     #[test]
@@ -2073,16 +2360,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.models.len(), 1);
-        assert_eq!(usage.models[0].provider, "xiaomi");
+        assert_eq!(usage.models[0].provider.as_ref(), "xiaomi");
         assert_eq!(usage.models[0].cost, 3.0);
 
         let daily_models = &usage.daily[0].client_breakdown[&ClientId::OpenCode].models;
         assert_eq!(daily_models.len(), 1);
-        let daily_model = daily_models
-            .get("v1|cpm|8:opencode6:xiaomi13:mimo-v2.5-pro")
-            .unwrap();
-        assert_eq!(daily_model.provider, "xiaomi");
-        assert_eq!(daily_model.display_name, "mimo-v2.5-pro");
+        let daily_model = &daily_models[0];
+        assert_eq!(daily_model.provider.as_ref(), "xiaomi");
+        assert_eq!(daily_model.display_name.as_ref(), "mimo-v2.5-pro");
     }
 
     #[test]
@@ -2104,17 +2389,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.models.len(), 1);
-        assert_eq!(usage.models[0].model_id, "gpt-5.5");
-        assert_eq!(usage.models[0].display_name, "gpt-5.5");
-        assert_eq!(usage.models[0].provider, "openai");
+        assert_eq!(usage.models[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(usage.models[0].display_name.as_ref(), "gpt-5.5");
+        assert_eq!(usage.models[0].provider.as_ref(), "openai");
 
         let daily_models = &usage.daily[0].client_breakdown[&ClientId::OpenCode].models;
         assert_eq!(daily_models.len(), 1);
-        let daily_model = daily_models
-            .get("v1|cpm|8:opencode6:openai7:gpt-5.5")
-            .unwrap();
-        assert_eq!(daily_model.provider, "openai");
-        assert_eq!(daily_model.display_name, "gpt-5.5");
+        let daily_model = &daily_models[0];
+        assert_eq!(daily_model.provider.as_ref(), "openai");
+        assert_eq!(daily_model.display_name.as_ref(), "gpt-5.5");
     }
 
     #[test]
@@ -2150,11 +2433,15 @@ mod tests {
 
         let daily_models = &usage.daily[0].client_breakdown[&ClientId::OpenCode].models;
         assert_eq!(daily_models.len(), 2);
-        assert!(daily_models.contains_key("v1|cpm|8:opencode6:openai7:gpt-5.5"));
-        assert!(daily_models.contains_key("v1|cpm|8:opencode9:microsoft7:gpt-5.5"));
         assert!(daily_models
-            .values()
-            .all(|model| model.display_name == "gpt-5.5"));
+            .iter()
+            .any(|model| model.provider.as_ref() == "openai"));
+        assert!(daily_models
+            .iter()
+            .any(|model| model.provider.as_ref() == "microsoft"));
+        assert!(daily_models
+            .iter()
+            .all(|model| model.display_name.as_ref() == "gpt-5.5"));
     }
 
     #[test]
@@ -2187,7 +2474,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.models.len(), 1);
-        assert_eq!(usage.models[0].provider, "kimi");
+        assert_eq!(usage.models[0].provider.as_ref(), "kimi");
         assert_eq!(usage.models[0].cost, 3.0);
     }
 
@@ -2239,7 +2526,7 @@ mod tests {
             .iter()
             .find(|agent| agent.client == ClientId::OpenCode)
             .unwrap();
-        assert_eq!(opencode.agent, "Builder");
+        assert_eq!(opencode.agent.as_ref(), "Builder");
         assert_eq!(opencode.message_count, 1);
         assert!((opencode.cost - 1.25).abs() < f64::EPSILON);
         assert_eq!(opencode.tokens.total(), 15);
@@ -2249,7 +2536,7 @@ mod tests {
             .iter()
             .find(|agent| agent.client == ClientId::RooCode)
             .unwrap();
-        assert_eq!(roocode.agent, "Builder");
+        assert_eq!(roocode.agent.as_ref(), "Builder");
         assert_eq!(roocode.message_count, 1);
         assert!((roocode.cost - 2.75).abs() < f64::EPSILON);
         assert_eq!(roocode.tokens.total(), 30);
@@ -2338,8 +2625,8 @@ mod tests {
         assert_eq!(usage.models.len(), 1);
         assert_eq!(usage.models[0].workspace_key.as_deref(), Some("/repo-a"));
         assert_eq!(usage.models[0].workspace_label.as_deref(), Some("repo-a"));
-        assert_eq!(usage.models[0].model_id, "claude-sonnet-4.5");
-        assert_eq!(usage.models[0].display_name, "claude-sonnet-4.5");
+        assert_eq!(usage.models[0].model_id.as_ref(), "claude-sonnet-4.5");
+        assert_eq!(usage.models[0].display_name.as_ref(), "claude-sonnet-4.5");
         assert_eq!(usage.models[0].clients, [ClientId::Claude, ClientId::Qwen]);
         assert_eq!(usage.models[0].session_count, 2);
         assert_eq!(usage.models[0].cost, 4.0);
@@ -2460,15 +2747,11 @@ mod tests {
             .client_breakdown
             .get(&ClientId::Claude)
             .unwrap();
-        let daily_keys: Vec<_> = claude.models.keys().cloned().collect();
-        assert_eq!(daily_keys.len(), 2);
-        assert_ne!(daily_keys[0], daily_keys[1]);
-
         // The workspace dimension travels in structured fields; display_name
         // and model_id stay the bare canonical model (ADR 0010).
         let daily_identities: Vec<_> = claude
             .models
-            .values()
+            .iter()
             .map(|info| {
                 (
                     info.display_name.clone(),
@@ -2482,16 +2765,16 @@ mod tests {
             daily_identities,
             vec![
                 (
-                    "claude-sonnet-4.5".to_string(),
-                    "claude-sonnet-4.5".to_string(),
-                    Some("/repo-a".to_string()),
-                    Some("repo-a".to_string()),
+                    Arc::from("claude-sonnet-4.5"),
+                    Arc::from("claude-sonnet-4.5"),
+                    Some(Arc::from("/repo-a")),
+                    Some(Arc::from("repo-a")),
                 ),
                 (
-                    "claude-sonnet-4.5".to_string(),
-                    "claude-sonnet-4.5".to_string(),
-                    Some("/repo-b".to_string()),
-                    Some("repo-b".to_string()),
+                    Arc::from("claude-sonnet-4.5"),
+                    Arc::from("claude-sonnet-4.5"),
+                    Some(Arc::from("/repo-b")),
+                    Some(Arc::from("repo-b")),
                 ),
             ]
         );
@@ -2533,33 +2816,28 @@ mod tests {
             .unwrap();
         assert_eq!(claude.models.len(), 2);
 
-        // Keys must differ even though display names are identical
-        let daily_keys: Vec<_> = claude.models.keys().cloned().collect();
-        assert_eq!(daily_keys.len(), 2);
-        assert_ne!(daily_keys[0], daily_keys[1]);
-
         let display_names: Vec<_> = claude
             .models
-            .values()
+            .iter()
             .map(|info| info.display_name.clone())
             .collect();
         assert_eq!(
             display_names,
             vec![
-                "claude-sonnet-4.5".to_string(),
-                "claude-sonnet-4.5".to_string()
+                Arc::from("claude-sonnet-4.5"),
+                Arc::from("claude-sonnet-4.5")
             ]
         );
         let workspace_keys: Vec<_> = claude
             .models
-            .values()
+            .iter()
             .map(|info| info.workspace_key.clone())
             .collect();
         assert_eq!(
             workspace_keys,
             vec![
-                Some("/srv/team-a/demo".to_string()),
-                Some("/srv/team-b/demo".to_string())
+                Some(Arc::from("/srv/team-a/demo")),
+                Some(Arc::from("/srv/team-b/demo"))
             ]
         );
     }
@@ -2590,9 +2868,9 @@ mod tests {
 
             let models = &usage.daily[0].client_breakdown[&ClientId::Claude].models;
             assert_eq!(models.len(), 1);
-            let info = models.values().next().unwrap();
-            assert_eq!(info.model_id, "claude-sonnet-4.5");
-            assert_eq!(info.display_name, "claude-sonnet-4.5");
+            let info = &models[0];
+            assert_eq!(info.model_id.as_ref(), "claude-sonnet-4.5");
+            assert_eq!(info.display_name.as_ref(), "claude-sonnet-4.5");
             if group_by == GroupBy::WorkspaceModel {
                 assert_eq!(info.workspace_key.as_deref(), Some("/repo-a"));
                 assert_eq!(info.workspace_label.as_deref(), Some("repo-a"));
@@ -2603,10 +2881,7 @@ mod tests {
 
             let hourly = &usage.hourly[0].models;
             assert_eq!(hourly.len(), 1);
-            assert_eq!(
-                hourly.values().next().unwrap().model_id,
-                "claude-sonnet-4.5"
-            );
+            assert_eq!(hourly[0].model_id.as_ref(), "claude-sonnet-4.5");
         }
     }
 
@@ -2642,12 +2917,12 @@ mod tests {
         assert_eq!(usage.models.len(), 2);
         assert!(usage.models.iter().any(|model| {
             model.workspace_key.as_deref() == Some("a:b")
-                && model.model_id == "c"
+                && model.model_id.as_ref() == "c"
                 && (model.cost - 1.0).abs() < f64::EPSILON
         }));
         assert!(usage.models.iter().any(|model| {
             model.workspace_key.as_deref() == Some("a")
-                && model.model_id == "b:c"
+                && model.model_id.as_ref() == "b:c"
                 && (model.cost - 2.0).abs() < f64::EPSILON
         }));
 
@@ -2706,17 +2981,23 @@ mod tests {
             .unwrap();
         assert_eq!(claude.models.len(), 2);
 
-        let anthropic_key = "v1|cpm|6:claude9:anthropic17:claude-sonnet-4.5";
-        let copilot_key = "v1|cpm|6:claude9:microsoft17:claude-sonnet-4.5";
-        let anthropic_model = claude.models.get(anthropic_key).unwrap();
-        assert_eq!(anthropic_model.display_name, "claude-sonnet-4.5");
-        assert_eq!(anthropic_model.provider, "anthropic");
+        let anthropic_model = claude
+            .models
+            .iter()
+            .find(|model| model.provider.as_ref() == "anthropic")
+            .unwrap();
+        assert_eq!(anthropic_model.display_name.as_ref(), "claude-sonnet-4.5");
+        assert_eq!(anthropic_model.provider.as_ref(), "anthropic");
         assert_eq!(anthropic_model.tokens.total(), 15);
         assert_eq!(anthropic_model.messages, 1);
 
-        let copilot_model = claude.models.get(copilot_key).unwrap();
-        assert_eq!(copilot_model.display_name, "claude-sonnet-4.5");
-        assert_eq!(copilot_model.provider, "microsoft");
+        let copilot_model = claude
+            .models
+            .iter()
+            .find(|model| model.provider.as_ref() == "microsoft")
+            .unwrap();
+        assert_eq!(copilot_model.display_name.as_ref(), "claude-sonnet-4.5");
+        assert_eq!(copilot_model.provider.as_ref(), "microsoft");
         assert_eq!(copilot_model.tokens.total(), 30);
         assert_eq!(copilot_model.messages, 1);
     }
@@ -2771,8 +3052,8 @@ mod tests {
             .unwrap();
         assert_eq!(claude.cost, 1.0);
         assert_eq!(claude.models.len(), 1);
-        let claude_model = claude.models.get("v1|m|17:claude-sonnet-4.5").unwrap();
-        assert_eq!(claude_model.display_name, "claude-sonnet-4.5");
+        let claude_model = &claude.models[0];
+        assert_eq!(claude_model.display_name.as_ref(), "claude-sonnet-4.5");
         assert_eq!(claude_model.tokens.total(), 15);
 
         let gemini = usage.daily[0]
@@ -2781,8 +3062,8 @@ mod tests {
             .unwrap();
         assert_eq!(gemini.cost, 2.0);
         assert_eq!(gemini.models.len(), 1);
-        let gemini_model = gemini.models.get("v1|m|17:claude-sonnet-4.5").unwrap();
-        assert_eq!(gemini_model.display_name, "claude-sonnet-4.5");
+        let gemini_model = &gemini.models[0];
+        assert_eq!(gemini_model.display_name.as_ref(), "claude-sonnet-4.5");
         assert_eq!(gemini_model.tokens.total(), 30);
     }
 
@@ -2830,12 +3111,12 @@ mod tests {
 
         assert_eq!(usage.agents.len(), 2);
         assert!(usage.agents.iter().any(|agent| {
-            agent.agent == "Sisyphus"
+            agent.agent.as_ref() == "Sisyphus"
                 && agent.client == ClientId::OpenCode
                 && agent.message_count == 1
         }));
         assert!(usage.agents.iter().any(|agent| {
-            agent.agent == "Sisyphus (Ultraworker)"
+            agent.agent.as_ref() == "Sisyphus (Ultraworker)"
                 && agent.client == ClientId::OpenCode
                 && agent.message_count == 1
         }));
@@ -2884,8 +3165,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.agents.len(), 2);
-        assert!(usage.agents.iter().any(|agent| agent.agent == "Hephaestus"));
-        assert!(usage.agents.iter().any(|agent| agent.agent == "hephaestus"));
+        assert!(usage
+            .agents
+            .iter()
+            .any(|agent| agent.agent.as_ref() == "Hephaestus"));
+        assert!(usage
+            .agents
+            .iter()
+            .any(|agent| agent.agent.as_ref() == "hephaestus"));
     }
 
     #[test]
@@ -2931,11 +3218,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(usage.agents.len(), 2);
-        assert!(usage.agents.iter().any(|agent| agent.agent == "Sisyphus"));
         assert!(usage
             .agents
             .iter()
-            .any(|agent| agent.agent == "Sisyphus (Ultraworker)"));
+            .any(|agent| agent.agent.as_ref() == "Sisyphus"));
+        assert!(usage
+            .agents
+            .iter()
+            .any(|agent| agent.agent.as_ref() == "Sisyphus (Ultraworker)"));
     }
 
     fn collision_message(
@@ -2991,7 +3281,7 @@ mod tests {
     }
 
     #[test]
-    fn daily_and_hourly_maps_use_collision_free_structured_keys() {
+    fn daily_and_hourly_models_preserve_collision_free_structured_identity() {
         let timestamp = 1_735_689_600_000;
         let first = collision_message(ClientId::Amp, "b:c", "same", "d", 10, timestamp);
         let second = collision_message(ClientId::Amp, "b", "same", "c:d", 20, timestamp);
@@ -3003,33 +3293,45 @@ mod tests {
 
         let daily = &usage.daily[0].client_breakdown[&ClientId::Amp].models;
         assert_eq!(daily.len(), 2);
-        let first_daily = &daily["v1|cpm|3:amp3:b:c1:d"];
-        assert_eq!(first_daily.provider, "b:c");
-        assert_eq!(first_daily.model_id, "d");
-        assert_eq!(first_daily.display_name, "d");
+        let first_daily = daily
+            .iter()
+            .find(|model| model.provider.as_ref() == "b:c")
+            .unwrap();
+        assert_eq!(first_daily.provider.as_ref(), "b:c");
+        assert_eq!(first_daily.model_id.as_ref(), "d");
+        assert_eq!(first_daily.display_name.as_ref(), "d");
         assert_eq!(first_daily.tokens.total(), 10);
         assert_eq!(first_daily.cost, 10.0);
         assert_eq!(first_daily.messages, 1);
-        let second_daily = &daily["v1|cpm|3:amp1:b3:c:d"];
-        assert_eq!(second_daily.provider, "b");
-        assert_eq!(second_daily.model_id, "c:d");
-        assert_eq!(second_daily.display_name, "c:d");
+        let second_daily = daily
+            .iter()
+            .find(|model| model.provider.as_ref() == "b")
+            .unwrap();
+        assert_eq!(second_daily.provider.as_ref(), "b");
+        assert_eq!(second_daily.model_id.as_ref(), "c:d");
+        assert_eq!(second_daily.display_name.as_ref(), "c:d");
         assert_eq!(second_daily.tokens.total(), 20);
         assert_eq!(second_daily.cost, 20.0);
         assert_eq!(second_daily.messages, 1);
 
         let hourly = &usage.hourly[0].models;
         assert_eq!(hourly.len(), 2);
-        let first_hourly = &hourly["v1|pm|3:b:c1:d"];
-        assert_eq!(first_hourly.provider, "b:c");
-        assert_eq!(first_hourly.model_id, "d");
-        assert_eq!(first_hourly.display_name, "d");
+        let first_hourly = hourly
+            .iter()
+            .find(|model| model.provider.as_ref() == "b:c")
+            .unwrap();
+        assert_eq!(first_hourly.provider.as_ref(), "b:c");
+        assert_eq!(first_hourly.model_id.as_ref(), "d");
+        assert_eq!(first_hourly.display_name.as_ref(), "d");
         assert_eq!(first_hourly.tokens.total(), 10);
         assert_eq!(first_hourly.cost, 10.0);
-        let second_hourly = &hourly["v1|pm|1:b3:c:d"];
-        assert_eq!(second_hourly.provider, "b");
-        assert_eq!(second_hourly.model_id, "c:d");
-        assert_eq!(second_hourly.display_name, "c:d");
+        let second_hourly = hourly
+            .iter()
+            .find(|model| model.provider.as_ref() == "b")
+            .unwrap();
+        assert_eq!(second_hourly.provider.as_ref(), "b");
+        assert_eq!(second_hourly.model_id.as_ref(), "c:d");
+        assert_eq!(second_hourly.display_name.as_ref(), "c:d");
         assert_eq!(second_hourly.tokens.total(), 20);
         assert_eq!(second_hourly.cost, 20.0);
     }
@@ -3101,8 +3403,12 @@ mod tests {
         assert_eq!(usage.models.len(), 2);
         let daily_models = &usage.daily[0].client_breakdown[&ClientId::Codex].models;
         assert_eq!(daily_models.len(), 2);
-        assert!(daily_models.contains_key("v1|wmu|5:model"));
-        assert!(daily_models.contains_key("v1|wmk|0:5:model"));
+        assert!(daily_models
+            .iter()
+            .any(|model| model.workspace_key.is_none()));
+        assert!(daily_models
+            .iter()
+            .any(|model| model.workspace_key.as_deref() == Some("")));
     }
 
     #[test]
@@ -3304,6 +3610,73 @@ mod tests {
         acc.finish()
     }
 
+    fn container_capacities(index: &FrozenUsageIndex) -> Vec<(usize, usize)> {
+        let mut capacities = vec![
+            (
+                index.usage_totals_by_client.len(),
+                index.usage_totals_by_client.capacity(),
+            ),
+            (index.model_map.len(), index.model_map.capacity()),
+            (index.agent_map.len(), index.agent_map.capacity()),
+            (index.daily_map.len(), index.daily_map.capacity()),
+            (index.hourly_map.len(), index.hourly_map.capacity()),
+        ];
+        for agent in index.agent_map.values() {
+            if let IdentitySet::Many(instances) = &agent.instances {
+                capacities.push((instances.len(), instances.capacity()));
+            }
+        }
+        for daily in index.daily_map.values() {
+            capacities.push((daily.clients.len(), daily.clients.capacity()));
+            capacities.extend(
+                daily
+                    .clients
+                    .values()
+                    .map(|client| (client.models.len(), client.models.capacity())),
+            );
+        }
+        for hourly in index.hourly_map.values() {
+            capacities.push((hourly.clients.len(), hourly.clients.capacity()));
+            capacities.extend(
+                hourly
+                    .clients
+                    .values()
+                    .map(|client| (client.models.len(), client.models.capacity())),
+            );
+        }
+        capacities
+    }
+
+    fn reserve_frozen_index_storage(index: &mut FrozenUsageIndex, additional: usize) {
+        index.usage_totals_by_client.reserve(additional);
+        index.model_map.reserve(additional);
+        index.agent_map.reserve(additional);
+        index.daily_map.reserve(additional);
+        index.hourly_map.reserve(additional);
+        for agent in index.agent_map.values_mut() {
+            agent
+                .instances
+                .insert(AgentInstanceKey::Explicit(crate::records::intern::intern(
+                    "capacity-test-instance",
+                )));
+            if let IdentitySet::Many(instances) = &mut agent.instances {
+                instances.reserve(additional);
+            }
+        }
+        for daily in index.daily_map.values_mut() {
+            daily.clients.reserve(additional);
+            for client in daily.clients.values_mut() {
+                client.models.reserve(additional);
+            }
+        }
+        for hourly in index.hourly_map.values_mut() {
+            hourly.clients.reserve(additional);
+            for client in hourly.clients.values_mut() {
+                client.models.reserve(additional);
+            }
+        }
+    }
+
     fn assert_tokens_eq(left: &UsageTokenBreakdown, right: &UsageTokenBreakdown) {
         assert_eq!(left.input, right.input);
         assert_eq!(left.output, right.output);
@@ -3344,6 +3717,7 @@ mod tests {
     }
 
     fn assert_usage_data_eq(left: &UsageProjection, right: &UsageProjection) {
+        assert_eq!(left.group_by, right.group_by);
         assert_eq!(left.total_tokens, right.total_tokens);
         assert_eq!(left.total_cost.to_bits(), right.total_cost.to_bits());
         assert_eq!(left.current_streak, right.current_streak);
@@ -3379,10 +3753,7 @@ mod tests {
                 assert_tokens_eq(&left_info.tokens, &right_info.tokens);
                 assert_eq!(left_info.cost.to_bits(), right_info.cost.to_bits());
                 assert_eq!(left_info.models.len(), right_info.models.len());
-                for ((left_key, left_model), (right_key, right_model)) in
-                    left_info.models.iter().zip(&right_info.models)
-                {
-                    assert_eq!(left_key, right_key);
+                for (left_model, right_model) in left_info.models.iter().zip(&right_info.models) {
                     assert_eq!(left_model.provider, right_model.provider);
                     assert_eq!(left_model.model_id, right_model.model_id);
                     assert_eq!(left_model.display_name, right_model.display_name);
@@ -3404,10 +3775,7 @@ mod tests {
             assert_eq!(left.message_count, right.message_count);
             assert_eq!(left.turn_count, right.turn_count);
             assert_eq!(left.models.len(), right.models.len());
-            for ((left_key, left_model), (right_key, right_model)) in
-                left.models.iter().zip(&right.models)
-            {
-                assert_eq!(left_key, right_key);
+            for (left_model, right_model) in left.models.iter().zip(&right.models) {
                 assert_eq!(left_model.provider, right_model.provider);
                 assert_eq!(left_model.model_id, right_model.model_id);
                 assert_eq!(left_model.display_name, right_model.display_name);
@@ -3518,6 +3886,112 @@ mod tests {
             &acc.project_usage_for_clients(&GroupBy::Model, &selected, projection_date()),
             &restored.project_usage_for_clients(&GroupBy::Model, &selected, projection_date()),
         );
+    }
+
+    #[test]
+    fn finish_compacts_every_persisted_hash_container() {
+        const EXCESS_CAPACITY: usize = 4_096;
+
+        let mut builder = UsageIndexBuilder::new();
+        for message in reprojection_corpus() {
+            builder.push(&message);
+        }
+        reserve_frozen_index_storage(&mut builder.index, EXCESS_CAPACITY);
+        let before = container_capacities(&builder.index);
+        assert!(!before.is_empty());
+        assert!(before
+            .iter()
+            .all(|(len, capacity)| *capacity >= len + EXCESS_CAPACITY));
+
+        let compact = builder.finish();
+        let after = container_capacities(&compact);
+        assert_eq!(after.len(), before.len());
+        assert!(after
+            .iter()
+            .all(|(len, capacity)| *capacity >= *len && *capacity < EXCESS_CAPACITY));
+    }
+
+    #[test]
+    fn cache_deserialization_compacts_every_persisted_hash_container() {
+        const EXCESS_CAPACITY: usize = 4_096;
+
+        let mut builder = UsageIndexBuilder::new();
+        for message in reprojection_corpus() {
+            builder.push(&message);
+        }
+        reserve_frozen_index_storage(&mut builder.index, EXCESS_CAPACITY);
+        let before = container_capacities(&builder.index);
+        assert!(!before.is_empty());
+        assert!(before
+            .iter()
+            .all(|(len, capacity)| *capacity >= len + EXCESS_CAPACITY));
+
+        let encoded =
+            bincode::serialize(&builder.index).expect("serialize oversized frozen usage index");
+        let mut restored: FrozenUsageIndex =
+            bincode::deserialize(&encoded).expect("deserialize frozen usage index");
+        let after = container_capacities(&restored);
+        assert_eq!(after.len(), before.len());
+        assert!(after
+            .iter()
+            .all(|(len, capacity)| *capacity >= *len && *capacity < EXCESS_CAPACITY));
+
+        restored.shrink_to_fit();
+        assert_eq!(container_capacities(&restored), after);
+    }
+
+    #[test]
+    fn cache_deserialization_restores_canonical_arc_sharing() {
+        let index = reprojection_index();
+        let encoded = bincode::serialize(&index).expect("serialize frozen usage index");
+        drop(index);
+
+        let restored: FrozenUsageIndex =
+            bincode::deserialize(&encoded).expect("deserialize frozen usage index");
+        let (model_key, model_bucket) = restored
+            .model_map
+            .iter()
+            .find(|(key, _)| {
+                key.client == ClientId::Claude
+                    && key.provider.as_ref() == "openai"
+                    && key.session.as_ref() == "s1"
+                    && key.model.as_ref() == "gpt-5.5"
+            })
+            .expect("canonical model bucket");
+        let (daily_key, daily_bucket) = restored
+            .daily_map
+            .values()
+            .flat_map(|day| day.clients.get(&ClientId::Claude))
+            .flat_map(|client| client.models.iter())
+            .find(|(key, _)| {
+                key.provider.as_ref() == "openai"
+                    && key.session.as_ref() == "s1"
+                    && key.model.as_ref() == "gpt-5.5"
+            })
+            .expect("daily model bucket");
+        let hourly_key = restored
+            .hourly_map
+            .values()
+            .flat_map(|hour| hour.clients.get(&ClientId::Claude))
+            .flat_map(|client| client.models.keys())
+            .find(|key| key.provider.as_ref() == "openai" && key.model.as_ref() == "gpt-5.5")
+            .expect("hourly model bucket");
+
+        assert!(Arc::ptr_eq(&model_key.provider, &daily_key.provider));
+        assert!(Arc::ptr_eq(&model_key.provider, &hourly_key.provider));
+        assert!(Arc::ptr_eq(&model_key.session, &daily_key.session));
+        assert!(Arc::ptr_eq(&model_key.model, &daily_key.model));
+        assert!(Arc::ptr_eq(&model_key.model, &hourly_key.model));
+        assert!(Arc::ptr_eq(
+            &model_bucket.workspace_label,
+            &daily_bucket.workspace_label
+        ));
+        let (WorkspaceKey::Known(model_workspace), WorkspaceKey::Known(daily_workspace)) =
+            (&model_key.workspace, &daily_key.workspace)
+        else {
+            panic!("test model must retain a known workspace");
+        };
+        assert!(Arc::ptr_eq(model_workspace, daily_workspace));
     }
 
     #[test]
@@ -3707,9 +4181,9 @@ mod tests {
         let gpt = model
             .models
             .iter()
-            .find(|entry| entry.model_id == "gpt-5.5")
+            .find(|entry| entry.model_id.as_ref() == "gpt-5.5")
             .expect("merged gpt-5.5 entry");
-        assert_eq!(gpt.provider, "azure, openai");
+        assert_eq!(gpt.provider.as_ref(), "azure, openai");
         assert_eq!(
             gpt.clients,
             [ClientId::Qwen, ClientId::Claude, ClientId::Codex]
@@ -3722,7 +4196,7 @@ mod tests {
         let sonnet = model
             .models
             .iter()
-            .find(|entry| entry.model_id == "claude-sonnet-4.5")
+            .find(|entry| entry.model_id.as_ref() == "claude-sonnet-4.5")
             .expect("claude-sonnet-4.5 entry");
         assert_eq!(sonnet.session_count, 1);
 
@@ -3734,8 +4208,12 @@ mod tests {
             .find(|day| day.date == day0)
             .expect("day0 usage")
             .client_breakdown[&ClientId::Claude];
-        let gpt_daily = &day0_claude.models["v1|m|7:gpt-5.5"];
-        assert_eq!(gpt_daily.provider, "openai");
+        let gpt_daily = day0_claude
+            .models
+            .iter()
+            .find(|entry| entry.model_id.as_ref() == "gpt-5.5")
+            .unwrap();
+        assert_eq!(gpt_daily.provider.as_ref(), "openai");
         assert_eq!(gpt_daily.tokens.total(), 520);
         assert!((gpt_daily.cost - 0.4).abs() < 1e-9);
         let hour12 = model
@@ -3743,7 +4221,10 @@ mod tests {
             .iter()
             .find(|hour| hour.datetime == day0_hour12)
             .expect("day0 hour12 usage");
-        assert!(hour12.models.contains_key("v1|m|7:gpt-5.5"));
+        assert!(hour12
+            .models
+            .iter()
+            .any(|entry| entry.model_id.as_ref() == "gpt-5.5"));
 
         let client_model = acc.project_usage(&GroupBy::ClientModel, projection_date());
         assert_eq!(client_model.models.len(), 4);
@@ -3751,10 +4232,11 @@ mod tests {
             .models
             .iter()
             .find(|entry| {
-                entry.model_id == "gpt-5.5" && entry.clients.as_slice() == [ClientId::Claude]
+                entry.model_id.as_ref() == "gpt-5.5"
+                    && entry.clients.as_slice() == [ClientId::Claude]
             })
             .expect("claude gpt-5.5 entry");
-        assert_eq!(claude_gpt.provider, "azure, openai");
+        assert_eq!(claude_gpt.provider.as_ref(), "azure, openai");
         assert_eq!(claude_gpt.tokens.total(), 520);
         assert_eq!(claude_gpt.session_count, 1);
         let day0_claude = &client_model
@@ -3763,7 +4245,10 @@ mod tests {
             .find(|day| day.date == day0)
             .expect("day0 usage")
             .client_breakdown[&ClientId::Claude];
-        assert!(day0_claude.models.contains_key("v1|cm|6:claude7:gpt-5.5"));
+        assert!(day0_claude
+            .models
+            .iter()
+            .any(|entry| entry.model_id.as_ref() == "gpt-5.5"));
 
         let cpm = acc.project_usage(&GroupBy::ClientProviderModel, projection_date());
         assert_eq!(cpm.models.len(), 5);
@@ -3775,24 +4260,31 @@ mod tests {
             .client_breakdown[&ClientId::Claude];
         assert!(day0_claude
             .models
-            .contains_key("v1|cpm|6:claude6:openai7:gpt-5.5"));
+            .iter()
+            .any(|entry| entry.provider.as_ref() == "openai"));
         assert!(day0_claude
             .models
-            .contains_key("v1|cpm|6:claude5:azure7:gpt-5.5"));
-        // Only ClientProviderModel splits the hourly models map by provider.
+            .iter()
+            .any(|entry| entry.provider.as_ref() == "azure"));
+        // Only ClientProviderModel splits hourly models by provider.
         let cpm_hour13 = cpm
             .hourly
             .iter()
             .find(|hour| hour.datetime == day0_hour13)
             .expect("day0 hour13 usage");
         assert_eq!(cpm_hour13.models.len(), 1);
-        assert!(cpm_hour13.models.contains_key("v1|pm|5:azure7:gpt-5.5"));
+        assert!(cpm_hour13.models.iter().any(
+            |entry| entry.provider.as_ref() == "azure" && entry.model_id.as_ref() == "gpt-5.5"
+        ));
         let model_hour13 = model
             .hourly
             .iter()
             .find(|hour| hour.datetime == day0_hour13)
             .expect("day0 hour13 usage");
-        assert!(model_hour13.models.contains_key("v1|m|7:gpt-5.5"));
+        assert!(model_hour13
+            .models
+            .iter()
+            .any(|entry| entry.model_id.as_ref() == "gpt-5.5"));
 
         let workspace = acc.project_usage(&GroupBy::WorkspaceModel, projection_date());
         assert_eq!(workspace.models.len(), 3);
@@ -3829,8 +4321,14 @@ mod tests {
             .find(|day| day.date == day0)
             .expect("day0 usage")
             .client_breakdown[&ClientId::Claude];
-        assert!(day0_claude.models.contains_key("v1|wmk|7:/repo-a7:gpt-5.5"));
-        assert!(day0_claude.models.contains_key("v1|wmk|7:/repo-b7:gpt-5.5"));
+        assert!(day0_claude
+            .models
+            .iter()
+            .any(|entry| entry.workspace_key.as_deref() == Some("/repo-a")));
+        assert!(day0_claude
+            .models
+            .iter()
+            .any(|entry| entry.workspace_key.as_deref() == Some("/repo-b")));
         let day1_claude = &workspace
             .daily
             .iter()
@@ -3839,7 +4337,9 @@ mod tests {
             .client_breakdown[&ClientId::Claude];
         assert!(day1_claude
             .models
-            .contains_key("v1|wmu|17:claude-sonnet-4.5"));
+            .iter()
+            .any(|entry| entry.workspace_key.is_none()
+                && entry.model_id.as_ref() == "claude-sonnet-4.5"));
     }
 
     fn hourly(hour: u32, input_tokens: u64, cost: f64) -> HourlyUsage {
@@ -3854,7 +4354,7 @@ mod tests {
             },
             cost,
             clients: BTreeSet::new(),
-            models: BTreeMap::new(),
+            models: Vec::new(),
             message_count: 0,
             turn_count: 0,
         }

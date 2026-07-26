@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -6,7 +7,8 @@ use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use tokenx_engine::{
-    pricing::PricingStatus, ClientId, ClientSelection, ClientUniverse, Generation, UsageQuery,
+    pricing::PricingStatus, ClientId, ClientSelection, ClientUniverse, Generation, GroupBy,
+    UsageQuery,
 };
 
 use ratatui::style::Color;
@@ -330,31 +332,64 @@ fn merge_provider_label(target: &mut String, provider: &str) {
     }
 }
 
-fn build_detail_rows(client_breakdown: &BTreeMap<ClientId, DailyClientInfo>) -> Vec<DetailRow> {
-    let mut rows_by_key: BTreeMap<String, DetailRowAccumulator> = BTreeMap::new();
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+enum DetailModelIdentity {
+    Model(Arc<str>),
+    ClientModel(ClientId, Arc<str>),
+    ClientProviderModel(ClientId, Arc<str>, Arc<str>),
+    WorkspaceModel(Option<Arc<str>>, Arc<str>),
+}
+
+fn detail_model_identity(
+    client: ClientId,
+    model: &tokenx_engine::projection::DailyModelInfo,
+    group_by: GroupBy,
+) -> DetailModelIdentity {
+    match group_by {
+        GroupBy::Model => DetailModelIdentity::Model(Arc::clone(&model.model_id)),
+        GroupBy::ClientModel => {
+            DetailModelIdentity::ClientModel(client, Arc::clone(&model.model_id))
+        }
+        GroupBy::ClientProviderModel => DetailModelIdentity::ClientProviderModel(
+            client,
+            Arc::clone(&model.provider),
+            Arc::clone(&model.model_id),
+        ),
+        GroupBy::WorkspaceModel => DetailModelIdentity::WorkspaceModel(
+            model.workspace_key.clone(),
+            Arc::clone(&model.model_id),
+        ),
+    }
+}
+
+fn build_detail_rows(
+    client_breakdown: &BTreeMap<ClientId, DailyClientInfo>,
+    group_by: GroupBy,
+) -> Vec<DetailRow> {
+    let mut rows_by_key: BTreeMap<DetailModelIdentity, DetailRowAccumulator> = BTreeMap::new();
 
     for (client, client_info) in client_breakdown {
-        for (model_key, model_info) in &client_info.models {
-            let row =
-                rows_by_key
-                    .entry(model_key.clone())
-                    .or_insert_with(|| DetailRowAccumulator {
-                        client_totals: HashMap::new(),
-                        provider: String::new(),
-                        model: if model_info.display_name.is_empty() {
-                            model_info.model_id.clone()
-                        } else {
-                            model_info.display_name.clone()
-                        },
-                        model_id: model_info.model_id.clone(),
-                        workspace: model_info
-                            .workspace_label
-                            .clone()
-                            .or_else(|| model_info.workspace_key.clone()),
-                        tokens: UsageTokenBreakdown::default(),
-                        cost: 0.0,
-                        messages: 0,
-                    });
+        for model_info in &client_info.models {
+            let row = rows_by_key
+                .entry(detail_model_identity(*client, model_info, group_by))
+                .or_insert_with(|| DetailRowAccumulator {
+                    client_totals: HashMap::new(),
+                    provider: String::new(),
+                    model: if model_info.display_name.is_empty() {
+                        model_info.model_id.to_string()
+                    } else {
+                        model_info.display_name.to_string()
+                    },
+                    model_id: model_info.model_id.to_string(),
+                    workspace: model_info
+                        .workspace_label
+                        .as_deref()
+                        .or(model_info.workspace_key.as_deref())
+                        .map(str::to_owned),
+                    tokens: UsageTokenBreakdown::default(),
+                    cost: 0.0,
+                    messages: 0,
+                });
 
             let client_count = row.client_totals.len();
             let client_total =
@@ -977,12 +1012,13 @@ impl App {
             }
         }
         if let Some(selection) = self.selected_period_detail {
-            let period_still_exists = build_period_usage(&self.usage().daily, selection.kind)
-                .iter()
-                .any(|period| {
-                    period.start_date == selection.start_date
-                        && period.end_date == selection.end_date
-                });
+            let period_still_exists =
+                build_period_usage(self.usage(), selection.kind)
+                    .iter()
+                    .any(|period| {
+                        period.start_date == selection.start_date
+                            && period.end_date == selection.end_date
+                    });
             if !period_still_exists {
                 let tab = Self::period_tab(selection.kind);
                 self.leave_period_detail_sort_context();
@@ -1978,8 +2014,8 @@ impl App {
             Tab::Weekly if self.is_period_detail_active_for_kind(PeriodKind::Weekly) => {
                 self.get_sorted_period_detail_rows().len()
             }
-            Tab::Monthly => build_period_usage(&self.usage().daily, PeriodKind::Monthly).len(),
-            Tab::Weekly => build_period_usage(&self.usage().daily, PeriodKind::Weekly).len(),
+            Tab::Monthly => build_period_usage(self.usage(), PeriodKind::Monthly).len(),
+            Tab::Weekly => build_period_usage(self.usage(), PeriodKind::Weekly).len(),
             Tab::Daily => self.usage().daily.len(),
             Tab::Hourly => self.usage().hourly.len(),
             Tab::Stats => 0,
@@ -2092,7 +2128,7 @@ impl App {
     }
 
     fn model_detail_matches(selection: &ModelDetailSelection, model: &UsageModelEntry) -> bool {
-        model.model_id == selection.model
+        model.model_id.as_ref() == selection.model
             && selection
                 .client
                 .is_none_or(|client| model.clients.as_slice() == [client])
@@ -2139,7 +2175,7 @@ impl App {
             models
                 .get(self.selected_index)
                 .map(|model| ModelDetailSelection {
-                    model: model.model_id.clone(),
+                    model: model.model_id.to_string(),
                     client: (self.group_by() == tokenx_engine::GroupBy::ClientModel)
                         .then(|| model.clients.first().copied())
                         .flatten(),
@@ -2697,7 +2733,7 @@ impl App {
 
     pub fn period_detail_label(&self) -> Option<String> {
         let selection = self.selected_period_detail?;
-        build_period_usage(&self.usage().daily, selection.kind)
+        build_period_usage(self.usage(), selection.kind)
             .into_iter()
             .find(|period| {
                 period.start_date == selection.start_date && period.end_date == selection.end_date
@@ -2713,7 +2749,7 @@ impl App {
             return Vec::new();
         };
 
-        let mut rows = build_detail_rows(&day.client_breakdown);
+        let mut rows = build_detail_rows(&day.client_breakdown, self.group_by());
         sort_detail_rows(&mut rows, self.sort_field, self.sort_direction);
         rows
     }
@@ -2722,7 +2758,7 @@ impl App {
         let Some(selection) = self.selected_period_detail else {
             return Vec::new();
         };
-        let Some(period) = build_period_usage(&self.usage().daily, selection.kind)
+        let Some(period) = build_period_usage(self.usage(), selection.kind)
             .into_iter()
             .find(|period| {
                 period.start_date == selection.start_date && period.end_date == selection.end_date
@@ -2731,7 +2767,7 @@ impl App {
             return Vec::new();
         };
 
-        let mut rows = build_detail_rows(&period.client_breakdown);
+        let mut rows = build_detail_rows(&period.client_breakdown, self.group_by());
         sort_detail_rows(&mut rows, self.sort_field, self.sort_direction);
         rows
     }
@@ -2772,7 +2808,7 @@ impl App {
     }
 
     pub fn get_sorted_periods(&self, kind: PeriodKind) -> Vec<PeriodUsage> {
-        let mut periods = build_period_usage(&self.usage().daily, kind);
+        let mut periods = build_period_usage(self.usage(), kind);
 
         // Metric sorts keep Year sections newest-first; ordering is metric-based within each year.
         match (self.sort_field, self.sort_direction) {
@@ -2975,9 +3011,9 @@ mod tests {
         // Add some mock data
         app.usage_mut_for_test().models = vec![
             UsageModelEntry {
-                model_id: "model1".to_string(),
-                display_name: "model1".to_string(),
-                provider: "provider1".to_string(),
+                model_id: "model1".into(),
+                display_name: "model1".into(),
+                provider: "provider1".into(),
                 clients: vec![ClientId::OpenCode],
                 tokens: UsageTokenBreakdown::default(),
                 cost: 0.0,
@@ -2986,9 +3022,9 @@ mod tests {
                 workspace_label: None,
             },
             UsageModelEntry {
-                model_id: "model2".to_string(),
-                display_name: "model2".to_string(),
-                provider: "provider2".to_string(),
+                model_id: "model2".into(),
+                display_name: "model2".into(),
+                provider: "provider2".into(),
                 clients: vec![ClientId::OpenCode],
                 tokens: UsageTokenBreakdown::default(),
                 cost: 0.0,
@@ -3022,9 +3058,9 @@ mod tests {
         // Add some mock data
         app.usage_mut_for_test().models = vec![
             UsageModelEntry {
-                model_id: "model1".to_string(),
-                display_name: "model1".to_string(),
-                provider: "provider1".to_string(),
+                model_id: "model1".into(),
+                display_name: "model1".into(),
+                provider: "provider1".into(),
                 clients: vec![ClientId::OpenCode],
                 tokens: UsageTokenBreakdown::default(),
                 cost: 0.0,
@@ -3033,9 +3069,9 @@ mod tests {
                 workspace_label: None,
             },
             UsageModelEntry {
-                model_id: "model2".to_string(),
-                display_name: "model2".to_string(),
-                provider: "provider2".to_string(),
+                model_id: "model2".into(),
+                display_name: "model2".into(),
+                provider: "provider2".into(),
                 clients: vec![ClientId::OpenCode],
                 tokens: UsageTokenBreakdown::default(),
                 cost: 0.0,
@@ -3068,9 +3104,9 @@ mod tests {
 
         // Add some mock data
         app.usage_mut_for_test().models = vec![UsageModelEntry {
-            model_id: "model1".to_string(),
-            display_name: "model1".to_string(),
-            provider: "provider1".to_string(),
+            model_id: "model1".into(),
+            display_name: "model1".into(),
+            provider: "provider1".into(),
             clients: vec![ClientId::OpenCode],
             tokens: UsageTokenBreakdown::default(),
             cost: 0.0,
@@ -3308,9 +3344,9 @@ mod tests {
         let mut app = make_app();
         app.usage_mut_for_test().models = (0..n)
             .map(|i| UsageModelEntry {
-                model_id: format!("model{}", i),
-                display_name: format!("model{}", i),
-                provider: "provider".to_string(),
+                model_id: format!("model{}", i).into(),
+                display_name: format!("model{}", i).into(),
+                provider: "provider".into(),
                 clients: vec![ClientId::OpenCode],
                 tokens: UsageTokenBreakdown::default(),
                 cost: 0.0,
@@ -3389,7 +3425,7 @@ mod tests {
         let mut total_cost = 0.0;
 
         for (client, models) in clients {
-            let mut model_breakdown = BTreeMap::new();
+            let mut model_breakdown = Vec::new();
             let mut client_tokens = UsageTokenBreakdown::default();
             let mut client_cost = 0.0;
 
@@ -3411,19 +3447,16 @@ mod tests {
                 client_cost += model_cost;
                 total_cost += model_cost;
 
-                model_breakdown.insert(
-                    model.to_string(),
-                    DailyModelInfo {
-                        provider: provider.to_string(),
-                        model_id: model.to_string(),
-                        display_name: model.to_string(),
-                        workspace_key: None,
-                        workspace_label: None,
-                        tokens,
-                        cost: model_cost,
-                        messages: 1,
-                    },
-                );
+                model_breakdown.push(DailyModelInfo {
+                    provider: provider.into(),
+                    model_id: model.into(),
+                    display_name: model.into(),
+                    workspace_key: None,
+                    workspace_label: None,
+                    tokens,
+                    cost: model_cost,
+                    messages: 1,
+                });
             }
 
             client_breakdown.insert(
@@ -3447,13 +3480,12 @@ mod tests {
     }
 
     #[test]
-    fn detail_rows_keep_canonical_model_identity_separate_from_storage_keys() {
+    fn detail_rows_keep_canonical_model_identity() {
         let canonical_model_id = "claude-opus-4.6";
-        let storage_key = "v1|4:kiro|14:amazon-bedrock|17:claude-opus-4.6";
         let model = DailyModelInfo {
-            provider: "amazon-bedrock".to_string(),
-            model_id: canonical_model_id.to_string(),
-            display_name: canonical_model_id.to_string(),
+            provider: "amazon-bedrock".into(),
+            model_id: canonical_model_id.into(),
+            display_name: canonical_model_id.into(),
             workspace_key: None,
             workspace_label: None,
             tokens: UsageTokenBreakdown {
@@ -3468,16 +3500,15 @@ mod tests {
             DailyClientInfo {
                 tokens: model.tokens.clone(),
                 cost: 0.0,
-                models: BTreeMap::from([(storage_key.to_string(), model)]),
+                models: vec![model],
             },
         )]);
 
-        let rows = build_detail_rows(&client_breakdown);
+        let rows = build_detail_rows(&client_breakdown, GroupBy::ClientProviderModel);
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model_id, canonical_model_id);
         assert_eq!(rows[0].model, canonical_model_id);
-        assert_ne!(rows[0].model_id, storage_key);
     }
 
     fn usage_data_with_graph_for_today(
@@ -3671,7 +3702,7 @@ mod tests {
         let mut app = make_app();
         app.usage_mut_for_test().agents = vec![
             AgentEntry {
-                agent: "builder".to_string(),
+                agent: "builder".into(),
                 client: ClientId::OpenCode,
                 tokens: UsageTokenBreakdown {
                     input: 10,
@@ -3685,7 +3716,7 @@ mod tests {
                 instance_count: 1,
             },
             AgentEntry {
-                agent: "reviewer".to_string(),
+                agent: "reviewer".into(),
                 client: ClientId::RooCode,
                 tokens: UsageTokenBreakdown {
                     input: 50,
@@ -3701,8 +3732,8 @@ mod tests {
         ];
 
         let agents = app.get_sorted_agents();
-        assert_eq!(agents[0].agent, "reviewer");
-        assert_eq!(agents[1].agent, "builder");
+        assert_eq!(agents[0].agent.as_ref(), "reviewer");
+        assert_eq!(agents[1].agent.as_ref(), "builder");
     }
 
     #[test]
@@ -3712,7 +3743,7 @@ mod tests {
         app.sort_direction = SortDirection::Ascending;
         app.usage_mut_for_test().agents = vec![
             AgentEntry {
-                agent: "builder".to_string(),
+                agent: "builder".into(),
                 client: ClientId::OpenCode,
                 tokens: UsageTokenBreakdown {
                     input: 100,
@@ -3726,7 +3757,7 @@ mod tests {
                 instance_count: 1,
             },
             AgentEntry {
-                agent: "reviewer".to_string(),
+                agent: "reviewer".into(),
                 client: ClientId::RooCode,
                 tokens: UsageTokenBreakdown {
                     input: 20,
@@ -3742,8 +3773,8 @@ mod tests {
         ];
 
         let agents = app.get_sorted_agents();
-        assert_eq!(agents[0].agent, "reviewer");
-        assert_eq!(agents[1].agent, "builder");
+        assert_eq!(agents[0].agent.as_ref(), "reviewer");
+        assert_eq!(agents[1].agent.as_ref(), "builder");
     }
 
     #[test]
@@ -4138,10 +4169,10 @@ mod tests {
             .get_mut(&ClientId::Claude)
             .unwrap()
             .models
-            .get_mut("fallback-model")
+            .iter_mut()
+            .find(|model| model.model_id.as_ref() == "fallback-model")
             .unwrap()
-            .display_name
-            .clear();
+            .display_name = "".into();
 
         app.handle_key_event(key(KeyCode::Enter));
 
@@ -4332,9 +4363,9 @@ mod tests {
         let mut app = make_app();
         app.usage_mut_for_test().models = vec![
             UsageModelEntry {
-                model_id: "expensive-low-token".to_string(),
-                display_name: "expensive-low-token".to_string(),
-                provider: "anthropic".to_string(),
+                model_id: "expensive-low-token".into(),
+                display_name: "expensive-low-token".into(),
+                provider: "anthropic".into(),
                 clients: vec![ClientId::Claude],
                 tokens: UsageTokenBreakdown {
                     input: 10,
@@ -4349,9 +4380,9 @@ mod tests {
                 workspace_label: None,
             },
             UsageModelEntry {
-                model_id: "cheap-high-token".to_string(),
-                display_name: "cheap-high-token".to_string(),
-                provider: "anthropic".to_string(),
+                model_id: "cheap-high-token".into(),
+                display_name: "cheap-high-token".into(),
+                provider: "anthropic".into(),
                 clients: vec![ClientId::Claude],
                 tokens: UsageTokenBreakdown {
                     input: 1_000,
@@ -4371,7 +4402,10 @@ mod tests {
 
         assert_eq!(app.sort_field, SortField::Tokens);
         assert_eq!(app.sort_direction, SortDirection::Descending);
-        assert_eq!(app.get_sorted_models()[0].model_id, "cheap-high-token");
+        assert_eq!(
+            app.get_sorted_models()[0].model_id.as_ref(),
+            "cheap-high-token"
+        );
     }
 
     #[test]
@@ -4711,7 +4745,7 @@ mod tests {
         app.selected_index = app
             .get_sorted_models()
             .iter()
-            .position(|model| model.model_id == "shared-model")
+            .position(|model| model.model_id.as_ref() == "shared-model")
             .unwrap();
 
         app.handle_key_event(key(KeyCode::Enter));
@@ -4726,7 +4760,7 @@ mod tests {
         let mut rows = app
             .get_sorted_models()
             .into_iter()
-            .map(|model| (model.clients.clone(), model.provider.clone()))
+            .map(|model| (model.clients.clone(), model.provider.to_string()))
             .collect::<Vec<_>>();
         rows.sort();
         assert_eq!(
@@ -4746,7 +4780,8 @@ mod tests {
             .get_sorted_models()
             .iter()
             .position(|model| {
-                model.model_id == "shared-model" && model.clients.as_slice() == [ClientId::Claude]
+                model.model_id.as_ref() == "shared-model"
+                    && model.clients.as_slice() == [ClientId::Claude]
             })
             .unwrap();
 
@@ -4764,7 +4799,7 @@ mod tests {
             .into_iter()
             .map(|model| {
                 assert_eq!(model.clients, [ClientId::Claude]);
-                model.provider.clone()
+                model.provider.to_string()
             })
             .collect::<Vec<_>>();
         providers.sort();
@@ -4779,7 +4814,7 @@ mod tests {
         app.selected_index = app
             .get_sorted_models()
             .iter()
-            .position(|model| model.model_id == "shared-model")
+            .position(|model| model.model_id.as_ref() == "shared-model")
             .unwrap();
         let outer_selection = app.selected_index;
 
@@ -4823,7 +4858,7 @@ mod tests {
         app.selected_index = app
             .get_sorted_models()
             .iter()
-            .position(|model| model.model_id == "shared-model")
+            .position(|model| model.model_id.as_ref() == "shared-model")
             .unwrap();
         app.handle_key_event(key(KeyCode::Enter));
         assert!(app.model_detail_models.is_some());
@@ -4836,7 +4871,7 @@ mod tests {
         app.selected_index = app
             .get_sorted_models()
             .iter()
-            .position(|model| model.model_id == "shared-model")
+            .position(|model| model.model_id.as_ref() == "shared-model")
             .unwrap();
         app.handle_key_event(key(KeyCode::Enter));
         assert!(app.model_detail_models.is_some());
@@ -4869,7 +4904,9 @@ mod tests {
 
         assert!(!app.is_model_detail_active());
         assert_eq!(
-            app.get_sorted_models()[app.selected_index].model_id,
+            app.get_sorted_models()[app.selected_index]
+                .model_id
+                .as_ref(),
             "shared-model"
         );
     }
@@ -4881,7 +4918,8 @@ mod tests {
             .get_sorted_models()
             .iter()
             .position(|model| {
-                model.model_id == "shared-model" && model.clients.as_slice() == [ClientId::Codex]
+                model.model_id.as_ref() == "shared-model"
+                    && model.clients.as_slice() == [ClientId::Codex]
             })
             .unwrap();
         app.handle_key_event(key(KeyCode::Enter));

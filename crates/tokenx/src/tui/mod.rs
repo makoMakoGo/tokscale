@@ -143,7 +143,6 @@ pub fn run(runtime: tokio::runtime::Handle, plan: crate::cli::TuiPlan) -> Result
         initial_tab,
     } = plan;
 
-    data::configure_allocator();
     if debug {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("debug")
@@ -606,19 +605,16 @@ mod tests {
                     crate::tui::data::DailyClientInfo {
                         tokens: tokens.clone(),
                         cost: 0.0,
-                        models: std::collections::BTreeMap::from([(
-                            "gpt-5".to_string(),
-                            crate::tui::data::DailyModelInfo {
-                                provider: "openai".to_string(),
-                                model_id: "gpt-5".to_string(),
-                                display_name: "gpt-5".to_string(),
-                                workspace_key: None,
-                                workspace_label: None,
-                                tokens,
-                                cost: 0.0,
-                                messages: 1,
-                            },
-                        )]),
+                        models: vec![crate::tui::data::DailyModelInfo {
+                            provider: "openai".into(),
+                            model_id: "gpt-5".into(),
+                            display_name: "gpt-5".into(),
+                            workspace_key: None,
+                            workspace_label: None,
+                            tokens,
+                            cost: 0.0,
+                            messages: 1,
+                        }],
                     },
                 )]),
                 message_count: 1,
@@ -707,9 +703,9 @@ mod tests {
         app.usage_mut_for_test()
             .models
             .push(crate::tui::data::UsageModelEntry {
-                model_id: "gpt-5".to_string(),
-                display_name: "gpt-5".to_string(),
-                provider: "openai".to_string(),
+                model_id: "gpt-5".into(),
+                display_name: "gpt-5".into(),
+                provider: "openai".into(),
                 clients: vec![ClientId::Codex],
                 workspace_key: None,
                 workspace_label: None,
@@ -900,7 +896,10 @@ mod tests {
 
         let cached_data = cached_data.expect("fresh cache must remain immediately visible");
         assert!(!needs_background_load);
-        assert_eq!(cached_data.sessions()[0].session_id, "cached-session");
+        assert_eq!(
+            cached_data.sessions()[0].session_id.as_ref(),
+            "cached-session"
+        );
         assert_eq!(cached_data.input_footprint().bytes_for(ClientId::Amp), 512);
     }
 
@@ -920,7 +919,10 @@ mod tests {
 
         let cached_data = cached_data.expect("stale cache must remain immediately visible");
         assert!(needs_background_load);
-        assert_eq!(cached_data.sessions()[0].session_id, "cached-session");
+        assert_eq!(
+            cached_data.sessions()[0].session_id.as_ref(),
+            "cached-session"
+        );
     }
 
     #[test]
@@ -997,7 +999,7 @@ mod tests {
         let mut app = app_on_client(Tab::Models, ClientId::Amp);
         let mut controller = controller_for(&app, loader.clone());
         controller.apply_result_for_test(&mut app, Ok(old), true);
-        assert_eq!(app.usage().models[0].model_id, "old-model");
+        assert_eq!(app.usage().models[0].model_id.as_ref(), "old-model");
 
         write_amp_model_input(home.path(), "new-model", 100);
         app.set_group_by_for_test(tokenx_engine::GroupBy::ClientProviderModel);
@@ -1006,7 +1008,7 @@ mod tests {
         controller.apply_result_for_test(&mut app, Ok(loaded), true);
 
         assert_eq!(app.group_by(), tokenx_engine::GroupBy::ClientProviderModel);
-        assert_eq!(app.usage().models[0].model_id, "new-model");
+        assert_eq!(app.usage().models[0].model_id.as_ref(), "new-model");
         assert_eq!(app.usage().models[0].clients, [ClientId::Amp]);
         let model_projection = app
             .generation_for_test()
@@ -1017,7 +1019,7 @@ mod tests {
                 chrono::NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
             ))
             .unwrap();
-        assert_eq!(model_projection.models[0].model_id, "new-model");
+        assert_eq!(model_projection.models[0].model_id.as_ref(), "new-model");
         assert_eq!(
             app.local_usage_status(),
             local_usage::LocalUsageStatus::Ready
@@ -1065,7 +1067,7 @@ mod tests {
         assert!(!app.is_background_loading());
         assert_eq!(app.usage().total_tokens, 99);
         assert_eq!(
-            app.session_snapshot().sessions()[0].session_id,
+            app.session_snapshot().sessions()[0].session_id.as_ref(),
             "new-session"
         );
         assert_eq!(input_bytes_for(&app, ClientId::Amp), Some(4096));
@@ -1103,7 +1105,7 @@ mod tests {
         assert!(!app.is_background_loading());
         assert_eq!(app.usage().total_tokens, 77);
         assert_eq!(
-            app.session_snapshot().sessions()[0].session_id,
+            app.session_snapshot().sessions()[0].session_id.as_ref(),
             "retained-session"
         );
         assert_eq!(input_bytes_for(&app, ClientId::Amp), Some(2048));
@@ -1189,7 +1191,7 @@ mod tests {
         controller.apply_result_for_test(&mut app, Err(anyhow::anyhow!("load failed")), false);
 
         assert_eq!(app.usage().total_tokens, old_tokens);
-        assert_eq!(app.usage().models[0].model_id, "retained-model");
+        assert_eq!(app.usage().models[0].model_id.as_ref(), "retained-model");
         assert_eq!(app.session_snapshot().sessions(), old_sessions);
         assert_eq!(input_bytes_for(&app, ClientId::Amp), old_input_bytes);
         assert!(app.has_installed_generation());
@@ -1232,7 +1234,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(data.total_tokens, 42);
                 assert_eq!(
-                    generation.sessions()[0].session_id,
+                    generation.sessions()[0].session_id.as_ref(),
                     "loaded-despite-cache-error"
                 );
                 assert_eq!(generation.source_digest(), signature.process_digest());

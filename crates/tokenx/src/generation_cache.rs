@@ -137,11 +137,12 @@ fn current_timestamp_ms() -> anyhow::Result<u64> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::sync::Arc;
 
     use serial_test::serial;
     use tokenx_engine::{
-        scanner::ScannerSettings, ClientId, ClientUniverse, FrozenUsageIndex, InputFootprint,
-        SourceFingerprint,
+        scanner::ScannerSettings, AttributedUsageRecord, ClientId, ClientUniverse, InputFootprint,
+        SessionUsage, SourceFingerprint, TokenBreakdown,
     };
 
     use super::*;
@@ -172,6 +173,30 @@ mod tests {
     }
 
     fn generation(home: &std::path::Path) -> Generation {
+        let usage_index = tokenx_engine::build_usage_index(
+            &[AttributedUsageRecord::new(
+                ClientId::Amp,
+                "amp-model",
+                "amp-provider",
+                "amp-session",
+                1_706_745_600_000,
+                TokenBreakdown {
+                    input: 11,
+                    output: 2,
+                    ..TokenBreakdown::default()
+                },
+                0.25,
+            )],
+            tokenx_engine::DateRange::none(),
+        );
+        let mut session = SessionUsage::new(ClientId::Amp, "amp-session");
+        session.models.insert(Arc::from("amp-model"));
+        session.tokens.input = 11;
+        session.tokens.output = 2;
+        session.cost = 0.25;
+        session.message_count = 1;
+        session.first_seen = 1_706_745_600;
+        session.last_seen = 1_706_745_600;
         Generation::new(
             AcquisitionConfig::new(
                 home.to_path_buf(),
@@ -181,8 +206,8 @@ mod tests {
             )
             .unwrap(),
             SourceFingerprint::from_bytes([9; 32]),
-            FrozenUsageIndex::new(),
-            Vec::new(),
+            usage_index,
+            vec![session],
             InputFootprint::from_client_bytes([(ClientId::Amp, 13)]).unwrap(),
             tokenx_engine::input_health::HealthSummary::default(),
             vec![tokenx_engine::pricing::PricingDiagnostic::cached_fallback(
@@ -220,13 +245,24 @@ mod tests {
             loaded.pricing_status(),
             tokenx_engine::pricing::PricingStatus::CachedFallback
         );
-        assert!(loaded
+        assert_eq!(loaded.sessions()[0].session_id.as_ref(), "amp-session");
+        assert_eq!(
+            loaded.sessions()[0]
+                .models
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<_>>(),
+            ["amp-model"]
+        );
+        let projection = loaded
             .project_usage(&tokenx_engine::UsageQuery::full(
                 loaded.universe(),
                 tokenx_engine::GroupBy::Model,
                 chrono::NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
             ))
-            .is_ok());
+            .unwrap();
+        assert_eq!(projection.total_tokens, 13);
+        assert_eq!(projection.models[0].model_id.as_ref(), "amp-model");
     }
 
     #[test]

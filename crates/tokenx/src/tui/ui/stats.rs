@@ -364,12 +364,12 @@ struct RankedModel {
 fn rank_canonical_models(daily: &DailyUsage) -> Vec<RankedModel> {
     let mut totals: BTreeMap<String, (u64, f64)> = BTreeMap::new();
     for client_info in daily.client_breakdown.values() {
-        for model in client_info.models.values() {
+        for model in &client_info.models {
             let tokens = model.tokens.total();
             if model.model_id.is_empty() || tokens == 0 {
                 continue;
             }
-            let entry = totals.entry(model.model_id.clone()).or_default();
+            let entry = totals.entry(model.model_id.to_string()).or_default();
             entry.0 = entry.0.saturating_add(tokens);
             entry.1 += model.cost;
         }
@@ -844,9 +844,9 @@ mod tests {
         cost: f64,
     ) -> DailyModelInfo {
         DailyModelInfo {
-            provider: provider.to_string(),
-            model_id: model_id.to_string(),
-            display_name: display_name.to_string(),
+            provider: provider.into(),
+            model_id: model_id.into(),
+            display_name: display_name.into(),
             workspace_key: None,
             workspace_label: None,
             tokens: token_breakdown(tokens),
@@ -859,10 +859,7 @@ mod tests {
         DailyClientInfo {
             tokens: token_breakdown(tokens),
             cost,
-            models: models
-                .into_iter()
-                .map(|(key, model)| (key.to_string(), model))
-                .collect(),
+            models: models.into_iter().map(|(_, model)| model).collect(),
         }
     }
 
@@ -896,7 +893,7 @@ mod tests {
             tokens: token_breakdown(tokens),
             cost: 0.0,
             clients: BTreeSet::new(),
-            models: BTreeMap::new(),
+            models: Vec::new(),
             message_count: 0,
             turn_count: 0,
         }

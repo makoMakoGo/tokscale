@@ -24,7 +24,9 @@ workspace facts, daily totals, and finer-than-daily data that cannot be
 recovered later.
 
 Maintained time views coarser than daily are derived from the already aggregated
-daily buckets with `build_period_usage(daily, kind)`:
+projection with `build_period_usage(usage, kind)`. `UsageProjection` carries the
+`GroupBy` that produced its lossy daily model values, so period derivation
+cannot interpret those values under an independently supplied grouping:
 
 - monthly and weekly never add another per-message map;
 - hourly remains a per-message aggregate because daily has discarded hour
@@ -101,11 +103,14 @@ Model-carrying view entries have disjoint fields:
 - grouping dimensions such as `workspace_key` and `workspace_label` travel in
   dedicated structured fields.
 
-`GroupedModelKey::map_key` is a collision-free internal storage encoding, not a
-display or semantic fallback. `color_key` is not part of the model contract.
-Model color is the fixed brand color selected from canonical model family; an
-unclassified model receives the explicit neutral color. Provider, route, cost,
-rank, client, workspace, and Group By do not affect that color.
+Daily and hourly model collections are stable ordered vectors. Transient typed
+grouping identities determine their order but are not persisted as duplicate
+string keys. Period derivation reads the grouping authority from the same
+projection and uses transient typed `BTreeMap` buckets before emitting another
+stable vector. `color_key` is not part of the model contract. Model color is the
+fixed brand color selected from canonical model family; an unclassified model
+receives the explicit neutral color. Provider, route, cost, rank, client,
+workspace, and Group By do not affect that color.
 
 Exports identify `groupBy` and emit structured grouping fields such as
 `workspaceKey` and `workspaceLabel`, so payloads are self-describing.

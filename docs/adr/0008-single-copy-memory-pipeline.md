@@ -160,10 +160,10 @@ original error. Aggregation over caller-owned slices does not sweep global
 state.
 
 Grouping uses structured Arc-backed keys, matches the requested grouping before
-cloning unrelated fields, and creates public strings only for materialized
-buckets. Composite identities never use delimiter-concatenated public keys.
-Persisted map keys are versioned, variant-tagged, byte-length-prefixed values
-with a distinct unknown-workspace tag.
+cloning unrelated fields, and projects canonical identity fields by cloning
+their `Arc<str>`. Materialized daily and hourly models are stable ordered
+vectors; transient typed keys establish their order and are then discarded, so
+the projection retains neither duplicate strings nor synthetic storage keys.
 
 `InputFootprint` is the sole input-space fact. It maps typed `ClientId` values to
 the byte size of snapshots confirmed at the final cache-decision/fold boundary,
@@ -237,9 +237,22 @@ ADR 0028 owns refresh installation and projection behavior.
 ### Resident-memory behavior
 
 After transient load state or a replaced generation is dropped, Linux/glibc
-builds trim freed pages. The TUI limits glibc to one arena before worker threads
-start so short-lived folds do not leave detached arena high-water marks.
-Other platforms retain native allocator behavior.
+builds trim freed pages. The application composition root limits glibc to one
+arena before constructing the Tokio runtime or any acquisition worker threads,
+so short-lived parallel folds do not leave detached arena high-water marks; a
+rejected allocator policy fails process initialization explicitly.
+The Tokio runtime uses two workers so terminal, timer, subscription, and pricing
+I/O remain responsive without multiplying allocator arenas by the host CPU
+count. CPU scanning and parsing run on a pool scoped to one prepared
+acquisition, bounded to four
+workers or the machine's available parallelism when lower; acquisition
+therefore cannot silently expand onto Rayon's host-sized global pool, and a
+fresh cache hit retains no idle CPU pool. After asynchronous pricing completes,
+the acquisition owner synchronously installs the CPU fold on that pool. The fold
+therefore finishes or propagates its panic before the build future can be
+dropped; the TUI runs that owner on its joined acquisition thread, while
+headless callers accept this explicitly non-cancellable CPU phase. Other
+platforms retain native allocator behavior.
 
 ## Consequences
 

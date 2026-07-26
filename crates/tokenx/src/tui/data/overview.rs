@@ -113,10 +113,10 @@ impl OverviewSummary {
                     .or_default()
                     .add(client.tokens.total(), client.cost);
 
-                for model in client.models.values() {
+                for model in &client.models {
                     let model_tokens = model.tokens.total();
                     models
-                        .entry(model.model_id.clone())
+                        .entry(model.model_id.to_string())
                         .or_default()
                         .add(model_tokens, model.cost);
                     families
@@ -231,7 +231,7 @@ mod tests {
         let mut day_cost = 0.0;
 
         for (client_id, models) in clients {
-            let mut client_models = BTreeMap::new();
+            let mut client_models = Vec::new();
             let mut client_tokens = UsageTokenBreakdown::default();
             let mut client_cost = 0.0;
             for (model_id, model_tokens, cost) in models {
@@ -245,19 +245,16 @@ mod tests {
                     client_cost += cost;
                     day_cost += cost;
                 }
-                client_models.insert(
-                    model_id.to_string(),
-                    DailyModelInfo {
-                        provider: String::new(),
-                        model_id: model_id.to_string(),
-                        display_name: model_id.to_string(),
-                        workspace_key: None,
-                        workspace_label: None,
-                        tokens: model_tokens,
-                        cost,
-                        messages: 1,
-                    },
-                );
+                client_models.push(DailyModelInfo {
+                    provider: "".into(),
+                    model_id: model_id.into(),
+                    display_name: model_id.into(),
+                    workspace_key: None,
+                    workspace_label: None,
+                    tokens: model_tokens,
+                    cost,
+                    messages: 1,
+                });
             }
             client_breakdown.insert(
                 ClientId::from_str(client_id).expect("test client must be accepted"),

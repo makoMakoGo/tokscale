@@ -287,9 +287,9 @@ mod tests {
             ..UsageTokenBreakdown::default()
         };
         let model = DailyModelInfo {
-            provider: "openai".to_string(),
-            model_id: "gpt-5".to_string(),
-            display_name: "gpt-5".to_string(),
+            provider: "openai".into(),
+            model_id: "gpt-5".into(),
+            display_name: "gpt-5".into(),
             workspace_key: None,
             workspace_label: None,
             tokens: tokens.clone(),
@@ -305,7 +305,7 @@ mod tests {
                 DailyClientInfo {
                     tokens,
                     cost: 0.0,
-                    models: BTreeMap::from([("gpt-5".to_string(), model)]),
+                    models: vec![model],
                 },
             )]),
             message_count: 1,
@@ -326,16 +326,13 @@ mod tests {
             tokens: tokens.clone(),
             cost: 0.0,
             clients: BTreeSet::from([ClientId::Codex]),
-            models: BTreeMap::from([(
-                "gpt-5".to_string(),
-                HourlyModelInfo {
-                    provider: "openai".to_string(),
-                    model_id: "gpt-5".to_string(),
-                    display_name: "gpt-5".to_string(),
-                    tokens,
-                    cost: 0.0,
-                },
-            )]),
+            models: vec![HourlyModelInfo {
+                provider: "openai".into(),
+                model_id: "gpt-5".into(),
+                display_name: "gpt-5".into(),
+                tokens,
+                cost: 0.0,
+            }],
             message_count: 1,
             turn_count: 1,
         }

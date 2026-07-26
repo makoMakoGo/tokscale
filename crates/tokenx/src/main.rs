@@ -17,11 +17,10 @@ use commands::models::run_models;
 use commands::pricing::{run_pricing_list_overrides, run_pricing_lookup};
 use failure::{CliFailure, FailureClass};
 
+const TOKIO_WORKER_THREADS: usize = 2;
+
 fn main() {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match build_process_runtime() {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("Error: failed to initialize async runtime: {error}");
@@ -40,6 +39,29 @@ fn main() {
             std::process::exit(error.exit_code());
         }
     }
+}
+
+/// Install process-wide memory policy before constructing any worker threads.
+fn build_process_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    configure_allocator()?;
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(TOKIO_WORKER_THREADS)
+        .enable_all()
+        .build()
+}
+
+/// Keep transient parallel acquisition allocations in one glibc arena.
+fn configure_allocator() -> std::io::Result<()> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+        let configured = unsafe { libc::mallopt(libc::M_ARENA_MAX, 1) };
+        if configured == 0 {
+            return Err(std::io::Error::other(
+                "glibc rejected the process allocator arena limit",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn run(runtime: &tokio::runtime::Runtime) -> std::result::Result<ExecutionOutcome, CliFailure> {

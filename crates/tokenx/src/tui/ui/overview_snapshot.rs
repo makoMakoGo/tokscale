@@ -843,9 +843,9 @@ mod tests {
             ..UsageTokenBreakdown::default()
         };
         let model = DailyModelInfo {
-            provider: "openai".to_string(),
-            model_id: "gpt-5.4".to_string(),
-            display_name: "gpt-5.4".to_string(),
+            provider: "openai".into(),
+            model_id: "gpt-5.4".into(),
+            display_name: "gpt-5.4".into(),
             workspace_key: None,
             workspace_label: None,
             tokens: tokens.clone(),
@@ -855,7 +855,7 @@ mod tests {
         let client_usage = DailyClientInfo {
             tokens: tokens.clone(),
             cost: 1.0,
-            models: BTreeMap::from([("gpt-5.4".to_string(), model)]),
+            models: vec![model],
         };
         let day = DailyUsage {
             date: NaiveDate::from_ymd_opt(2026, 7, 16).unwrap(),

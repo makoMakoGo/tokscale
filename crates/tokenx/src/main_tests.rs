@@ -6,6 +6,14 @@ use clap::Parser;
 use tokenx_engine::ClientId;
 
 #[test]
+fn process_runtime_uses_bounded_worker_pool() {
+    let runtime = super::build_process_runtime().expect("process runtime must build");
+
+    assert_eq!(runtime.metrics().num_workers(), super::TOKIO_WORKER_THREADS);
+    assert_eq!(super::TOKIO_WORKER_THREADS, 2);
+}
+
+#[test]
 fn tui_exit_maps_to_process_execution_outcome() {
     assert_eq!(
         super::ExecutionOutcome::from(crate::tui::TuiExit::Quit),

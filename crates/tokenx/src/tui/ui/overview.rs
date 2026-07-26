@@ -99,8 +99,11 @@ fn collect_overview_data(app: &App) -> OverviewData {
 
     for day in &app.usage().daily {
         for client in day.client_breakdown.values() {
-            for model in client.models.values() {
-                let entry = overview.models.entry(model.model_id.clone()).or_default();
+            for model in &client.models {
+                let entry = overview
+                    .models
+                    .entry(model.model_id.to_string())
+                    .or_default();
                 entry.tokens = entry
                     .tokens
                     .checked_add(model.tokens.total())
@@ -130,8 +133,8 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
             .map(|day| {
                 let mut models = BTreeMap::<String, ModelAggregate>::new();
                 for client in day.client_breakdown.values() {
-                    for model in client.models.values() {
-                        let entry = models.entry(model.model_id.clone()).or_default();
+                    for model in &client.models {
+                        let entry = models.entry(model.model_id.to_string()).or_default();
                         entry.tokens = entry
                             .tokens
                             .checked_add(model.tokens.total())
@@ -163,8 +166,8 @@ fn render_chart(frame: &mut Frame, app: &App, area: Rect) {
             .rev()
             .map(|hour| {
                 let mut models = BTreeMap::<String, ModelAggregate>::new();
-                for model in hour.models.values() {
-                    let entry = models.entry(model.model_id.clone()).or_default();
+                for model in &hour.models {
+                    let entry = models.entry(model.model_id.to_string()).or_default();
                     entry.tokens = entry
                         .tokens
                         .checked_add(model.tokens.total())
@@ -323,27 +326,24 @@ mod tests {
 
     fn app_with_models(width: u16, model_names: &[&str]) -> App {
         let mut app = make_app(width);
-        let mut models = BTreeMap::new();
+        let mut models = Vec::new();
         for name in model_names {
-            models.insert(
-                name.to_string(),
-                DailyModelInfo {
-                    provider: "provider".to_string(),
-                    model_id: name.to_string(),
-                    display_name: name.to_string(),
-                    workspace_key: None,
-                    workspace_label: None,
-                    tokens: UsageTokenBreakdown {
-                        input: 100,
-                        output: 10,
-                        cache_read: 0,
-                        cache_write: 0,
-                        reasoning: 0,
-                    },
-                    cost: 1.0,
-                    messages: 1,
+            models.push(DailyModelInfo {
+                provider: "provider".into(),
+                model_id: (*name).into(),
+                display_name: (*name).into(),
+                workspace_key: None,
+                workspace_label: None,
+                tokens: UsageTokenBreakdown {
+                    input: 100,
+                    output: 10,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
                 },
-            );
+                cost: 1.0,
+                messages: 1,
+            });
         }
         let mut client_breakdown = BTreeMap::new();
         client_breakdown.insert(

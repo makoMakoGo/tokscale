@@ -8,14 +8,6 @@ use crate::{records, AttributedUsageRecord, ClientId, GroupBy};
 
 pub const UNKNOWN_WORKSPACE_LABEL: &str = "Unknown workspace";
 
-fn push_len_prefixed(output: &mut String, value: &str) {
-    output.push_str(&value.len().to_string());
-    output.push(':');
-    output.push_str(value);
-}
-
-const STORAGE_KEY_VERSION: &str = "v1|";
-
 /// Allocation-free for the empty and singleton cases; a hash table is
 /// created only when a second distinct identity is actually observed.
 #[derive(Default, Serialize, Deserialize)]
@@ -62,16 +54,19 @@ where
             Self::Many(values) => values.len(),
         }
     }
+
+    pub(crate) fn shrink_to_fit(&mut self) {
+        if let Self::Many(values) = self {
+            values.shrink_to_fit();
+        }
+    }
 }
 
-impl<T> IdentitySet<T>
-where
-    T: AsRef<str> + Eq + Hash,
-{
-    pub(crate) fn to_sorted_string(&self) -> String {
+impl IdentitySet<Arc<str>> {
+    pub(crate) fn to_sorted_arc(&self) -> Arc<str> {
         match self {
             Self::Empty => panic!("identity set must contain a value before materialization"),
-            Self::One(value) => value.as_ref().to_owned(),
+            Self::One(value) => Arc::clone(value),
             Self::Many(values) => {
                 let mut values: Vec<_> = values.iter().collect();
                 values.sort_unstable_by(|left, right| left.as_ref().cmp(right.as_ref()));
@@ -96,7 +91,7 @@ where
                     }
                     output.push_str(value.as_ref());
                 }
-                output
+                records::intern::intern(&output)
             }
         }
     }
@@ -104,7 +99,7 @@ where
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub(crate) enum WorkspaceKey {
-    Known(Arc<str>),
+    Known(#[serde(deserialize_with = "crate::records::intern::de_intern")] Arc<str>),
     Unknown,
 }
 
@@ -168,70 +163,12 @@ impl GroupedModelKey {
     pub(crate) fn merges_clients(&self) -> bool {
         matches!(self, Self::Model(_) | Self::WorkspaceModel { .. })
     }
-
-    /// Stable, collision-free key for DTO maps that cannot retain the
-    /// structured enum directly. Every component is byte-length-prefixed and
-    /// each enum variant, including known versus unknown workspace, has its
-    /// own tag.
-    pub(crate) fn map_key(&self) -> String {
-        let mut output = String::from(STORAGE_KEY_VERSION);
-        match self {
-            Self::Model(model) => {
-                output.push_str("m|");
-                push_len_prefixed(&mut output, model);
-            }
-            Self::ClientModel { client, model } => {
-                output.push_str("cm|");
-                push_len_prefixed(&mut output, client.as_str());
-                push_len_prefixed(&mut output, model);
-            }
-            Self::ClientProviderModel {
-                client,
-                provider,
-                model,
-            } => {
-                output.push_str("cpm|");
-                push_len_prefixed(&mut output, client.as_str());
-                push_len_prefixed(&mut output, provider);
-                push_len_prefixed(&mut output, model);
-            }
-            Self::WorkspaceModel { workspace, model } => {
-                match workspace {
-                    WorkspaceKey::Known(workspace) => {
-                        output.push_str("wmk|");
-                        push_len_prefixed(&mut output, workspace);
-                    }
-                    WorkspaceKey::Unknown => output.push_str("wmu|"),
-                }
-                push_len_prefixed(&mut output, model);
-            }
-        }
-        output
-    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum HourlyModelKey {
     Model(Arc<str>),
     ProviderModel { provider: Arc<str>, model: Arc<str> },
-}
-
-impl HourlyModelKey {
-    pub(crate) fn map_key(&self) -> String {
-        let mut output = String::from(STORAGE_KEY_VERSION);
-        match self {
-            Self::Model(model) => {
-                output.push_str("m|");
-                push_len_prefixed(&mut output, model);
-            }
-            Self::ProviderModel { provider, model } => {
-                output.push_str("pm|");
-                push_len_prefixed(&mut output, provider);
-                push_len_prefixed(&mut output, model);
-            }
-        }
-        output
-    }
 }
 
 /// Finest-granularity model identity for every public `GroupBy` dimension,
@@ -241,9 +178,12 @@ impl HourlyModelKey {
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FineModelKey {
     pub(crate) client: ClientId,
+    #[serde(deserialize_with = "crate::records::intern::de_intern")]
     pub(crate) provider: Arc<str>,
     pub(crate) workspace: WorkspaceKey,
+    #[serde(deserialize_with = "crate::records::intern::de_intern")]
     pub(crate) session: Arc<str>,
+    #[serde(deserialize_with = "crate::records::intern::de_intern")]
     pub(crate) model: Arc<str>,
 }
 
@@ -284,7 +224,9 @@ impl FineModelKey {
 /// grouping re-folds providers back into the bare model.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FineHourlyModelKey {
+    #[serde(deserialize_with = "crate::records::intern::de_intern")]
     pub(crate) provider: Arc<str>,
+    #[serde(deserialize_with = "crate::records::intern::de_intern")]
     pub(crate) model: Arc<str>,
 }
 
@@ -316,10 +258,11 @@ pub(crate) fn workspace_fields(msg: &AttributedUsageRecord) -> (Option<Arc<str>>
         (Some(key), None) => (
             Some(Arc::clone(key)),
             records::workspace_label_from_key(key)
-                .map(Arc::from)
-                .unwrap_or_else(|| Arc::from(UNKNOWN_WORKSPACE_LABEL)),
+                .as_deref()
+                .map(records::intern::intern)
+                .unwrap_or_else(|| records::intern::intern(UNKNOWN_WORKSPACE_LABEL)),
         ),
-        _ => (None, Arc::from(UNKNOWN_WORKSPACE_LABEL)),
+        _ => (None, records::intern::intern(UNKNOWN_WORKSPACE_LABEL)),
     }
 }
 
@@ -377,9 +320,6 @@ mod tests {
         let left = GroupedModelKey::from_message(&GroupBy::ClientModel, &left);
         let right = GroupedModelKey::from_message(&GroupBy::ClientModel, &right);
         assert_ne!(left, right);
-        assert_ne!(left.map_key(), right.map_key());
-        assert_eq!(left.map_key(), "v1|cm|3:amp1:c");
-        assert_eq!(right.map_key(), "v1|cm|5:codex1:c");
     }
 
     #[test]
@@ -418,36 +358,6 @@ mod tests {
         let left = FineHourlyModelKey::from_message(&left).grouped(&GroupBy::ClientProviderModel);
         let right = FineHourlyModelKey::from_message(&right).grouped(&GroupBy::ClientProviderModel);
         assert_ne!(left, right);
-        assert_ne!(left.map_key(), right.map_key());
-        assert_eq!(left.map_key(), "v1|pm|3:a:b1:c");
-        assert_eq!(right.map_key(), "v1|pm|1:a3:b:c");
-    }
-
-    #[test]
-    fn map_keys_tag_every_grouping_variant() {
-        let msg = message();
-        let cases = [
-            (GroupBy::Model, "v1|m|"),
-            (GroupBy::ClientModel, "v1|cm|"),
-            (GroupBy::ClientProviderModel, "v1|cpm|"),
-            (GroupBy::WorkspaceModel, "v1|wmk|"),
-        ];
-        for (group_by, prefix) in cases {
-            assert!(GroupedModelKey::from_message(&group_by, &msg)
-                .map_key()
-                .starts_with(prefix));
-        }
-    }
-
-    #[test]
-    fn map_key_lengths_count_utf8_bytes() {
-        let mut msg = message();
-        msg.model_id = Arc::from("雪");
-
-        assert_eq!(
-            GroupedModelKey::from_message(&GroupBy::Model, &msg).map_key(),
-            "v1|m|3:雪"
-        );
     }
 
     #[test]
@@ -460,9 +370,6 @@ mod tests {
         let unknown = GroupedModelKey::from_message(&GroupBy::WorkspaceModel, &unknown);
         let literal = GroupedModelKey::from_message(&GroupBy::WorkspaceModel, &literal);
         assert_ne!(unknown, literal);
-        assert!(unknown.map_key().starts_with("v1|wmu|"));
-        assert!(literal.map_key().starts_with("v1|wmk|"));
-        assert_ne!(unknown.map_key(), literal.map_key());
     }
 
     #[test]

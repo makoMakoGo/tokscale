@@ -6,12 +6,15 @@
 //! form; [`UsageTokenBreakdown`] is the sanitized unsigned form presented to
 //! users.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 
-use crate::ClientId;
+use crate::{ClientId, GroupBy};
 
 /// Sanitized token breakdown with non-negative `u64` fields. Distinct from the
 /// core parsed `TokenBreakdown` (`i64`), which can carry negative/placeholder
@@ -64,14 +67,14 @@ impl UsageTokenBreakdown {
 pub struct UsageModelEntry {
     /// Bare canonical semantic identity used for grouping, ranking, pricing,
     /// detail selection, and model color.
-    pub model_id: String,
+    pub model_id: Arc<str>,
     /// Presentation-only model label.
-    pub display_name: String,
-    pub provider: String,
+    pub display_name: Arc<str>,
+    pub provider: Arc<str>,
     /// Clients contributing to this model bucket, in contribution order.
     pub clients: Vec<ClientId>,
-    pub workspace_key: Option<String>,
-    pub workspace_label: Option<String>,
+    pub workspace_key: Option<Arc<str>>,
+    pub workspace_label: Option<Arc<str>>,
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
     pub session_count: u32,
@@ -91,7 +94,7 @@ pub struct ModelProjection {
 
 #[derive(Debug, Clone)]
 pub struct AgentEntry {
-    pub agent: String,
+    pub agent: Arc<str>,
     pub client: ClientId,
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
@@ -108,14 +111,14 @@ pub struct DailyModelInfo {
     /// single daily model entry. In that case this field retains whichever
     /// provider was seen first and is **not** authoritative. Only treat it as
     /// exact when `group_by == GroupBy::ClientProviderModel`.
-    pub provider: String,
+    pub provider: Arc<str>,
     /// Bare canonical model ID: the authoritative model identity (ADR 0010).
-    pub model_id: String,
+    pub model_id: Arc<str>,
     /// Pure display label; never carries another grouping dimension.
-    pub display_name: String,
+    pub display_name: Arc<str>,
     /// Workspace dimension, populated only under `GroupBy::WorkspaceModel`.
-    pub workspace_key: Option<String>,
-    pub workspace_label: Option<String>,
+    pub workspace_key: Option<Arc<str>>,
+    pub workspace_label: Option<Arc<str>>,
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
     pub messages: u64,
@@ -125,7 +128,7 @@ pub struct DailyModelInfo {
 pub struct DailyClientInfo {
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
-    pub models: BTreeMap<String, DailyModelInfo>,
+    pub models: Vec<DailyModelInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,10 +143,10 @@ pub struct DailyUsage {
 
 #[derive(Debug, Clone)]
 pub struct HourlyModelInfo {
-    pub provider: String,
+    pub provider: Arc<str>,
     /// Bare canonical model ID: the authoritative model identity (ADR 0010).
-    pub model_id: String,
-    pub display_name: String,
+    pub model_id: Arc<str>,
+    pub display_name: Arc<str>,
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
 }
@@ -154,7 +157,7 @@ pub struct HourlyUsage {
     pub tokens: UsageTokenBreakdown,
     pub cost: f64,
     pub clients: BTreeSet<ClientId>,
-    pub models: BTreeMap<String, HourlyModelInfo>,
+    pub models: Vec<HourlyModelInfo>,
     pub message_count: u32,
     pub turn_count: u32,
 }
@@ -209,6 +212,9 @@ pub struct UsageGraphData {
 
 #[derive(Debug, Clone, Default)]
 pub struct UsageProjection {
+    /// Grouping authority used to materialize every group-sensitive field in
+    /// this projection, including daily and hourly model vectors.
+    pub group_by: GroupBy,
     pub models: Vec<UsageModelEntry>,
     pub agents: Vec<AgentEntry>,
     pub daily: Vec<DailyUsage>,

@@ -59,11 +59,15 @@ impl SessionTokens {
 #[serde(rename_all = "camelCase")]
 pub struct SessionUsage {
     pub client: ClientId,
-    pub session_id: String,
+    #[serde(deserialize_with = "crate::records::intern::de_intern")]
+    pub session_id: Arc<str>,
     pub is_main_session: bool,
-    pub workspace_key: Option<String>,
-    pub workspace_label: Option<String>,
-    pub models: BTreeSet<String>,
+    #[serde(default, deserialize_with = "crate::records::intern::de_intern_opt")]
+    pub workspace_key: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "crate::records::intern::de_intern_opt")]
+    pub workspace_label: Option<Arc<str>>,
+    #[serde(deserialize_with = "crate::records::intern::de_intern_btree_set")]
+    pub models: BTreeSet<Arc<str>>,
     pub tokens: SessionTokens,
     pub cost: f64,
     pub message_count: u64,
@@ -73,10 +77,10 @@ pub struct SessionUsage {
 }
 
 impl SessionUsage {
-    pub fn new(client: ClientId, session_id: impl Into<String>) -> Self {
+    pub fn new(client: ClientId, session_id: impl AsRef<str>) -> Self {
         Self {
             client,
-            session_id: session_id.into(),
+            session_id: crate::records::intern::intern(session_id.as_ref()),
             is_main_session: false,
             workspace_key: None,
             workspace_label: None,
@@ -164,15 +168,11 @@ impl SessionUsageBuilder {
             .into_iter()
             .map(|((client, session_id), bucket)| SessionUsage {
                 client,
-                session_id: session_id.to_string(),
+                session_id,
                 is_main_session: bucket.is_main_session,
-                workspace_key: bucket.workspace_key.map(|value| value.to_string()),
-                workspace_label: bucket.workspace_label.map(|value| value.to_string()),
-                models: bucket
-                    .models
-                    .into_iter()
-                    .map(|value| value.to_string())
-                    .collect(),
+                workspace_key: bucket.workspace_key,
+                workspace_label: bucket.workspace_label,
+                models: bucket.models,
                 tokens: bucket.tokens,
                 cost: bucket.cost,
                 message_count: bucket.message_count,
@@ -299,7 +299,7 @@ mod tests {
 
         let (usage, sessions) = accumulator.into_generation_parts();
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_id, "kept");
+        assert_eq!(sessions[0].session_id.as_ref(), "kept");
         assert_eq!(
             usage
                 .project_usage(
@@ -309,5 +309,66 @@ mod tests {
                 .total_tokens,
             18
         );
+    }
+
+    #[test]
+    fn finish_reuses_interned_session_identity_fields() {
+        let mut record = message(ClientId::Codex, "shared-session", 1_704_110_400_000);
+        record.workspace_key = Some(crate::records::intern::intern("/workspace/shared"));
+        record.workspace_label = Some(crate::records::intern::intern("shared"));
+        let session_id = Arc::clone(&record.session_id);
+        let workspace_key = Arc::clone(record.workspace_key.as_ref().unwrap());
+        let workspace_label = Arc::clone(record.workspace_label.as_ref().unwrap());
+        let model = Arc::clone(&record.model_id);
+
+        let mut builder = SessionUsageBuilder::new();
+        builder.push(&record);
+        let sessions = builder.finish();
+        let session = &sessions[0];
+
+        assert!(Arc::ptr_eq(&session.session_id, &session_id));
+        assert!(Arc::ptr_eq(
+            session.workspace_key.as_ref().unwrap(),
+            &workspace_key
+        ));
+        assert!(Arc::ptr_eq(
+            session.workspace_label.as_ref().unwrap(),
+            &workspace_label
+        ));
+        assert!(Arc::ptr_eq(session.models.first().unwrap(), &model));
+    }
+
+    #[test]
+    fn serde_keeps_string_wire_shape_and_reinterns_identity_fields() {
+        let mut session = SessionUsage::new(ClientId::Codex, "serde-session");
+        session.workspace_key = Some(crate::records::intern::intern("/workspace/serde"));
+        session.workspace_label = Some(crate::records::intern::intern("serde"));
+        session
+            .models
+            .insert(crate::records::intern::intern("gpt-5.6"));
+
+        let json = serde_json::to_value(&session).unwrap();
+        assert_eq!(json["sessionId"], "serde-session");
+        assert_eq!(json["workspaceKey"], "/workspace/serde");
+        assert_eq!(json["workspaceLabel"], "serde");
+        assert_eq!(json["models"], serde_json::json!(["gpt-5.6"]));
+
+        let session_id = Arc::clone(&session.session_id);
+        let workspace_key = Arc::clone(session.workspace_key.as_ref().unwrap());
+        let workspace_label = Arc::clone(session.workspace_label.as_ref().unwrap());
+        let model = Arc::clone(session.models.first().unwrap());
+        let encoded = bincode::serialize(&session).unwrap();
+        let restored: SessionUsage = bincode::deserialize(&encoded).unwrap();
+
+        assert!(Arc::ptr_eq(&restored.session_id, &session_id));
+        assert!(Arc::ptr_eq(
+            restored.workspace_key.as_ref().unwrap(),
+            &workspace_key
+        ));
+        assert!(Arc::ptr_eq(
+            restored.workspace_label.as_ref().unwrap(),
+            &workspace_label
+        ));
+        assert!(Arc::ptr_eq(restored.models.first().unwrap(), &model));
     }
 }

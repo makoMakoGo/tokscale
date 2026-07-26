@@ -344,7 +344,15 @@ fn render_session_details(
         .unwrap_or(WORKSPACE_MIN_WIDTH);
     let models_content_width = rows
         .iter()
-        .map(|row| display_width(&row.models.iter().cloned().collect::<Vec<_>>().join(", ")))
+        .map(|row| {
+            display_width(
+                &row.models
+                    .iter()
+                    .map(|model| model.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        })
         .max()
         .unwrap_or(MODELS_MIN_WIDTH);
     let layout = session_table_layout(
@@ -370,7 +378,12 @@ fn render_session_details(
                 .as_deref()
                 .or(row.workspace_key.as_deref())
                 .unwrap_or("—");
-            let models = row.models.iter().cloned().collect::<Vec<_>>().join(", ");
+            let models = row
+                .models
+                .iter()
+                .map(|model| model.as_ref())
+                .collect::<Vec<_>>()
+                .join(", ");
             let cells = columns
                 .iter()
                 .map(|column| {

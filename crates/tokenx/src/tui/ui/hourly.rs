@@ -446,7 +446,7 @@ mod tests {
     use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::{HourlyModelInfo, HourlyUsage, UsageTokenBreakdown};
     use ratatui::{backend::TestBackend, Terminal};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
     fn length_at(widths: &[Constraint], index: usize) -> u16 {
         match widths[index] {
@@ -463,7 +463,7 @@ mod tests {
             tokens: UsageTokenBreakdown::default(),
             cost: 1.0,
             clients,
-            models: BTreeMap::new(),
+            models: Vec::new(),
             message_count: 5,
             turn_count: 2,
         }
@@ -667,9 +667,9 @@ mod tests {
 
     fn hourly_model(provider: &str, model_id: &str, tokens: u64) -> HourlyModelInfo {
         HourlyModelInfo {
-            provider: provider.to_string(),
-            model_id: model_id.to_string(),
-            display_name: model_id.to_string(),
+            provider: provider.into(),
+            model_id: model_id.into(),
+            display_name: model_id.into(),
             tokens: UsageTokenBreakdown {
                 input: tokens,
                 ..UsageTokenBreakdown::default()
@@ -684,10 +684,7 @@ mod tests {
             input: 100,
             ..UsageTokenBreakdown::default()
         };
-        entry.models = models
-            .into_iter()
-            .map(|(key, model)| (key.to_string(), model))
-            .collect();
+        entry.models = models.into_iter().map(|(_, model)| model).collect();
         entry
     }
 

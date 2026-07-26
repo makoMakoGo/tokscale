@@ -563,12 +563,12 @@ mod tests {
     #[test]
     fn workspace_model_widths_split_workspace_from_bare_model() {
         let model = crate::tui::data::UsageModelEntry {
-            model_id: "gpt-5".to_string(),
-            display_name: "gpt-5".to_string(),
-            provider: "openai".to_string(),
+            model_id: "gpt-5".into(),
+            display_name: "gpt-5".into(),
+            provider: "openai".into(),
             clients: vec![tokenx_engine::ClientId::OpenCode],
-            workspace_key: Some("/work/project".to_string()),
-            workspace_label: Some("project-with-long-name".to_string()),
+            workspace_key: Some("/work/project".into()),
+            workspace_label: Some("project-with-long-name".into()),
             tokens: crate::tui::data::UsageTokenBreakdown {
                 input: 0,
                 output: 0,
@@ -592,11 +592,11 @@ mod tests {
     #[test]
     fn workspace_column_falls_back_to_key_when_label_missing() {
         let model = crate::tui::data::UsageModelEntry {
-            model_id: "gpt-5".to_string(),
-            display_name: "gpt-5".to_string(),
-            provider: "openai".to_string(),
+            model_id: "gpt-5".into(),
+            display_name: "gpt-5".into(),
+            provider: "openai".into(),
             clients: vec![tokenx_engine::ClientId::OpenCode],
-            workspace_key: Some("/work/project".to_string()),
+            workspace_key: Some("/work/project".into()),
             workspace_label: None,
             tokens: crate::tui::data::UsageTokenBreakdown::default(),
             cost: 0.0,
@@ -683,12 +683,12 @@ mod tests {
         cost: f64,
     ) -> crate::tui::data::UsageModelEntry {
         crate::tui::data::UsageModelEntry {
-            model_id: model.to_string(),
-            display_name: model.to_string(),
-            provider: "openai".to_string(),
+            model_id: model.into(),
+            display_name: model.into(),
+            provider: "openai".into(),
             clients: vec![tokenx_engine::ClientId::OpenCode],
-            workspace_key: Some(format!("/work/{workspace}")),
-            workspace_label: Some(workspace.to_string()),
+            workspace_key: Some(format!("/work/{workspace}").into()),
+            workspace_label: Some(workspace.into()),
             tokens: crate::tui::data::UsageTokenBreakdown::default(),
             cost,
             session_count: 1,

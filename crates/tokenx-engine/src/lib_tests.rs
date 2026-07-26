@@ -1163,7 +1163,7 @@ fn test_workspace_model_grouping_merges_same_workspace_and_model() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].model_id, "claude-sonnet-4.5");
+    assert_eq!(entries[0].model_id.as_ref(), "claude-sonnet-4.5");
     assert_eq!(entries[0].workspace_key.as_deref(), Some("/repo-a"));
     assert_eq!(entries[0].workspace_label.as_deref(), Some("repo-a"));
     assert_eq!(entries[0].cost, 4.0);
@@ -1197,7 +1197,7 @@ fn test_model_grouping_cleans_fast_variant() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].model_id, "gpt-5.5");
+    assert_eq!(entries[0].model_id.as_ref(), "gpt-5.5");
     assert_eq!(entries[0].cost, 5.0);
 }
 
@@ -1228,7 +1228,7 @@ fn test_model_grouping_cleans_hyphenated_date_snapshot() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].model_id, "qwen3.7-max");
+    assert_eq!(entries[0].model_id.as_ref(), "qwen3.7-max");
     assert_eq!(entries[0].cost, 4.0);
 }
 
@@ -1259,7 +1259,7 @@ fn test_model_grouping_cleans_anthropic_prefixed_claude_variant() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].model_id, "claude-sonnet-4.6");
+    assert_eq!(entries[0].model_id.as_ref(), "claude-sonnet-4.6");
     assert_eq!(entries[0].cost, 4.0);
 }
 
@@ -1290,8 +1290,8 @@ fn test_model_grouping_uses_finalized_provider_ids() {
     );
 
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].model_id, "mimo-v2.5-pro");
-    assert_eq!(entries[0].provider, "xiaomi");
+    assert_eq!(entries[0].model_id.as_ref(), "mimo-v2.5-pro");
+    assert_eq!(entries[0].provider.as_ref(), "xiaomi");
     assert_eq!(entries[0].cost, 3.0);
 }
 
@@ -1323,8 +1323,8 @@ fn test_client_provider_model_grouping_uses_finalized_provider_ids() {
 
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].clients, [ClientId::OpenCode]);
-    assert_eq!(entries[0].provider, "xiaomi");
-    assert_eq!(entries[0].model_id, "mimo-v2.5-pro");
+    assert_eq!(entries[0].provider.as_ref(), "xiaomi");
+    assert_eq!(entries[0].model_id.as_ref(), "mimo-v2.5-pro");
     assert_eq!(entries[0].cost, 3.0);
 }
 
@@ -1547,12 +1547,12 @@ fn test_workspace_model_grouping_avoids_separator_key_collisions() {
     assert_eq!(entries.len(), 2);
     assert!(entries.iter().any(|entry| {
         entry.workspace_key.as_deref() == Some("a:b")
-            && entry.model_id == "c"
+            && entry.model_id.as_ref() == "c"
             && (entry.cost - 1.0).abs() < f64::EPSILON
     }));
     assert!(entries.iter().any(|entry| {
         entry.workspace_key.as_deref() == Some("a")
-            && entry.model_id == "b:c"
+            && entry.model_id.as_ref() == "b:c"
             && (entry.cost - 2.0).abs() < f64::EPSILON
     }));
 }
@@ -2158,7 +2158,10 @@ fn generation_footprint_uses_confirmed_inventory() {
     );
     let sessions = generation.sessions();
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].session_id, "session-confirmed-after-prepare");
+    assert_eq!(
+        sessions[0].session_id.as_ref(),
+        "session-confirmed-after-prepare"
+    );
 }
 
 #[test]
@@ -2402,7 +2405,7 @@ fn prepare_discovers_once_and_execute_consumes_the_same_inventory() {
 
 #[test]
 #[serial_test::serial]
-fn prepared_aggregation_reclaims_dead_interner_indices_after_materialization() {
+fn prepared_aggregation_projection_retains_only_live_interned_identities() {
     let home = tempfile::TempDir::new().unwrap();
     let amp_dir = home.path().join(".local/share/amp/threads");
     std::fs::create_dir_all(&amp_dir).unwrap();
@@ -2433,10 +2436,13 @@ fn prepared_aggregation_reclaims_dead_interner_indices_after_materialization() {
     let prepared = super::prepare_test_inventory(inventory_options(home.path(), &["amp"])).unwrap();
     let usage = super::load_prepared_test_usage(prepared, GroupBy::Model, None).unwrap();
 
-    assert_eq!(usage.models[0].model_id, model);
-    assert_eq!(usage.models[0].display_name, model);
+    assert_eq!(usage.models[0].model_id.as_ref(), model);
+    assert_eq!(usage.models[0].display_name.as_ref(), model);
     assert_eq!(crate::records::intern::prune_count(), prune_before + 1);
-    assert_eq!(crate::records::intern::indexed_live_count(model), 0);
+    assert_eq!(crate::records::intern::indexed_live_count(model), 1);
+    let shared_model = crate::records::intern::intern(model);
+    assert!(Arc::ptr_eq(&usage.models[0].model_id, &shared_model));
+    drop(shared_model);
     assert_eq!(
         crate::records::intern::indexed_live_count(&externally_live),
         1
@@ -2445,6 +2451,9 @@ fn prepared_aggregation_reclaims_dead_interner_indices_after_materialization() {
         &externally_live,
         &crate::records::intern::intern(&externally_live)
     ));
+    drop(usage);
+    crate::records::intern::prune_dead();
+    assert_eq!(crate::records::intern::indexed_live_count(model), 0);
 }
 
 #[test]
@@ -5528,8 +5537,8 @@ fn test_default_usage_projection_includes_antigravity_database_rows() {
     assert_eq!(usage.total_tokens, 19);
     assert_eq!(usage.models.len(), 1);
     assert_eq!(usage.models[0].clients, [ClientId::Antigravity]);
-    assert_eq!(usage.models[0].model_id, "gemini-3.5-flash");
-    assert_eq!(usage.models[0].display_name, "gemini-3.5-flash");
+    assert_eq!(usage.models[0].model_id.as_ref(), "gemini-3.5-flash");
+    assert_eq!(usage.models[0].display_name.as_ref(), "gemini-3.5-flash");
 }
 
 #[test]

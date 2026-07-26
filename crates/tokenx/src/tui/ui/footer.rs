@@ -727,8 +727,8 @@ fn current_count_label(app: &App) -> String {
             for day in &app.usage().daily {
                 for (client, client_info) in &day.client_breakdown {
                     clients.insert(client.as_str());
-                    for model in client_info.models.values() {
-                        models.insert(model.model_id.as_str());
+                    for model in &client_info.models {
+                        models.insert(model.model_id.as_ref());
                     }
                 }
             }
@@ -755,11 +755,11 @@ fn current_count_label(app: &App) -> String {
         }
         Tab::Monthly => format!(
             " ({} months)",
-            build_period_usage(&app.usage().daily, PeriodKind::Monthly).len()
+            build_period_usage(app.usage(), PeriodKind::Monthly).len()
         ),
         Tab::Weekly => format!(
             " ({} weeks)",
-            build_period_usage(&app.usage().daily, PeriodKind::Weekly).len()
+            build_period_usage(app.usage(), PeriodKind::Weekly).len()
         ),
         Tab::Daily => format!(" ({} days)", app.usage().daily.len()),
         Tab::Hourly => format!(" ({} hours)", app.usage().hourly.len()),
@@ -1219,9 +1219,9 @@ mod tests {
             turn_count: 0,
         });
         app.usage_mut_for_test().models.push(UsageModelEntry {
-            model_id: "test-model".to_string(),
-            display_name: "Test Model".to_string(),
-            provider: "test-provider".to_string(),
+            model_id: "test-model".into(),
+            display_name: "Test Model".into(),
+            provider: "test-provider".into(),
             clients: vec![tokenx_engine::ClientId::Codex],
             workspace_key: None,
             workspace_label: None,

@@ -18,19 +18,6 @@ pub use tokenx_engine::projection::{
 pub use tokenx_engine::projection::{DailyModelInfo, HourlyModelInfo};
 pub use tokenx_engine::{aggregate_by_period, build_period_usage, find_peak_hour};
 
-/// Bound glibc's process-wide arena count before the TUI starts worker threads.
-/// The TUI explicitly trims after snapshot replacement, and one arena prevents
-/// short-lived background folds from leaving otherwise unreachable arenas at
-/// their high-water RSS (ADR 0008).
-pub(super) fn configure_allocator() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
-        unsafe {
-            libc::mallopt(libc::M_ARENA_MAX, 1);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,12 +244,12 @@ after"#,
         .unwrap();
 
         assert_eq!(usage.agents.len(), 2);
-        assert_eq!(usage.agents[0].agent, "Architect");
+        assert_eq!(usage.agents[0].agent.as_ref(), "Architect");
         assert_eq!(usage.agents[0].client, ClientId::RooCode);
         assert_eq!(usage.agents[0].message_count, 2);
         assert_eq!(usage.agents[0].tokens.total(), 734_000);
 
-        assert_eq!(usage.agents[1].agent, "Reviewer");
+        assert_eq!(usage.agents[1].agent.as_ref(), "Reviewer");
         assert_eq!(usage.agents[1].message_count, 2);
         assert_eq!(usage.agents[1].tokens.total(), 147_000);
     }
@@ -310,9 +297,9 @@ after"#,
 
         assert_eq!(usage.models.len(), 1);
         assert_eq!(usage.models[0].clients, [ClientId::OpenCode]);
-        assert_eq!(usage.models[0].provider, "fireworks");
-        assert_eq!(usage.models[0].model_id, "deepseek-v3");
-        assert_eq!(usage.models[0].display_name, "deepseek-v3");
+        assert_eq!(usage.models[0].provider.as_ref(), "fireworks");
+        assert_eq!(usage.models[0].model_id.as_ref(), "deepseek-v3");
+        assert_eq!(usage.models[0].display_name.as_ref(), "deepseek-v3");
         assert_eq!(usage.models[0].tokens.total(), 15);
     }
 
@@ -347,20 +334,16 @@ after"#,
             input: input_tokens,
             ..UsageTokenBreakdown::default()
         };
-        let mut models = BTreeMap::new();
-        models.insert(
-            "claude-sonnet-4".to_string(),
-            DailyModelInfo {
-                provider: "anthropic".to_string(),
-                model_id: "claude-sonnet-4".to_string(),
-                display_name: "claude-sonnet-4".to_string(),
-                workspace_key: None,
-                workspace_label: None,
-                tokens: tokens.clone(),
-                cost,
-                messages: 1,
-            },
-        );
+        let models = vec![DailyModelInfo {
+            provider: "anthropic".into(),
+            model_id: "claude-sonnet-4".into(),
+            display_name: "claude-sonnet-4".into(),
+            workspace_key: None,
+            workspace_label: None,
+            tokens: tokens.clone(),
+            cost,
+            messages: 1,
+        }];
 
         let mut client_breakdown = BTreeMap::new();
         client_breakdown.insert(
@@ -382,16 +365,22 @@ after"#,
         }
     }
 
+    fn period_projection(daily: Vec<DailyUsage>) -> UsageProjection {
+        UsageProjection {
+            group_by: GroupBy::Model,
+            daily,
+            ..UsageProjection::default()
+        }
+    }
+
     #[test]
     fn test_build_monthly_period_usage_groups_by_calendar_year() {
-        let periods = build_period_usage(
-            &[
-                period_day("2026-06-02", 10, 1.0),
-                period_day("2026-06-14", 20, 2.0),
-                period_day("2026-05-01", 5, 0.5),
-            ],
-            PeriodKind::Monthly,
-        );
+        let usage = period_projection(vec![
+            period_day("2026-06-02", 10, 1.0),
+            period_day("2026-06-14", 20, 2.0),
+            period_day("2026-05-01", 5, 0.5),
+        ]);
+        let periods = build_period_usage(&usage, PeriodKind::Monthly);
 
         assert_eq!(periods.len(), 2);
         assert_eq!(periods[0].section_label, "2026");
@@ -403,14 +392,15 @@ after"#,
         assert_eq!(periods[0].tokens.input, 30);
         assert_eq!(periods[0].cost, 3.0);
         assert_eq!(
-            periods[0].client_breakdown[&ClientId::Claude].models["claude-sonnet-4"].messages,
+            periods[0].client_breakdown[&ClientId::Claude].models[0].messages,
             2
         );
     }
 
     #[test]
     fn test_build_period_usage_counts_zero_token_message_days_as_active() {
-        let periods = build_period_usage(&[period_day("2026-06-02", 0, 0.0)], PeriodKind::Monthly);
+        let usage = period_projection(vec![period_day("2026-06-02", 0, 0.0)]);
+        let periods = build_period_usage(&usage, PeriodKind::Monthly);
 
         assert_eq!(periods.len(), 1);
         assert_eq!(periods[0].active_days, 1);
@@ -420,14 +410,12 @@ after"#,
 
     #[test]
     fn test_build_weekly_period_usage_uses_iso_week_year_for_cross_year_week() {
-        let periods = build_period_usage(
-            &[
-                period_day("2026-01-04", 20, 2.0),
-                period_day("2025-12-29", 10, 1.0),
-                period_day("2025-12-28", 5, 0.5),
-            ],
-            PeriodKind::Weekly,
-        );
+        let usage = period_projection(vec![
+            period_day("2026-01-04", 20, 2.0),
+            period_day("2025-12-29", 10, 1.0),
+            period_day("2025-12-28", 5, 0.5),
+        ]);
+        let periods = build_period_usage(&usage, PeriodKind::Weekly);
 
         assert_eq!(periods.len(), 2);
         assert_eq!(periods[0].section_label, "2026");

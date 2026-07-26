@@ -1,11 +1,39 @@
-use std::path::PathBuf;
-
 use crate::{
     load_pricing_for_acquisition_with_diagnostics, prepare_inventory, records,
     stream_local_inputs_into_accumulator, AcquisitionConfig, AcquisitionError, DataHealth,
     FoldOutcome, FrozenUsageIndex, Generation, GenerationError, InputFootprint, PreparedInventory,
     SessionUsage, SourceFingerprint,
 };
+use std::path::PathBuf;
+use std::sync::Arc;
+
+const MAX_ACQUISITION_WORKERS: usize = 4;
+
+#[derive(Debug)]
+struct AcquisitionExecutor {
+    pool: rayon::ThreadPool,
+}
+
+impl AcquisitionExecutor {
+    fn new() -> Result<Self, rayon::ThreadPoolBuildError> {
+        let worker_count = std::thread::available_parallelism()
+            .map(|parallelism| parallelism.get().min(MAX_ACQUISITION_WORKERS))
+            .unwrap_or(1);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(worker_count)
+            .thread_name(|index| format!("tokenx-acquisition-{index}"))
+            .build()
+            .map(|pool| Self { pool })
+    }
+
+    fn install<Operation, Output>(&self, operation: Operation) -> Output
+    where
+        Operation: FnOnce() -> Output + Send,
+        Output: Send,
+    {
+        self.pool.install(operation)
+    }
+}
 
 /// The sole application service that may acquire local usage data.
 ///
@@ -44,16 +72,21 @@ impl AcquisitionEngine {
     }
 
     pub fn prepare(&self) -> Result<PreparedAcquisition, GenerationBuildError> {
-        let inputs = prepare_inventory(
-            self.config.resolved_home_dir(),
-            self.config.universe().clone(),
-            self.config.date_range().clone(),
-            self.config.scanner(),
-            self.input_cache_dir.clone(),
-        )?;
+        let executor =
+            AcquisitionExecutor::new().map_err(GenerationBuildError::ExecutorInitialization)?;
+        let inputs = executor.install(|| {
+            prepare_inventory(
+                self.config.resolved_home_dir(),
+                self.config.universe().clone(),
+                self.config.date_range().clone(),
+                self.config.scanner(),
+                self.input_cache_dir.clone(),
+            )
+        })?;
         Ok(PreparedAcquisition {
             inputs,
             config: self.config.clone(),
+            executor,
         })
     }
 
@@ -61,11 +94,15 @@ impl AcquisitionEngine {
         &self,
         prepared: PreparedAcquisition,
     ) -> Result<Generation, GenerationBuildError> {
-        let PreparedAcquisition { inputs, config } = prepared;
+        let PreparedAcquisition {
+            inputs,
+            config,
+            executor,
+        } = prepared;
         if config != self.config {
             return Err(GenerationBuildError::PreparedConfigMismatch);
         }
-        let data = build_generation_data(inputs)
+        let data = build_generation_data(inputs, &executor)
             .await
             .map_err(GenerationBuildError::from)?;
         Generation::new(
@@ -96,9 +133,18 @@ struct GenerationData {
 
 async fn build_generation_data(
     prepared: PreparedInventory,
+    executor: &AcquisitionExecutor,
 ) -> Result<GenerationData, AcquisitionError> {
     let mut pricing_diagnostics = crate::pricing::PricingDiagnostics::new();
     let pricing = load_pricing_for_acquisition_with_diagnostics(&mut pricing_diagnostics).await;
+    executor.install(move || fold_generation_data(prepared, pricing, pricing_diagnostics))
+}
+
+fn fold_generation_data(
+    prepared: PreparedInventory,
+    pricing: Option<Arc<crate::pricing::PricingService>>,
+    pricing_diagnostics: crate::pricing::PricingDiagnostics,
+) -> Result<GenerationData, AcquisitionError> {
     let date_range = prepared.date_range.clone();
     let mut accumulator = crate::aggregate::GenerationAccumulator::new(date_range);
     let FoldOutcome {
@@ -130,6 +176,7 @@ async fn build_generation_data(
 pub struct PreparedAcquisition {
     inputs: PreparedInventory,
     config: AcquisitionConfig,
+    executor: AcquisitionExecutor,
 }
 
 impl PreparedAcquisition {
@@ -150,6 +197,8 @@ pub enum GenerationBuildError {
     InvalidGeneration(#[source] GenerationError),
     #[error("prepared inventory belongs to a different acquisition configuration")]
     PreparedConfigMismatch,
+    #[error("failed to initialize the bounded acquisition executor: {0}")]
+    ExecutorInitialization(#[source] rayon::ThreadPoolBuildError),
     #[error(transparent)]
     Acquisition(#[from] AcquisitionError),
 }
@@ -194,6 +243,36 @@ mod tests {
             std::path::Path::new("/tmp/tokenx-home")
         );
         assert_eq!(engine.config().date_range(), &date_range);
+    }
+
+    #[test]
+    fn acquisition_executor_is_structured_bounded_and_named() {
+        let executor = AcquisitionExecutor::new().unwrap();
+        let mut operation_completed = false;
+        let (workers, thread_name) = executor.install(|| {
+            operation_completed = true;
+            (
+                rayon::current_num_threads(),
+                std::thread::current().name().map(str::to_owned),
+            )
+        });
+
+        assert!(operation_completed);
+        assert!((1..=MAX_ACQUISITION_WORKERS).contains(&workers));
+        assert!(thread_name
+            .as_deref()
+            .is_some_and(|name| name.starts_with("tokenx-acquisition-")));
+    }
+
+    #[test]
+    fn acquisition_executor_propagates_fold_panics() {
+        let executor = AcquisitionExecutor::new().unwrap();
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            executor.install(|| panic!("fold failed"));
+        }));
+
+        assert!(panic.is_err());
     }
 
     #[tokio::test]

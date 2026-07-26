@@ -455,7 +455,7 @@ fn top_period_model(period: &PeriodUsage) -> Option<TopPeriodModel> {
     let mut models: BTreeMap<String, TopPeriodModel> = BTreeMap::new();
 
     for client in period.client_breakdown.values() {
-        for model in client.models.values() {
+        for model in &client.models {
             let tokens = model.tokens.total();
             // Rank by the bare canonical id (ADR 0010): grouping must not
             // split one model into several candidates, and the storage map
@@ -465,7 +465,7 @@ fn top_period_model(period: &PeriodUsage) -> Option<TopPeriodModel> {
             }
 
             models
-                .entry(model.model_id.clone())
+                .entry(model.model_id.to_string())
                 .and_modify(|entry| {
                     entry.tokens = entry
                         .tokens
@@ -474,8 +474,8 @@ fn top_period_model(period: &PeriodUsage) -> Option<TopPeriodModel> {
                     entry.cost += model.cost;
                 })
                 .or_insert_with(|| TopPeriodModel {
-                    key: model.model_id.clone(),
-                    label: model.model_id.clone(),
+                    key: model.model_id.to_string(),
+                    label: model.model_id.to_string(),
                     tokens,
                     cost: model.cost,
                 });
@@ -1094,9 +1094,9 @@ mod tests {
 
     fn daily_model(provider: &str, model_id: &str, tokens: u64, cost: f64) -> DailyModelInfo {
         DailyModelInfo {
-            provider: provider.to_string(),
-            model_id: model_id.to_string(),
-            display_name: model_id.to_string(),
+            provider: provider.into(),
+            model_id: model_id.into(),
+            display_name: model_id.into(),
             workspace_key: None,
             workspace_label: None,
             tokens: token_breakdown(tokens),
@@ -1113,8 +1113,8 @@ mod tests {
         cost: f64,
     ) -> DailyModelInfo {
         DailyModelInfo {
-            workspace_key: Some(format!("/work/{workspace}")),
-            workspace_label: Some(workspace.to_string()),
+            workspace_key: Some(format!("/work/{workspace}").into()),
+            workspace_label: Some(workspace.into()),
             ..daily_model(provider, model_id, tokens, cost)
         }
     }
@@ -1138,10 +1138,7 @@ mod tests {
                 DailyClientInfo {
                     tokens: token_breakdown(tokens),
                     cost: 0.0,
-                    models: models
-                        .into_iter()
-                        .map(|(key, model)| (key.to_string(), model))
-                        .collect(),
+                    models: models.into_iter().map(|(_, model)| model).collect(),
                 },
             )]),
             message_count: 0,
@@ -1238,16 +1235,10 @@ mod tests {
                 DailyClientInfo {
                     tokens: token_breakdown(300),
                     cost: 3.0,
-                    models: BTreeMap::from([
-                        (
-                            "v1|codex|ws-a|gpt-5".to_string(),
-                            workspace_daily_model("openai", "gpt-5", "ws-alpha", 200, 2.0),
-                        ),
-                        (
-                            "v1|codex|ws-b|gpt-5".to_string(),
-                            workspace_daily_model("openai", "gpt-5", "ws-beta", 100, 1.0),
-                        ),
-                    ]),
+                    models: vec![
+                        workspace_daily_model("openai", "gpt-5", "ws-alpha", 200, 2.0),
+                        workspace_daily_model("openai", "gpt-5", "ws-beta", 100, 1.0),
+                    ],
                 },
             )]),
             message_count: 10,
@@ -1256,7 +1247,7 @@ mod tests {
     }
 
     fn select_monthly_period(app: &mut App) {
-        let periods = crate::tui::data::build_period_usage(&app.usage().daily, PeriodKind::Monthly);
+        let periods = crate::tui::data::build_period_usage(app.usage(), PeriodKind::Monthly);
         let period = periods.first().expect("one monthly period");
         app.selected_period_detail = Some(PeriodDetailSelection {
             kind: PeriodKind::Monthly,

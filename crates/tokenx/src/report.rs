@@ -159,12 +159,12 @@ mod tests {
 
     fn model_entry(workspace_key: Option<&str>, workspace_label: Option<&str>) -> UsageModelEntry {
         UsageModelEntry {
-            model_id: "claude-sonnet-4.5".to_string(),
-            display_name: "Claude Sonnet 4.5".to_string(),
-            provider: "anthropic".to_string(),
+            model_id: "claude-sonnet-4.5".into(),
+            display_name: "Claude Sonnet 4.5".into(),
+            provider: "anthropic".into(),
             clients: vec![tokenx_engine::ClientId::Claude],
-            workspace_key: workspace_key.map(str::to_string),
-            workspace_label: workspace_label.map(str::to_string),
+            workspace_key: workspace_key.map(Into::into),
+            workspace_label: workspace_label.map(Into::into),
             tokens: Default::default(),
             cost: 1.0,
             session_count: 1,
@@ -241,7 +241,7 @@ mod tests {
         };
         let data = UsageProjection {
             agents: vec![AgentEntry {
-                agent: "Builder".to_string(),
+                agent: "Builder".into(),
                 client: tokenx_engine::ClientId::OpenCode,
                 tokens: tokens.clone(),
                 cost: 0.0,
