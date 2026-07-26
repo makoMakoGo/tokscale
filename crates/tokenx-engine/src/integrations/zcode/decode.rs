@@ -10,7 +10,7 @@ use crate::records::utils::parse_timestamp_str;
 use crate::records::{
     dedup_hash_str, normalize_workspace_key, workspace_label_from_key, UsageRecord,
 };
-use crate::{checked_token_sum, TokenBreakdown};
+use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -139,19 +139,19 @@ impl ZcodeUsage {
             reasoning,
             self.total,
             self.prompt_tokens.is_some(),
-        );
-
-        if checked_token_sum([input, output, cache_read, cache_write, reasoning]) == 0 {
-            return None;
-        }
-
-        Some(TokenBreakdown {
+        )?;
+        let breakdown = TokenBreakdown {
             input,
             output,
             cache_read,
             cache_write,
             reasoning,
-        })
+        };
+        if breakdown.checked_total()? == 0 {
+            return None;
+        }
+
+        Some(breakdown)
     }
 }
 
@@ -167,7 +167,7 @@ fn normalize_input_and_output(
     reasoning: i64,
     total: Option<i64>,
     prompt_tokens_without_total_are_inclusive: bool,
-) -> (i64, i64) {
+) -> Option<(i64, i64)> {
     let input = input.max(0);
     let output = output.max(0);
     let cache_read = cache_read.max(0);
@@ -175,26 +175,27 @@ fn normalize_input_and_output(
     let reasoning = reasoning.max(0);
 
     if let Some(total) = total.map(|value| value.max(0)) {
-        let inclusive_total = checked_token_sum([input, output]);
-        let exclusive_total =
-            checked_token_sum([input, output, cache_read, cache_write, reasoning]);
+        let inclusive_total = input.checked_add(output)?;
+        let exclusive_total = [input, output, cache_read, cache_write, reasoning]
+            .into_iter()
+            .try_fold(0_i64, i64::checked_add)?;
         if (cache_read > 0 || cache_write > 0 || reasoning > 0)
             && total == inclusive_total
             && total != exclusive_total
         {
-            return (
-                subtract_overlap(input, checked_token_sum([cache_read, cache_write])),
+            return Some((
+                subtract_overlap(input, cache_read.checked_add(cache_write)?),
                 subtract_overlap(output, reasoning),
-            );
+            ));
         }
 
-        return (input, output);
+        return Some((input, output));
     }
 
     if prompt_tokens_without_total_are_inclusive {
-        (subtract_overlap(input, cache_read), output)
+        Some((subtract_overlap(input, cache_read), output))
     } else {
-        (input, output)
+        Some((input, output))
     }
 }
 

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use tokenx_engine::{
@@ -7,15 +8,22 @@ use tokenx_engine::{
 };
 
 #[cfg(not(test))]
-fn bind_engine(config: AcquisitionConfig) -> Result<AcquisitionEngine> {
-    Ok(AcquisitionEngine::new(config)?)
+fn bind_engine(
+    config: AcquisitionConfig,
+    pricing: Arc<tokenx_engine::pricing::ResolvedPricingSnapshot>,
+) -> Result<AcquisitionEngine> {
+    Ok(AcquisitionEngine::new(config, pricing)?)
 }
 
 #[cfg(test)]
-fn bind_engine(config: AcquisitionConfig) -> Result<AcquisitionEngine> {
+fn bind_engine(
+    config: AcquisitionConfig,
+    pricing: Arc<tokenx_engine::pricing::ResolvedPricingSnapshot>,
+) -> Result<AcquisitionEngine> {
     let input_cache_dir = config.resolved_home_dir().join(".tokenx-test-cache/input");
     Ok(AcquisitionEngine::with_input_cache_dir(
         config,
+        pricing,
         input_cache_dir,
     )?)
 }
@@ -26,16 +34,46 @@ pub(crate) fn acquisition_engine(
     clients: ClientUniverse,
     date_range: DateRange,
     scanner: tokenx_engine::scanner::ScannerSettings,
+    calendar: tokenx_engine::CalendarContext,
+    pricing: Arc<tokenx_engine::pricing::ResolvedPricingSnapshot>,
 ) -> Result<AcquisitionEngine> {
-    let config = AcquisitionConfig::new(resolved_home_dir, date_range, clients, scanner)?;
-    bind_engine(config)
+    let config = AcquisitionConfig::new(
+        resolved_home_dir,
+        date_range,
+        clients,
+        scanner,
+        calendar,
+        pricing.context().clone(),
+    )?;
+    bind_engine(config, pricing)
 }
 
-pub(crate) async fn build_generation(
+#[cfg(test)]
+pub(crate) fn test_pricing_snapshot() -> Arc<tokenx_engine::pricing::ResolvedPricingSnapshot> {
+    Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::explicit(
+        tokenx_engine::PricingContext::explicit_with_catalog("test-custom", "test-catalog"),
+        None,
+        Vec::new(),
+    ))
+}
+
+pub(crate) fn build_generation(
     engine: &AcquisitionEngine,
     prepared: PreparedAcquisition,
 ) -> Result<Generation> {
-    let generation = engine.build(prepared).await.map_err(anyhow::Error::new);
+    let generation = engine.build(prepared).map_err(anyhow::Error::new);
+    trim_allocator();
+    generation
+}
+
+pub(crate) fn build_generation_with_cancellation(
+    engine: &AcquisitionEngine,
+    prepared: PreparedAcquisition,
+    cancellation: &tokenx_engine::AcquisitionCancellation,
+) -> Result<Generation> {
+    let generation = engine
+        .build_with_cancellation(prepared, cancellation)
+        .map_err(anyhow::Error::new);
     trim_allocator();
     generation
 }
@@ -65,6 +103,8 @@ mod tests {
             )
             .unwrap(),
             tokenx_engine::scanner::ScannerSettings::default(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+            test_pricing_snapshot(),
         )
         .unwrap();
 
@@ -93,6 +133,8 @@ mod tests {
             ClientUniverse::new([ClientId::Amp]).unwrap(),
             DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+            test_pricing_snapshot(),
         )
         .unwrap();
 

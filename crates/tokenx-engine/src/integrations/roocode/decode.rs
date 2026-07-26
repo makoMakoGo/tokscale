@@ -67,8 +67,13 @@ pub fn parse_roocode_file(path: &Path) -> SessionParseResult<ScannedInput> {
             cache_write: payload.cache_writes,
             reasoning: 0,
         };
-        if crate::positive_token_total(&token_breakdown) == 0 {
-            continue;
+        match crate::positive_token_total(&token_breakdown) {
+            Some(0) => continue,
+            Some(_) => {}
+            None => {
+                rejections.record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
         }
         let Some(timestamp) = parse_entry_timestamp(entry.get("ts")) else {
             rejections.record(RecordRejectionReason::MissingTimestamp);

@@ -29,6 +29,29 @@ pub fn write_atomic_with(
     final_path: &Path,
     write: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> io::Result<()> {
+    write_atomic_with_options(final_path, true, write)
+}
+
+/// Atomically publish a private file without making a crash-durability
+/// guarantee.
+///
+/// The temporary file is completely written and flushed before it replaces
+/// the final path, so readers observe either the previous complete file or the
+/// new complete file. Unlike [`write_atomic_with`], this helper does not fsync
+/// the file or its parent directory. It is intended for disposable,
+/// reconstructible caches.
+pub fn write_atomic_visible_with(
+    final_path: &Path,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<()> {
+    write_atomic_with_options(final_path, false, write)
+}
+
+fn write_atomic_with_options(
+    final_path: &Path,
+    durable: bool,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<()> {
     let parent = parent_dir_for_io(final_path)?;
     let filename = final_path.file_name().ok_or_else(|| {
         io::Error::new(
@@ -50,7 +73,7 @@ pub fn write_atomic_with(
             Err(err) => return Err(err),
         };
 
-        return write_open_temp_file(file, &tmp_path, final_path, write);
+        return write_open_temp_file(file, &tmp_path, final_path, durable, write);
     }
 
     Err(last_exists_error.unwrap_or_else(|| {
@@ -67,7 +90,9 @@ pub fn write_atomic_with(
 #[cfg(test)]
 fn write_atomic_to_temp(tmp_path: &Path, final_path: &Path, bytes: &[u8]) -> io::Result<()> {
     let file = create_temp_file(tmp_path)?;
-    write_open_temp_file(file, tmp_path, final_path, |file| file.write_all(bytes))
+    write_open_temp_file(file, tmp_path, final_path, true, |file| {
+        file.write_all(bytes)
+    })
 }
 
 fn create_temp_file(tmp_path: &Path) -> io::Result<File> {
@@ -88,14 +113,21 @@ fn write_open_temp_file(
     mut file: File,
     tmp_path: &Path,
     final_path: &Path,
+    durable: bool,
     write: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> io::Result<()> {
     let write_result = (|| -> io::Result<()> {
         write(&mut file)?;
-        file.sync_all()?;
+        file.flush()?;
+        if durable {
+            file.sync_all()?;
+        }
         drop(file);
-        replace_file(tmp_path, final_path)?;
-        sync_parent_dir(final_path)
+        replace_file_with_durability(tmp_path, final_path, durable)?;
+        if durable {
+            sync_parent_dir(final_path)?;
+        }
+        Ok(())
     })();
 
     if write_result.is_err() {
@@ -117,13 +149,22 @@ fn temp_path(parent: &Path, filename: &std::ffi::OsStr) -> PathBuf {
 }
 
 pub fn replace_file(tmp_path: &Path, final_path: &Path) -> io::Result<()> {
+    replace_file_with_durability(tmp_path, final_path, true)
+}
+
+fn replace_file_with_durability(
+    tmp_path: &Path,
+    final_path: &Path,
+    durable: bool,
+) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        windows_replace_file(tmp_path, final_path)
+        windows_replace_file(tmp_path, final_path, durable)
     }
 
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = durable;
         std::fs::rename(tmp_path, final_path)
     }
 }
@@ -154,7 +195,7 @@ fn sync_parent_dir(_path: &Path) -> io::Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_replace_file(tmp_path: &Path, final_path: &Path) -> io::Result<()> {
+fn windows_replace_file(tmp_path: &Path, final_path: &Path, durable: bool) -> io::Result<()> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
 
@@ -182,7 +223,7 @@ fn windows_replace_file(tmp_path: &Path, final_path: &Path) -> io::Result<()> {
         MoveFileExW(
             existing.as_ptr(),
             new.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            MOVEFILE_REPLACE_EXISTING | if durable { MOVEFILE_WRITE_THROUGH } else { 0 },
         )
     };
     if result == 0 {
@@ -237,6 +278,45 @@ mod tests {
         .unwrap();
 
         assert_eq!(fs::read_to_string(path).unwrap(), "{\"ok\":true}");
+    }
+
+    #[test]
+    fn visibility_only_writer_never_publishes_a_partial_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cache.bin");
+        fs::write(&path, b"complete-old").unwrap();
+
+        let error = write_atomic_visible_with(&path, |file| {
+            file.write_all(b"partial-new")?;
+            Err(io::Error::other("injected serialization failure"))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(fs::read(&path).unwrap(), b"complete-old");
+        assert_eq!(
+            fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .count(),
+            1,
+            "failed visibility-only writes must clean up their temporary file"
+        );
+    }
+
+    #[test]
+    fn visibility_only_writer_atomically_replaces_the_complete_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cache.bin");
+        fs::write(&path, b"complete-old").unwrap();
+
+        write_atomic_visible_with(&path, |file| {
+            file.write_all(b"complete-")?;
+            file.write_all(b"new")
+        })
+        .unwrap();
+
+        assert_eq!(fs::read(path).unwrap(), b"complete-new");
     }
 
     #[test]

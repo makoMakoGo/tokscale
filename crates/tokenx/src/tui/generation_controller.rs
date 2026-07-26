@@ -4,8 +4,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::acquisition::build_generation;
-use crate::generation_cache::save_generation_cache;
+use crate::acquisition::{acquisition_engine, build_generation_with_cancellation};
+use crate::cli::RelativeDateRange;
+use crate::generation_cache::{save_generation_cache_with_retry_backoff, RetryBackoff};
 
 use super::app::{App, StatusTone};
 use super::task_supervisor::TaskSupervisor;
@@ -94,6 +95,7 @@ pub(super) enum BackgroundLoad {
     Loaded {
         generation: Box<tokenx_engine::Generation>,
         cache_persistence_warning: Option<String>,
+        retry_backoff: Option<RetryBackoff>,
     },
 }
 
@@ -113,6 +115,8 @@ pub(super) struct GenerationController {
     pending: Option<PendingRefresh>,
     active: Option<ActiveRefresh>,
     next_request_id: u64,
+    retry_backoff: Option<RetryBackoff>,
+    relative_date_range: Option<RelativeDateRange>,
 }
 
 impl GenerationController {
@@ -127,7 +131,28 @@ impl GenerationController {
             pending: None,
             active: None,
             next_request_id: 1,
+            retry_backoff: None,
+            relative_date_range: None,
         }
+    }
+
+    pub(super) fn with_relative_date_range(
+        mut self,
+        relative_date_range: Option<RelativeDateRange>,
+    ) -> Self {
+        self.relative_date_range = relative_date_range;
+        self
+    }
+
+    pub(super) fn set_retry_backoff(&mut self, retry_backoff: Option<RetryBackoff>) {
+        if let Some(backoff) = retry_backoff.as_ref() {
+            tracing::debug!(
+                retry_attempt = backoff.attempt(),
+                retry_affected_clients = ?backoff.affected_clients(),
+                "installed acquisition retry backoff"
+            );
+        }
+        self.retry_backoff = retry_backoff;
     }
 
     pub(super) fn request_initial_load(&mut self, force: bool) {
@@ -151,6 +176,21 @@ impl GenerationController {
     }
 
     pub(super) fn on_tick(&mut self, app: &mut App, now: Instant) {
+        self.on_tick_for_date(
+            app,
+            now,
+            self.acquisition.config().calendar().current_date(),
+        );
+    }
+
+    fn on_tick_for_date(&mut self, app: &mut App, now: Instant, effective_date: chrono::NaiveDate) {
+        let date_changed = app.effective_date() != effective_date;
+        app.advance_effective_date(effective_date);
+        if date_changed && self.relative_date_range.is_some() {
+            self.queue(PendingRefresh {
+                request: RefreshRequest::Automatic,
+            });
+        }
         if self.status.automatic
             && now.saturating_duration_since(self.last_checked) >= self.status.interval
             && self.active.is_none()
@@ -171,7 +211,22 @@ impl GenerationController {
             return;
         };
 
-        let force = should_force_input_reload(pending.request.force(), app.generation_health());
+        let context_changed = match self.refresh_acquisition_context(app.effective_date()) {
+            Ok(changed) => changed,
+            Err(error) => {
+                generation_background_failure(
+                    app,
+                    format!("Failed to refresh acquisition context: {error:#}"),
+                );
+                self.publish_status(app);
+                return;
+            }
+        };
+        let force = should_force_input_reload(
+            pending.request.force() || context_changed,
+            app.generation_health(),
+            self.retry_backoff.as_ref(),
+        );
         let request_id = self.next_request_id;
         self.next_request_id = self
             .next_request_id
@@ -183,8 +238,36 @@ impl GenerationController {
             started_at: Instant::now(),
         });
         self.publish_status(app);
-        let last_digest = installed_source_digest(app);
-        tasks.spawn_acquisition(request_id, self.acquisition.clone(), force, last_digest);
+        let last_fingerprint = installed_source_fingerprint(app);
+        tasks.spawn_acquisition(
+            request_id,
+            self.acquisition.clone(),
+            force,
+            last_fingerprint,
+        );
+    }
+
+    fn refresh_acquisition_context(&mut self, effective_date: chrono::NaiveDate) -> Result<bool> {
+        let current = self.acquisition.config();
+        let date_range = self
+            .relative_date_range
+            .map(|relative| relative.resolve(effective_date))
+            .unwrap_or_else(|| current.date_range().clone());
+        let replacement = acquisition_engine(
+            current.resolved_home_dir().to_path_buf(),
+            current.universe().clone(),
+            date_range,
+            current.scanner().clone(),
+            *current.calendar(),
+            self.acquisition.pricing_snapshot(),
+        )?;
+        if replacement.config() == current {
+            return Ok(false);
+        }
+
+        self.acquisition = replacement;
+        self.retry_backoff = None;
+        Ok(true)
     }
 
     pub(super) fn apply_task_result(
@@ -214,6 +297,7 @@ impl GenerationController {
             Ok(BackgroundLoad::Loaded {
                 generation,
                 cache_persistence_warning,
+                retry_backoff,
             }) => {
                 if let Err(error) = app.install_generation(*generation) {
                     generation_background_failure(
@@ -221,8 +305,17 @@ impl GenerationController {
                         format!("Generation projection failed: {error:#}"),
                     );
                 } else {
-                    app.set_cache_persistence_warning(cache_persistence_warning);
-                    app.set_generation_status_with_tone("Data loaded", StatusTone::Success);
+                    self.set_retry_backoff(retry_backoff);
+                    let recovered_cache_warning = cache_persistence_warning
+                        .is_none()
+                        .then(|| app.generation_cache_warning().map(str::to_owned))
+                        .flatten();
+                    app.set_generation_cache_warning(cache_persistence_warning);
+                    if let Some(warning) = recovered_cache_warning {
+                        app.set_generation_status_with_tone(&warning, StatusTone::Warning);
+                    } else {
+                        app.set_generation_status_with_tone("Data loaded", StatusTone::Success);
+                    }
                 }
             }
             Ok(BackgroundLoad::Unchanged) if active.force => {
@@ -322,48 +415,83 @@ fn generation_background_failure(app: &mut App, diagnostic: String) {
 fn should_force_input_reload(
     explicitly_requested: bool,
     health: Option<&tokenx_engine::input_health::HealthSummary>,
+    retry_backoff: Option<&RetryBackoff>,
 ) -> bool {
-    explicitly_requested || health.is_some_and(|health| health.requires_input_retry())
+    explicitly_requested
+        || (health.is_some_and(|health| health.requires_input_retry())
+            && retry_backoff.is_none_or(RetryBackoff::is_due))
 }
 
-fn installed_source_digest(app: &App) -> Option<u64> {
+fn installed_source_fingerprint(app: &App) -> Option<tokenx_engine::SourceFingerprint> {
     app.installed_generation()
-        .map(|installed| installed.generation().source_digest())
+        .map(|installed| installed.generation().source_fingerprint())
 }
 
-pub(super) async fn load_background_data(
+#[cfg(test)]
+pub(super) fn load_background_data(
     engine: &tokenx_engine::AcquisitionEngine,
     force: bool,
-    last_digest: Option<u64>,
+    last_fingerprint: Option<tokenx_engine::SourceFingerprint>,
 ) -> Result<BackgroundLoad> {
-    let mut prepared = engine.prepare()?;
-    let digest = prepared.refresh_source_fingerprint().process_digest();
-    if !force && last_digest == Some(digest) {
+    load_background_data_with_cancellation(
+        engine,
+        force,
+        last_fingerprint,
+        &tokenx_engine::AcquisitionCancellation::default(),
+    )
+}
+
+pub(super) fn load_background_data_with_cancellation(
+    engine: &tokenx_engine::AcquisitionEngine,
+    force: bool,
+    last_fingerprint: Option<tokenx_engine::SourceFingerprint>,
+    cancellation: &tokenx_engine::AcquisitionCancellation,
+) -> Result<BackgroundLoad> {
+    let prepared = engine.prepare_with_cancellation(cancellation)?;
+    let fingerprint = prepared.source_fingerprint();
+    if !force && last_fingerprint == Some(fingerprint) {
         return Ok(BackgroundLoad::Unchanged);
     }
 
-    build_generation(engine, prepared)
-        .await
-        .map(|generation| BackgroundLoad::Loaded {
+    build_generation_with_cancellation(engine, prepared, cancellation).map(|generation| {
+        BackgroundLoad::Loaded {
             generation: Box::new(generation),
             cache_persistence_warning: None,
-        })
+            retry_backoff: None,
+        }
+    })
 }
 
+#[cfg(test)]
 pub(super) fn persist_background_load(result: Result<BackgroundLoad>) -> Result<BackgroundLoad> {
+    persist_background_load_with_cancellation(
+        result,
+        &tokenx_engine::AcquisitionCancellation::default(),
+    )
+}
+
+pub(super) fn persist_background_load_with_cancellation(
+    result: Result<BackgroundLoad>,
+    cancellation: &tokenx_engine::AcquisitionCancellation,
+) -> Result<BackgroundLoad> {
     let result = result?;
+    cancellation
+        .check(tokenx_engine::AcquisitionPhase::GenerationFinalization)
+        .map_err(anyhow::Error::new)?;
     let BackgroundLoad::Loaded {
         generation,
         cache_persistence_warning: _,
+        retry_backoff: _,
     } = result
     else {
         return Ok(BackgroundLoad::Unchanged);
     };
 
-    match save_generation_cache(&generation) {
-        Ok(()) => Ok(BackgroundLoad::Loaded {
+    match save_generation_cache_with_retry_backoff(&generation) {
+        Ok(retry_backoff) => Ok(BackgroundLoad::Loaded {
             generation,
             cache_persistence_warning: None,
+            retry_backoff,
         }),
         Err(error) => {
             let diagnostic = format!("{error:#}");
@@ -374,11 +502,13 @@ pub(super) fn persist_background_load(result: Result<BackgroundLoad>) -> Result<
             Ok(BackgroundLoad::Loaded {
                 generation,
                 cache_persistence_warning: Some(format!("Cache persistence warning: {diagnostic}")),
+                retry_backoff: None,
             })
         }
     }
 }
 
+#[cfg(test)]
 pub(super) fn run_acquisition_task(
     tx: &mpsc::Sender<AcquisitionTaskResult>,
     request_id: u64,
@@ -403,11 +533,40 @@ pub(super) fn run_acquisition_task(
     }
 }
 
+pub(super) fn run_acquisition_task_with_cancellation(
+    tx: &mpsc::Sender<AcquisitionTaskResult>,
+    request_id: u64,
+    cancellation: &tokenx_engine::AcquisitionCancellation,
+    task: impl FnOnce() -> Result<BackgroundLoad>,
+) {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(task)).unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("unknown panic payload");
+        Err(anyhow::anyhow!("TUI background worker panicked: {message}"))
+    });
+    if cancellation.is_cancelled() {
+        return;
+    }
+    if tx
+        .send(AcquisitionTaskResult { request_id, result })
+        .is_err()
+    {
+        tracing::warn!(
+            request_id,
+            "dropped TUI background load result because receiver is closed"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::local_usage::LocalUsageStatus;
+    use tokenx_engine::ClientId;
 
     fn harness(automatic: bool) -> (App, GenerationController) {
         let universe = tokenx_engine::ClientUniverse::new([tokenx_engine::ClientId::Amp]).unwrap();
@@ -427,6 +586,8 @@ mod tests {
             universe,
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+            crate::acquisition::test_pricing_snapshot(),
         )
         .unwrap();
         let controller = GenerationController::new(acquisition, status);
@@ -448,13 +609,19 @@ mod tests {
     #[test]
     fn force_rule_includes_degraded_generation_health() {
         let degraded = tokenx_engine::input_health::HealthSummary {
-            failed_inputs: 1,
-            complete: false,
+            issues: vec![tokenx_engine::input_health::HealthIssue {
+                level: tokenx_engine::input_health::HealthLevel::Error,
+                client: Some(ClientId::Amp),
+                issue: tokenx_engine::input_health::HealthIssueKind::InputUnavailable,
+                affected_inputs: 1,
+                rejected_records: None,
+                handling: tokenx_engine::input_health::HealthHandling::InputSkipped,
+            }],
             ..Default::default()
         };
-        assert!(should_force_input_reload(false, Some(&degraded)));
-        assert!(should_force_input_reload(true, None));
-        assert!(!should_force_input_reload(false, None));
+        assert!(should_force_input_reload(false, Some(&degraded), None));
+        assert!(should_force_input_reload(true, None, None));
+        assert!(!should_force_input_reload(false, None, None));
     }
 
     #[test]
@@ -471,6 +638,61 @@ mod tests {
                 request: RefreshRequest::Automatic
             })
         ));
+    }
+
+    #[test]
+    fn relative_range_rebinds_when_refresh_starts_after_midnight() {
+        let (_, controller) = harness(false);
+        let mut controller =
+            controller.with_relative_date_range(Some(RelativeDateRange::LastSevenDays));
+        let calendar = *controller.acquisition.config().calendar();
+        let pricing = controller.acquisition.config().pricing().clone();
+        let pricing_snapshot = controller.acquisition.pricing_snapshot();
+        let next_day = chrono::NaiveDate::from_ymd_opt(2026, 7, 27).unwrap();
+
+        assert!(controller.refresh_acquisition_context(next_day).unwrap());
+
+        assert_eq!(
+            controller.acquisition.config().date_range(),
+            &RelativeDateRange::LastSevenDays.resolve(next_day)
+        );
+        assert_eq!(controller.acquisition.config().calendar(), &calendar);
+        assert_eq!(controller.acquisition.config().pricing(), &pricing);
+        assert!(std::sync::Arc::ptr_eq(
+            &controller.acquisition.pricing_snapshot(),
+            &pricing_snapshot,
+        ));
+    }
+
+    #[test]
+    fn midnight_projection_change_does_not_queue_an_input_rescan() {
+        let (mut app, mut controller) = harness(false);
+        let next_day = chrono::NaiveDate::from_ymd_opt(2026, 7, 27).unwrap();
+
+        controller.on_tick_for_date(&mut app, Instant::now(), next_day);
+
+        assert_eq!(app.effective_date(), next_day);
+        assert!(controller.pending.is_none());
+        assert!(controller.active.is_none());
+    }
+
+    #[test]
+    fn relative_range_midnight_change_queues_a_refresh_even_when_automatic_refresh_is_off() {
+        let (mut app, controller) = harness(false);
+        let mut controller =
+            controller.with_relative_date_range(Some(RelativeDateRange::LastSevenDays));
+        let next_day = chrono::NaiveDate::from_ymd_opt(2026, 7, 27).unwrap();
+
+        controller.on_tick_for_date(&mut app, Instant::now(), next_day);
+
+        assert_eq!(app.effective_date(), next_day);
+        assert!(matches!(
+            controller.pending,
+            Some(PendingRefresh {
+                request: RefreshRequest::Automatic
+            })
+        ));
+        assert!(controller.active.is_none());
     }
 
     #[test]
@@ -507,18 +729,59 @@ mod tests {
     }
 
     #[test]
-    fn installed_generation_is_the_source_digest_authority() {
+    fn installed_generation_is_the_complete_source_fingerprint_authority() {
         let (mut app, _) = harness(false);
-        assert_eq!(installed_source_digest(&app), None);
+        assert_eq!(installed_source_fingerprint(&app), None);
         app.install_generation_fixture(
             tokenx_engine::FrozenUsageIndex::new(),
             Vec::new(),
             tokenx_engine::InputFootprint::default(),
         );
         assert_eq!(
-            installed_source_digest(&app),
+            installed_source_fingerprint(&app),
             app.generation_for_test()
-                .map(tokenx_engine::Generation::source_digest)
+                .map(tokenx_engine::Generation::source_fingerprint)
         );
+    }
+
+    #[test]
+    fn recovered_startup_cache_failure_remains_visible_as_transient_warning() {
+        let (mut app, mut controller) = harness(false);
+        let warning = "Generation cache warning: decode failure: digest mismatch";
+        app.set_generation_cache_warning(Some(warning.to_string()));
+        let generation = crate::tui::generation_fixture_with_health(
+            [tokenx_engine::ClientId::Amp],
+            tokenx_engine::FrozenUsageIndex::new(),
+            Vec::new(),
+            tokenx_engine::InputFootprint::default(),
+            tokenx_engine::input_health::HealthSummary::default(),
+        );
+
+        controller.apply_result_for_test(
+            &mut app,
+            Ok(BackgroundLoad::Loaded {
+                generation: Box::new(generation),
+                cache_persistence_warning: None,
+                retry_backoff: None,
+            }),
+            true,
+        );
+
+        assert_eq!(app.generation_cache_warning(), None);
+        assert_eq!(app.status_message.as_deref(), Some(warning));
+        assert_eq!(app.status_message_tone(), StatusTone::Warning);
+    }
+
+    #[test]
+    fn cancelled_worker_does_not_publish_a_background_result() {
+        let (tx, rx) = mpsc::channel();
+        let cancellation = tokenx_engine::AcquisitionCancellation::default();
+        cancellation.cancel();
+
+        run_acquisition_task_with_cancellation(&tx, 7, &cancellation, || {
+            Ok(BackgroundLoad::Unchanged)
+        });
+
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
     }
 }

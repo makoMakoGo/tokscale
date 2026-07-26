@@ -16,7 +16,6 @@ use crate::integrations::{
     InputDiscoveryError, IntegrationDriver, ParseContext, ParsedUnit, SourceSpec,
 };
 
-const WARP_RECORD_REJECTION_REVISION: u32 = 5;
 const SOURCE: SourceSpec = SourceSpec::home(
     ".local/state/warp-terminal",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::warp_sqlite),
@@ -30,13 +29,10 @@ impl IntegrationDriver for Driver {
         ctx: &DiscoveryContext<'_>,
     ) -> Result<Vec<DiscoveredInput>, InputDiscoveryError> {
         let client = ctx.client;
-        let mut paths = source_discovery::scan_roots(
-            client,
-            warp_sqlite_roots(ctx.home_dir),
-            SOURCE.matcher(),
-        )?;
+        let mut paths =
+            source_discovery::scan_roots(ctx, warp_sqlite_roots(ctx.home_dir), SOURCE.matcher())?;
         paths.extend(source_discovery::scan_roots(
-            client,
+            ctx,
             source_discovery::extra_roots_for_client(client, ctx)?,
             SOURCE.matcher(),
         )?);
@@ -45,7 +41,7 @@ impl IntegrationDriver for Driver {
             client,
             paths,
             FingerprintPolicy::SqliteWithWal,
-            DecoderKind::plain(DecoderId::Warp, WARP_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::Warp),
         )?;
         Ok(units)
     }
@@ -147,6 +143,7 @@ mod tests {
             client: ClientId::Warp,
             home_dir: home.path(),
             scanner_settings: &settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         };
 
         let units = DRIVER.discover_inputs(&ctx).unwrap();
@@ -156,9 +153,8 @@ mod tests {
         assert!(units
             .iter()
             .all(|unit| unit.fingerprint_policy == FingerprintPolicy::SqliteWithWal));
-        assert!(units.iter().all(|unit| {
-            unit.decoder.version()
-                == DecoderVersion::new(DecoderId::Warp, WARP_RECORD_REJECTION_REVISION)
-        }));
+        assert!(units
+            .iter()
+            .all(|unit| { unit.decoder.version() == DecoderVersion::current(DecoderId::Warp) }));
     }
 }

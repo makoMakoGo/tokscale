@@ -1,5 +1,5 @@
 use super::litellm::ModelPricing;
-use crate::{checked_token_add, model_aliases, provider_identity, TokenBreakdown};
+use crate::{model_aliases, provider_identity, TokenBreakdown};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -30,6 +30,14 @@ pub struct LookupResult {
     pub pricing: ModelPricing,
     pub pricing_source: String,
     pub matched_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PricingComputationError {
+    #[error("output and reasoning token counts exceed i64::MAX")]
+    OutputReasoningTokenOverflow,
+    #[error("pricing produced a non-finite {component} cost")]
+    NonFiniteCost { component: &'static str },
 }
 
 impl PricingLookup {
@@ -197,7 +205,7 @@ impl PricingLookup {
         cache_read: i64,
         cache_write: i64,
         reasoning: i64,
-    ) -> f64 {
+    ) -> Result<f64, PricingComputationError> {
         let usage = TokenBreakdown {
             input,
             output,
@@ -213,9 +221,9 @@ impl PricingLookup {
         model_id: &str,
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
-    ) -> f64 {
+    ) -> Result<f64, PricingComputationError> {
         let Some(result) = self.lookup_with_provider(model_id, provider_id) else {
-            return 0.0;
+            return Ok(0.0);
         };
 
         compute_cost(
@@ -357,13 +365,17 @@ pub fn compute_cost(
     cache_read: i64,
     cache_write: i64,
     reasoning: i64,
-) -> f64 {
+) -> Result<f64, PricingComputationError> {
     let safe_price = |price: Option<f64>| {
         price
             .filter(|value| is_valid_price_value(*value))
             .unwrap_or(0.0)
     };
-    let tiered_cost = |tokens: f64, base: Option<f64>, tiers: &[(f64, Option<f64>)]| {
+    let tiered_cost = |tokens: f64,
+                       base: Option<f64>,
+                       tiers: &[(f64, Option<f64>)],
+                       component: &'static str|
+     -> Result<f64, PricingComputationError> {
         let mut cost = 0.0;
         let mut lower_bound = 0.0;
         let mut active_price = safe_price(base);
@@ -378,19 +390,27 @@ pub fn compute_cost(
             }
 
             if tokens <= *threshold {
-                return cost + (tokens - lower_bound).max(0.0) * active_price;
+                let cost = cost + (tokens - lower_bound).max(0.0) * active_price;
+                return finite_cost(cost, component);
             }
 
             cost += (*threshold - lower_bound) * active_price;
+            cost = finite_cost(cost, component)?;
             lower_bound = *threshold;
             active_price = tier_price;
         }
 
-        cost + (tokens - lower_bound).max(0.0) * active_price
+        finite_cost(
+            cost + (tokens - lower_bound).max(0.0) * active_price,
+            component,
+        )
     };
 
     let input = input.max(0) as f64;
-    let output = checked_token_add(output.max(0), reasoning.max(0)) as f64;
+    let output = output
+        .max(0)
+        .checked_add(reasoning.max(0))
+        .ok_or(PricingComputationError::OutputReasoningTokenOverflow)? as f64;
     let cache_read = cache_read.max(0) as f64;
     let cache_write = cache_write.max(0) as f64;
 
@@ -415,7 +435,8 @@ pub fn compute_cost(
                 pricing.input_cost_per_token_above_272k_tokens,
             ),
         ],
-    );
+        "input",
+    )?;
     let output_cost = tiered_cost(
         output,
         pricing.output_cost_per_token,
@@ -437,7 +458,8 @@ pub fn compute_cost(
                 pricing.output_cost_per_token_above_272k_tokens,
             ),
         ],
-    );
+        "output",
+    )?;
     let cache_read_cost = tiered_cost(
         cache_read,
         pricing.cache_read_input_token_cost,
@@ -451,7 +473,8 @@ pub fn compute_cost(
                 pricing.cache_read_input_token_cost_above_272k_tokens,
             ),
         ],
-    );
+        "cache-read",
+    )?;
     let cache_write_cost = tiered_cost(
         cache_write,
         pricing.cache_creation_input_token_cost,
@@ -459,9 +482,21 @@ pub fn compute_cost(
             TIERED_PRICING_THRESHOLD_200K_TOKENS,
             pricing.cache_creation_input_token_cost_above_200k_tokens,
         )],
-    );
+        "cache-write",
+    )?;
 
-    input_cost + output_cost + cache_read_cost + cache_write_cost
+    finite_cost(
+        input_cost + output_cost + cache_read_cost + cache_write_cost,
+        "total",
+    )
+}
+
+fn finite_cost(cost: f64, component: &'static str) -> Result<f64, PricingComputationError> {
+    if cost.is_finite() {
+        Ok(cost)
+    } else {
+        Err(PricingComputationError::NonFiniteCost { component })
+    }
 }
 
 #[cfg(test)]

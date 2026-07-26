@@ -13,8 +13,6 @@ use crate::integrations::{
     InputDiscoveryError, IntegrationDriver, ParseContext, ParsedBatchInput, ParsedUnit, SourceSpec,
 };
 
-const ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION: u32 =
-    crate::integrations::EXPLICIT_TOKEN_OVERFLOW_REVISION + 2;
 const SOURCE: SourceSpec = SourceSpec::home(
     ".gemini/antigravity-cli/conversations",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::database),
@@ -33,9 +31,9 @@ impl IntegrationDriver for Driver {
 
         source_discovery::input_units_from_paths(
             client,
-            source_discovery::scan_roots(client, roots, SOURCE.matcher())?,
+            source_discovery::scan_roots(ctx, roots, SOURCE.matcher())?,
             FingerprintPolicy::SqliteWithWal,
-            DecoderKind::antigravity_cli_sqlite(ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION),
+            DecoderKind::antigravity_cli_sqlite(),
         )
     }
 
@@ -47,7 +45,7 @@ impl IntegrationDriver for Driver {
         units
             .into_par_iter()
             .map(|unit| match unit.decoder {
-                DecoderKind::AntigravityCliSqlite { .. } => pipeline_cache::load_or_scan_unit_with(
+                DecoderKind::AntigravityCliSqlite => pipeline_cache::load_or_scan_unit_with(
                     unit,
                     ctx,
                     decode::parse_antigravity_cli_file,
@@ -98,25 +96,28 @@ fn fold_antigravity_units(
     for parsed_unit in parsed {
         let pipeline_cache::ResolvedUnit {
             unit,
-            messages,
+            mut messages,
             cache_write,
             invalidate_cache,
             status,
-            rejections,
+            mut rejections,
         } = pipeline_cache::resolve_unit(parsed_unit, ctx)?;
-        ctx.record_health(unit.path.clone(), status, rejections);
         let path = unit.path.clone();
+        rejections.merge(&crate::retain_source_eligible_messages(&mut messages));
+        let cache_write =
+            cache_write.map(|plan| Box::new(plan.with_rejections(rejections.clone())));
         let cache_write_outcome = pipeline_cache::write_cache(cache_write, ctx, &messages);
-        if cache_write_outcome.is_err() && invalidate_cache {
-            ctx.input_cache.remove(&path, unit.decoder.version());
-        }
-        let cache_write_outcome = cache_write_outcome?;
-        pipeline_cache::emit_messages(
+        rejections.merge(&crate::price_source_eligible_messages(
+            &mut messages,
+            ctx.pricing,
+        ));
+        rejections.merge(&pipeline_cache::emit_messages(
             messages
                 .into_iter()
                 .filter(|message| crate::should_keep_deduped_message(seen, message)),
             sink,
-        );
+        ));
+        ctx.record_health(unit.path.clone(), status, rejections);
 
         if cache_write_outcome == pipeline_cache::CacheWriteOutcome::NotPlanned && invalidate_cache
         {
@@ -180,6 +181,7 @@ mod tests {
             client: ClientId::Antigravity,
             home_dir,
             scanner_settings: settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         }
     }
 
@@ -203,15 +205,9 @@ mod tests {
         assert_eq!(unit.fingerprint_policy, FingerprintPolicy::SqliteWithWal);
         assert_eq!(
             unit.decoder.version(),
-            DecoderVersion::new(
-                DecoderId::AntigravityCliSqlite,
-                ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION,
-            )
+            DecoderVersion::current(DecoderId::AntigravityCliSqlite)
         );
-        assert!(matches!(
-            unit.decoder,
-            DecoderKind::AntigravityCliSqlite { .. }
-        ));
+        assert!(matches!(unit.decoder, DecoderKind::AntigravityCliSqlite));
     }
 
     #[test]
@@ -241,7 +237,7 @@ mod tests {
         );
         assert!(matches!(
             units[0].decoder,
-            DecoderKind::AntigravityCliSqlite { .. }
+            DecoderKind::AntigravityCliSqlite
         ));
         assert!(!units.iter().any(|unit| unit.path == jsonl_path));
     }
@@ -266,10 +262,7 @@ mod tests {
 
     fn parsed_unit(path: &Path, message: UsageRecord) -> ParsedUnit {
         ParsedUnit::healthy(
-            DiscoveredInput::plain_file(
-                path.to_path_buf(),
-                DecoderKind::antigravity_cli_sqlite(ANTIGRAVITY_CLI_RECORD_REJECTION_REVISION),
-            ),
+            DiscoveredInput::plain_file(path.to_path_buf(), DecoderKind::antigravity_cli_sqlite()),
             UnitRecordPayload::Fresh(vec![message]),
             None,
             false,

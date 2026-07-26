@@ -414,17 +414,6 @@ mod tests {
             .timestamp_millis()
     }
 
-    fn local_date(timestamp_ms: i64) -> String {
-        use chrono::TimeZone;
-
-        chrono::Local
-            .timestamp_millis_opt(timestamp_ms)
-            .single()
-            .unwrap()
-            .format("%Y-%m-%d")
-            .to_string()
-    }
-
     #[test]
     fn test_parse_amp_reconciles_partial_ledger_with_message_usage() {
         let temp_dir = tempfile::TempDir::new().unwrap();
@@ -475,11 +464,8 @@ mod tests {
 
         let messages = parse_amp_file(&path);
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].date_string(), local_date(thread_created + 2000));
-        assert_eq!(
-            messages[1].date_string(),
-            local_date(timestamp_ms(ledger_timestamp))
-        );
+        assert_eq!(messages[0].timestamp, thread_created + 2000);
+        assert_eq!(messages[1].timestamp, timestamp_ms(ledger_timestamp));
         assert_eq!(messages[0].tokens.input, 50);
         assert_eq!(messages[1].tokens.input, 100);
     }
@@ -541,14 +527,8 @@ mod tests {
 
         let messages = parse_amp_file(&path);
         assert_eq!(messages.len(), 2);
-        assert_eq!(
-            messages[0].date_string(),
-            local_date(timestamp_ms(first_ledger_timestamp))
-        );
-        assert_eq!(
-            messages[1].date_string(),
-            local_date(timestamp_ms(second_ledger_timestamp))
-        );
+        assert_eq!(messages[0].timestamp, timestamp_ms(first_ledger_timestamp));
+        assert_eq!(messages[1].timestamp, timestamp_ms(second_ledger_timestamp));
     }
 
     #[test]

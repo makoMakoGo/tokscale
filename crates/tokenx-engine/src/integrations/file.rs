@@ -32,12 +32,11 @@ impl CachedFileDriver {
     pub(crate) const fn new(
         source: SourceSpec,
         decoder_id: DecoderId,
-        revision: u32,
         parse: fn(&Path) -> SessionParseResult<ScannedInput>,
     ) -> Self {
         Self {
             source,
-            decoder: DecoderKind::plain(decoder_id, revision),
+            decoder: DecoderKind::plain(decoder_id),
             fingerprint_policy: FingerprintPolicy::PlainFile,
             dependency_failure_policy: RelatedInputFailurePolicy::FailInput,
             dependency_path: None,
@@ -49,13 +48,12 @@ impl CachedFileDriver {
     pub(crate) const fn new_with_required_dependency(
         source: SourceSpec,
         decoder_id: DecoderId,
-        revision: u32,
         dependency_path: fn(&Path) -> Option<PathBuf>,
         parse: fn(&Path) -> SessionParseResult<ScannedInput>,
     ) -> Self {
         Self {
             source,
-            decoder: DecoderKind::plain(decoder_id, revision),
+            decoder: DecoderKind::plain(decoder_id),
             fingerprint_policy: FingerprintPolicy::PlainFile,
             dependency_failure_policy: RelatedInputFailurePolicy::FailInput,
             dependency_path: Some(dependency_path),
@@ -67,13 +65,12 @@ impl CachedFileDriver {
     pub(crate) const fn new_with_optional_dependency(
         source: SourceSpec,
         decoder_id: DecoderId,
-        revision: u32,
         dependency_path: fn(&Path) -> Option<PathBuf>,
         parse: fn(&Path) -> SessionParseResult<ScannedInput>,
     ) -> Self {
         Self {
             source,
-            decoder: DecoderKind::plain(decoder_id, revision),
+            decoder: DecoderKind::plain(decoder_id),
             fingerprint_policy: FingerprintPolicy::PlainFile,
             dependency_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
             dependency_path: Some(dependency_path),
@@ -85,13 +82,12 @@ impl CachedFileDriver {
     pub(crate) const fn new_with_optional_siblings(
         source: SourceSpec,
         decoder_id: DecoderId,
-        revision: u32,
         sibling_names: &'static [&'static str],
         parse: fn(&Path) -> SessionParseResult<ScannedInput>,
     ) -> Self {
         Self {
             source,
-            decoder: DecoderKind::plain(decoder_id, revision),
+            decoder: DecoderKind::plain(decoder_id),
             fingerprint_policy: FingerprintPolicy::PrimaryWithSiblings {
                 sibling_names,
                 related_failure_policy: RelatedInputFailurePolicy::PreservePrimary,
@@ -200,39 +196,19 @@ mod tests {
 
     use super::*;
     use crate::input_record_cache;
-    use crate::integrations::amp::{
-        DECODER_REVISION as AMP_RECORD_REJECTION_REVISION, DRIVER as AMP_ADAPTER,
-    };
-    use crate::integrations::commandcode::{
-        DECODER_REVISION as COMMANDCODE_WORKSPACE_REVISION, DRIVER as COMMANDCODE_ADAPTER,
-    };
-    use crate::integrations::copilot::{
-        DECODER_REVISION as COPILOT_AGENT_IDENTITY_REVISION, DRIVER as COPILOT_ADAPTER,
-    };
-    use crate::integrations::droid::{
-        DECODER_REVISION as DROID_AGENT_ATTRIBUTION_REVISION, DRIVER as DROID_ADAPTER,
-        RECORD_REJECTION_REVISION as DROID_RECORD_REJECTION_REVISION,
-    };
-    use crate::integrations::gemini::{
-        DECODER_REVISION as GEMINI_RECORD_REJECTION_REVISION, DRIVER as GEMINI_ADAPTER,
-    };
+    use crate::input_record_cache::DecoderVariant;
+    use crate::integrations::amp::DRIVER as AMP_ADAPTER;
+    use crate::integrations::commandcode::DRIVER as COMMANDCODE_ADAPTER;
+    use crate::integrations::copilot::DRIVER as COPILOT_ADAPTER;
+    use crate::integrations::droid::DRIVER as DROID_ADAPTER;
+    use crate::integrations::gemini::DRIVER as GEMINI_ADAPTER;
     use crate::integrations::grok::{
-        DECODER_REVISION as GROK_RELATED_METADATA_REVISION, DRIVER as GROK_ADAPTER,
-        RECORD_REJECTION_REVISION as GROK_RECORD_REJECTION_REVISION,
-        RELATED_METADATA_SIBLINGS as GROK_RELATED_METADATA_SIBLINGS,
+        DRIVER as GROK_ADAPTER, RELATED_METADATA_SIBLINGS as GROK_RELATED_METADATA_SIBLINGS,
     };
-    use crate::integrations::kimi::{
-        DECODER_REVISION as KIMI_RECORD_REJECTION_REVISION, DRIVER as KIMI_ADAPTER,
-    };
-    use crate::integrations::mux::{
-        DECODER_REVISION as MUX_RECORD_REJECTION_REVISION, DRIVER as MUX_ADAPTER,
-    };
-    use crate::integrations::qwen::{
-        DECODER_REVISION as QWEN_RECORD_REJECTION_REVISION, DRIVER as QWEN_ADAPTER,
-    };
-    use crate::integrations::zcode::{
-        DECODER_REVISION as ZCODE_RECORD_REJECTION_REVISION, DRIVER as ZCODE_ADAPTER,
-    };
+    use crate::integrations::kimi::DRIVER as KIMI_ADAPTER;
+    use crate::integrations::mux::DRIVER as MUX_ADAPTER;
+    use crate::integrations::qwen::DRIVER as QWEN_ADAPTER;
+    use crate::integrations::zcode::DRIVER as ZCODE_ADAPTER;
     use crate::integrations::{FoldContext, ParseContext};
     use crate::records::UsageRecord;
     use crate::AttributedUsageRecord;
@@ -254,6 +230,7 @@ not-json
             client,
             home_dir,
             scanner_settings: settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         }
     }
 
@@ -263,7 +240,7 @@ not-json
     }
 
     fn finalized(client: ClientId, mut messages: Vec<UsageRecord>) -> Vec<AttributedUsageRecord> {
-        crate::finalize_token_priced_messages(&mut messages, None);
+        crate::finalize_message_identities(&mut messages);
         let messages: Vec<_> = messages
             .into_iter()
             .map(|message| message.attribute(client))
@@ -292,7 +269,7 @@ not-json
         units: Vec<crate::integrations::ExecutionInput>,
         cache: &mut input_record_cache::InputRecordShardStore,
     ) -> Vec<AttributedUsageRecord> {
-        let parsed = driver.parse_inputs(units, &ParseContext { pricing: None });
+        let parsed = driver.parse_inputs(units, &ParseContext::uncancelled(None));
         let (sink, _) = fold_parsed(client, driver, parsed, cache);
         assert!(sink.iter().all(|message| message.client == client));
         sink
@@ -348,7 +325,7 @@ not-json
         write_file(&path, AMP_CONTENT);
         let units = vec![DiscoveredInput::plain_file(
             path.clone(),
-            DecoderKind::plain(DecoderId::Amp, AMP_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::Amp),
         )];
         let mut cache = input_record_cache::InputRecordShardStore::default();
 
@@ -446,7 +423,7 @@ model = "claude-sonnet-4"
 
         let parsed = KIMI_ADAPTER.parse_inputs(
             crate::integrations::test_execute_all(vec![unit]),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
@@ -617,17 +594,14 @@ model = "claude-sonnet-4"
         let cache_dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, QWEN_MIXED_CONTENT);
-        let unit = DiscoveredInput::plain_file(
-            path.clone(),
-            DecoderKind::plain(DecoderId::Qwen, QWEN_RECORD_REJECTION_REVISION),
-        )
-        .prepare_snapshot()
-        .unwrap();
+        let unit = DiscoveredInput::plain_file(path.clone(), DecoderKind::plain(DecoderId::Qwen))
+            .prepare_snapshot()
+            .unwrap();
         let mut cache = input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
 
         let parsed = QWEN_ADAPTER.parse_inputs(
             vec![unit.clone().into_lookup_miss()],
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         assert_eq!(parsed.len(), 1);
         let health = &parsed[0].health;
@@ -677,7 +651,7 @@ model = "claude-sonnet-4"
 
         let parsed = GROK_ADAPTER.parse_inputs(
             crate::integrations::test_execute_all(vec![unit.clone()]),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         let health = &parsed[0].health;
         assert!(matches!(
@@ -729,7 +703,7 @@ model = "claude-sonnet-4"
         let mut cache = input_record_cache::InputRecordShardStore::default();
         let parsed = GROK_ADAPTER.parse_inputs(
             crate::integrations::test_execute_all(vec![unit.clone()]),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         let (sink, _) = fold_parsed(ClientId::Grok, &GROK_ADAPTER, parsed, &mut cache);
         assert_eq!(sink.len(), 1);
@@ -768,7 +742,7 @@ model = "claude-sonnet-4"
 
         let parsed = GROK_ADAPTER.parse_inputs(
             crate::integrations::test_execute_all(vec![unit]),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         let health = &parsed[0].health;
         assert!(matches!(
@@ -802,15 +776,12 @@ model = "claude-sonnet-4"
                 "tokenUsage": {"inputTokens": 10}
             }"#,
         );
-        let unit = DiscoveredInput::plain_file(
-            path.clone(),
-            DecoderKind::plain(DecoderId::Droid, DROID_RECORD_REJECTION_REVISION),
-        );
+        let unit = DiscoveredInput::plain_file(path.clone(), DecoderKind::plain(DecoderId::Droid));
         let mut cache = input_record_cache::InputRecordShardStore::default();
 
         let parsed = DROID_ADAPTER.parse_inputs(
             crate::integrations::test_execute_all(vec![unit]),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
 
         assert_eq!(parsed.len(), 1);
@@ -995,7 +966,7 @@ model = "claude-sonnet-4"
 
         let parsed = DROID_ADAPTER.parse_inputs(
             crate::integrations::test_execute_all(vec![unit]),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
@@ -1018,55 +989,22 @@ model = "claude-sonnet-4"
     }
 
     #[test]
-    fn cached_file_adapters_use_their_actual_record_rejection_revisions() {
-        for (actual, decoder_id, revision) in [
-            (
-                GEMINI_ADAPTER.decoder.version(),
-                DecoderId::Gemini,
-                GEMINI_RECORD_REJECTION_REVISION,
-            ),
-            (
-                GROK_ADAPTER.decoder.version(),
-                DecoderId::Grok,
-                GROK_RELATED_METADATA_REVISION,
-            ),
-            (
-                AMP_ADAPTER.decoder.version(),
-                DecoderId::Amp,
-                AMP_RECORD_REJECTION_REVISION,
-            ),
-            (
-                DROID_ADAPTER.decoder.version(),
-                DecoderId::Droid,
-                DROID_AGENT_ATTRIBUTION_REVISION,
-            ),
-            (
-                KIMI_ADAPTER.decoder.version(),
-                DecoderId::Kimi,
-                KIMI_RECORD_REJECTION_REVISION,
-            ),
-            (
-                QWEN_ADAPTER.decoder.version(),
-                DecoderId::Qwen,
-                QWEN_RECORD_REJECTION_REVISION,
-            ),
-            (
-                MUX_ADAPTER.decoder.version(),
-                DecoderId::Mux,
-                MUX_RECORD_REJECTION_REVISION,
-            ),
+    fn cached_file_adapters_derive_current_decoder_contracts() {
+        for (actual, decoder_id) in [
+            (GEMINI_ADAPTER.decoder.version(), DecoderId::Gemini),
+            (GROK_ADAPTER.decoder.version(), DecoderId::Grok),
+            (AMP_ADAPTER.decoder.version(), DecoderId::Amp),
+            (DROID_ADAPTER.decoder.version(), DecoderId::Droid),
+            (KIMI_ADAPTER.decoder.version(), DecoderId::Kimi),
+            (QWEN_ADAPTER.decoder.version(), DecoderId::Qwen),
+            (MUX_ADAPTER.decoder.version(), DecoderId::Mux),
             (
                 COMMANDCODE_ADAPTER.decoder.version(),
                 DecoderId::CommandCode,
-                COMMANDCODE_WORKSPACE_REVISION,
             ),
-            (
-                ZCODE_ADAPTER.decoder.version(),
-                DecoderId::Zcode,
-                ZCODE_RECORD_REJECTION_REVISION,
-            ),
+            (ZCODE_ADAPTER.decoder.version(), DecoderId::Zcode),
         ] {
-            assert_eq!(actual, DecoderVersion::new(decoder_id, revision));
+            assert_eq!(actual, DecoderVersion::current(decoder_id));
         }
     }
 
@@ -1095,8 +1033,30 @@ model = "claude-sonnet-4"
                 .collect::<Vec<_>>(),
             vec![default_path, extra_path]
         );
-        assert!(units.iter().all(|unit| unit.decoder.version()
-            == DecoderVersion::new(DecoderId::Copilot, COPILOT_AGENT_IDENTITY_REVISION)));
+        assert!(matches!(
+            units[0].decoder,
+            DecoderKind::Copilot {
+                workspace_scope: crate::integrations::CopilotWorkspaceScope::BuiltInPlatform,
+                ..
+            }
+        ));
+        assert_eq!(
+            units[0].decoder.version(),
+            DecoderVersion::current(DecoderId::Copilot)
+                .with_variant(DecoderVariant::CopilotBuiltIn)
+        );
+        assert!(matches!(
+            units[1].decoder,
+            DecoderKind::Copilot {
+                workspace_scope: crate::integrations::CopilotWorkspaceScope::ExplicitRoot,
+                ..
+            }
+        ));
+        assert_eq!(
+            units[1].decoder.version(),
+            DecoderVersion::current(DecoderId::Copilot)
+                .with_variant(DecoderVariant::CopilotExplicitRoot)
+        );
     }
 
     #[test]
@@ -1111,12 +1071,13 @@ model = "claude-sonnet-4"
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
 
         assert_eq!(paths, vec![default_path]);
-        assert!(units.iter().all(|unit| unit.decoder.version()
-            == DecoderVersion::new(DecoderId::Zcode, ZCODE_RECORD_REJECTION_REVISION)));
+        assert!(units
+            .iter()
+            .all(|unit| unit.decoder.version() == DecoderVersion::current(DecoderId::Zcode)));
     }
 
     #[test]
-    fn grok_driver_uses_related_metadata_revision_and_siblings() {
+    fn grok_driver_uses_related_metadata_contract_and_siblings() {
         let home = tempfile::TempDir::new().unwrap();
         let path = home
             .path()
@@ -1130,11 +1091,7 @@ model = "claude-sonnet-4"
         assert_eq!(units.len(), 1);
         assert_eq!(
             units[0].decoder.version(),
-            DecoderVersion::new(DecoderId::Grok, GROK_RELATED_METADATA_REVISION)
-        );
-        assert_ne!(
-            units[0].decoder.version(),
-            DecoderVersion::new(DecoderId::Grok, GROK_RECORD_REJECTION_REVISION)
+            DecoderVersion::current(DecoderId::Grok)
         );
         assert_eq!(
             units[0].fingerprint_policy,
@@ -1152,7 +1109,7 @@ model = "claude-sonnet-4"
         write_file(&path, ZCODE_CONTENT);
         let units = vec![DiscoveredInput::plain_file(
             path.clone(),
-            DecoderKind::plain(DecoderId::Zcode, ZCODE_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::Zcode),
         )];
         let mut cache = input_record_cache::InputRecordShardStore::default();
 
@@ -1177,11 +1134,11 @@ model = "claude-sonnet-4"
         );
         let units = vec![DiscoveredInput::plain_file(
             path.clone(),
-            DecoderKind::plain(DecoderId::Gemini, GEMINI_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::Gemini),
         )];
         let parsed = GEMINI_ADAPTER.parse_inputs(
             crate::integrations::test_execute_all(units),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
 
         assert_eq!(parsed.len(), 1);

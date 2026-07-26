@@ -651,11 +651,13 @@ mod tests {
             },
         );
         let pricing = PricingService::new(litellm, HashMap::new());
-        let cost = pricing.calculate_cost_with_provider(
-            &messages[0].model_id,
-            Some(&messages[0].provider_id),
-            &messages[0].tokens,
-        );
+        let cost = pricing
+            .calculate_cost_with_provider(
+                &messages[0].model_id,
+                Some(&messages[0].provider_id),
+                &messages[0].tokens,
+            )
+            .unwrap();
 
         assert!(cost > 0.0);
     }

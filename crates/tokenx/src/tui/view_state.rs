@@ -1,12 +1,29 @@
 use std::cmp::Ordering;
 use std::ops::Range;
+use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 
 use super::app::{App, SortDirection, SortField, Tab};
 use super::interaction::{ListInteraction, MoveCommand, TextViewport, WrapMode};
-use super::session_data::{ClientSummary, SessionEntry};
+use super::session_data::ClientSummary;
+#[cfg(test)]
+use super::session_data::SessionEntry;
 use tokenx_engine::ClientId;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionOrderKey {
+    snapshot_revision: u64,
+    client: ClientId,
+    sort_field: SortField,
+    sort_direction: SortDirection,
+}
+
+#[derive(Debug, Default)]
+struct SessionOrderCache {
+    key: Option<SessionOrderKey>,
+    order: Arc<[usize]>,
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct ViewState {
@@ -16,6 +33,7 @@ pub(crate) struct ViewState {
     selected_session_client: Option<ClientId>,
     session_clients: ListInteraction,
     session_details: ListInteraction,
+    session_order_cache: SessionOrderCache,
 }
 
 impl ViewState {
@@ -196,18 +214,32 @@ impl ViewState {
             .collect()
     }
 
-    pub(crate) fn session_rows<'a>(&self, app: &'a App) -> Vec<&'a SessionEntry> {
+    pub(crate) fn session_order(&mut self, app: &App) -> Arc<[usize]> {
         let Some(client) = self.selected_session_client else {
-            return Vec::new();
+            return Arc::from([]);
         };
         if !app.is_client_selected(client) {
-            return Vec::new();
+            return Arc::from([]);
         }
-        let mut rows = app
-            .session_snapshot()
-            .session_refs_for_client(client)
-            .collect::<Vec<_>>();
-        rows.sort_by(|left, right| {
+        let snapshot = app.session_snapshot();
+        let key = SessionOrderKey {
+            snapshot_revision: snapshot.revision(),
+            client,
+            sort_field: app.sort_field,
+            sort_direction: app.sort_direction,
+        };
+        if self.session_order_cache.key == Some(key) {
+            return Arc::clone(&self.session_order_cache.order);
+        }
+
+        let mut order = snapshot.session_indices_for_client(client).to_vec();
+        order.sort_by(|left_index, right_index| {
+            let left = snapshot
+                .session(*left_index)
+                .expect("session client index must reference the snapshot");
+            let right = snapshot
+                .session(*right_index)
+                .expect("session client index must reference the snapshot");
             let ordering = match app.sort_field {
                 SortField::Date => left.last_seen.cmp(&right.last_seen),
                 SortField::Tokens => left.tokens.total().cmp(&right.tokens.total()),
@@ -216,7 +248,24 @@ impl ViewState {
             apply_direction(ordering, app.sort_direction)
                 .then_with(|| left.session_id.cmp(&right.session_id))
         });
-        rows
+        let order: Arc<[usize]> = order.into();
+        self.session_order_cache = SessionOrderCache {
+            key: Some(key),
+            order: Arc::clone(&order),
+        };
+        order
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_rows<'a>(&mut self, app: &'a App) -> Vec<&'a SessionEntry> {
+        self.session_order(app)
+            .iter()
+            .map(|index| {
+                app.session_snapshot()
+                    .session(*index)
+                    .expect("cached session index must reference the snapshot")
+            })
+            .collect()
     }
 
     pub(crate) fn reconcile_session_snapshot(&mut self, app: &App) {
@@ -224,6 +273,7 @@ impl ViewState {
             self.selected_session_client = None;
             self.session_clients = ListInteraction::default();
             self.session_details = ListInteraction::default();
+            self.session_order_cache = SessionOrderCache::default();
             return;
         }
 
@@ -309,5 +359,68 @@ fn wheel_move_command(kind: MouseEventKind) -> Option<MoveCommand> {
         MouseEventKind::ScrollUp => Some(MoveCommand::Up),
         MouseEventKind::ScrollDown => Some(MoveCommand::Down),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::TuiConfig;
+    use crate::tui::session_data::SessionSnapshot;
+    use crate::tui::themes::ThemeName;
+    use std::collections::HashSet;
+    use tokenx_engine::InputFootprint;
+
+    fn app_with_sessions(sessions: Vec<SessionEntry>) -> App {
+        let mut app = App::new_for_test(TuiConfig {
+            theme: Some(ThemeName::Blue),
+            refresh: 0,
+            no_refresh: true,
+            client_universe: tokenx_engine::ClientUniverse::all(),
+            initial_tab: Some(Tab::Sessions),
+            effective_date: chrono::NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
+        })
+        .unwrap();
+        app.replace_session_snapshot_for_test(SessionSnapshot::new(
+            sessions,
+            &InputFootprint::default(),
+        ));
+        app.set_selected_clients_for_test(HashSet::from([ClientId::Codex]));
+        app
+    }
+
+    fn session(id: &str, tokens: u64) -> SessionEntry {
+        let mut session = SessionEntry::new(ClientId::Codex, id);
+        session.tokens.input = tokens;
+        session
+    }
+
+    #[test]
+    fn session_order_cache_reuses_key_and_invalidates_sort_or_snapshot_revision() {
+        let mut app = app_with_sessions(vec![session("small", 1), session("large", 10)]);
+        let mut state = ViewState::default();
+        state.select_session_client_for_test(ClientId::Codex);
+
+        let first = state.session_order(&app);
+        assert!(Arc::ptr_eq(&first, &state.session_order(&app)));
+
+        app.sort_direction = SortDirection::Ascending;
+        let resorted = state.session_order(&app);
+        assert!(!Arc::ptr_eq(&first, &resorted));
+
+        app.replace_session_snapshot_for_test(SessionSnapshot::new(
+            vec![session("replacement", 20)],
+            &InputFootprint::default(),
+        ));
+        let replacement = state.session_order(&app);
+        assert!(!Arc::ptr_eq(&resorted, &replacement));
+        assert_eq!(
+            app.session_snapshot()
+                .session(replacement[0])
+                .unwrap()
+                .session_id
+                .as_ref(),
+            "replacement"
+        );
     }
 }

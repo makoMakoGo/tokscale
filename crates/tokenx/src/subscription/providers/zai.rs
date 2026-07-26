@@ -171,16 +171,15 @@ async fn fetch_sub(client: &reqwest::Client, key: &str) -> Result<SubResp> {
     Ok(resp.json().await?)
 }
 
-pub async fn fetch() -> Result<SubscriptionPayload> {
+pub async fn fetch(client: &reqwest::Client) -> Result<SubscriptionPayload> {
     let api_key = super::helpers::read_env(API_KEY_ENV).ok_or_else(|| {
         anyhow::anyhow!(
             "No Z.ai coding plan API key set. Configure TOKENX_USAGE_ZAI_CODING_PLAN_API_KEY."
         )
     })?;
 
-    let client = reqwest::Client::new();
-    let quota = fetch_quota(&client, &api_key).await?;
-    let sub = fetch_sub(&client, &api_key).await.ok();
+    let quota = fetch_quota(client, &api_key).await?;
+    let sub = fetch_sub(client, &api_key).await.ok();
     Ok(payload_from_parts(quota, sub))
 }
 

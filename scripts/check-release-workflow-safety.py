@@ -231,6 +231,31 @@ def validate_bun_job(
         errors.append(f"{label} must set up Bun before {consumer_text!r}")
 
 
+def validate_native_binary_smoke(
+    errors: list[str],
+    label: str,
+    workflow_lines: list[str],
+    job_name: str,
+) -> None:
+    block = "\n".join(job_block(workflow_lines, job_name))
+    required_fragments = (
+        "name: Smoke native binary",
+        '"$TOKENX_BINARY" --version',
+        'smoke_home="$(mktemp -d)"',
+        'export TOKENX_CONFIG_DIR="$smoke_home/.tokenx"',
+        '--home "$smoke_home"',
+        "--client amp",
+        "--json",
+        "--no-spinner",
+    )
+    missing = [fragment for fragment in required_fragments if fragment not in block]
+    if missing:
+        errors.append(
+            f"{label} must execute the built binary in an isolated offline smoke test; "
+            f"missing {missing}"
+        )
+
+
 def matrix_settings(lines: list[str], job_name: str) -> list[dict[str, str]]:
     block = job_block(lines, job_name)
     settings_start = None
@@ -501,6 +526,10 @@ def main() -> None:
 
     publish_build = by_target(matrix_settings(publish_lines, "build-native-binary"), "publish build")
     native_build = by_target(matrix_settings(native_lines, "build"), "build-native")
+    validate_native_binary_smoke(
+        errors, "publish native build", publish_lines, "build-native-binary"
+    )
+    validate_native_binary_smoke(errors, "build-native", native_lines, "build")
 
     unexpected_native_targets = [
         target for target in native_build if target not in publish_build

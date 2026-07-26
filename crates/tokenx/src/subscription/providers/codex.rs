@@ -141,7 +141,7 @@ fn account_from_id(account_id: Option<&str>) -> Option<UsageAccount> {
         })
 }
 
-async fn fetch_async(auth: Auth) -> Result<SubscriptionPayload> {
+async fn fetch_async(auth: Auth, client: &reqwest::Client) -> Result<SubscriptionPayload> {
     let tokens = auth
         .tokens
         .ok_or_else(|| anyhow::anyhow!("No Codex tokens."))?;
@@ -154,7 +154,7 @@ async fn fetch_async(auth: Auth) -> Result<SubscriptionPayload> {
     let account = account_from_id(tokens.account_id.as_deref());
 
     let response = fetch_usage(
-        &reqwest::Client::new(),
+        client,
         access_token,
         account.as_ref().map(|account| account.id.as_str()),
     )
@@ -178,9 +178,9 @@ async fn fetch_async(auth: Auth) -> Result<SubscriptionPayload> {
     })
 }
 
-pub async fn fetch() -> Result<SubscriptionPayload> {
+pub async fn fetch(client: &reqwest::Client) -> Result<SubscriptionPayload> {
     let auth = read_current_credentials()?;
-    fetch_async(auth).await
+    fetch_async(auth, client).await
 }
 
 #[cfg(test)]

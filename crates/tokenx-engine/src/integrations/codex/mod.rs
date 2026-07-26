@@ -20,10 +20,6 @@ use crate::records::UsageRecord;
 use crate::{input_record_cache, pricing, records};
 
 pub(crate) struct Driver;
-// Codex Agent roles use the shared neutral text normalizer. Keep cached
-// records aligned when that parser-owned identity changes.
-pub(crate) const DECODER_REVISION: u32 =
-    crate::integrations::MODEL_ID_CANONICALIZATION_REVISION + 4;
 
 const SOURCE: SourceSpec = SourceSpec::home(
     ".codex/sessions",
@@ -54,9 +50,9 @@ impl IntegrationDriver for Driver {
 
         let units = source_discovery::input_units_from_paths_preserving_order(
             client,
-            source_discovery::scan_roots(client, roots, SOURCE.matcher())?,
+            source_discovery::scan_roots(ctx, roots, SOURCE.matcher())?,
             FingerprintPolicy::PlainFile,
-            DecoderKind::codex(DECODER_REVISION),
+            DecoderKind::codex(),
         )?;
         Ok(units)
     }
@@ -64,13 +60,13 @@ impl IntegrationDriver for Driver {
     fn parse_inputs(
         &self,
         units: Vec<crate::integrations::ExecutionInput>,
-        _ctx: &ParseContext<'_>,
+        ctx: &ParseContext<'_>,
     ) -> Vec<ParsedUnit> {
         units
             .into_par_iter()
             .map(|unit| {
                 let unit_identity = unit.clone();
-                match load_or_parse_codex_unit(unit) {
+                match load_or_parse_codex_unit(unit, Some(ctx.cancellation())) {
                     Ok(parsed) => parsed,
                     Err(source) => ParsedUnit::unavailable(
                         unit_identity,
@@ -117,11 +113,21 @@ fn plan_exact_codex_cache_hit(
     unit: crate::integrations::PreparedInput,
     input_cache: &input_record_cache::InputRecordShardStore,
 ) -> Result<CacheHitPlan, InputPlanningError> {
+    if input_cache.is_disabled() {
+        return Ok(CacheHitPlan::Miss(unit.into_bypass_execution()));
+    }
     let cached = match input_cache.get_meta(&unit.path, unit.decoder.version()) {
         Ok(Some(cached)) => cached,
-        Ok(None) | Err(_) => {
+        Ok(None) if input_cache.is_disabled() => {
+            return Ok(CacheHitPlan::Miss(unit.into_bypass_execution()));
+        }
+        Ok(None) => {
             return Ok(CacheHitPlan::Miss(unit.into_lookup_miss()));
         }
+        Err(_) if input_cache.is_disabled() => {
+            return Ok(CacheHitPlan::Miss(unit.into_bypass_execution()));
+        }
+        Err(_) => return Ok(CacheHitPlan::Miss(unit.into_lookup_miss())),
     };
     let stamp =
         input_record_cache::InputPolicy::plain(&unit.path).stamp_from_snapshot(unit.snapshot())?;
@@ -190,25 +196,29 @@ fn fold_codex_units(
             status = health.status;
             rejections = health.rejections;
         }
-        ctx.record_health(path.clone(), status, rejections);
+        rejections.merge(&crate::retain_source_eligible_messages(&mut messages));
+        let cache_write = cache_write
+            .or(extra_write)
+            .map(|plan| Box::new(plan.with_rejections(rejections.clone())));
         write_codex_cache_and_apply_recovery(
             &path,
             decoder_version,
-            cache_write.or(extra_write),
+            cache_write,
             &messages,
             invalidate_cache,
             recovery_requires_removal,
             ctx,
-        )?;
+        );
         if finalization {
-            finalize_codex_messages(&mut messages, ctx.pricing);
+            rejections.merge(&finalize_codex_messages(&mut messages, ctx.pricing));
         }
-        pipeline_cache::emit_messages(
+        rejections.merge(&pipeline_cache::emit_messages(
             messages
                 .into_iter()
                 .filter(|message| crate::should_keep_deduped_message(seen, message)),
             sink,
-        );
+        ));
+        ctx.record_health(path.clone(), status, rejections);
     }
     Ok(())
 }
@@ -239,18 +249,13 @@ fn write_codex_cache_and_apply_recovery(
     invalidate_cache: bool,
     recovery_requires_removal: bool,
     ctx: &mut FoldContext<'_>,
-) -> Result<pipeline_cache::CacheWriteOutcome, InputPipelineError> {
+) -> pipeline_cache::CacheWriteOutcome {
     let write_result = pipeline_cache::write_cache(cache_write, ctx, messages);
     let should_remove = invalidate_cache || recovery_requires_removal;
-    if should_remove
-        && !matches!(
-            &write_result,
-            Ok(pipeline_cache::CacheWriteOutcome::Written)
-        )
-    {
+    if should_remove && write_result != pipeline_cache::CacheWriteOutcome::Written {
         ctx.input_cache.remove(path, decoder_version);
     }
-    write_result.map_err(Into::into)
+    write_result
 }
 
 struct CodexResolvedMessages {
@@ -268,6 +273,7 @@ fn codex_home(home_dir: &Path) -> PathBuf {
 fn parse_full_log_input(
     unit: DiscoveredInput,
     input_snapshot: input_record_cache::InputSnapshot,
+    cancellation: Option<&crate::engine::AcquisitionCancellation>,
 ) -> crate::records::error::SessionParseResult<ParsedUnit> {
     let path = unit.path.clone();
     let decode::ParsedCodexFile {
@@ -279,7 +285,12 @@ fn parse_full_log_input(
         content_hash,
         ends_with_newline,
         input_identity,
-    } = decode::parse_codex_file_incremental(&path, 0, decode::CodexParseState::default())?;
+    } = decode::parse_codex_file_incremental_with_cancellation(
+        &path,
+        0,
+        decode::CodexParseState::default(),
+        cancellation,
+    )?;
     let cache_write = if interrupted.is_none() {
         let content_hash = content_hash.ok_or_else(|| {
             records::error::SessionParseError::invalid(
@@ -334,8 +345,8 @@ fn parse_full_log_input(
 fn finalize_codex_messages(
     messages: &mut Vec<UsageRecord>,
     pricing: Option<&pricing::PricingService>,
-) {
-    crate::finalize_token_priced_messages(messages, pricing);
+) -> crate::input_health::RejectionSummary {
+    crate::price_source_eligible_messages(messages, pricing)
 }
 
 struct CodexCacheMaterial {
@@ -383,7 +394,10 @@ fn build_codex_cache_metadata(
     let stamp = input_policy.stamp_from_snapshot(&material.input_snapshot)?;
     let fingerprint =
         input_record_cache::InputFingerprint::from_main_digest(stamp, material.content_hash)?;
-    if fingerprint.size != material.consumed_offset {
+    if fingerprint
+        .primary_digest()
+        .is_none_or(|(size, _)| size != material.consumed_offset)
+    {
         return Ok(None);
     }
     let Some(incremental) = input_record_cache::build_codex_incremental_cache(
@@ -399,6 +413,7 @@ fn build_codex_cache_metadata(
 
 fn load_or_parse_codex_unit(
     mut unit: crate::integrations::ExecutionInput,
+    cancellation: Option<&crate::engine::AcquisitionCancellation>,
 ) -> crate::records::error::SessionParseResult<ParsedUnit> {
     let path = unit.path.clone();
     let cached = unit.take_cache_candidate();
@@ -412,8 +427,11 @@ fn load_or_parse_codex_unit(
     if let Some(cached) = cached {
         let reparse_snapshot = input_snapshot.clone();
         let reparse_from_start = |invalidate_cache: bool| {
-            let mut parsed =
-                parse_full_log_input(unit.clone().into_discovered(), reparse_snapshot.clone())?;
+            let mut parsed = parse_full_log_input(
+                unit.clone().into_discovered(),
+                reparse_snapshot.clone(),
+                cancellation,
+            )?;
             parsed.invalidate_cache = invalidate_cache;
             Ok(parsed)
         };
@@ -452,11 +470,12 @@ fn load_or_parse_codex_unit(
             if snapshot.primary_size().is_some_and(|size| {
                 size > codex_incremental.consumed_offset && codex_incremental.ends_with_newline
             }) {
-                let parsed = decode::parse_codex_file_incremental_verified(
+                let parsed = decode::parse_codex_file_incremental_verified_with_cancellation(
                     &path,
                     codex_incremental.consumed_offset,
                     codex_incremental.state.clone(),
                     codex_incremental.prefix_hash,
+                    cancellation,
                 )?;
                 if let Some(parsed) = parsed {
                     let mut rejections = cached.rejections.clone();
@@ -537,7 +556,7 @@ fn load_or_parse_codex_unit(
         return reparse_from_start(true);
     }
 
-    parse_full_log_input(unit.into_discovered(), input_snapshot)
+    parse_full_log_input(unit.into_discovered(), input_snapshot, cancellation)
 }
 
 fn resolve_codex_messages(
@@ -548,10 +567,13 @@ fn resolve_codex_messages(
         UnitRecordPayload::Fresh(messages) => Ok(CodexResolvedMessages {
             messages,
             cache_write: None,
-            finalization: false,
+            finalization: true,
             recovery_requires_removal: false,
             health_override: None,
         }),
+        UnitRecordPayload::PendingFinalization(_) => {
+            unreachable!("codex does not use generic pending-finalization payloads")
+        }
         UnitRecordPayload::CodexFresh(messages) => Ok(CodexResolvedMessages {
             messages,
             cache_write: None,
@@ -584,6 +606,7 @@ fn resolve_codex_messages(
                         &read_plan.path(),
                         read_plan.decoder_version(),
                         recovery_requires_removal,
+                        Some(ctx.cancellation()),
                     )
                 }
             }
@@ -612,6 +635,7 @@ fn resolve_codex_messages(
                         &path,
                         decoder_version,
                         recovery_requires_removal,
+                        Some(ctx.cancellation()),
                     );
                 }
             };
@@ -632,6 +656,7 @@ fn reparse_full_codex_messages(
     path: &Path,
     decoder_version: input_record_cache::DecoderVersion,
     recovery_requires_removal: bool,
+    cancellation: Option<&crate::engine::AcquisitionCancellation>,
 ) -> Result<CodexResolvedMessages, InputPipelineError> {
     let input_snapshot = input_record_cache::InputPolicy::plain(path)
         .snapshot()
@@ -645,9 +670,13 @@ fn reparse_full_codex_messages(
         content_hash,
         ends_with_newline,
         input_identity,
-    } = decode::parse_codex_file_incremental(path, 0, decode::CodexParseState::default()).map_err(
-        |source| InputParseError::from_session(path, decoder_version.decoder_id, source),
-    )?;
+    } = decode::parse_codex_file_incremental_with_cancellation(
+        path,
+        0,
+        decode::CodexParseState::default(),
+        cancellation,
+    )
+    .map_err(|source| InputParseError::from_session(path, decoder_version.decoder_id, source))?;
     let cache_write = if interrupted.is_none() {
         let content_hash = content_hash.ok_or_else(|| {
             InputPipelineError::contract("Codex full reparse did not produce a content hash")
@@ -762,6 +791,7 @@ mod tests {
             client: ClientId::Codex,
             home_dir,
             scanner_settings: settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         }
     }
 
@@ -774,7 +804,7 @@ mod tests {
     }
 
     fn codex_unit(path: &Path) -> DiscoveredInput {
-        DiscoveredInput::plain_file(path.to_path_buf(), DecoderKind::codex(DECODER_REVISION))
+        DiscoveredInput::plain_file(path.to_path_buf(), DecoderKind::codex())
     }
 
     fn prepared_codex_unit(path: &Path) -> crate::integrations::PreparedInput {
@@ -873,9 +903,8 @@ mod tests {
                 .expect("Codex cache planning must succeed")
             {
                 CacheHitPlan::Hit(hit) => parsed.push(hit),
-                CacheHitPlan::Miss(miss) => {
-                    parsed.extend(DRIVER.parse_inputs(vec![miss], &ParseContext { pricing }))
-                }
+                CacheHitPlan::Miss(miss) => parsed
+                    .extend(DRIVER.parse_inputs(vec![miss], &ParseContext::uncancelled(pricing))),
             }
         }
         parsed
@@ -926,6 +955,116 @@ mod tests {
         sink
     }
 
+    #[test]
+    fn codex_specialized_fold_rejects_one_bad_record_and_keeps_its_sibling() {
+        let unit = DiscoveredInput::no_record_cache(
+            "/tmp/tokenx-codex-record-isolation.jsonl".into(),
+            DecoderKind::codex(),
+        );
+        let good = UsageRecord::new(
+            "gpt-5.4",
+            "openai",
+            "good-session",
+            1,
+            crate::TokenBreakdown {
+                input: 5,
+                ..Default::default()
+            },
+            0.0,
+        );
+        let bad = UsageRecord::new(
+            "gpt-5.4",
+            "openai",
+            "bad-session",
+            1,
+            crate::TokenBreakdown {
+                input: -1,
+                output: 3,
+                ..Default::default()
+            },
+            0.0,
+        );
+        let parsed = ParsedUnit::healthy(
+            unit,
+            UnitRecordPayload::CodexFresh(vec![bad, good]),
+            None,
+            false,
+        );
+        let mut cache = input_record_cache::InputRecordShardStore::default();
+        let mut ctx = codex_fold_context(&mut cache, None);
+        let mut messages = Vec::new();
+
+        fold_codex_into(vec![parsed], &mut ctx, &mut messages).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id.as_ref(), "good-session");
+        assert_eq!(ctx.health().rejected_records(), 1);
+        assert_eq!(
+            ctx.health().inputs()[0]
+                .rejections
+                .entries()
+                .next()
+                .unwrap()
+                .key,
+            "invalid-usage-record"
+        );
+    }
+
+    #[test]
+    fn codex_specialized_write_failure_keeps_records_and_only_latches_store_diagnostic() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("session.jsonl");
+        let cache_path = temp.path().join("cache");
+        write_file(&path, FIRST_CODEX_ENTRY);
+        let unit = codex_unit(&path);
+        let decoder_version = unit.decoder.version();
+        let fingerprint = unit.input_policy().fingerprint().unwrap();
+        let message = UsageRecord::new(
+            "gpt-5.4",
+            "openai",
+            "healthy-session",
+            1_766_000_000_000,
+            crate::TokenBreakdown {
+                input: 7,
+                output: 2,
+                ..Default::default()
+            },
+            0.0,
+        );
+        let parsed = ParsedUnit::healthy(
+            unit,
+            UnitRecordPayload::CodexFresh(vec![message]),
+            Some(Box::new(input_record_cache::CacheWritePlan::new(
+                &path,
+                decoder_version,
+                fingerprint,
+                None,
+            ))),
+            false,
+        );
+        let mut cache = input_record_cache::InputRecordShardStore::with_cache_dir(&cache_path);
+        std::fs::rename(&cache_path, temp.path().join("cache-backup")).unwrap();
+        std::fs::write(&cache_path, b"cache path intentionally blocked").unwrap();
+        let mut ctx = codex_fold_context(&mut cache, None);
+        let mut messages = Vec::new();
+
+        fold_codex_into(vec![parsed], &mut ctx, &mut messages)
+            .expect("disposable cache failure must not fail the specialized fold");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id.as_ref(), "healthy-session");
+        assert_eq!(messages[0].tokens.input, 7);
+        assert_eq!(ctx.health().issue_count(), 0);
+        let (kind, _) = ctx
+            .input_cache
+            .disabled_diagnostic()
+            .expect("write failure must latch the store-level diagnostic");
+        assert_eq!(
+            kind,
+            crate::input_health::InputDiagnosticKind::CacheWriteFailed
+        );
+    }
+
     fn parser_messages(path: &Path) -> Vec<UsageRecord> {
         let mut messages = decode::parse_codex_file(path).unwrap();
         for message in &mut messages {
@@ -957,10 +1096,8 @@ mod tests {
         let expected =
             decode::parse_codex_file_incremental(path, 0, decode::CodexParseState::default())
                 .unwrap();
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         let mut cache = input_record_cache::InputRecordShardStore::with_cache_dir(cache_home);
         let meta = cache
             .get_meta(path, decoder_version)
@@ -1014,7 +1151,7 @@ mod tests {
             .all(|unit| unit.fingerprint_policy == FingerprintPolicy::PlainFile));
         assert!(units
             .iter()
-            .all(|unit| matches!(unit.decoder, DecoderKind::Codex { .. })));
+            .all(|unit| matches!(unit.decoder, DecoderKind::Codex)));
     }
 
     #[test]
@@ -1082,10 +1219,7 @@ mod tests {
         assert!(cache
             .get_meta(
                 &path,
-                input_record_cache::DecoderVersion::new(
-                    input_record_cache::DecoderId::Codex,
-                    DECODER_REVISION,
-                ),
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,),
             )
             .unwrap()
             .and_then(|meta| meta.codex_incremental)
@@ -1100,7 +1234,7 @@ mod tests {
 
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(vec![codex_unit(&path)]),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
 
         assert_eq!(parsed.len(), 1);
@@ -1160,10 +1294,8 @@ mod tests {
         assert_eq!(messages[1].model_id.as_ref(), "gpt-5.5");
         assert_eq!(ctx.health().rejected_records(), 1);
         assert_eq!(ctx.health().partial_inputs(), 0);
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         let cached = ctx
             .input_cache
             .get_meta(&path, decoder_version)
@@ -1203,10 +1335,8 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 8);
         assert_eq!(ctx.health().partial_inputs(), 1);
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         assert!(ctx
             .input_cache
             .get_meta(&path, decoder_version)
@@ -1249,10 +1379,8 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         assert!(ctx
             .input_cache
             .get_meta(&path, decoder_version)
@@ -1298,10 +1426,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         let mut seed_cache =
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_home.path());
         let expected = parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
@@ -1342,10 +1468,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         let mut seed_cache =
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
@@ -1395,10 +1519,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         let mut seed_cache =
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
@@ -1458,10 +1580,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         let mut seed_cache =
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
@@ -1499,10 +1619,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         let mut seed_cache =
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
@@ -1547,10 +1665,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         let mut seed_cache =
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
@@ -1594,10 +1710,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         let mut seed_cache =
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_home.path());
         let expected = parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
@@ -1624,10 +1738,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         let mut seed_cache =
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
@@ -1672,10 +1784,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         let mut seed_cache =
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
@@ -1715,15 +1825,13 @@ mod tests {
     }
 
     #[test]
-    fn codex_corrupt_body_is_removed_when_repair_write_fails() {
+    fn codex_repair_write_failure_disables_cache_until_the_next_acquisition() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         write_file(&path, FIRST_CODEX_ENTRY);
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         let mut seed_cache =
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_home.path());
         parse_and_fold(vec![codex_unit(&path)], &mut seed_cache);
@@ -1748,6 +1856,7 @@ mod tests {
         let backup_path = cache_path.with_extension("write-failure-backup");
         std::fs::rename(&cache_path, &backup_path).unwrap();
         std::fs::write(&cache_path, b"block cache directory recreation").unwrap();
+        let expected_records = resolved.messages.clone();
         let write_result = write_codex_cache_and_apply_recovery(
             &path,
             decoder_version,
@@ -1759,11 +1868,28 @@ mod tests {
         );
         std::fs::remove_file(&cache_path).unwrap();
         std::fs::rename(&backup_path, &cache_path).unwrap();
-        assert!(write_result.is_err());
+        assert_eq!(write_result, pipeline_cache::CacheWriteOutcome::NotPlanned);
+        assert_eq!(resolved.messages, expected_records);
+        assert!(cache.is_disabled());
+        let (kind, _) = cache
+            .disabled_diagnostic()
+            .expect("write failure must latch one store-level diagnostic");
+        assert_eq!(
+            kind,
+            crate::input_health::InputDiagnosticKind::CacheWriteFailed
+        );
         cache.save_if_dirty().unwrap();
         assert!(
-            !shard_path.exists(),
-            "a queued removal must delete proven corruption after the cache directory recovers"
+            shard_path.exists(),
+            "a disabled store must not retry removal during the same acquisition"
+        );
+
+        let mut retry =
+            input_record_cache::InputRecordShardStore::with_cache_dir(cache_home.path());
+        parse_and_fold(vec![codex_unit(&path)], &mut retry);
+        assert!(
+            retry.get_meta(&path, decoder_version).unwrap().is_some(),
+            "the next acquisition must reopen the cache and repair the corrupt shard"
         );
     }
 
@@ -1787,7 +1913,7 @@ mod tests {
         assert_eq!(parse_and_fold(vec![codex_unit(&path)], &mut cache).len(), 1);
         input_record_cache::reset_input_read_stats(&path);
 
-        let parsed = DRIVER.parse_inputs(vec![miss], &ParseContext { pricing: None });
+        let parsed = DRIVER.parse_inputs(vec![miss], &ParseContext::uncancelled(None));
 
         assert!(matches!(
             parsed[0].messages,
@@ -1813,10 +1939,8 @@ mod tests {
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_home.path());
         assert!(parse_and_fold(vec![codex_unit(&path)], &mut cold_cache).is_empty());
 
-        let decoder_version = input_record_cache::DecoderVersion::new(
-            input_record_cache::DecoderId::Codex,
-            DECODER_REVISION,
-        );
+        let decoder_version =
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex);
         let meta = cold_cache
             .get_meta(&path, decoder_version)
             .expect("Codex cache lookup must succeed")
@@ -1888,7 +2012,7 @@ mod tests {
             miss.snapshot().unwrap(),
             &miss.input_policy().snapshot().unwrap()
         );
-        let parsed = DRIVER.parse_inputs(vec![miss], &ParseContext { pricing: None });
+        let parsed = DRIVER.parse_inputs(vec![miss], &ParseContext::uncancelled(None));
 
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
@@ -1967,7 +2091,6 @@ mod tests {
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_home.path());
         let initial = parse_and_fold(vec![codex_unit(&path)], &mut cache);
         assert_eq!(initial[0].tokens.input, 8);
-        let mut prepared = prepared_codex_unit(&path);
 
         let replacement = dir.path().join("replacement.jsonl");
         let replacement_contents =
@@ -1979,14 +2102,14 @@ mod tests {
             .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
             .unwrap();
         std::fs::rename(&replacement, &path).unwrap();
-        prepared.refresh_for_execution().unwrap();
+        let prepared = prepared_codex_unit(&path);
 
         let miss = expect_codex_miss(
             DRIVER.plan_cache_hit(prepared, &cache),
             "persisted file identity must reject the replaced input",
         );
         let reparsed = fold_parsed(
-            DRIVER.parse_inputs(vec![miss], &ParseContext { pricing: None }),
+            DRIVER.parse_inputs(vec![miss], &ParseContext::uncancelled(None)),
             &mut cache,
         );
         assert_eq!(reparsed[0].tokens.input, 9);
@@ -2065,10 +2188,7 @@ mod tests {
         let mut remover = input_record_cache::InputRecordShardStore::load().unwrap();
         remover.remove(
             &path,
-            input_record_cache::DecoderVersion::new(
-                input_record_cache::DecoderId::Codex,
-                DECODER_REVISION,
-            ),
+            input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex),
         );
         remover.save_if_dirty().unwrap();
 

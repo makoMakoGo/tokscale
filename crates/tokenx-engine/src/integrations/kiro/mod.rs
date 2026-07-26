@@ -16,7 +16,6 @@ use crate::integrations::{
     InputDiscoveryError, IntegrationDriver, ParseContext, ParsedUnit, SourceSpec,
 };
 
-const KIRO_RECORD_REJECTION_REVISION: u32 = 5;
 const SOURCE: SourceSpec = SourceSpec::home(
     ".kiro/sessions/cli",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::json),
@@ -32,9 +31,9 @@ impl IntegrationDriver for Driver {
         let client = ctx.client;
         let mut units = source_discovery::input_units_from_paths(
             client,
-            source_discovery::scan_roots(client, [SOURCE.resolve(ctx.home_dir)], SOURCE.matcher())?,
+            source_discovery::scan_roots(ctx, [SOURCE.resolve(ctx.home_dir)], SOURCE.matcher())?,
             FingerprintPolicy::PlainFile,
-            DecoderKind::kiro_file(KIRO_RECORD_REJECTION_REVISION),
+            DecoderKind::kiro_file(),
         )?
         .into_iter()
         .map(configure_kiro_file_unit)
@@ -43,21 +42,21 @@ impl IntegrationDriver for Driver {
         if let Some(db_path) = kiro_db_path(client, ctx.home_dir)? {
             units.push(DiscoveredInput::sqlite_with_wal(
                 db_path,
-                DecoderKind::kiro_sqlite(KIRO_RECORD_REJECTION_REVISION),
+                DecoderKind::kiro_sqlite(),
             ));
         }
 
         units.extend(source_discovery::input_units_from_paths(
             client,
             source_discovery::scan_roots(
-                client,
+                ctx,
                 kiro_global_storage_roots(ctx.home_dir),
                 crate::integrations::SourceMatcher::new(
                     crate::integrations::source_matchers::kiro_global_storage,
                 ),
             )?,
             FingerprintPolicy::PlainFile,
-            DecoderKind::kiro_global_storage(KIRO_RECORD_REJECTION_REVISION),
+            DecoderKind::kiro_global_storage(),
         )?);
 
         units.extend(kiro_extra_units(client, ctx)?);
@@ -74,13 +73,13 @@ impl IntegrationDriver for Driver {
         units
             .into_par_iter()
             .map(|unit| match unit.decoder {
-                DecoderKind::KiroFile { .. } => {
+                DecoderKind::KiroFile => {
                     pipeline_cache::load_or_scan_unit_with(unit, ctx, decode::parse_kiro_file)
                 }
-                DecoderKind::KiroSqlite { .. } => {
+                DecoderKind::KiroSqlite => {
                     pipeline_cache::parse_uncached_unit(unit, ctx, decode::parse_kiro_sqlite)
                 }
-                DecoderKind::KiroGlobalStorage { .. } => {
+                DecoderKind::KiroGlobalStorage => {
                     pipeline_cache::load_or_scan_unit_with(unit, ctx, decode::parse_kiro_file)
                 }
                 _ => unreachable!("unexpected Kiro decoder"),
@@ -94,10 +93,10 @@ impl IntegrationDriver for Driver {
         input_cache: &crate::input_record_cache::InputRecordShardStore,
     ) -> Result<crate::integrations::CacheHitPlan, crate::integrations::InputPlanningError> {
         match unit.decoder {
-            DecoderKind::KiroFile { .. } | DecoderKind::KiroGlobalStorage { .. } => {
+            DecoderKind::KiroFile | DecoderKind::KiroGlobalStorage => {
                 pipeline_cache::plan_cache_hit(unit, input_cache)
             }
-            DecoderKind::KiroSqlite { .. } => Ok(crate::integrations::CacheHitPlan::Miss(
+            DecoderKind::KiroSqlite => Ok(crate::integrations::CacheHitPlan::Miss(
                 unit.into_bypass_execution(),
             )),
             _ => unreachable!("unexpected Kiro decoder"),
@@ -115,27 +114,66 @@ impl IntegrationDriver for Driver {
 }
 
 fn kiro_db_path(client: ClientId, home_dir: &Path) -> Result<Option<PathBuf>, InputDiscoveryError> {
-    let xdg_path = home_dir.join(".local/share/kiro-cli/data.sqlite3");
     let mut paths = Vec::new();
-    source_discovery::push_existing_file(client, xdg_path, &mut paths)?;
-    if let Some(path) = paths.pop() {
-        return Ok(Some(path));
+    for path in kiro_db_candidates(home_dir) {
+        source_discovery::push_existing_file(client, path, &mut paths)?;
     }
-
-    let macos_path = home_dir.join("Library/Application Support/kiro-cli/data.sqlite3");
-    source_discovery::push_existing_file(client, macos_path, &mut paths)?;
     Ok(paths.pop())
 }
 
+fn kiro_db_candidates(home_dir: &Path) -> Vec<PathBuf> {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        vec![home_dir.join(".local/share/kiro-cli/data.sqlite3")]
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        vec![home_dir.join("Library/Application Support/kiro-cli/data.sqlite3")]
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+    {
+        let _ = home_dir;
+        Vec::new()
+    }
+}
+
 fn kiro_global_storage_roots(home_dir: &Path) -> Vec<PathBuf> {
-    vec![
-        home_dir.join("Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent"),
-        home_dir.join("Library/Application Support/kiro/User/globalStorage/kiro.kiroagent"),
-        home_dir.join(".config/Kiro/User/globalStorage/kiro.kiroagent"),
-        home_dir.join(".config/kiro/User/globalStorage/kiro.kiroagent"),
-        home_dir.join("AppData/Roaming/Kiro/User/globalStorage/kiro.kiroagent"),
-        home_dir.join("AppData/Roaming/kiro/User/globalStorage/kiro.kiroagent"),
-    ]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        vec![
+            home_dir.join(".config/Kiro/User/globalStorage/kiro.kiroagent"),
+            home_dir.join(".config/kiro/User/globalStorage/kiro.kiroagent"),
+        ]
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        vec![
+            home_dir.join("Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent"),
+            home_dir.join("Library/Application Support/kiro/User/globalStorage/kiro.kiroagent"),
+        ]
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        vec![
+            home_dir.join("AppData/Roaming/Kiro/User/globalStorage/kiro.kiroagent"),
+            home_dir.join("AppData/Roaming/kiro/User/globalStorage/kiro.kiroagent"),
+        ]
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos",
+        target_os = "windows"
+    )))]
+    {
+        let _ = home_dir;
+        Vec::new()
+    }
 }
 
 fn configure_kiro_file_unit(unit: DiscoveredInput) -> DiscoveredInput {
@@ -190,7 +228,7 @@ fn kiro_extra_units(
         client,
         cli_paths,
         FingerprintPolicy::PlainFile,
-        DecoderKind::kiro_file(KIRO_RECORD_REJECTION_REVISION),
+        DecoderKind::kiro_file(),
     )?
     .into_iter()
     .map(configure_kiro_file_unit)
@@ -199,13 +237,13 @@ fn kiro_extra_units(
         client,
         sqlite_paths,
         FingerprintPolicy::SqliteWithWal,
-        DecoderKind::kiro_sqlite(KIRO_RECORD_REJECTION_REVISION),
+        DecoderKind::kiro_sqlite(),
     )?);
     units.extend(source_discovery::input_units_from_paths(
         client,
         global_storage_paths,
         FingerprintPolicy::PlainFile,
-        DecoderKind::kiro_global_storage(KIRO_RECORD_REJECTION_REVISION),
+        DecoderKind::kiro_global_storage(),
     )?);
     Ok(units)
 }
@@ -256,26 +294,24 @@ mod tests {
     use super::*;
 
     fn kiro_global_unit(path: PathBuf) -> DiscoveredInput {
-        DiscoveredInput::plain_file(
-            path,
-            DecoderKind::kiro_global_storage(KIRO_RECORD_REJECTION_REVISION),
-        )
+        DiscoveredInput::plain_file(path, DecoderKind::kiro_global_storage())
     }
 
     fn kiro_file_unit(path: PathBuf) -> DiscoveredInput {
         let sidecar = path.with_extension("jsonl");
-        DiscoveredInput::plain_file(path, DecoderKind::kiro_file(KIRO_RECORD_REJECTION_REVISION))
+        DiscoveredInput::plain_file(path, DecoderKind::kiro_file())
             .with_optional_dependency(sidecar)
     }
 
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[test]
-    fn kiro_driver_discovers_file_sqlite_and_global_storage_inputs() {
+    fn kiro_driver_discovers_linux_file_sqlite_and_global_storage_inputs() {
         let home = tempfile::TempDir::new().unwrap();
         let file_path = home.path().join(".kiro/sessions/cli/session.json");
         let db_path = home.path().join(".local/share/kiro-cli/data.sqlite3");
-        let global_path = home.path().join(
-            "Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/workspace-a/execution.chat",
-        );
+        let global_path = home
+            .path()
+            .join(".config/Kiro/User/globalStorage/kiro.kiroagent/workspace-a/execution.chat");
         for path in [&file_path, &db_path, &global_path] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, "").unwrap();
@@ -285,6 +321,7 @@ mod tests {
             client: ClientId::Kiro,
             home_dir: home.path(),
             scanner_settings: &settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         };
 
         let units = DRIVER.discover_inputs(&ctx).unwrap();
@@ -292,19 +329,16 @@ mod tests {
         assert_eq!(units.len(), 3);
         assert!(units
             .iter()
-            .any(|unit| unit.path == file_path
-                && matches!(unit.decoder, DecoderKind::KiroFile { .. })));
+            .any(|unit| unit.path == file_path && matches!(unit.decoder, DecoderKind::KiroFile)));
         assert!(units
             .iter()
-            .any(|unit| unit.path == db_path
-                && matches!(unit.decoder, DecoderKind::KiroSqlite { .. })));
+            .any(|unit| unit.path == db_path && matches!(unit.decoder, DecoderKind::KiroSqlite)));
         assert!(units.iter().any(|unit| {
-            unit.path == global_path
-                && matches!(unit.decoder, DecoderKind::KiroGlobalStorage { .. })
+            unit.path == global_path && matches!(unit.decoder, DecoderKind::KiroGlobalStorage)
         }));
         let file_unit = units
             .iter()
-            .find(|unit| matches!(unit.decoder, DecoderKind::KiroFile { .. }))
+            .find(|unit| matches!(unit.decoder, DecoderKind::KiroFile))
             .unwrap();
         assert_eq!(
             file_unit.fingerprint_policy,
@@ -316,21 +350,72 @@ mod tests {
         );
         let global_unit = units
             .iter()
-            .find(|unit| matches!(unit.decoder, DecoderKind::KiroGlobalStorage { .. }))
+            .find(|unit| matches!(unit.decoder, DecoderKind::KiroGlobalStorage))
             .unwrap();
         assert_eq!(global_unit.fingerprint_policy, FingerprintPolicy::PlainFile);
         for unit in &units {
             let decoder_id = match unit.decoder {
-                DecoderKind::KiroFile { .. } => DecoderId::KiroFile,
-                DecoderKind::KiroSqlite { .. } => DecoderId::KiroSqlite,
-                DecoderKind::KiroGlobalStorage { .. } => DecoderId::KiroGlobalStorage,
+                DecoderKind::KiroFile => DecoderId::KiroFile,
+                DecoderKind::KiroSqlite => DecoderId::KiroSqlite,
+                DecoderKind::KiroGlobalStorage => DecoderId::KiroGlobalStorage,
                 _ => unreachable!(),
             };
-            assert_eq!(
-                unit.decoder.version(),
-                DecoderVersion::new(decoder_id, KIRO_RECORD_REJECTION_REVISION)
-            );
+            assert_eq!(unit.decoder.version(), DecoderVersion::current(decoder_id));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kiro_linux_built_in_candidates_exclude_macos_and_windows_layouts() {
+        let home = Path::new("/home/alice");
+        assert_eq!(
+            kiro_db_candidates(home),
+            vec![home.join(".local/share/kiro-cli/data.sqlite3")]
+        );
+        let roots = kiro_global_storage_roots(home);
+        assert_eq!(roots.len(), 2);
+        assert!(roots
+            .iter()
+            .all(|root| root.starts_with(home.join(".config"))));
+        assert!(roots.iter().all(|root| {
+            let root = root.to_string_lossy();
+            !root.contains("Library") && !root.contains("AppData")
+        }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn kiro_macos_built_in_candidates_exclude_linux_and_windows_layouts() {
+        let home = Path::new("/Users/alice");
+        assert_eq!(
+            kiro_db_candidates(home),
+            vec![home.join("Library/Application Support/kiro-cli/data.sqlite3")]
+        );
+        let roots = kiro_global_storage_roots(home);
+        assert_eq!(roots.len(), 2);
+        assert!(roots
+            .iter()
+            .all(|root| root.starts_with(home.join("Library/Application Support"))));
+        assert!(roots.iter().all(|root| {
+            let root = root.to_string_lossy();
+            !root.contains(".config") && !root.contains("AppData")
+        }));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn kiro_windows_built_in_candidates_exclude_linux_and_macos_layouts() {
+        let home = Path::new(r"C:\Users\alice");
+        assert!(kiro_db_candidates(home).is_empty());
+        let roots = kiro_global_storage_roots(home);
+        assert_eq!(roots.len(), 2);
+        assert!(roots
+            .iter()
+            .all(|root| root.starts_with(home.join("AppData/Roaming"))));
+        assert!(roots.iter().all(|root| {
+            let root = root.to_string_lossy();
+            !root.contains(".config") && !root.contains("Library")
+        }));
     }
 
     #[test]
@@ -358,13 +443,14 @@ mod tests {
             client: ClientId::Kiro,
             home_dir: home.path(),
             scanner_settings: &settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         };
 
         let units = DRIVER.discover_inputs(&ctx).unwrap();
         assert_eq!(units.len(), 3);
 
         let cli_unit = units.iter().find(|unit| unit.path == cli_path).unwrap();
-        assert!(matches!(cli_unit.decoder, DecoderKind::KiroFile { .. }));
+        assert!(matches!(cli_unit.decoder, DecoderKind::KiroFile));
         assert_eq!(
             cli_unit.fingerprint_policy,
             FingerprintPolicy::PrimaryWithDependency {
@@ -375,31 +461,28 @@ mod tests {
         );
         assert_eq!(
             cli_unit.decoder.version(),
-            DecoderVersion::new(DecoderId::KiroFile, KIRO_RECORD_REJECTION_REVISION)
+            DecoderVersion::current(DecoderId::KiroFile)
         );
 
         let sqlite_unit = units.iter().find(|unit| unit.path == sqlite_path).unwrap();
-        assert!(matches!(
-            sqlite_unit.decoder,
-            DecoderKind::KiroSqlite { .. }
-        ));
+        assert!(matches!(sqlite_unit.decoder, DecoderKind::KiroSqlite));
         assert_eq!(
             sqlite_unit.fingerprint_policy,
             FingerprintPolicy::SqliteWithWal
         );
         assert_eq!(
             sqlite_unit.decoder.version(),
-            DecoderVersion::new(DecoderId::KiroSqlite, KIRO_RECORD_REJECTION_REVISION)
+            DecoderVersion::current(DecoderId::KiroSqlite)
         );
 
         let global_unit = units.iter().find(|unit| unit.path == global_path).unwrap();
         assert!(matches!(
             global_unit.decoder,
-            DecoderKind::KiroGlobalStorage { .. }
+            DecoderKind::KiroGlobalStorage
         ));
         assert_eq!(
             global_unit.decoder.version(),
-            DecoderVersion::new(DecoderId::KiroGlobalStorage, KIRO_RECORD_REJECTION_REVISION)
+            DecoderVersion::current(DecoderId::KiroGlobalStorage)
         );
     }
 
@@ -428,7 +511,7 @@ mod tests {
         let units = paths.into_iter().map(kiro_global_unit).collect::<Vec<_>>();
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(units),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         let mut cache = crate::input_record_cache::InputRecordShardStore::default();
         let mut messages = Vec::new();
@@ -455,7 +538,7 @@ mod tests {
 
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(vec![kiro_file_unit(path)]),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
 
         let health = &parsed[0].health;
@@ -492,7 +575,7 @@ mod tests {
 
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(vec![unit]),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
 
         let health = &parsed[0].health;

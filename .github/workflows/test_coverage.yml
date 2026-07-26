@@ -19,7 +19,6 @@ on:
       - '.github/workflows/publish.yml'
       - '.github/workflows/test_coverage.yml'
   pull_request:
-    branches: [main]
     paths:
       - 'crates/**'
       - 'Cargo.toml'

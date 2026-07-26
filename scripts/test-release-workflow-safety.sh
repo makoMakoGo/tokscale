@@ -86,6 +86,13 @@ jobs:
             build: cargo zigbuild --release -p tokenx --target x86_64-unknown-linux-gnu
             strip: strip target/x86_64-unknown-linux-gnu/release/tokenx
             bin_name: tokenx
+    steps:
+      - name: Smoke native binary
+        run: |
+          "$TOKENX_BINARY" --version
+          smoke_home="$(mktemp -d)"
+          export TOKENX_CONFIG_DIR="$smoke_home/.tokenx"
+          "$TOKENX_BINARY" models --home "$smoke_home" --client amp --json --no-spinner
 EOF_YAML
   cat > "${work}/.github/workflows/publish.yml" <<'EOF_YAML'
 name: Publish
@@ -127,6 +134,13 @@ jobs:
             bin_name: tokenx
             build: cargo zigbuild --release -p tokenx --target x86_64-unknown-linux-gnu
             strip: strip target/x86_64-unknown-linux-gnu/release/tokenx
+    steps:
+      - name: Smoke native binary
+        run: |
+          "$TOKENX_BINARY" --version
+          smoke_home="$(mktemp -d)"
+          export TOKENX_CONFIG_DIR="$smoke_home/.tokenx"
+          "$TOKENX_BINARY" models --home "$smoke_home" --client amp --json --no-spinner
   publish-platform-packages:
     strategy:
       matrix:
@@ -285,7 +299,11 @@ insert = """          - host: windows-latest
             build: cargo build --release -p tokenx --target x86_64-pc-windows-msvc
             strip: \"\"
 """
-text = text.replace("  publish-platform-packages:\n", insert + "  publish-platform-packages:\n")
+text = text.replace(
+    "    steps:\n      - name: Smoke native binary\n",
+    insert + "    steps:\n      - name: Smoke native binary\n",
+    1,
+)
 path.write_text(text)
 PY
 
@@ -325,6 +343,21 @@ PY
   fi
 
   grep -q "env MACOSX_DEPLOYMENT_TARGET differs" "${output}"
+}
+
+test_rejects_missing_native_binary_smoke() {
+  local work="${TMP_DIR}/missing-native-smoke"
+  write_good_workflows "${work}"
+  replace_text \
+    "${work}/.github/workflows/build-native.yml" \
+    '"$TOKENX_BINARY" --version' \
+    'true'
+
+  assert_safety_rejected \
+    "${work}" \
+    "${TMP_DIR}/missing-native-smoke-output.txt" \
+    "build-native must execute the built binary in an isolated offline smoke test" \
+    "Expected workflow safety check to reject a missing native binary smoke"
 }
 
 test_rejects_missing_required_release_env() {
@@ -636,6 +669,7 @@ test_reads_workflows_as_utf8_when_locale_is_non_utf8
 test_rejects_build_matrix_target_drift
 test_rejects_publish_matrix_target_without_native_coverage
 test_rejects_release_env_drift
+test_rejects_missing_native_binary_smoke
 test_rejects_missing_required_release_env
 test_rejects_platform_publish_matrix_drift
 test_rejects_missing_default_branch_push_trigger

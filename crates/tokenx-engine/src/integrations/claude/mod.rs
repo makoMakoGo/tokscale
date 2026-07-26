@@ -1,9 +1,9 @@
 pub(crate) mod decode;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
@@ -15,41 +15,12 @@ use crate::integrations::discover as source_discovery;
 use crate::integrations::{
     BoundUsageSink, DecoderKind, DiscoveredInput, DiscoveryContext, FingerprintPolicy, FoldContext,
     InputDiscoveryError, IntegrationDriver, ParseContext, ParsedBatchInput, ParsedUnit, SourceSpec,
-    MODEL_ID_CANONICALIZATION_REVISION,
 };
 
-const CLAUDE_DECODER_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 10;
 const SOURCE: SourceSpec = SourceSpec::home(
     ".claude/projects",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::jsonl),
 );
-
-static CLAUDE_PROJECT_RESOLVERS: LazyLock<
-    Mutex<HashMap<PathBuf, Arc<decode::ClaudeProjectResolver>>>,
-> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn reset_claude_project_resolver(home_dir: &Path) {
-    CLAUDE_PROJECT_RESOLVERS
-        .lock()
-        .expect("Claude project resolver registry poisoned")
-        .insert(
-            home_dir.to_path_buf(),
-            Arc::new(decode::ClaudeProjectResolver::new(Some(home_dir))),
-        );
-}
-
-fn claude_project_resolver(home_dir: Option<&Path>) -> Arc<decode::ClaudeProjectResolver> {
-    let Some(home_dir) = home_dir else {
-        return Arc::new(decode::ClaudeProjectResolver::new(None));
-    };
-    let mut resolvers = CLAUDE_PROJECT_RESOLVERS
-        .lock()
-        .expect("Claude project resolver registry poisoned");
-    resolvers
-        .entry(home_dir.to_path_buf())
-        .or_insert_with(|| Arc::new(decode::ClaudeProjectResolver::new(Some(home_dir))))
-        .clone()
-}
 
 pub(crate) struct Driver;
 
@@ -59,7 +30,7 @@ impl IntegrationDriver for Driver {
         ctx: &DiscoveryContext<'_>,
     ) -> Result<Vec<DiscoveredInput>, InputDiscoveryError> {
         let client = ctx.client;
-        reset_claude_project_resolver(ctx.home_dir);
+        let project_resolver = Arc::new(decode::ClaudeProjectResolver::new(Some(ctx.home_dir)));
         let mut roots = vec![SOURCE.resolve(ctx.home_dir)];
 
         roots.extend(source_discovery::extra_roots_for_client(client, ctx)?);
@@ -67,15 +38,16 @@ impl IntegrationDriver for Driver {
 
         let units = source_discovery::input_units_from_paths(
             client,
-            source_discovery::scan_roots(client, roots, SOURCE.matcher())?,
+            source_discovery::scan_roots(ctx, roots, SOURCE.matcher())?,
             FingerprintPolicy::ClaudeCodeWithHome {
                 home_dir: ctx.home_dir.to_path_buf(),
                 parent_session_path: None,
             },
-            DecoderKind::plain(DecoderId::Claude, CLAUDE_DECODER_REVISION),
+            DecoderKind::plain(DecoderId::Claude),
         )?
         .into_iter()
         .map(configure_claude_parent_dependency)
+        .map(|unit| unit.with_claude_project_resolver(project_resolver.clone()))
         .collect();
         Ok(units)
     }
@@ -85,32 +57,47 @@ impl IntegrationDriver for Driver {
         units: Vec<crate::integrations::ExecutionInput>,
         ctx: &ParseContext<'_>,
     ) -> Vec<ParsedUnit> {
+        let project_resolver = units
+            .iter()
+            .find_map(|unit| unit.claude_project_resolver().cloned())
+            .unwrap_or_else(|| {
+                let home_dir = units
+                    .iter()
+                    .find_map(|unit| match &unit.fingerprint_policy {
+                        FingerprintPolicy::ClaudeCodeWithHome { home_dir, .. } => {
+                            Some(home_dir.as_path())
+                        }
+                        _ => None,
+                    });
+                Arc::new(decode::ClaudeProjectResolver::new(home_dir))
+            });
         units
             .into_par_iter()
             .map(|unit| {
-                let (home_dir, parent_session_fingerprinted) = match &unit.fingerprint_policy {
+                let parent_session_fingerprinted = match &unit.fingerprint_policy {
                     FingerprintPolicy::ClaudeCodeWithHome {
-                        home_dir,
                         parent_session_path,
                         ..
-                    } => (Some(home_dir.clone()), parent_session_path.is_some()),
-                    FingerprintPolicy::NoRecordCache => (None, false),
+                    } => parent_session_path.is_some(),
+                    FingerprintPolicy::NoRecordCache => false,
                     _ => unreachable!("unexpected Claude input fingerprint policy"),
                 };
-                let project_resolver = claude_project_resolver(home_dir.as_deref());
                 pipeline_cache::load_or_scan_unit_with_cacheability(unit, ctx, |path| {
-                    decode::parse_claude_file_with_project_resolver(path, &project_resolver).map(
-                        |(scanned, dependency)| {
-                            let cacheable = match dependency {
-                                decode::ClaudeProjectDependency::None => true,
-                                decode::ClaudeProjectDependency::ParentSession => {
-                                    parent_session_fingerprinted
-                                }
-                                decode::ClaudeProjectDependency::ExternalMetadata => false,
-                            };
-                            (scanned, cacheable)
-                        },
+                    decode::parse_claude_file_with_project_resolver_and_cancellation(
+                        path,
+                        project_resolver.as_ref(),
+                        Some(ctx.cancellation()),
                     )
+                    .map(|(scanned, dependency)| {
+                        let cacheable = match dependency {
+                            decode::ClaudeProjectDependency::None => true,
+                            decode::ClaudeProjectDependency::ParentSession => {
+                                parent_session_fingerprinted
+                            }
+                            decode::ClaudeProjectDependency::ExternalMetadata => false,
+                        };
+                        (scanned, cacheable)
+                    })
                 })
             })
             .collect()
@@ -240,25 +227,28 @@ fn fold_claude_units(
     for parsed_unit in parsed {
         let pipeline_cache::ResolvedUnit {
             unit,
-            messages,
+            mut messages,
             cache_write,
             invalidate_cache,
             status,
-            rejections,
+            mut rejections,
         } = pipeline_cache::resolve_unit(parsed_unit, ctx)?;
-        ctx.record_health(unit.path.clone(), status, rejections);
         let path = unit.path.clone();
+        rejections.merge(&crate::retain_source_eligible_messages(&mut messages));
+        let cache_write =
+            cache_write.map(|plan| Box::new(plan.with_rejections(rejections.clone())));
         let cache_write_outcome = pipeline_cache::write_cache(cache_write, ctx, &messages);
-        if cache_write_outcome.is_err() && invalidate_cache {
-            ctx.input_cache.remove(&path, unit.decoder.version());
-        }
-        let cache_write_outcome = cache_write_outcome?;
-        pipeline_cache::emit_messages(
+        rejections.merge(&crate::price_source_eligible_messages(
+            &mut messages,
+            ctx.pricing,
+        ));
+        rejections.merge(&pipeline_cache::emit_messages(
             messages
                 .into_iter()
                 .filter(|message| crate::should_keep_deduped_message(seen_keys, message)),
             sink,
-        );
+        ));
+        ctx.record_health(unit.path.clone(), status, rejections);
 
         if cache_write_outcome == pipeline_cache::CacheWriteOutcome::NotPlanned && invalidate_cache
         {
@@ -293,6 +283,7 @@ mod tests {
             client: ClientId::Claude,
             home_dir,
             scanner_settings: settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         }
     }
 
@@ -311,11 +302,13 @@ mod tests {
     }
 
     fn decoder() -> DecoderKind {
-        DecoderKind::plain(DecoderId::Claude, CLAUDE_DECODER_REVISION)
+        DecoderKind::plain(DecoderId::Claude)
     }
 
     fn input_unit(path: PathBuf, home_dir: PathBuf) -> DiscoveredInput {
+        let resolver = Arc::new(decode::ClaudeProjectResolver::new(Some(&home_dir)));
         DiscoveredInput::claude_code(path, home_dir, decoder())
+            .with_claude_project_resolver(resolver)
     }
 
     fn input_health(parsed: &ParsedUnit) -> InputHealth {
@@ -358,7 +351,7 @@ mod tests {
         unit: crate::integrations::ExecutionInput,
         cache: &mut input_record_cache::InputRecordShardStore,
     ) -> (Vec<crate::AttributedUsageRecord>, InputHealth) {
-        let parsed = DRIVER.parse_inputs(vec![unit], &ParseContext { pricing: None });
+        let parsed = DRIVER.parse_inputs(vec![unit], &ParseContext::uncancelled(None));
         let health = input_health(&parsed[0]);
         let messages = fold_parsed(parsed, cache);
         (messages, health)
@@ -376,7 +369,7 @@ mod tests {
     fn finalized(
         mut messages: Vec<crate::records::UsageRecord>,
     ) -> Vec<crate::AttributedUsageRecord> {
-        crate::finalize_token_priced_messages(&mut messages, None);
+        crate::finalize_message_identities(&mut messages);
         messages
             .into_iter()
             .map(|message| message.attribute(ClientId::Claude))
@@ -430,6 +423,135 @@ mod tests {
             &unit.fingerprint_policy,
             FingerprintPolicy::ClaudeCodeWithHome { .. }
         )));
+    }
+
+    #[test]
+    fn claude_resolver_is_owned_by_one_discovery_and_never_crosses_homes() {
+        let home_a = tempfile::TempDir::new().unwrap();
+        let home_b = tempfile::TempDir::new().unwrap();
+        for home in [home_a.path(), home_b.path()] {
+            write_file(&home.join(".claude/projects/project/session-a.jsonl"), "");
+            write_file(&home.join(".claude/projects/project/session-b.jsonl"), "");
+        }
+
+        let (units_a, units_b) = std::thread::scope(|scope| {
+            let discovery_a = scope.spawn(|| {
+                let settings = crate::scanner::ScannerSettings::default();
+                DRIVER
+                    .discover_inputs(&scan_context(home_a.path(), &settings))
+                    .unwrap()
+            });
+            let discovery_b = scope.spawn(|| {
+                let settings = crate::scanner::ScannerSettings::default();
+                DRIVER
+                    .discover_inputs(&scan_context(home_b.path(), &settings))
+                    .unwrap()
+            });
+            (discovery_a.join().unwrap(), discovery_b.join().unwrap())
+        });
+
+        let resolver_a = units_a[0].claude_project_resolver().unwrap().clone();
+        let resolver_b = units_b[0].claude_project_resolver().unwrap().clone();
+        assert!(units_a
+            .iter()
+            .all(|unit| Arc::ptr_eq(unit.claude_project_resolver().unwrap(), &resolver_a)));
+        assert!(units_b
+            .iter()
+            .all(|unit| Arc::ptr_eq(unit.claude_project_resolver().unwrap(), &resolver_b)));
+        assert!(!Arc::ptr_eq(&resolver_a, &resolver_b));
+
+        let next_a = {
+            let settings = crate::scanner::ScannerSettings::default();
+            DRIVER
+                .discover_inputs(&scan_context(home_a.path(), &settings))
+                .unwrap()
+        };
+        assert!(!Arc::ptr_eq(
+            &resolver_a,
+            next_a[0].claude_project_resolver().unwrap()
+        ));
+
+        let weak_a = Arc::downgrade(&resolver_a);
+        drop(units_a);
+        drop(resolver_a);
+        assert!(weak_a.upgrade().is_none());
+    }
+
+    #[test]
+    fn parallel_sidechains_read_shared_parent_metadata_once() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = home.path().join(".claude/projects/-workspace-project-a");
+        let parent_path = project.join("shared-parent.jsonl");
+        let child_a = project.join("shared-parent/subagents/agent-a1.jsonl");
+        let child_b = project.join("shared-parent/subagents/agent-b2.jsonl");
+        write_file(
+            &parent_path,
+            r#"{"type":"assistant","projectPath":"/workspace/project-a","message":{"content":[{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"subagent_type":"explore"}},{"type":"tool_use","id":"toolu_b","name":"Agent","input":{"subagent_type":"plan"}}]}}
+{"type":"user","message":{"content":[{"tool_use_id":"toolu_a","type":"tool_result","content":[{"type":"text","text":"agentId: a1"}]},{"tool_use_id":"toolu_b","type":"tool_result","content":[{"type":"text","text":"agentId: b2"}]}]}}"#,
+        );
+        write_file(&child_a, &sidechain("shared-parent", "a1"));
+        write_file(&child_b, &sidechain("shared-parent", "b2"));
+
+        let settings = crate::scanner::ScannerSettings::default();
+        let units = DRIVER
+            .discover_inputs(&scan_context(home.path(), &settings))
+            .unwrap();
+        let resolver = units[0].claude_project_resolver().unwrap().clone();
+        let sidechains = units
+            .into_iter()
+            .filter(|unit| unit.path == child_a || unit.path == child_b)
+            .collect::<Vec<_>>();
+        assert_eq!(sidechains.len(), 2);
+
+        let parsed = DRIVER.parse_inputs(
+            crate::integrations::test_execute_all(sidechains),
+            &ParseContext::uncancelled(None),
+        );
+        let mut cache = input_record_cache::InputRecordShardStore::default();
+        let messages = fold_parsed(parsed, &mut cache);
+        let agents = messages
+            .iter()
+            .filter_map(|message| message.agent.as_deref())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(agents, HashSet::from(["Claude Explore", "Claude Plan"]));
+        assert!(messages
+            .iter()
+            .all(|message| { message.workspace_key.as_deref() == Some("/workspace/project-a") }));
+        assert_eq!(resolver.parent_metadata_load_count(), 1);
+    }
+
+    #[test]
+    fn parallel_sidechains_share_parent_metadata_failure_without_deadlock() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = home.path().join(".claude/projects/project-a");
+        let parent_path = project.join("broken-parent.jsonl");
+        let child_a = project.join("broken-parent/subagents/agent-a1.jsonl");
+        let child_b = project.join("broken-parent/subagents/agent-b2.jsonl");
+        write_file(&parent_path, "{not-json");
+        write_file(&child_a, &sidechain("broken-parent", "a1"));
+        write_file(&child_b, &sidechain("broken-parent", "b2"));
+
+        let settings = crate::scanner::ScannerSettings::default();
+        let units = DRIVER
+            .discover_inputs(&scan_context(home.path(), &settings))
+            .unwrap();
+        let resolver = units[0].claude_project_resolver().unwrap().clone();
+        let sidechains = units
+            .into_iter()
+            .filter(|unit| unit.path == child_a || unit.path == child_b)
+            .collect::<Vec<_>>();
+
+        let parsed = DRIVER.parse_inputs(
+            crate::integrations::test_execute_all(sidechains),
+            &ParseContext::uncancelled(None),
+        );
+
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed
+            .iter()
+            .all(|unit| unit.health.rejections.total() == 1));
+        assert_eq!(resolver.parent_metadata_load_count(), 1);
     }
 
     #[test]
@@ -487,7 +609,7 @@ mod tests {
         let unit = input_unit(session_path.clone(), home.path().to_path_buf());
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(vec![unit]),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         let actual = fold_parsed(parsed, &mut cache);
 
@@ -518,7 +640,7 @@ mod tests {
 
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(vec![unit]),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
 
         assert_eq!(parsed.len(), 1);
@@ -550,14 +672,14 @@ mod tests {
     }
 
     #[test]
-    fn claude_warm_cache_hit_restores_record_rejections() {
+    fn claude_warm_cache_keeps_negative_usage_rejected() {
         let home = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let session_path = home.path().join(".claude/projects/project-a/health.jsonl");
         write_file(
             &session_path,
             r#"{"type":"assistant","cwd":"project-a","timestamp":"2026-07-14T00:00:00Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":1}}}
-{"type":"assistant","timestamp":"2026-07-14T00:00:01Z","message":{"usage":{"input_tokens":99,"output_tokens":9}}}
+{"type":"assistant","timestamp":"2026-07-14T00:00:01Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":99,"output_tokens":-9}}}
 {"type":"assistant","timestamp":"2026-07-14T00:00:02Z","message":{"model":"claude-sonnet-4.6","usage":{"input_tokens":20,"output_tokens":2}}}"#,
         );
         let unit = input_unit(session_path.clone(), home.path().to_path_buf())
@@ -567,14 +689,14 @@ mod tests {
 
         let cold = DRIVER.parse_inputs(
             vec![unit.clone().into_lookup_miss()],
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         assert_eq!(cold[0].health.rejections.total(), 1);
         let messages = fold_parsed(cold, &mut cache);
         assert_eq!(messages.len(), 2);
         cache.save_if_dirty().unwrap();
 
-        let warm_cache =
+        let mut warm_cache =
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
         let planned = DRIVER.plan_cache_hit(unit, &warm_cache).unwrap();
         let crate::integrations::CacheHitPlan::Hit(warm) = planned else {
@@ -588,8 +710,13 @@ mod tests {
         assert_eq!(health.rejections.total(), 1);
         assert_eq!(
             health.rejections.entries().next().unwrap().key,
-            "missing-model"
+            "malformed-record"
         );
+        let warm_messages = fold_parsed(vec![warm], &mut warm_cache);
+        assert_eq!(warm_messages, messages);
+        assert!(warm_messages
+            .iter()
+            .all(|message| message.tokens.output >= 0));
     }
 
     #[test]
@@ -656,8 +783,12 @@ mod tests {
         assert_eq!(cold_health.rejections.total(), 1);
 
         write_file(&parent_path, &explore_parent("nested1"));
+        let fresh_unit = discover_unit(home.path(), &child_path);
         let crate::integrations::CacheHitPlan::Miss(miss) = DRIVER
-            .plan_cache_hit(crate::integrations::test_prepare(unit.clone()), &cache)
+            .plan_cache_hit(
+                crate::integrations::test_prepare(fresh_unit.clone()),
+                &cache,
+            )
             .unwrap()
         else {
             panic!("changing a Tier 2 parent must invalidate the child cache shard");
@@ -667,7 +798,7 @@ mod tests {
         assert_eq!(fresh_health.rejections.total(), 0);
 
         let crate::integrations::CacheHitPlan::Hit(warm) = DRIVER
-            .plan_cache_hit(crate::integrations::test_prepare(unit), &cache)
+            .plan_cache_hit(crate::integrations::test_prepare(fresh_unit), &cache)
             .unwrap()
         else {
             panic!("unchanged child and Tier 2 parent must hit the cache");
@@ -694,8 +825,12 @@ mod tests {
         assert_eq!(cold_health.rejections.total(), 1);
 
         write_file(&parent_path, &explore_parent("flat1"));
+        let fresh_unit = discover_unit(home.path(), &child_path);
         let crate::integrations::CacheHitPlan::Miss(miss) = DRIVER
-            .plan_cache_hit(crate::integrations::test_prepare(unit.clone()), &cache)
+            .plan_cache_hit(
+                crate::integrations::test_prepare(fresh_unit.clone()),
+                &cache,
+            )
             .unwrap()
         else {
             panic!("changing a flat Tier 2 parent must invalidate the child cache shard");
@@ -706,7 +841,7 @@ mod tests {
 
         assert!(matches!(
             DRIVER
-                .plan_cache_hit(crate::integrations::test_prepare(unit), &cache)
+                .plan_cache_hit(crate::integrations::test_prepare(fresh_unit), &cache)
                 .unwrap(),
             crate::integrations::CacheHitPlan::Hit(_)
         ));
@@ -721,8 +856,7 @@ mod tests {
         write_file(&child_path, &sidechain("parent-later", "later1"));
 
         let unit = discover_unit(home.path(), &child_path);
-        let mut inventory_unit = crate::integrations::test_prepare(unit.clone());
-        inventory_unit.refresh_for_inventory().unwrap();
+        let inventory_unit = crate::integrations::test_prepare(unit.clone());
         let parent_absent_inventory = inventory_unit.inventory_signature_digest();
         let mut cache = input_record_cache::InputRecordShardStore::default();
         let (cold_messages, cold_health) = scan_and_fold(unit.clone(), &mut cache);
@@ -730,7 +864,7 @@ mod tests {
         assert_eq!(cold_health.rejections.total(), 0);
 
         write_file(&parent_path, &explore_parent("later1"));
-        inventory_unit.refresh_for_inventory().unwrap();
+        let inventory_unit = crate::integrations::test_prepare(unit.clone());
         assert_ne!(
             parent_absent_inventory,
             inventory_unit.inventory_signature_digest()

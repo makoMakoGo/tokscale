@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const CUSTOM_PRICING_FILENAME: &str = "custom-pricing.json";
@@ -207,15 +208,46 @@ impl CustomPricing {
         Self::load_from_path_with_sink(path, &mut diagnostics)
     }
 
+    pub(crate) fn load_from_bytes_with_diagnostics(
+        bytes: &[u8],
+        path: &Path,
+        diagnostics: &mut PricingDiagnostics,
+    ) -> Self {
+        let mut diagnostics = Some(diagnostics);
+        let content = match std::str::from_utf8(bytes) {
+            Ok(content) => content,
+            Err(err) => {
+                warn_custom_pricing(
+                    &mut diagnostics,
+                    path,
+                    format_args!("file is not valid UTF-8: {err}"),
+                );
+                return Self::default();
+            }
+        };
+        Self::load_from_str(content, path, &mut diagnostics)
+    }
+
     fn load_from_path_with_sink(path: &Path, diagnostics: &mut PricingDiagnosticSink<'_>) -> Self {
-        let metadata = match fs::metadata(path) {
-            Ok(metadata) => metadata,
+        let mut file = match fs::File::open(path) {
+            Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Self::default(),
             Err(err) => {
                 warn_custom_pricing(
                     diagnostics,
                     path,
-                    format_args!("failed to stat file: {err}"),
+                    format_args!("failed to open file: {err}"),
+                );
+                return Self::default();
+            }
+        };
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                warn_custom_pricing(
+                    diagnostics,
+                    path,
+                    format_args!("failed to inspect opened file: {err}"),
                 );
                 return Self::default();
             }
@@ -234,20 +266,44 @@ impl CustomPricing {
             return Self::default();
         }
 
-        let content = match fs::read_to_string(path) {
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(metadata.len())
+                .unwrap_or(usize::MAX)
+                .min(MAX_CUSTOM_PRICING_FILE_BYTES as usize),
+        );
+        let mut bounded = (&mut file).take(MAX_CUSTOM_PRICING_FILE_BYTES + 1);
+        if let Err(err) = bounded.read_to_end(&mut bytes) {
+            warn_custom_pricing(
+                diagnostics,
+                path,
+                format_args!("failed to read opened file: {err}"),
+            );
+            return Self::default();
+        }
+        if bytes.len() as u64 > MAX_CUSTOM_PRICING_FILE_BYTES {
+            warn_custom_pricing(
+                diagnostics,
+                path,
+                format_args!(
+                    "file grew beyond the maximum while being read (max {} bytes)",
+                    MAX_CUSTOM_PRICING_FILE_BYTES
+                ),
+            );
+            return Self::default();
+        }
+        let content = match std::str::from_utf8(&bytes) {
             Ok(content) => content,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Self::default(),
             Err(err) => {
                 warn_custom_pricing(
                     diagnostics,
                     path,
-                    format_args!("failed to read file: {err}"),
+                    format_args!("file is not valid UTF-8: {err}"),
                 );
                 return Self::default();
             }
         };
 
-        Self::load_from_str(&content, path, diagnostics)
+        Self::load_from_str(content, path, diagnostics)
     }
 
     pub fn from_models(models: HashMap<String, ModelPricing>) -> Self {
@@ -824,15 +880,18 @@ mod tests {
     }
 
     #[test]
-    fn drops_oversized_file() {
+    fn bounded_reader_rejects_oversized_file() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("custom-pricing.json");
         let file = fs::File::create(&path).unwrap();
         file.set_len(MAX_CUSTOM_PRICING_FILE_BYTES + 1).unwrap();
+        let mut diagnostics = Vec::new();
 
-        let loaded = CustomPricing::load_from_path(&path);
+        let loaded = CustomPricing::load_from_path_with_diagnostics(&path, &mut diagnostics);
 
         assert!(loaded.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("file is too large"));
     }
 
     #[test]

@@ -2,16 +2,17 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::aggregate::FrozenUsageIndexWire;
 use crate::input_health::HealthSummary;
 use crate::pricing::{PricingDiagnostics, PricingStatus};
 use crate::projection::{ModelProjection, UsageProjection};
 use crate::scanner::{ScannerSettings, ScannerSettingsError};
 use crate::{
     ClientId, FrozenUsageIndex, GroupBy, InputFootprint, SessionUsage, SourceFingerprint,
-    UsageIndexValidationError,
+    UsageIndexValidationError, UsageProjectionError,
 };
 
 /// Immutable set of clients acquired for one local-data generation.
@@ -116,12 +117,124 @@ impl UsageQuery {
     }
 }
 
+/// Local-calendar authority captured for one acquisition.
+///
+/// Aggregation converts absolute timestamps into local dates and hours through
+/// this typed IANA timezone. "Today" is deliberately absent: it belongs to a
+/// [`UsageQuery`] and can advance without invalidating an unfiltered generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CalendarContext {
+    timezone: chrono_tz::Tz,
+}
+
+impl CalendarContext {
+    pub fn system() -> Result<Self, CalendarContextError> {
+        let timezone = iana_time_zone::get_timezone()
+            .map_err(|error| CalendarContextError::Unavailable(error.to_string()))?;
+        Self::explicit(timezone)
+    }
+
+    pub fn explicit(timezone: impl AsRef<str>) -> Result<Self, CalendarContextError> {
+        let timezone = timezone.as_ref().trim();
+        let timezone = timezone.parse::<chrono_tz::Tz>().map_err(|error| {
+            CalendarContextError::InvalidTimezone {
+                timezone: timezone.to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+        Ok(Self { timezone })
+    }
+
+    pub fn timezone(self) -> chrono_tz::Tz {
+        self.timezone
+    }
+
+    pub fn current_date(self) -> NaiveDate {
+        Utc::now().with_timezone(&self.timezone).date_naive()
+    }
+
+    pub fn current_hour(self) -> NaiveDateTime {
+        let local = Utc::now().with_timezone(&self.timezone).naive_local();
+        local
+            .date()
+            .and_hms_opt(local.hour(), 0, 0)
+            .unwrap_or(local)
+    }
+
+    pub fn local_datetime_seconds(self, timestamp: i64) -> Option<NaiveDateTime> {
+        if timestamp <= 0 {
+            return None;
+        }
+        self.timezone
+            .timestamp_opt(timestamp, 0)
+            .single()
+            .map(|datetime| datetime.naive_local())
+    }
+
+    pub(crate) fn local_date_and_hour(
+        self,
+        timestamp_ms: i64,
+    ) -> Option<(NaiveDate, NaiveDateTime)> {
+        if timestamp_ms <= 0 {
+            return None;
+        }
+        let datetime = match self.timezone.timestamp_millis_opt(timestamp_ms) {
+            chrono::LocalResult::Single(datetime) => datetime,
+            _ => return None,
+        };
+        let local = datetime.naive_local();
+        let hour = local
+            .date()
+            .and_hms_opt(local.hour(), 0, 0)
+            .unwrap_or(local);
+        Some((local.date(), hour))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CalendarContextError {
+    #[error("could not resolve the local IANA timezone: {0}")]
+    Unavailable(String),
+    #[error("invalid IANA timezone `{timezone}`: {reason}")]
+    InvalidTimezone { timezone: String, reason: String },
+}
+
+/// Pricing inputs that affect token-derived costs in one generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PricingContext {
+    custom_pricing_fingerprint: String,
+    catalog_fingerprint: String,
+}
+
+impl PricingContext {
+    pub fn explicit_with_catalog(
+        custom_pricing_fingerprint: impl Into<String>,
+        catalog_fingerprint: impl Into<String>,
+    ) -> Self {
+        Self {
+            custom_pricing_fingerprint: custom_pricing_fingerprint.into(),
+            catalog_fingerprint: catalog_fingerprint.into(),
+        }
+    }
+
+    pub fn custom_pricing_fingerprint(&self) -> &str {
+        &self.custom_pricing_fingerprint
+    }
+
+    pub fn catalog_fingerprint(&self) -> &str {
+        &self.catalog_fingerprint
+    }
+}
+
 /// Complete, normalized identity of one local-data acquisition.
 ///
 /// This is the single authority shared by discovery, generation construction,
 /// and generation-cache identity. The cache compares this value as a whole:
-/// changing a root, date range, client universe, or scanner setting must never
-/// reuse a generation acquired from the previous input universe.
+/// changing a root, date range, client universe, scanner setting, calendar, or
+/// pricing fingerprint must never reuse a generation acquired under the
+/// previous authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AcquisitionConfig {
@@ -129,6 +242,8 @@ pub struct AcquisitionConfig {
     date_range: crate::DateRange,
     universe: ClientUniverse,
     scanner: ScannerSettings,
+    calendar: CalendarContext,
+    pricing: PricingContext,
 }
 
 impl AcquisitionConfig {
@@ -137,6 +252,8 @@ impl AcquisitionConfig {
         date_range: crate::DateRange,
         universe: ClientUniverse,
         mut scanner: ScannerSettings,
+        calendar: CalendarContext,
+        pricing: PricingContext,
     ) -> Result<Self, AcquisitionConfigError> {
         if resolved_home_dir.as_os_str().is_empty() {
             return Err(AcquisitionConfigError::EmptyHomeDirectory);
@@ -153,6 +270,8 @@ impl AcquisitionConfig {
             date_range,
             universe,
             scanner,
+            calendar,
+            pricing,
         })
     }
 
@@ -170,6 +289,14 @@ impl AcquisitionConfig {
 
     pub fn scanner(&self) -> &ScannerSettings {
         &self.scanner
+    }
+
+    pub fn calendar(&self) -> &CalendarContext {
+        &self.calendar
+    }
+
+    pub fn pricing(&self) -> &PricingContext {
+        &self.pricing
     }
 
     fn validate(&self) -> Result<(), AcquisitionConfigError> {
@@ -193,7 +320,7 @@ pub enum AcquisitionConfigError {
 ///
 /// This is the only cacheable application state. Public projections are derived
 /// from `usage_index` and are deliberately absent from the persisted shape.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Generation {
     acquisition: AcquisitionConfig,
@@ -203,6 +330,52 @@ pub struct Generation {
     input_footprint: InputFootprint,
     health: HealthSummary,
     pricing_diagnostics: PricingDiagnostics,
+    #[serde(skip)]
+    _interned_identity_lifetime: InternedIdentityLifetime,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GenerationWire {
+    acquisition: AcquisitionConfig,
+    source_fingerprint: SourceFingerprint,
+    usage_index: FrozenUsageIndexWire,
+    sessions: Arc<[SessionUsage]>,
+    input_footprint: InputFootprint,
+    health: HealthSummary,
+    pricing_diagnostics: PricingDiagnostics,
+}
+
+impl<'de> Deserialize<'de> for Generation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = GenerationWire::deserialize(deserializer)?;
+        let generation = Self {
+            acquisition: wire.acquisition,
+            source_fingerprint: wire.source_fingerprint,
+            usage_index: wire.usage_index.into_index(),
+            sessions: wire.sessions,
+            input_footprint: wire.input_footprint,
+            health: wire.health,
+            pricing_diagnostics: wire.pricing_diagnostics,
+            _interned_identity_lifetime: InternedIdentityLifetime,
+        };
+        generation.validate().map_err(serde::de::Error::custom)?;
+        Ok(generation)
+    }
+}
+
+#[derive(Default)]
+struct InternedIdentityLifetime;
+
+impl Drop for InternedIdentityLifetime {
+    fn drop(&mut self) {
+        // This guard is declared after every Generation field that may own an
+        // interned identity, so Rust drops those strong references first.
+        crate::records::intern::prune_dead();
+    }
 }
 
 impl std::fmt::Debug for Generation {
@@ -244,6 +417,7 @@ impl Generation {
             input_footprint,
             health,
             pricing_diagnostics,
+            _interned_identity_lifetime: InternedIdentityLifetime,
         };
         generation.validate()?;
         Ok(generation)
@@ -265,16 +439,33 @@ impl Generation {
         self.usage_index
             .validate(&self.acquisition.universe)
             .map_err(GenerationError::InvalidUsageIndex)?;
+        self.health
+            .validate()
+            .map_err(GenerationError::InvalidHealth)?;
 
         for session in self.sessions.iter() {
             if !self.acquisition.universe.contains(session.client) {
                 return Err(GenerationError::SessionOutsideUniverse(session.client));
             }
+            if session.tokens.checked_total().is_none() {
+                return Err(GenerationError::SessionTokenOverflow {
+                    client: session.client,
+                    session_id: session.session_id.to_string(),
+                });
+            }
+            if !session.cost.is_finite() || session.cost < 0.0 {
+                return Err(GenerationError::InvalidSessionCost {
+                    client: session.client,
+                    session_id: session.session_id.to_string(),
+                });
+            }
         }
 
         for issue in &self.health.issues {
-            if !self.acquisition.universe.contains(issue.client) {
-                return Err(GenerationError::HealthOutsideUniverse(issue.client));
+            if let Some(client) = issue.client {
+                if !self.acquisition.universe.contains(client) {
+                    return Err(GenerationError::HealthOutsideUniverse(client));
+                }
             }
         }
 
@@ -287,7 +478,7 @@ impl Generation {
             &query.group_by,
             &query.clients.as_hash_set(),
             query.effective_date,
-        ))
+        )?)
     }
 
     /// Project only model rows and aggregate totals.
@@ -302,7 +493,7 @@ impl Generation {
         self.validate_selection(clients)?;
         Ok(self
             .usage_index
-            .project_models_for_clients(&group_by, &clients.as_hash_set()))
+            .project_models_for_clients(&group_by, &clients.as_hash_set())?)
     }
 
     fn validate_selection(&self, clients: &ClientSelection) -> Result<(), GenerationError> {
@@ -322,10 +513,6 @@ impl Generation {
 
     pub fn source_fingerprint(&self) -> SourceFingerprint {
         self.source_fingerprint
-    }
-
-    pub fn source_digest(&self) -> u64 {
-        self.source_fingerprint.process_digest()
     }
 
     pub fn sessions(&self) -> Arc<[SessionUsage]> {
@@ -361,10 +548,28 @@ pub enum GenerationError {
     FootprintUniverseMismatch,
     #[error("generation session client `{0}` is outside the client universe")]
     SessionOutsideUniverse(ClientId),
+    #[error(
+        "generation session `{session_id}` for client `{client}` has overflowing token totals"
+    )]
+    SessionTokenOverflow {
+        client: ClientId,
+        session_id: String,
+    },
+    #[error(
+        "generation session `{session_id}` for client `{client}` has a non-finite or negative cost"
+    )]
+    InvalidSessionCost {
+        client: ClientId,
+        session_id: String,
+    },
     #[error("generation health client `{0}` is outside the client universe")]
     HealthOutsideUniverse(ClientId),
+    #[error("generation health summary is invalid: {0}")]
+    InvalidHealth(#[source] crate::input_health::HealthSummaryValidationError),
     #[error("generation usage index is invalid: {0}")]
     InvalidUsageIndex(#[source] UsageIndexValidationError),
+    #[error("generation projection failed: {0}")]
+    ProjectionOverflow(#[from] UsageProjectionError),
     #[error("generation acquisition configuration is invalid: {0}")]
     InvalidAcquisition(String),
 }
@@ -382,6 +587,8 @@ mod tests {
             crate::DateRange::none(),
             ClientUniverse::new(clients).unwrap(),
             ScannerSettings::default(),
+            CalendarContext::explicit("UTC").unwrap(),
+            PricingContext::explicit_with_catalog("test-custom", "test-catalog"),
         )
         .unwrap()
     }
@@ -417,7 +624,9 @@ mod tests {
                 ),
             ],
             crate::DateRange::none(),
-        );
+            CalendarContext::explicit("UTC").unwrap(),
+        )
+        .unwrap();
         Generation::new(
             acquisition(PathBuf::from("/tmp/home"), [ClientId::Amp, ClientId::Codex]),
             SourceFingerprint::from_bytes([7; 32]),
@@ -428,6 +637,90 @@ mod tests {
             Vec::new(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn generation_new_sorts_sessions_by_recency_client_and_id() {
+        let session = |client, session_id, last_seen| {
+            let mut session = SessionUsage::new(client, session_id);
+            session.last_seen = last_seen;
+            session
+        };
+        let generation = Generation::new(
+            acquisition(
+                PathBuf::from("/tmp/home"),
+                [ClientId::Amp, ClientId::Codex, ClientId::Zed],
+            ),
+            SourceFingerprint::from_bytes([9; 32]),
+            FrozenUsageIndex::new(),
+            vec![
+                session(ClientId::Amp, "old", 8),
+                session(ClientId::Zed, "b", 9),
+                session(ClientId::Codex, "z", 9),
+                session(ClientId::Codex, "a", 9),
+            ],
+            InputFootprint::from_client_bytes([
+                (ClientId::Amp, 1),
+                (ClientId::Codex, 1),
+                (ClientId::Zed, 1),
+            ])
+            .unwrap(),
+            HealthSummary::default(),
+            Vec::new(),
+        )
+        .unwrap();
+
+        let sessions = generation.sessions();
+        let keys = sessions
+            .iter()
+            .map(|entry| (entry.client, entry.session_id.as_ref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![
+                (ClientId::Codex, "a"),
+                (ClientId::Codex, "z"),
+                (ClientId::Zed, "b"),
+                (ClientId::Amp, "old"),
+            ]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn dropping_generation_prunes_identities_after_its_fields() {
+        let model_id = "generation-drop-prunes-this-unique-model";
+        let usage_index = crate::build_usage_index(
+            &[crate::AttributedUsageRecord::new(
+                ClientId::Amp,
+                model_id,
+                "openai",
+                "generation-drop-session",
+                1_735_689_600_000,
+                crate::TokenBreakdown {
+                    input: 1,
+                    ..crate::TokenBreakdown::default()
+                },
+                0.0,
+            )],
+            crate::DateRange::none(),
+            CalendarContext::explicit("UTC").unwrap(),
+        )
+        .unwrap();
+        let generation = Generation::new(
+            acquisition(PathBuf::from("/tmp/home"), [ClientId::Amp]),
+            SourceFingerprint::from_bytes([11; 32]),
+            usage_index,
+            Vec::new(),
+            InputFootprint::from_client_bytes([(ClientId::Amp, 1)]).unwrap(),
+            HealthSummary::default(),
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(crate::records::intern::indexed_live_count(model_id), 1);
+        drop(generation);
+        assert_eq!(crate::records::intern::indexed_live_count(model_id), 0);
     }
 
     #[test]
@@ -447,6 +740,75 @@ mod tests {
     }
 
     #[test]
+    fn deserialization_rejects_a_semantically_invalid_generation() {
+        let mut invalid = generation();
+        invalid.input_footprint = InputFootprint::from_client_bytes([(ClientId::Amp, 13)]).unwrap();
+        let encoded = bincode::serialize(&invalid).unwrap();
+
+        let error = bincode::deserialize::<Generation>(&encoded).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("input footprint keys do not exactly match"));
+    }
+
+    #[test]
+    fn deserialization_rejects_session_token_overflow_before_projection() {
+        let mut overflow = generation();
+        let mut session = SessionUsage::new(ClientId::Amp, "overflow");
+        session.tokens.input = u64::MAX;
+        session.tokens.output = 1;
+        overflow.sessions = vec![session].into();
+        let encoded = bincode::serialize(&overflow).unwrap();
+
+        let error = bincode::deserialize::<Generation>(&encoded).unwrap_err();
+
+        assert!(error.to_string().contains("generation session `overflow`"));
+        assert!(error.to_string().contains("overflowing token totals"));
+    }
+
+    #[test]
+    fn deserialization_rejects_invalid_session_cost_before_projection() {
+        for cost in [f64::NAN, f64::INFINITY, -0.01] {
+            let mut invalid = generation();
+            let mut session = SessionUsage::new(ClientId::Amp, "invalid-cost");
+            session.cost = cost;
+            invalid.sessions = vec![session].into();
+            let encoded = bincode::serialize(&invalid).unwrap();
+
+            let error = bincode::deserialize::<Generation>(&encoded).unwrap_err();
+
+            assert!(error
+                .to_string()
+                .contains("generation session `invalid-cost`"));
+            assert!(error.to_string().contains("non-finite or negative cost"));
+        }
+    }
+
+    #[test]
+    fn generation_rejects_contradictory_health_issue_handling() {
+        let mut generation = generation();
+        generation.health = HealthSummary {
+            issues: vec![crate::input_health::HealthIssue {
+                level: crate::input_health::HealthLevel::Error,
+                client: Some(ClientId::Amp),
+                issue: crate::input_health::HealthIssueKind::InputUnavailable,
+                affected_inputs: 1,
+                rejected_records: None,
+                handling: crate::input_health::HealthHandling::ConfirmedDataKept,
+            }],
+            ..HealthSummary::default()
+        };
+
+        assert!(matches!(
+            generation.validate(),
+            Err(GenerationError::InvalidHealth(
+                crate::input_health::HealthSummaryValidationError::InvalidHandling { .. }
+            ))
+        ));
+    }
+
+    #[test]
     fn generation_rejects_usage_index_clients_outside_its_universe() {
         let usage_index = crate::build_usage_index(
             &[crate::AttributedUsageRecord::new(
@@ -462,7 +824,9 @@ mod tests {
                 0.0,
             )],
             crate::DateRange::none(),
-        );
+            CalendarContext::explicit("UTC").unwrap(),
+        )
+        .unwrap();
 
         let error = Generation::new(
             acquisition(PathBuf::from("/tmp/home"), [ClientId::Amp]),
@@ -547,9 +911,132 @@ mod tests {
             crate::DateRange::none(),
             ClientUniverse::new([ClientId::Amp]).unwrap(),
             ScannerSettings::default(),
+            CalendarContext::explicit("UTC").unwrap(),
+            PricingContext::explicit_with_catalog("test-custom", "test-catalog"),
         )
         .unwrap_err();
 
         assert!(matches!(error, AcquisitionConfigError::EmptyHomeDirectory));
+    }
+
+    #[test]
+    fn calendar_and_pricing_provenance_are_part_of_cache_identity() {
+        let base = |calendar, pricing| {
+            AcquisitionConfig::new(
+                PathBuf::from("/tmp/home"),
+                crate::DateRange::none(),
+                ClientUniverse::new([ClientId::Amp]).unwrap(),
+                ScannerSettings::default(),
+                calendar,
+                pricing,
+            )
+            .unwrap()
+        };
+        let canonical = base(
+            CalendarContext::explicit("Asia/Shanghai").unwrap(),
+            PricingContext::explicit_with_catalog("custom-a", "catalog"),
+        );
+
+        assert_ne!(
+            canonical,
+            base(
+                CalendarContext::explicit("America/Los_Angeles").unwrap(),
+                PricingContext::explicit_with_catalog("custom-a", "catalog"),
+            )
+        );
+        assert_ne!(
+            canonical,
+            base(
+                CalendarContext::explicit("Asia/Shanghai").unwrap(),
+                PricingContext::explicit_with_catalog("custom-b", "catalog"),
+            )
+        );
+    }
+
+    #[test]
+    fn calendar_uses_iana_offsets_and_dst_for_local_buckets() {
+        use chrono::TimeZone;
+
+        let shanghai = CalendarContext::explicit("Asia/Shanghai").unwrap();
+        let los_angeles = CalendarContext::explicit("America/Los_Angeles").unwrap();
+        let shared_instant = Utc
+            .with_ymd_and_hms(2026, 7, 25, 16, 30, 0)
+            .unwrap()
+            .timestamp_millis();
+
+        assert_eq!(
+            shanghai.local_date_and_hour(shared_instant),
+            Some((
+                NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 7, 26)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            ))
+        );
+        assert_eq!(
+            los_angeles.local_date_and_hour(shared_instant),
+            Some((
+                NaiveDate::from_ymd_opt(2026, 7, 25).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 7, 25)
+                    .unwrap()
+                    .and_hms_opt(9, 0, 0)
+                    .unwrap(),
+            ))
+        );
+
+        let before_spring_forward = Utc
+            .with_ymd_and_hms(2026, 3, 8, 9, 30, 0)
+            .unwrap()
+            .timestamp_millis();
+        let after_spring_forward = Utc
+            .with_ymd_and_hms(2026, 3, 8, 10, 30, 0)
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(
+            los_angeles
+                .local_date_and_hour(before_spring_forward)
+                .unwrap()
+                .1
+                .hour(),
+            1
+        );
+        assert_eq!(
+            los_angeles
+                .local_date_and_hour(after_spring_forward)
+                .unwrap()
+                .1
+                .hour(),
+            3
+        );
+    }
+
+    #[test]
+    fn effective_date_changes_projection_query_not_acquisition_identity() {
+        let acquisition = AcquisitionConfig::new(
+            PathBuf::from("/tmp/home"),
+            crate::DateRange::none(),
+            ClientUniverse::new([ClientId::Amp]).unwrap(),
+            ScannerSettings::default(),
+            CalendarContext::explicit("Asia/Shanghai").unwrap(),
+            PricingContext::explicit_with_catalog("test-custom", "test-catalog"),
+        )
+        .unwrap();
+        let first = UsageQuery::full(
+            acquisition.universe(),
+            GroupBy::Model,
+            NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
+        );
+        let second = UsageQuery::full(
+            acquisition.universe(),
+            GroupBy::Model,
+            NaiveDate::from_ymd_opt(2026, 7, 27).unwrap(),
+        );
+
+        assert_ne!(first, second);
+        assert_eq!(
+            acquisition.calendar(),
+            &CalendarContext::explicit("Asia/Shanghai").unwrap()
+        );
     }
 }

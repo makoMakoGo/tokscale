@@ -14,9 +14,8 @@ use crate::records::{
 use crate::{model_aliases, provider_identity, TokenBreakdown};
 use rayon::prelude::*;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
@@ -125,32 +124,6 @@ struct OmpParentScan {
     cache_input: Option<OmpParentCacheInput>,
 }
 
-struct HashingReader<R> {
-    inner: R,
-    hasher: Sha256,
-}
-
-impl<R> HashingReader<R> {
-    fn new(inner: R) -> Self {
-        Self {
-            inner,
-            hasher: Sha256::new(),
-        }
-    }
-
-    fn finish(self) -> [u8; 32] {
-        self.hasher.finalize().into()
-    }
-}
-
-impl<R: Read> Read for HashingReader<R> {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let read = self.inner.read(buffer)?;
-        self.hasher.update(&buffer[..read]);
-        Ok(read)
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct OmpParentHealth {
     pub path: PathBuf,
@@ -161,7 +134,6 @@ pub(crate) struct OmpParentHealth {
 
 #[derive(Debug, Clone)]
 pub(crate) struct OmpParentCacheInput {
-    pub content_hash: [u8; 32],
     pub snapshot: InputSnapshot,
 }
 
@@ -555,10 +527,9 @@ fn omp_task_agent_scan_from_parent(parent_path: &Path) -> OmpParentScan {
             format!("{}: {source}", parent_path.display()),
         )
     });
-    let mut reader = BufReader::new(HashingReader::new(file));
+    let mut reader = BufReader::new(file);
     let mut scan = omp_task_agent_scan_from_reader(parent_path, &mut reader);
     if matches!(scan.status, InputStatus::Complete) {
-        let content_hash = reader.into_inner().finish();
         let cache_input = before_snapshot.and_then(|snapshot| {
             let opened_identity = opened_identity?;
             if snapshot.primary_identity() != Some(opened_identity) {
@@ -579,10 +550,7 @@ fn omp_task_agent_scan_from_parent(parent_path: &Path) -> OmpParentScan {
                     format!("{} changed while it was scanned", parent_path.display()),
                 ));
             }
-            Ok(OmpParentCacheInput {
-                content_hash,
-                snapshot,
-            })
+            Ok(OmpParentCacheInput { snapshot })
         });
         match cache_input {
             Ok(cache_input) => scan.cache_input = Some(cache_input),
@@ -1281,16 +1249,8 @@ mod tests {
 
         let index = build_omp_parent_task_agent_index(&[child_path]);
         let health = index.parent_health();
-        let expected: [u8; 32] = Sha256::digest(parent_content.as_bytes()).into();
-
         assert_eq!(health.len(), 1);
-        assert_eq!(
-            health[0]
-                .cache_input
-                .as_ref()
-                .map(|input| input.content_hash),
-            Some(expected)
-        );
+        assert!(health[0].cache_input.is_some());
     }
 
     #[test]

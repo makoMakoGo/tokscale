@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::input_record_cache::DecoderId;
 use crate::integrations::file::{apply_workspace, CachedFileDriver};
-use crate::integrations::{SourceSpec, MODEL_ID_CANONICALIZATION_REVISION};
+use crate::integrations::SourceSpec;
 use crate::records::UsageRecord;
 
 fn should_descend_into_project(path: &Path, depth: usize) -> bool {
@@ -18,16 +18,10 @@ const SOURCE: SourceSpec = SourceSpec::home(
         should_descend_into_project,
     ),
 );
-pub(crate) const DECODER_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
-
 fn enrich(path: &Path, messages: &mut [UsageRecord]) {
     apply_workspace(messages, decode::gemini_workspace_metadata(path));
 }
 
-pub(crate) static DRIVER: CachedFileDriver = CachedFileDriver::new(
-    SOURCE,
-    DecoderId::Gemini,
-    DECODER_REVISION,
-    decode::parse_gemini_file,
-)
-.with_workspace_enrichment(enrich);
+pub(crate) static DRIVER: CachedFileDriver =
+    CachedFileDriver::new(SOURCE, DecoderId::Gemini, decode::parse_gemini_file)
+        .with_workspace_enrichment(enrich);

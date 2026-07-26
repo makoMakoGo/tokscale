@@ -127,18 +127,27 @@ mod tests {
     fn exported_report_keeps_degraded_input_health() {
         let data = UsageProjection::default();
         let health = HealthSummary {
-            complete: false,
             degraded_inputs: 1,
-            rejected_records: 2,
-            failed_inputs: 1,
-            issues: vec![tokenx_engine::input_health::HealthIssue {
-                level: "warning".to_string(),
-                client: tokenx_engine::ClientId::Zed,
-                issue: "missing-model".to_string(),
-                affected_inputs: 1,
-                rejected_records: Some(2),
-                handling: "record-skipped".to_string(),
-            }],
+            issues: vec![
+                tokenx_engine::input_health::HealthIssue {
+                    level: tokenx_engine::input_health::HealthLevel::Warning,
+                    client: Some(tokenx_engine::ClientId::Zed),
+                    issue: tokenx_engine::input_health::HealthIssueKind::RecordRejection(
+                        "missing-model".to_string(),
+                    ),
+                    affected_inputs: 1,
+                    rejected_records: Some(2),
+                    handling: tokenx_engine::input_health::HealthHandling::RecordSkipped,
+                },
+                tokenx_engine::input_health::HealthIssue {
+                    level: tokenx_engine::input_health::HealthLevel::Error,
+                    client: Some(tokenx_engine::ClientId::Zed),
+                    issue: tokenx_engine::input_health::HealthIssueKind::InputUnavailable,
+                    affected_inputs: 1,
+                    rejected_records: None,
+                    handling: tokenx_engine::input_health::HealthHandling::InputSkipped,
+                },
+            ],
             ..HealthSummary::default()
         };
 

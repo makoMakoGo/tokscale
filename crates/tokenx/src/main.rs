@@ -97,7 +97,7 @@ fn execute(
         }
         ExecutionPlan::Models(plan) => {
             let no_spinner = effective_no_spinner(plan.json, plan.no_spinner);
-            runtime.block_on(run_models(plan, no_spinner))
+            run_models(plan, no_spinner)
         }
         ExecutionPlan::Pricing(subcommand) => match subcommand {
             PricingSubcommand::Lookup {
@@ -114,7 +114,7 @@ fn execute(
             PricingSubcommand::Overrides { json } => run_pricing_list_overrides(json),
         },
         ExecutionPlan::CachePrune => run_input_record_cache_prune(),
-        ExecutionPlan::CacheWarm(startup) => runtime.block_on(run_warm_generation_cache(startup)),
+        ExecutionPlan::CacheWarm(startup) => run_warm_generation_cache(startup),
     }?;
 
     Ok(ExecutionOutcome::Completed)

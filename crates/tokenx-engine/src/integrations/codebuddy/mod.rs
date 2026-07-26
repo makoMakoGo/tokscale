@@ -1,10 +1,11 @@
 pub(crate) mod decode;
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rayon::prelude::*;
 
+#[cfg(test)]
 use crate::clients::ClientId;
 #[cfg(test)]
 use crate::input_record_cache::DecoderVersion;
@@ -18,10 +19,6 @@ use crate::integrations::{
 use crate::records::UsageRecord;
 
 const MIRROR_DEDUP_WINDOW_MS: i64 = 1000;
-const CODEBUDDY_JSONL_RECORD_REJECTION_REVISION: u32 =
-    crate::integrations::MODEL_ID_CANONICALIZATION_REVISION + 2;
-const CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION: u32 =
-    crate::integrations::MODEL_ID_CANONICALIZATION_REVISION + 2;
 const SOURCE: SourceSpec = SourceSpec::home(
     ".codebuddy/projects",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::jsonl),
@@ -38,10 +35,9 @@ impl IntegrationDriver for Driver {
         let default_root = SOURCE.resolve(ctx.home_dir);
         let extra_roots = source_discovery::extra_roots_for_client(client, ctx)?;
 
-        let mut jsonl_paths =
-            source_discovery::scan_roots(client, [default_root], SOURCE.matcher())?;
+        let mut jsonl_paths = source_discovery::scan_roots(ctx, [default_root], SOURCE.matcher())?;
         jsonl_paths.extend(source_discovery::scan_roots(
-            client,
+            ctx,
             extra_roots.clone(),
             SOURCE.matcher(),
         )?);
@@ -50,11 +46,11 @@ impl IntegrationDriver for Driver {
             client,
             jsonl_paths,
             FingerprintPolicy::PlainFile,
-            DecoderKind::codebuddy_jsonl(CODEBUDDY_JSONL_RECORD_REJECTION_REVISION),
+            DecoderKind::codebuddy_jsonl(),
         )?;
 
-        units.extend(codebuddy_extension_log_units(client, ctx.home_dir)?);
-        units.extend(codebuddy_extra_log_units(client, extra_roots)?);
+        units.extend(codebuddy_extension_log_units(ctx)?);
+        units.extend(codebuddy_extra_log_units(ctx, extra_roots)?);
         dedup_units_by_canonical_path(&mut units)?;
         units.sort_by(|left, right| left.path.cmp(&right.path));
         Ok(units)
@@ -68,14 +64,14 @@ impl IntegrationDriver for Driver {
         units
             .into_par_iter()
             .map(|unit| match unit.decoder {
-                DecoderKind::CodeBuddyJsonl { .. } => {
+                DecoderKind::CodeBuddyJsonl => {
                     pipeline_cache::load_or_scan_unit_with(unit, ctx, |path| {
                         decode::parse_codebuddy_jsonl_file(path)
                     })
                 }
                 DecoderKind::CodeBuddyExtensionLog { .. } => {
                     pipeline_cache::load_or_scan_unit_with(unit, ctx, |path| {
-                        decode::parse_codebuddy_extension_log_file(path)
+                        decode::parse_codebuddy_extension_log_file(path, ctx.calendar())
                     })
                 }
                 _ => unreachable!("unexpected CodeBuddy decoder"),
@@ -120,10 +116,35 @@ impl IntegrationDriver for Driver {
 }
 
 fn codebuddy_extension_log_units(
-    client: ClientId,
-    home_dir: &Path,
+    ctx: &DiscoveryContext<'_>,
 ) -> Result<Vec<DiscoveredInput>, InputDiscoveryError> {
-    let roots = [
+    let client = ctx.client;
+
+    let mut units = Vec::new();
+    for (root, origin, require_extension_component) in codebuddy_extension_log_roots(ctx.home_dir) {
+        let paths = source_discovery::scan_roots(
+            ctx,
+            [root],
+            crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::log),
+        )?
+        .into_iter()
+        .filter(|path| !require_extension_component || has_codebuddy_extension_component(path))
+        .collect::<Vec<_>>();
+        units.extend(source_discovery::input_units_from_paths(
+            client,
+            paths,
+            FingerprintPolicy::NoRecordCache,
+            DecoderKind::codebuddy_extension_log(origin),
+        )?);
+    }
+    Ok(units)
+}
+
+#[cfg(target_os = "windows")]
+fn codebuddy_extension_log_roots(
+    home_dir: &std::path::Path,
+) -> Vec<(PathBuf, CodeBuddyLogOrigin, bool)> {
+    vec![
         (
             home_dir.join("AppData/Local/CodeBuddyExtension/Logs/CodeBuddyIDE"),
             CodeBuddyLogOrigin::Extension,
@@ -144,37 +165,22 @@ fn codebuddy_extension_log_units(
             CodeBuddyLogOrigin::Host,
             true,
         ),
-    ];
+    ]
+}
 
-    let mut units = Vec::new();
-    for (root, origin, require_extension_component) in roots {
-        let paths = source_discovery::scan_roots(
-            client,
-            [root],
-            crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::log),
-        )?
-        .into_iter()
-        .filter(|path| !require_extension_component || has_codebuddy_extension_component(path))
-        .collect::<Vec<_>>();
-        units.extend(source_discovery::input_units_from_paths(
-            client,
-            paths,
-            FingerprintPolicy::PlainFile,
-            DecoderKind::codebuddy_extension_log(
-                CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION,
-                origin,
-            ),
-        )?);
-    }
-    Ok(units)
+#[cfg(not(target_os = "windows"))]
+fn codebuddy_extension_log_roots(
+    _home_dir: &std::path::Path,
+) -> Vec<(PathBuf, CodeBuddyLogOrigin, bool)> {
+    Vec::new()
 }
 
 fn codebuddy_extra_log_units(
-    client: ClientId,
+    ctx: &DiscoveryContext<'_>,
     roots: Vec<PathBuf>,
 ) -> Result<Vec<DiscoveredInput>, InputDiscoveryError> {
     let paths = source_discovery::scan_roots(
-        client,
+        ctx,
         roots,
         crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::log),
     )?;
@@ -182,12 +188,9 @@ fn codebuddy_extra_log_units(
         .into_iter()
         .filter_map(|unit| {
             let origin = codebuddy_extra_log_origin(&unit)?;
-            Some(DiscoveredInput::plain_file(
+            Some(DiscoveredInput::no_record_cache(
                 unit,
-                DecoderKind::codebuddy_extension_log(
-                    CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION,
-                    origin,
-                ),
+                DecoderKind::codebuddy_extension_log(origin),
             ))
         })
         .collect())
@@ -322,6 +325,7 @@ mod tests {
             client: ClientId::CodeBuddy,
             home_dir,
             scanner_settings: settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         }
     }
 
@@ -331,7 +335,7 @@ mod tests {
     }
 
     fn finalized(mut messages: Vec<UsageRecord>) -> Vec<crate::AttributedUsageRecord> {
-        crate::finalize_token_priced_messages(&mut messages, None);
+        crate::finalize_message_identities(&mut messages);
         let messages: Vec<_> = messages
             .into_iter()
             .map(|message| message.attribute(ClientId::CodeBuddy))
@@ -346,7 +350,7 @@ mod tests {
         let mut cache = input_record_cache::InputRecordShardStore::default();
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(units),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         let mut sink = Vec::new();
         let binding = crate::integrations::integration_for(ClientId::CodeBuddy);
@@ -360,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn codebuddy_driver_discovers_project_jsonl_and_extension_logs() {
+    fn codebuddy_driver_limits_built_in_logs_to_the_current_platform() {
         let home = tempfile::TempDir::new().unwrap();
         let project_path = home
             .path()
@@ -381,37 +385,69 @@ mod tests {
         units.sort_by(|left, right| left.path.cmp(&right.path));
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
         let decoders: Vec<_> = units.iter().map(|unit| unit.decoder).collect();
-        let mut expected = vec![project_path, ide_log, vscode_log];
+        let mut expected = vec![project_path];
+        #[cfg(target_os = "windows")]
+        expected.extend([ide_log, vscode_log]);
         expected.sort_unstable();
 
         assert_eq!(paths, expected);
         for unit in &units {
-            let revision = match unit.decoder {
-                DecoderKind::CodeBuddyJsonl { .. } => CODEBUDDY_JSONL_RECORD_REJECTION_REVISION,
-                DecoderKind::CodeBuddyExtensionLog { .. } => {
-                    CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION
+            let expected_version = match unit.decoder {
+                DecoderKind::CodeBuddyJsonl => {
+                    assert_eq!(unit.fingerprint_policy, FingerprintPolicy::PlainFile);
+                    DecoderVersion::current(DecoderId::CodeBuddy)
+                        .with_variant(crate::input_record_cache::DecoderVariant::CodeBuddyJsonl)
+                }
+                DecoderKind::CodeBuddyExtensionLog { origin } => {
+                    assert_eq!(unit.fingerprint_policy, FingerprintPolicy::NoRecordCache);
+                    DecoderVersion::current(DecoderId::CodeBuddy).with_variant(match origin {
+                        CodeBuddyLogOrigin::Extension => {
+                            crate::input_record_cache::DecoderVariant::CodeBuddyExtension
+                        }
+                        CodeBuddyLogOrigin::Host => {
+                            crate::input_record_cache::DecoderVariant::CodeBuddyHost
+                        }
+                    })
                 }
                 _ => unreachable!(),
             };
-            assert_eq!(
-                unit.decoder.version(),
-                DecoderVersion::new(DecoderId::CodeBuddy, revision)
-            );
+            assert_eq!(unit.decoder.version(), expected_version);
         }
-        assert_eq!(
-            decoders,
-            vec![
-                DecoderKind::codebuddy_jsonl(CODEBUDDY_JSONL_RECORD_REJECTION_REVISION),
-                DecoderKind::codebuddy_extension_log(
-                    CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION,
-                    CodeBuddyLogOrigin::Extension,
-                ),
-                DecoderKind::codebuddy_extension_log(
-                    CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION,
-                    CodeBuddyLogOrigin::Host,
-                ),
-            ]
-        );
+        #[cfg(target_os = "windows")]
+        let expected_decoders = vec![
+            DecoderKind::codebuddy_jsonl(),
+            DecoderKind::codebuddy_extension_log(CodeBuddyLogOrigin::Extension),
+            DecoderKind::codebuddy_extension_log(CodeBuddyLogOrigin::Host),
+        ];
+        #[cfg(not(target_os = "windows"))]
+        let expected_decoders = vec![DecoderKind::codebuddy_jsonl()];
+        assert_eq!(decoders, expected_decoders);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codebuddy_linux_built_in_roots_exclude_windows_application_data() {
+        assert!(codebuddy_extension_log_roots(Path::new("/home/alice")).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn codebuddy_macos_built_in_roots_exclude_windows_application_data() {
+        assert!(codebuddy_extension_log_roots(Path::new("/Users/alice")).is_empty());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn codebuddy_windows_built_in_roots_use_only_windows_application_data() {
+        let roots = codebuddy_extension_log_roots(Path::new(r"C:\Users\alice"));
+
+        assert_eq!(roots.len(), 4);
+        assert!(roots
+            .iter()
+            .all(|(root, _, _)| root.starts_with(r"C:\Users\alice\AppData")));
+        assert!(roots
+            .iter()
+            .all(|(root, _, _)| !root.to_string_lossy().contains("Library")));
     }
 
     #[test]
@@ -440,23 +476,14 @@ mod tests {
 
         assert_eq!(units.len(), 3);
         let mut expected = vec![
-            (
-                project_path,
-                DecoderKind::codebuddy_jsonl(CODEBUDDY_JSONL_RECORD_REJECTION_REVISION),
-            ),
+            (project_path, DecoderKind::codebuddy_jsonl()),
             (
                 ide_log,
-                DecoderKind::codebuddy_extension_log(
-                    CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION,
-                    CodeBuddyLogOrigin::Extension,
-                ),
+                DecoderKind::codebuddy_extension_log(CodeBuddyLogOrigin::Extension),
             ),
             (
                 host_log,
-                DecoderKind::codebuddy_extension_log(
-                    CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION,
-                    CodeBuddyLogOrigin::Host,
-                ),
+                DecoderKind::codebuddy_extension_log(CodeBuddyLogOrigin::Host),
             ),
         ];
         expected.sort_by(|left, right| left.0.cmp(&right.0));
@@ -467,31 +494,29 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected
         );
-        assert!(units.iter().all(|unit| {
-            let expected_revision = match unit.decoder {
-                DecoderKind::CodeBuddyJsonl { .. } => CODEBUDDY_JSONL_RECORD_REJECTION_REVISION,
-                DecoderKind::CodeBuddyExtensionLog { .. } => {
-                    CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION
-                }
-                _ => unreachable!(),
-            };
-            unit.decoder.version() == DecoderVersion::new(DecoderId::CodeBuddy, expected_revision)
-        }));
+        assert!(units
+            .iter()
+            .all(|unit| unit.decoder.version().contract()
+                == DecoderId::CodeBuddy.contract_fingerprint()));
     }
 
     #[test]
     fn codebuddy_driver_filters_host_logs_to_extension_component() {
         let home = tempfile::TempDir::new().unwrap();
-        let wanted = home
-            .path()
+        let extra_root = home.path().join("windows-profile");
+        let wanted = extra_root
             .join("AppData/Roaming/Code/logs/20260701/Tencent-Cloud.coding-copilot/output.log");
-        let unrelated = home
-            .path()
-            .join("AppData/Roaming/Code/logs/20260701/other-extension/output.log");
+        let unrelated =
+            extra_root.join("AppData/Roaming/Code/logs/20260701/other-extension/output.log");
         write_file(&wanted, "");
         write_file(&unrelated, "");
 
-        let settings = crate::scanner::ScannerSettings::default();
+        let settings = crate::scanner::ScannerSettings {
+            extra_scan_paths: [(ClientId::CodeBuddy, vec![extra_root])]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
         let ctx = scan_context(home.path(), &settings);
         let units = DRIVER
             .discover_inputs(&ctx)
@@ -512,17 +537,11 @@ mod tests {
         let mut units = vec![
             DiscoveredInput::plain_file(
                 path.clone(),
-                DecoderKind::codebuddy_extension_log(
-                    CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION,
-                    CodeBuddyLogOrigin::Extension,
-                ),
+                DecoderKind::codebuddy_extension_log(CodeBuddyLogOrigin::Extension),
             ),
             DiscoveredInput::plain_file(
                 path.clone(),
-                DecoderKind::codebuddy_extension_log(
-                    CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION,
-                    CodeBuddyLogOrigin::Extension,
-                ),
+                DecoderKind::codebuddy_extension_log(CodeBuddyLogOrigin::Extension),
             ),
         ];
 
@@ -542,7 +561,7 @@ mod tests {
         );
         let units = vec![DiscoveredInput::plain_file(
             path.clone(),
-            DecoderKind::codebuddy_jsonl(CODEBUDDY_JSONL_RECORD_REJECTION_REVISION),
+            DecoderKind::codebuddy_jsonl(),
         )];
 
         let actual = fold_with_units(units);
@@ -570,13 +589,7 @@ mod tests {
             .into_iter()
             .zip([CodeBuddyLogOrigin::Extension, CodeBuddyLogOrigin::Host])
             .map(|(path, origin)| {
-                DiscoveredInput::plain_file(
-                    path,
-                    DecoderKind::codebuddy_extension_log(
-                        CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION,
-                        origin,
-                    ),
-                )
+                DiscoveredInput::plain_file(path, DecoderKind::codebuddy_extension_log(origin))
             })
             .collect();
 
@@ -606,10 +619,7 @@ mod tests {
             .map(|path| {
                 DiscoveredInput::plain_file(
                     path,
-                    DecoderKind::codebuddy_extension_log(
-                        CODEBUDDY_EXTENSION_RECORD_REJECTION_REVISION,
-                        CodeBuddyLogOrigin::Extension,
-                    ),
+                    DecoderKind::codebuddy_extension_log(CodeBuddyLogOrigin::Extension),
                 )
             })
             .collect();
@@ -622,10 +632,7 @@ mod tests {
     #[test]
     fn codebuddy_parse_cache_uses_codebuddy_decoder_id() {
         let path = PathBuf::from("/tmp/codebuddy/session.jsonl");
-        let unit = DiscoveredInput::plain_file(
-            path,
-            DecoderKind::codebuddy_jsonl(CODEBUDDY_JSONL_RECORD_REJECTION_REVISION),
-        );
+        let unit = DiscoveredInput::plain_file(path, DecoderKind::codebuddy_jsonl());
 
         assert_eq!(unit.decoder.version().decoder_id, DecoderId::CodeBuddy);
     }

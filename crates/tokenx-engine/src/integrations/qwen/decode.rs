@@ -95,15 +95,27 @@ pub fn parse_qwen_file(path: &Path) -> SessionParseResult<ScannedInput> {
         };
 
         // Null token fields are equivalent to zero in Qwen's usage payload.
-        let input = usage.prompt_token_count.unwrap_or(0).max(0);
-        let output = usage.candidates_token_count.unwrap_or(0).max(0);
-        let reasoning = usage.thoughts_token_count.unwrap_or(0).max(0);
-        let cache_read = usage.cached_content_token_count.unwrap_or(0).max(0);
+        let input = usage.prompt_token_count.unwrap_or(0);
+        let output = usage.candidates_token_count.unwrap_or(0);
+        let reasoning = usage.thoughts_token_count.unwrap_or(0);
+        let cache_read = usage.cached_content_token_count.unwrap_or(0);
         let cache_write = 0; // Qwen CLI doesn't report cache write tokens
-
-        // Skip entries with zero tokens
-        if input == 0 && output == 0 && cache_read == 0 && reasoning == 0 {
-            continue;
+        let token_breakdown = TokenBreakdown {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning,
+        };
+        match crate::positive_token_total(&token_breakdown) {
+            Some(0) => continue,
+            Some(_) => {}
+            None => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
         }
 
         let Some(timestamp) = qwen_line.timestamp.as_deref() else {
@@ -160,13 +172,7 @@ pub fn parse_qwen_file(path: &Path) -> SessionParseResult<ScannedInput> {
             DEFAULT_PROVIDER,
             line_session_id,
             timestamp_ms,
-            TokenBreakdown {
-                input,
-                output,
-                cache_read,
-                cache_write,
-                reasoning,
-            },
+            token_breakdown,
             0.0, // Cost calculated later by pricing resolver
             Some(dedup_key),
         );
@@ -358,6 +364,27 @@ not valid json at all
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
         assert_eq!(rejection.count, 1);
+    }
+
+    #[test]
+    fn test_negative_and_overflow_usage_are_rejected_beside_good_missing_buckets() {
+        let content = r#"{"type":"assistant","model":"qwen3.5-plus","timestamp":"2026-02-23T14:24:56.857Z","sessionId":"session1","usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20,"cachedContentTokenCount":-1}}
+{"type":"assistant","model":"qwen3.5-plus","timestamp":"2026-02-23T14:24:57.857Z","sessionId":"session1","usageMetadata":{"promptTokenCount":9223372036854775807,"candidatesTokenCount":1}}
+{"type":"assistant","model":"qwen3.5-plus","timestamp":"2026-02-23T14:24:58.857Z","sessionId":"session1","usageMetadata":{"promptTokenCount":10}}"#;
+        let file = create_test_file(content);
+
+        let scanned = super::parse_qwen_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.input, 10);
+        assert_eq!(scanned.messages[0].tokens.output, 0);
+        assert_eq!(scanned.messages[0].tokens.reasoning, 0);
+        assert_eq!(scanned.messages[0].tokens.cache_read, 0);
+        assert_eq!(scanned.rejections.total(), 2);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 2);
+        assert!(scanned.interrupted.is_none());
     }
 
     #[test]

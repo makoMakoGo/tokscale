@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::input_health::{InputFailure, InputStatus, ScannedInput};
+use crate::input_health::{InputDiagnosticKind, InputFailure, InputStatus, ScannedInput};
 use crate::integrations::{
     BoundUsageSink, CacheHitPlan, DiscoveredInput, ExecutionInput, FingerprintPolicy, FoldContext,
     InputPipelineError, InputPlanningError, ParseContext, ParsedUnit, PreparedInput,
@@ -12,14 +12,23 @@ pub(crate) fn plan_cache_hit(
     unit: PreparedInput,
     input_cache: &input_record_cache::InputRecordShardStore,
 ) -> Result<CacheHitPlan, InputPlanningError> {
-    if matches!(unit.fingerprint_policy, FingerprintPolicy::NoRecordCache) {
+    if matches!(unit.fingerprint_policy, FingerprintPolicy::NoRecordCache)
+        || input_cache.is_disabled()
+    {
         return Ok(CacheHitPlan::Miss(unit.into_bypass_execution()));
     }
     let cached = match input_cache.get_meta(&unit.path, unit.decoder.version()) {
         Ok(Some(cached)) => cached,
-        Ok(None) | Err(_) => {
+        Ok(None) if input_cache.is_disabled() => {
+            return Ok(CacheHitPlan::Miss(unit.into_bypass_execution()));
+        }
+        Ok(None) => {
             return Ok(CacheHitPlan::Miss(unit.into_lookup_miss()));
         }
+        Err(_) if input_cache.is_disabled() => {
+            return Ok(CacheHitPlan::Miss(unit.into_bypass_execution()));
+        }
+        Err(_) => return Ok(CacheHitPlan::Miss(unit.into_lookup_miss())),
     };
     let stamp = match unit.input_policy().stamp_from_snapshot(unit.snapshot()) {
         Ok(stamp) => stamp,
@@ -75,10 +84,9 @@ where
     load_or_scan_unit_cacheable(unit, ctx, ScanCacheOptions::default(), scan)
 }
 
-pub(crate) fn load_or_scan_empty_sentinel_with_primary_hash<F>(
+pub(crate) fn load_or_scan_empty_sentinel_with_primary_snapshot<F>(
     unit: ExecutionInput,
     ctx: &ParseContext<'_>,
-    primary_hash: [u8; 32],
     primary_snapshot: input_record_cache::InputSnapshot,
     scan: F,
 ) -> ParsedUnit
@@ -90,8 +98,7 @@ where
         ctx,
         ScanCacheOptions {
             cache_clean_empty: true,
-            precomputed_content_hash: Some(PrecomputedContentHash::Primary {
-                hash: primary_hash,
+            indexed_snapshot: Some(IndexedSnapshot::Primary {
                 snapshot: primary_snapshot,
             }),
         },
@@ -99,10 +106,9 @@ where
     )
 }
 
-pub(crate) fn load_or_scan_unit_with_dependency_hash<F>(
+pub(crate) fn load_or_scan_unit_with_dependency_snapshot<F>(
     unit: ExecutionInput,
     ctx: &ParseContext<'_>,
-    dependency_hash: [u8; 32],
     dependency_snapshot: input_record_cache::InputSnapshot,
     scan: F,
 ) -> ParsedUnit
@@ -114,8 +120,7 @@ where
         ctx,
         ScanCacheOptions {
             cache_clean_empty: false,
-            precomputed_content_hash: Some(PrecomputedContentHash::Dependency {
-                hash: dependency_hash,
+            indexed_snapshot: Some(IndexedSnapshot::Dependency {
                 snapshot: dependency_snapshot,
             }),
         },
@@ -123,13 +128,11 @@ where
     )
 }
 
-enum PrecomputedContentHash {
+enum IndexedSnapshot {
     Primary {
-        hash: [u8; 32],
         snapshot: input_record_cache::InputSnapshot,
     },
     Dependency {
-        hash: [u8; 32],
         snapshot: input_record_cache::InputSnapshot,
     },
 }
@@ -137,7 +140,7 @@ enum PrecomputedContentHash {
 #[derive(Default)]
 struct ScanCacheOptions {
     cache_clean_empty: bool,
-    precomputed_content_hash: Option<PrecomputedContentHash>,
+    indexed_snapshot: Option<IndexedSnapshot>,
 }
 
 fn load_or_scan_unit_cacheable<F>(
@@ -149,17 +152,43 @@ fn load_or_scan_unit_cacheable<F>(
 where
     F: Fn(&Path) -> crate::records::error::SessionParseResult<(ScannedInput, bool)>,
 {
+    if ctx.is_cancelled() {
+        return ParsedUnit::unavailable(
+            unit,
+            InputFailure::new("parse local input", "acquisition cancelled"),
+        );
+    }
     let ScanCacheOptions {
         cache_clean_empty,
-        precomputed_content_hash,
+        indexed_snapshot,
     } = options;
     let scan_input = |path: &Path| scan(path);
     if unit.bypasses_cache() {
+        let validate_snapshot =
+            if matches!(unit.fingerprint_policy, FingerprintPolicy::NoRecordCache) {
+                None
+            } else {
+                unit.snapshot()
+                    .cloned()
+                    .map(|snapshot| (unit.input_policy(), snapshot))
+            };
         let unit = unit.into_discovered();
-        let (scanned, _) = match scan_input(&unit.path) {
+        let (mut scanned, _) = match scan_input(&unit.path) {
             Ok(scanned) => scanned,
             Err(error) => return ParsedUnit::unavailable(unit, InputFailure::from(&error)),
         };
+        if scanned.interrupted.is_none() {
+            if let Some((input_policy, snapshot)) = validate_snapshot {
+                scanned.interrupted = match input_policy.snapshot() {
+                    Ok(current) if current == snapshot => None,
+                    Ok(_) => Some(InputFailure::new(
+                        "validate input snapshot after scan",
+                        format!("{} changed while it was scanned", unit.path.display()),
+                    )),
+                    Err(source) => Some(snapshot_failure(source)),
+                };
+            }
+        }
         return finalize_uncached_scan(unit, scanned, ctx);
     }
 
@@ -173,42 +202,35 @@ where
             ),
         );
     };
-    let (fingerprint_result, precomputed_snapshot_mismatch) = match precomputed_content_hash {
-        Some(PrecomputedContentHash::Primary {
-            hash,
-            snapshot: hash_snapshot,
-        }) if snapshot.input_matches_single_file_snapshot(0, &hash_snapshot) => (
-            Some(input_policy.fingerprint_from_snapshot_with_primary_hash(&snapshot, hash)),
-            false,
-        ),
-        Some(PrecomputedContentHash::Dependency {
-            hash,
-            snapshot: hash_snapshot,
-        }) if snapshot.input_matches_single_file_snapshot(1, &hash_snapshot) => (
-            Some(input_policy.fingerprint_from_snapshot_with_dependency_hash(&snapshot, hash)),
-            false,
-        ),
-        Some(_) => (None, true),
-        None => (
-            Some(input_policy.fingerprint_from_snapshot(&snapshot)),
-            false,
-        ),
+    let indexed_snapshot_matches = match indexed_snapshot {
+        Some(IndexedSnapshot::Primary {
+            snapshot: indexed_snapshot,
+        }) => snapshot.input_matches_single_file_snapshot(0, &indexed_snapshot),
+        Some(IndexedSnapshot::Dependency {
+            snapshot: indexed_snapshot,
+        }) => snapshot.input_matches_single_file_snapshot(1, &indexed_snapshot),
+        None => true,
     };
-    let (fingerprint, fingerprint_failure) = match fingerprint_result {
-        Some(Ok(fingerprint)) => (Some(fingerprint), None),
-        Some(Err(source)) if preserves_primary_on_related_failure(&unit, &source) => {
+    let (fingerprint, fingerprint_failure) = match input_policy.fingerprint_from_snapshot(&snapshot)
+    {
+        Ok(fingerprint) => (Some(fingerprint), None),
+        Err(source) if preserves_primary_on_related_failure(&unit, &source) => {
             (None, Some(snapshot_failure(source)))
         }
-        Some(Err(source)) => return ParsedUnit::unavailable(unit, snapshot_failure(source)),
-        None => (None, None),
+        Err(source) => return ParsedUnit::unavailable(unit, snapshot_failure(source)),
     };
 
+    if ctx.is_cancelled() {
+        return ParsedUnit::unavailable(
+            unit,
+            InputFailure::new("parse local input", "acquisition cancelled"),
+        );
+    }
     let (mut scanned, cacheable) = match scan_input(&unit.path) {
         Ok(scanned) => scanned,
         Err(error) => return ParsedUnit::unavailable(unit, InputFailure::from(&error)),
     };
     let fingerprint_failed = fingerprint_failure.is_some();
-    crate::finalize_token_priced_messages(&mut scanned.messages, ctx.pricing);
     let post_scan_snapshot_failure = match input_policy.snapshot() {
         Ok(current) if current == snapshot => None,
         Ok(_) => Some(InputFailure::new(
@@ -221,11 +243,11 @@ where
     if scanned.interrupted.is_none() {
         scanned.interrupted = fingerprint_failure
             .or_else(|| {
-                precomputed_snapshot_mismatch.then(|| {
+                (!indexed_snapshot_matches).then(|| {
                     InputFailure::new(
-                        "validate precomputed input snapshot",
+                        "validate indexed related input snapshot",
                         format!(
-                            "{} changed after its shared content was indexed",
+                            "{} changed after its related input was indexed",
                             unit.path.display()
                         ),
                     )
@@ -257,9 +279,9 @@ where
     };
     ParsedUnit {
         unit: unit.into(),
-        messages: UnitRecordPayload::Fresh(scanned.messages),
+        messages: UnitRecordPayload::PendingFinalization(scanned.messages),
         cache_write,
-        invalidate_cache: precomputed_snapshot_mismatch
+        invalidate_cache: !indexed_snapshot_matches
             || fingerprint_failed
             || !complete
             || !cacheable
@@ -282,6 +304,12 @@ where
     F: Fn(&Path) -> crate::records::error::SessionParseResult<ScannedInput>,
 {
     let unit = unit.into_discovered();
+    if ctx.is_cancelled() {
+        return ParsedUnit::unavailable(
+            unit,
+            InputFailure::new("parse local input", "acquisition cancelled"),
+        );
+    }
     match scan(&unit.path) {
         Ok(scanned) => finalize_uncached_scan(unit, scanned, ctx),
         Err(error) => ParsedUnit::unavailable(unit, InputFailure::from(&error)),
@@ -290,17 +318,16 @@ where
 
 fn finalize_uncached_scan(
     unit: DiscoveredInput,
-    mut scanned: ScannedInput,
-    ctx: &ParseContext<'_>,
+    scanned: ScannedInput,
+    _ctx: &ParseContext<'_>,
 ) -> ParsedUnit {
-    crate::finalize_token_priced_messages(&mut scanned.messages, ctx.pricing);
     let status = match scanned.interrupted {
         None => InputStatus::Complete,
         Some(failure) => InputStatus::Partial { failure },
     };
     ParsedUnit {
         unit,
-        messages: UnitRecordPayload::Fresh(scanned.messages),
+        messages: UnitRecordPayload::PendingFinalization(scanned.messages),
         cache_write: None,
         invalidate_cache: false,
         health: Box::new(crate::integrations::UnitScanHealth {
@@ -311,7 +338,7 @@ fn finalize_uncached_scan(
 }
 
 fn snapshot_failure(source: input_record_cache::InputSnapshotError) -> InputFailure {
-    InputFailure::new("snapshot input metadata and content", source.to_string())
+    InputFailure::new("snapshot input metadata", source.to_string())
 }
 
 fn preserves_primary_on_related_failure(
@@ -332,8 +359,8 @@ pub(crate) fn fold_units(
 pub(crate) fn emit_messages(
     messages: impl IntoIterator<Item = UsageRecord>,
     sink: &mut BoundUsageSink<'_>,
-) {
-    sink.emit_all(messages);
+) -> crate::input_health::RejectionSummary {
+    sink.emit_all(messages)
 }
 
 pub(crate) fn fold_units_with_filter<F>(
@@ -348,22 +375,25 @@ where
     for parsed_unit in parsed {
         let ResolvedUnit {
             unit,
-            messages,
+            mut messages,
             cache_write,
             invalidate_cache,
             status,
-            rejections,
+            mut rejections,
         } = resolve_unit(parsed_unit, ctx)?;
-        ctx.record_health(unit.path.clone(), status, rejections);
         let path = unit.path.clone();
         let decoder_version = unit.decoder.version();
+        rejections.merge(&crate::retain_source_eligible_messages(&mut messages));
+        let cache_write =
+            cache_write.map(|plan| Box::new(plan.with_rejections(rejections.clone())));
         let cache_write_outcome = write_cache(cache_write, ctx, &messages);
-        if cache_write_outcome.is_err() && invalidate_cache {
-            ctx.input_cache.remove(&path, decoder_version);
-        }
-        let cache_write_outcome = cache_write_outcome?;
+        rejections.merge(&crate::price_source_eligible_messages(
+            &mut messages,
+            ctx.pricing,
+        ));
         let messages = filter(&unit, messages);
-        emit_messages(messages, sink);
+        rejections.merge(&emit_messages(messages, sink));
+        ctx.record_health(unit.path.clone(), status, rejections);
 
         if cache_write_outcome == CacheWriteOutcome::NotPlanned && invalidate_cache {
             ctx.input_cache.remove(&path, decoder_version);
@@ -409,9 +439,17 @@ pub(crate) fn resolve_unit(
                     rejections,
                 });
             }
-            Err(failure) => {
+            Err(InputPipelineError::CacheRead(failure)) => {
                 if !failure.can_reparse_input() {
                     return Err(failure.into());
+                }
+                if !ctx.input_cache.is_disabled() {
+                    ctx.record_cache_diagnostic(
+                        unit.path.clone(),
+                        InputDiagnosticKind::CacheReadFailed,
+                        "read parsed records from the input cache",
+                        failure.to_string(),
+                    );
                 }
                 debug_assert_eq!(failure.input_path, unit.path);
                 debug_assert_eq!(failure.decoder_version, unit.decoder.version());
@@ -426,6 +464,7 @@ pub(crate) fn resolve_unit(
 
                 parsed = ctx.reparse_one(unit)?;
             }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -447,31 +486,38 @@ pub(crate) fn write_cache(
     cache_write: Option<Box<input_record_cache::CacheWritePlan>>,
     ctx: &mut FoldContext<'_>,
     records: &[UsageRecord],
-) -> Result<CacheWriteOutcome, input_record_cache::InputRecordCacheError> {
+) -> CacheWriteOutcome {
     if let Some(plan) = cache_write {
-        ctx.input_cache.write_records(*plan, records)?;
-        return Ok(CacheWriteOutcome::Written);
+        if ctx.input_cache.is_disabled() {
+            return CacheWriteOutcome::NotPlanned;
+        }
+        if ctx.input_cache.write_records(*plan, records).is_err() {
+            return CacheWriteOutcome::NotPlanned;
+        }
+        if ctx.input_cache.is_disabled() {
+            return CacheWriteOutcome::NotPlanned;
+        }
+        return CacheWriteOutcome::Written;
     }
-    Ok(CacheWriteOutcome::NotPlanned)
+    CacheWriteOutcome::NotPlanned
 }
 
 pub(crate) fn resolve_messages(
     payload: UnitRecordPayload,
     ctx: &mut FoldContext<'_>,
-) -> Result<Vec<UsageRecord>, input_record_cache::CacheReadFailure> {
-    match payload {
-        UnitRecordPayload::Fresh(messages) => Ok(messages),
-        UnitRecordPayload::CacheHit(plan) => {
-            let mut messages = ctx.input_cache.take_records(&plan)?;
-            crate::finalize_token_priced_messages(&mut messages, ctx.pricing);
-            Ok(messages)
+) -> Result<Vec<UsageRecord>, InputPipelineError> {
+    let messages = match payload {
+        UnitRecordPayload::Fresh(messages) | UnitRecordPayload::PendingFinalization(messages) => {
+            messages
         }
+        UnitRecordPayload::CacheHit(plan) => ctx.input_cache.take_records(&plan)?,
         UnitRecordPayload::CodexFresh(_)
         | UnitRecordPayload::CodexCacheHit(_)
         | UnitRecordPayload::CodexAppend(_) => {
             unreachable!("codex deferred messages must be resolved by Driver")
         }
-    }
+    };
+    Ok(messages)
 }
 
 #[cfg(test)]
@@ -481,7 +527,10 @@ mod tests {
     use super::*;
     use crate::clients::ClientId;
     use crate::input_record_cache::DecoderId;
-    use crate::integrations::{integration_for, DecoderKind, DiscoveredInput};
+    use crate::integrations::{
+        integration_for, AttributedUsageSink, AttributedUsageSinkOutcome, DecoderKind,
+        DiscoveredInput,
+    };
     use crate::pricing::{ModelPricing, PricingService};
     use crate::{AttributedUsageRecord, TokenBreakdown};
 
@@ -531,11 +580,11 @@ mod tests {
     }
 
     fn pi_unit(path: &Path) -> DiscoveredInput {
-        DiscoveredInput::plain_file(path.to_path_buf(), DecoderKind::plain(DecoderId::Pi, 1))
+        DiscoveredInput::plain_file(path.to_path_buf(), DecoderKind::plain(DecoderId::Pi))
     }
 
     fn plain_unit(path: impl Into<PathBuf>, decoder_id: DecoderId) -> DiscoveredInput {
-        DiscoveredInput::plain_file(path.into(), DecoderKind::plain(decoder_id, 1))
+        DiscoveredInput::plain_file(path.into(), DecoderKind::plain(decoder_id))
     }
 
     fn execution(unit: DiscoveredInput) -> ExecutionInput {
@@ -622,6 +671,25 @@ mod tests {
         Ok(messages)
     }
 
+    fn fold_planned_unit_with_health(
+        client: ClientId,
+        parsed: ParsedUnit,
+        cache: &mut input_record_cache::InputRecordShardStore,
+    ) -> Result<
+        (
+            Vec<AttributedUsageRecord>,
+            crate::input_health::HealthSummary,
+        ),
+        InputPipelineError,
+    > {
+        let binding = binding(client);
+        let mut messages = Vec::new();
+        let mut sink = BoundUsageSink::new(binding, &mut messages);
+        let mut ctx = FoldContext::new(binding, cache, None);
+        fold_units(vec![parsed], &mut ctx, &mut sink)?;
+        Ok((messages, ctx.take_health().summarize()))
+    }
+
     fn fold_planned_unit_with_pricing(
         client: ClientId,
         parsed: ParsedUnit,
@@ -687,6 +755,37 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_cold_parse_reads_the_input_once_without_a_fingerprint_hash_pass() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.json");
+        let contents = b"input contents";
+        std::fs::write(&path, contents).unwrap();
+        let unit = plain_unit(path.clone(), DecoderId::Amp)
+            .prepare_snapshot()
+            .unwrap()
+            .into_lookup_miss();
+        input_record_cache::reset_input_read_stats(&path);
+
+        let parsed = load_or_scan_unit_with(unit, &ParseContext::uncancelled(None), |scan_path| {
+            let bytes = std::fs::read(scan_path).unwrap();
+            input_record_cache::record_input_bytes(scan_path, bytes.len());
+            Ok(ScannedInput::complete(vec![cached_message()]))
+        });
+
+        assert!(matches!(
+            parsed.messages,
+            UnitRecordPayload::PendingFinalization(_)
+        ));
+        assert_eq!(
+            input_record_cache::get_input_read_stats(&path),
+            input_record_cache::InputReadStats {
+                bytes: contents.len() as u64,
+                hash_passes: 0,
+            }
+        );
+    }
+
+    #[test]
     fn warm_shard_reprices_cost_with_the_current_pricing_service() {
         let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
@@ -700,9 +799,7 @@ mod tests {
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
         let cold_parsed = load_or_scan_unit_with(
             execution(unit.clone()),
-            &ParseContext {
-                pricing: Some(&first_pricing),
-            },
+            &ParseContext::uncancelled(Some(&first_pricing)),
             |_| {
                 Ok(ScannedInput::complete(vec![UsageRecord::new(
                     "gpt-5.4",
@@ -759,6 +856,308 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_pricing_cost_rejects_only_the_record() {
+        let input_dir = tempfile::TempDir::new().unwrap();
+        let path = input_dir.path().join("session.json");
+        std::fs::write(&path, b"usage input").unwrap();
+        let pricing = pricing_service(f64::MAX);
+        let parsed = load_or_scan_unit_with(
+            execution(plain_unit(path, DecoderId::Amp)),
+            &ParseContext::uncancelled(Some(&pricing)),
+            |_| {
+                Ok(ScannedInput::complete(vec![UsageRecord::new(
+                    "gpt-5.4",
+                    "openai",
+                    "session",
+                    1,
+                    TokenBreakdown {
+                        input: i64::MAX,
+                        ..Default::default()
+                    },
+                    0.0,
+                )]))
+            },
+        );
+        let binding = binding(ClientId::Amp);
+        let mut cache = input_record_cache::InputRecordShardStore::default();
+        let mut context = FoldContext::new(binding, &mut cache, Some(&pricing));
+        let mut messages = Vec::new();
+        let mut sink = BoundUsageSink::new(binding, &mut messages);
+
+        fold_units(vec![parsed], &mut context, &mut sink).unwrap();
+
+        assert!(messages.is_empty());
+        assert_eq!(context.health().rejected_records(), 1);
+        let rejection = context.health().inputs()[0]
+            .rejections
+            .entries()
+            .next()
+            .unwrap();
+        assert_eq!(rejection.key, "pricing-computation-failed");
+    }
+
+    #[test]
+    fn sink_aggregation_rejection_is_attached_to_the_originating_input_health() {
+        #[derive(Default)]
+        struct RejectOneRecord {
+            retained: Vec<AttributedUsageRecord>,
+        }
+
+        impl AttributedUsageSink for RejectOneRecord {
+            fn push_record(
+                &mut self,
+                message: AttributedUsageRecord,
+            ) -> AttributedUsageSinkOutcome {
+                if message.session_id.as_ref() == "overflow" {
+                    AttributedUsageSinkOutcome::Rejected(
+                        crate::input_health::RecordRejectionReason::AggregationOverflow,
+                    )
+                } else {
+                    self.retained.push(message);
+                    AttributedUsageSinkOutcome::Retained
+                }
+            }
+        }
+
+        let path = PathBuf::from("/tmp/aggregation-overflow-input.json");
+        let parsed = ParsedUnit::healthy(
+            DiscoveredInput::no_record_cache(path.clone(), DecoderKind::plain(DecoderId::Amp)),
+            UnitRecordPayload::Fresh(vec![
+                UsageRecord::new(
+                    "gpt-5.4",
+                    "openai",
+                    "overflow",
+                    1,
+                    TokenBreakdown {
+                        input: 1,
+                        ..Default::default()
+                    },
+                    0.0,
+                ),
+                UsageRecord::new(
+                    "gpt-5.4",
+                    "openai",
+                    "retained",
+                    2,
+                    TokenBreakdown {
+                        input: 2,
+                        ..Default::default()
+                    },
+                    0.0,
+                ),
+            ]),
+            None,
+            false,
+        );
+        let binding = binding(ClientId::Amp);
+        let mut cache = input_record_cache::InputRecordShardStore::default();
+        let mut context = FoldContext::new(binding, &mut cache, None);
+        let mut downstream = RejectOneRecord::default();
+        {
+            let mut sink = BoundUsageSink::new(binding, &mut downstream);
+            fold_units(vec![parsed], &mut context, &mut sink).unwrap();
+        }
+
+        assert_eq!(downstream.retained.len(), 1);
+        assert_eq!(downstream.retained[0].session_id.as_ref(), "retained");
+        assert_eq!(context.health().rejected_records(), 1);
+        let input_health = &context.health().inputs()[0];
+        assert_eq!(input_health.path, path);
+        let rejection = input_health.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "aggregation-overflow");
+        assert_eq!(rejection.label, "Aggregation overflow");
+        assert_eq!(rejection.count, 1);
+        let summary = context.health().summarize();
+        assert_eq!(summary.degraded_inputs, 1);
+        assert_eq!(summary.rejected_records(), 1);
+        assert_eq!(summary.issues.len(), 1);
+        assert_eq!(summary.issues[0].issue.as_str(), "aggregation-overflow");
+        assert_eq!(summary.issues[0].affected_inputs, 1);
+        assert_eq!(summary.issues[0].rejected_records, Some(1));
+    }
+
+    #[test]
+    fn source_rejection_keeps_healthy_input_and_is_identical_on_warm_hit() {
+        let input_dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let good_path = input_dir.path().join("good.json");
+        let bad_path = input_dir.path().join("bad.json");
+        std::fs::write(&good_path, b"good").unwrap();
+        std::fs::write(&bad_path, b"bad").unwrap();
+        let good_unit = plain_unit(good_path.clone(), DecoderId::Amp);
+        let bad_unit = plain_unit(bad_path.clone(), DecoderId::Amp);
+
+        let cold_parsed = vec![
+            load_or_scan_unit_with(
+                execution(good_unit.clone()),
+                &ParseContext::uncancelled(None),
+                |_| {
+                    Ok(ScannedInput::complete(vec![UsageRecord::new(
+                        "gpt-5.4",
+                        "openai",
+                        "good-session",
+                        1,
+                        TokenBreakdown {
+                            input: 7,
+                            ..Default::default()
+                        },
+                        0.0,
+                    )]))
+                },
+            ),
+            load_or_scan_unit_with(
+                execution(bad_unit.clone()),
+                &ParseContext::uncancelled(None),
+                |_| {
+                    Ok(ScannedInput::complete(vec![UsageRecord::new(
+                        "gpt-5.4",
+                        "openai",
+                        "bad-session",
+                        1,
+                        TokenBreakdown {
+                            input: -1,
+                            output: 3,
+                            ..Default::default()
+                        },
+                        0.0,
+                    )]))
+                },
+            ),
+        ];
+        let binding = binding(ClientId::Amp);
+        let mut cold_cache =
+            input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
+        let mut cold_messages = Vec::new();
+        let mut cold_sink = BoundUsageSink::new(binding, &mut cold_messages);
+        let mut cold_ctx = FoldContext::new(binding, &mut cold_cache, None);
+        fold_units(cold_parsed, &mut cold_ctx, &mut cold_sink).unwrap();
+        let cold_health = cold_ctx.take_health().summarize();
+
+        assert_eq!(cold_messages.len(), 1);
+        assert_eq!(cold_messages[0].session_id.as_ref(), "good-session");
+        assert_eq!(cold_health.rejected_records(), 1);
+        assert!(cold_health
+            .issues
+            .iter()
+            .any(|issue| issue.issue == "invalid-usage-record"));
+
+        let mut inspection_cache =
+            input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
+        let bad_meta = inspection_cache
+            .get_meta(&bad_path, bad_unit.decoder.version())
+            .unwrap()
+            .unwrap();
+        assert_eq!(bad_meta.rejections.total(), 1);
+        let bad_cached_records = inspection_cache
+            .take_records(&input_record_cache::CacheReadPlan::new(
+                &bad_path,
+                bad_unit.decoder.version(),
+                bad_meta.fingerprint,
+            ))
+            .unwrap();
+        assert!(bad_cached_records.is_empty());
+
+        let mut warm_cache =
+            input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
+        let warm_parsed = vec![
+            expect_cache_hit(
+                plan_cache_hit(good_unit.prepare_snapshot().unwrap(), &warm_cache),
+                "healthy input must be warm",
+            ),
+            expect_cache_hit(
+                plan_cache_hit(bad_unit.prepare_snapshot().unwrap(), &warm_cache),
+                "rejected input must retain its aggregate health shard",
+            ),
+        ];
+        let mut warm_messages = Vec::new();
+        let mut warm_sink = BoundUsageSink::new(binding, &mut warm_messages);
+        let mut warm_ctx = FoldContext::new(binding, &mut warm_cache, None);
+        fold_units(warm_parsed, &mut warm_ctx, &mut warm_sink).unwrap();
+        let warm_health = warm_ctx.take_health().summarize();
+
+        assert_eq!(warm_messages, cold_messages);
+        assert_eq!(warm_health, cold_health);
+    }
+
+    #[test]
+    fn pricing_rejection_is_recomputed_and_can_recover_from_the_same_warm_shard() {
+        let input_dir = tempfile::TempDir::new().unwrap();
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let path = input_dir.path().join("session.json");
+        std::fs::write(&path, b"usage input").unwrap();
+        let unit = plain_unit(path.clone(), DecoderId::Amp);
+        let overflowing_pricing = pricing_service(f64::MAX);
+        let finite_pricing = pricing_service(1e-20);
+        let parsed = load_or_scan_unit_with(
+            execution(unit.clone()),
+            &ParseContext::uncancelled(Some(&overflowing_pricing)),
+            |_| {
+                Ok(ScannedInput::complete(vec![UsageRecord::new(
+                    "gpt-5.4",
+                    "openai",
+                    "session",
+                    1,
+                    TokenBreakdown {
+                        input: i64::MAX,
+                        ..Default::default()
+                    },
+                    0.0,
+                )]))
+            },
+        );
+        let binding = binding(ClientId::Amp);
+        let mut cold_cache =
+            input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
+        let mut cold_messages = Vec::new();
+        let mut cold_sink = BoundUsageSink::new(binding, &mut cold_messages);
+        let mut cold_ctx = FoldContext::new(binding, &mut cold_cache, Some(&overflowing_pricing));
+        fold_units(vec![parsed], &mut cold_ctx, &mut cold_sink).unwrap();
+
+        assert!(cold_messages.is_empty());
+        assert_eq!(cold_ctx.health().rejected_records(), 1);
+        assert_eq!(
+            cold_ctx.health().inputs()[0]
+                .rejections
+                .entries()
+                .next()
+                .unwrap()
+                .key,
+            "pricing-computation-failed"
+        );
+
+        let mut inspection_cache =
+            input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
+        let meta = inspection_cache
+            .get_meta(&path, unit.decoder.version())
+            .unwrap()
+            .unwrap();
+        assert!(meta.rejections.is_empty());
+        let cached_records = inspection_cache
+            .take_records(&input_record_cache::CacheReadPlan::new(
+                &path,
+                unit.decoder.version(),
+                meta.fingerprint,
+            ))
+            .unwrap();
+        assert_eq!(cached_records.len(), 1);
+
+        let mut warm_cache =
+            input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
+        let warm_parsed = expect_cache_hit(
+            plan_cache_hit(unit.prepare_snapshot().unwrap(), &warm_cache),
+            "source-eligible record must remain in the warm shard",
+        );
+        let mut warm_messages = Vec::new();
+        let mut warm_sink = BoundUsageSink::new(binding, &mut warm_messages);
+        let mut warm_ctx = FoldContext::new(binding, &mut warm_cache, Some(&finite_pricing));
+        fold_units(vec![warm_parsed], &mut warm_ctx, &mut warm_sink).unwrap();
+
+        assert_eq!(warm_messages.len(), 1);
+        assert!(warm_messages[0].cost.is_finite());
+        assert!(warm_ctx.health().is_empty());
+    }
+
+    #[test]
     fn sqlite_wal_warm_hit_reads_no_input_bytes() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("history.db");
@@ -768,7 +1167,7 @@ mod tests {
 
         assert_warm_hit_reads_no_input_bytes(DiscoveredInput::sqlite_with_wal(
             path,
-            DecoderKind::plain(DecoderId::Zed, 1),
+            DecoderKind::plain(DecoderId::Zed),
         ));
     }
 
@@ -784,7 +1183,7 @@ mod tests {
         assert_warm_hit_reads_no_input_bytes(DiscoveredInput::claude_code(
             path,
             home.path().to_path_buf(),
-            DecoderKind::plain(DecoderId::Claude, 1),
+            DecoderKind::plain(DecoderId::Claude),
         ));
     }
 
@@ -848,13 +1247,16 @@ mod tests {
         ));
         let parse_called = std::cell::Cell::new(false);
 
-        let parsed = load_or_scan_unit_with(miss, &ParseContext { pricing: None }, |_| {
+        let parsed = load_or_scan_unit_with(miss, &ParseContext::uncancelled(None), |_| {
             parse_called.set(true);
             Ok(ScannedInput::complete(vec![cached_message()]))
         });
 
         assert!(parse_called.get());
-        assert!(matches!(parsed.messages, UnitRecordPayload::Fresh(_)));
+        assert!(matches!(
+            parsed.messages,
+            UnitRecordPayload::PendingFinalization(_)
+        ));
     }
 
     #[test]
@@ -866,7 +1268,7 @@ mod tests {
 
         let parsed = load_or_scan_unit_with(
             execute_prepared(unit.prepare_snapshot().unwrap()),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
             |_| {
                 Err(crate::records::error::SessionParseError::invalid(
                     "parse test SQLite",
@@ -898,7 +1300,7 @@ mod tests {
         let unit = plain_unit(path, DecoderId::Amp);
 
         let parsed =
-            load_or_scan_unit_with(execution(unit), &ParseContext { pricing: None }, |_| {
+            load_or_scan_unit_with(execution(unit), &ParseContext::uncancelled(None), |_| {
                 Ok(ScannedInput::complete(Vec::new()))
             });
 
@@ -913,7 +1315,7 @@ mod tests {
         let unit = plain_unit(path, DecoderId::Amp);
 
         let parsed =
-            load_or_scan_unit_with(execution(unit), &ParseContext { pricing: None }, |_| {
+            load_or_scan_unit_with(execution(unit), &ParseContext::uncancelled(None), |_| {
                 let mut scanned = ScannedInput::complete(Vec::new());
                 scanned
                     .rejections
@@ -992,7 +1394,7 @@ mod tests {
 
         let parsed = expect_cache_hit(
             plan_cache_hit(unit.prepare_snapshot().unwrap(), &cache),
-            "cache planning must refresh metadata at the acceptance boundary",
+            "cache planning must accept a matching prepared snapshot",
         );
         assert!(matches!(parsed.messages, UnitRecordPayload::CacheHit(_)));
     }
@@ -1012,7 +1414,6 @@ mod tests {
         let fingerprint = policy
             .fingerprint_from_stamp(original_stamp.clone())
             .unwrap();
-        let original_content_hash = fingerprint.content_hash;
         let mut cache = input_record_cache::InputRecordShardStore::default();
         cache.insert(input_record_cache::CachedInputEntry::new_with_version(
             &path,
@@ -1041,27 +1442,22 @@ mod tests {
             original_modified_ms
         );
         assert_ne!(replacement_stamp, original_stamp);
-        assert_ne!(
-            policy
-                .fingerprint_from_stamp(replacement_stamp)
-                .unwrap()
-                .content_hash,
-            original_content_hash,
-            "the replacement really changed content even though size and mtime were restored"
-        );
         input_record_cache::reset_input_read_stats(&path);
         let parse_called = std::cell::Cell::new(false);
 
         let parsed = load_or_scan_unit_with(
             execute_prepared(unit),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
             |_| {
                 parse_called.set(true);
                 Ok(ScannedInput::complete(vec![cached_message()]))
             },
         );
         assert!(parse_called.get());
-        assert!(matches!(parsed.messages, UnitRecordPayload::Fresh(_)));
+        assert!(matches!(
+            parsed.messages,
+            UnitRecordPayload::PendingFinalization(_)
+        ));
     }
 
     #[test]
@@ -1071,7 +1467,7 @@ mod tests {
         std::fs::write(&path, b"before").unwrap();
         let unit = plain_unit(path.clone(), DecoderId::Amp);
         let parsed =
-            load_or_scan_unit_with(execution(unit), &ParseContext { pricing: None }, |_| {
+            load_or_scan_unit_with(execution(unit), &ParseContext::uncancelled(None), |_| {
                 std::fs::write(&path, b"after-and-different-size").unwrap();
                 Ok(ScannedInput::complete(vec![cached_message()]))
             });
@@ -1108,7 +1504,7 @@ mod tests {
             "an unavailable optional related input must force a cache miss",
         );
         let scan_called = std::cell::Cell::new(false);
-        let parsed = load_or_scan_unit_with(miss, &ParseContext { pricing: None }, |_| {
+        let parsed = load_or_scan_unit_with(miss, &ParseContext::uncancelled(None), |_| {
             scan_called.set(true);
             Ok(ScannedInput::complete(vec![scanned_message()]))
         });
@@ -1122,7 +1518,7 @@ mod tests {
         assert!(matches!(parsed.health.status, InputStatus::Partial { .. }));
         assert!(matches!(
             parsed.messages,
-            UnitRecordPayload::Fresh(ref messages) if messages.len() == 1
+            UnitRecordPayload::PendingFinalization(ref messages) if messages.len() == 1
         ));
         let messages = fold_planned_unit(ClientId::Kiro, parsed, &mut cache);
         assert_eq!(messages.len(), 1);
@@ -1167,9 +1563,9 @@ mod tests {
         let wal_path = dir.path().join("history.db-wal");
         std::fs::write(&path, b"database").unwrap();
         std::fs::write(&wal_path, b"wal-before").unwrap();
-        let unit = DiscoveredInput::sqlite_with_wal(path, DecoderKind::plain(DecoderId::Zed, 1));
+        let unit = DiscoveredInput::sqlite_with_wal(path, DecoderKind::plain(DecoderId::Zed));
         let parsed =
-            load_or_scan_unit_with(execution(unit), &ParseContext { pricing: None }, |_| {
+            load_or_scan_unit_with(execution(unit), &ParseContext::uncancelled(None), |_| {
                 std::fs::write(&wal_path, b"wal-after-and-larger").unwrap();
                 Ok(ScannedInput::complete(vec![cached_message()]))
             });
@@ -1218,11 +1614,15 @@ mod tests {
             plan_cache_hit(unit.clone().prepare_snapshot().unwrap(), &cache),
             "valid header must still plan a cache hit",
         );
-        let repaired = fold_planned_unit(ClientId::Pi, parsed, &mut cache);
+        let (repaired, health) =
+            fold_planned_unit_with_health(ClientId::Pi, parsed, &mut cache).unwrap();
         assert_eq!(repaired.len(), 1);
         assert_eq!(repaired[0].client, expected_client);
         assert_eq!(repaired[0].session_id.as_ref(), "input-session");
         assert_eq!(repaired[0].tokens.input, 17);
+        assert_eq!(health.issue_count(), 1);
+        assert_eq!(health.issues[0].issue, "input-cache-read-failed");
+        assert_eq!(health.issues[0].handling, "input-reparsed");
 
         let mut warm_cache =
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
@@ -1242,13 +1642,43 @@ mod tests {
     }
 
     #[test]
+    fn cache_write_failure_keeps_fresh_records_and_latches_one_store_diagnostic() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let input_path = temp.path().join("session.jsonl");
+        let cache_path = temp.path().join("cache");
+        std::fs::write(&input_path, PI_INPUT).unwrap();
+        let unit = pi_unit(&input_path);
+        let execution = unit.prepare_snapshot().unwrap().into_lookup_miss();
+        let parsed = load_or_scan_unit_with(
+            execution,
+            &ParseContext::uncancelled(None),
+            crate::integrations::pi::decode::parse_pi_file,
+        );
+        let mut cache = input_record_cache::InputRecordShardStore::with_cache_dir(&cache_path);
+        std::fs::rename(&cache_path, temp.path().join("cache-backup")).unwrap();
+        std::fs::write(&cache_path, b"cache path intentionally blocked").unwrap();
+
+        let (messages, health) = fold_planned_unit_with_health(ClientId::Pi, parsed, &mut cache)
+            .expect("disposable cache failure must not discard parsed records");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id.as_ref(), "input-session");
+        assert_eq!(messages[0].tokens.input, 17);
+        assert_eq!(health.issue_count(), 0);
+        let (kind, _) = cache
+            .disabled_diagnostic()
+            .expect("the first write failure must latch the cache as disabled");
+        assert_eq!(kind, InputDiagnosticKind::CacheWriteFailed);
+    }
+
+    #[test]
     fn corrupt_shard_removal_is_saved_when_recovery_parser_fails() {
         let input_dir = tempfile::TempDir::new().unwrap();
         let cache_dir = tempfile::TempDir::new().unwrap();
         let input_path = input_dir.path().join("opencode.db");
         std::fs::write(&input_path, b"not-a-database").unwrap();
         let unit =
-            DiscoveredInput::sqlite_with_wal(input_path.clone(), DecoderKind::opencode_sqlite(1));
+            DiscoveredInput::sqlite_with_wal(input_path.clone(), DecoderKind::opencode_sqlite());
         let fingerprint = unit.input_policy().fingerprint().unwrap();
         let mut seed = input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
         seed.insert(input_record_cache::CachedInputEntry::new_with_version(
@@ -1296,7 +1726,7 @@ mod tests {
         let input_path = input_dir.path().join("opencode.db");
         std::fs::write(&input_path, b"not-a-database").unwrap();
         let unit =
-            DiscoveredInput::sqlite_with_wal(input_path.clone(), DecoderKind::opencode_sqlite(1));
+            DiscoveredInput::sqlite_with_wal(input_path.clone(), DecoderKind::opencode_sqlite());
         let fingerprint = unit.input_policy().fingerprint().unwrap();
         let mut seed = input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
         seed.insert(input_record_cache::CachedInputEntry::new_with_version(
@@ -1521,7 +1951,7 @@ mod tests {
         );
         let cold_parsed = load_or_scan_unit_with(
             cold_unit,
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
             crate::integrations::pi::decode::parse_pi_file,
         );
         let mut cold_cache = cold_cache;

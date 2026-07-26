@@ -14,7 +14,6 @@ use crate::integrations::{
     InputDiscoveryError, IntegrationDriver, ParseContext, ParsedUnit, SourceSpec,
 };
 
-const KILO_RECORD_REJECTION_REVISION: u32 = 6;
 const SOURCE: SourceSpec = SourceSpec::local_share(
     "kilo/kilo.db",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::kilo_db),
@@ -31,7 +30,7 @@ impl IntegrationDriver for Driver {
         let mut paths = Vec::new();
         source_discovery::push_existing_file(client, SOURCE.resolve(ctx.home_dir), &mut paths)?;
         paths.extend(source_discovery::scan_roots(
-            client,
+            ctx,
             source_discovery::extra_roots_for_client(client, ctx)?,
             SOURCE.matcher(),
         )?);
@@ -40,7 +39,7 @@ impl IntegrationDriver for Driver {
             client,
             paths,
             crate::integrations::FingerprintPolicy::SqliteWithWal,
-            DecoderKind::plain(DecoderId::Kilo, KILO_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::Kilo),
         )
     }
 
@@ -102,6 +101,7 @@ mod tests {
             client: ClientId::Kilo,
             home_dir: home.path(),
             scanner_settings: &settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         };
 
         let units = DRIVER.discover_inputs(&ctx).unwrap();
@@ -114,8 +114,7 @@ mod tests {
             vec![default_db, first_extra_db, second_extra_db]
         );
         assert!(units.iter().all(|unit| {
-            unit.decoder.version()
-                == DecoderVersion::new(DecoderId::Kilo, KILO_RECORD_REJECTION_REVISION)
+            unit.decoder.version() == DecoderVersion::current(DecoderId::Kilo)
                 && unit.fingerprint_policy == crate::integrations::FingerprintPolicy::SqliteWithWal
         }));
     }

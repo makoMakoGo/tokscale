@@ -34,9 +34,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::acquisition::acquisition_engine;
-use crate::generation_cache::{load_generation_cache, CacheResult};
+use crate::generation_cache::{load_generation_cache, CacheResult, RetryBackoff};
 use anyhow::Result;
-use chrono::Local;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, KeyEvent, MouseEvent},
     execute,
@@ -46,6 +45,86 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 use tokenx_engine::Generation;
+
+type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
+
+struct TerminalSession {
+    terminal: Option<TuiTerminal>,
+    active: bool,
+    #[cfg(test)]
+    restore_hook: Option<Box<dyn FnOnce()>>,
+}
+
+impl TerminalSession {
+    fn enter() -> Result<Self> {
+        enable_raw_mode()?;
+        let mut session = Self {
+            terminal: None,
+            active: true,
+            #[cfg(test)]
+            restore_hook: None,
+        };
+        let mut stdout = io::stdout();
+
+        let _ = execute!(stdout, SetTitle("Tokenx"));
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        session.terminal = Some(Terminal::new(CrosstermBackend::new(stdout))?);
+
+        Ok(session)
+    }
+
+    fn terminal_mut(&mut self) -> &mut TuiTerminal {
+        self.terminal
+            .as_mut()
+            .expect("active terminal session owns a terminal")
+    }
+
+    fn restore(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+
+        #[cfg(test)]
+        if let Some(restore_hook) = self.restore_hook.take() {
+            restore_hook();
+            return;
+        }
+
+        let _ = disable_raw_mode();
+        if let Some(terminal) = self.terminal.as_mut() {
+            let _ = execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                SetTitle("")
+            );
+            let _ = terminal.show_cursor();
+        } else {
+            let _ = execute!(
+                io::stdout(),
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                SetTitle("")
+            );
+        }
+    }
+
+    #[cfg(test)]
+    fn with_restore_hook(restore_hook: impl FnOnce() + 'static) -> Self {
+        Self {
+            terminal: None,
+            active: true,
+            restore_hook: Some(Box::new(restore_hook)),
+        }
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
 
 #[cfg(test)]
 use tokenx_engine::{AcquisitionConfig, ClientId, ClientUniverse};
@@ -92,6 +171,8 @@ pub(crate) fn generation_fixture_with_health_and_pricing(
             tokenx_engine::DateRange::none(),
             universe,
             tokenx_engine::scanner::ScannerSettings::default(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+            tokenx_engine::PricingContext::explicit_with_catalog("test-custom", "test-catalog"),
         )
         .expect("test acquisition is valid"),
         tokenx_engine::SourceFingerprint::from_bytes([0; 32]),
@@ -104,11 +185,31 @@ pub(crate) fn generation_fixture_with_health_and_pricing(
     .expect("test generation is coherent")
 }
 
-fn decide_initial_data(load_result: CacheResult) -> (Option<Generation>, bool) {
+fn decide_initial_data(
+    load_result: CacheResult,
+) -> (
+    Option<Generation>,
+    bool,
+    Option<RetryBackoff>,
+    Option<String>,
+) {
     match load_result {
-        CacheResult::Fresh(generation) => (Some(generation), false),
-        CacheResult::Stale(generation) => (Some(generation), true),
-        CacheResult::Miss => (None, true),
+        CacheResult::Fresh(generation) => (Some(generation), false, None, None),
+        CacheResult::Stale {
+            generation,
+            retry_backoff,
+        } => (Some(generation), true, retry_backoff, None),
+        CacheResult::RetryDeferred {
+            generation,
+            retry_backoff,
+        } => (Some(generation), false, Some(retry_backoff), None),
+        CacheResult::Missing => (None, true, None, None),
+        CacheResult::Failure(failure) => (
+            None,
+            true,
+            None,
+            Some(format!("Generation cache warning: {failure}")),
+        ),
     }
 }
 
@@ -117,6 +218,34 @@ fn start_requested_subscription_fetch(app: &mut App, tasks: &mut TaskSupervisor)
         return;
     };
     tasks.spawn_subscription_fetch(enabled, tx);
+}
+
+fn install_cached_generation(app: &mut App, cached_snapshot: Option<Generation>) -> bool {
+    if let Some(cached) = cached_snapshot {
+        match app.install_generation(cached) {
+            Ok(()) => {
+                app.set_generation_status_with_tone("Loaded from cache", StatusTone::Success);
+            }
+            Err(error) => {
+                let warning =
+                    format!("Generation cache warning: cached generation rejected: {error:#}");
+                tracing::warn!(
+                    error = %error,
+                    "cached generation failed TUI projection; rebuilding from source inputs"
+                );
+                app.set_generation_cache_warning(Some(warning.clone()));
+                app.set_generation_status_with_tone(&warning, StatusTone::Warning);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn shutdown_session(tasks: &mut TaskSupervisor, terminal_session: TerminalSession) {
+    tasks.signal_cancel();
+    drop(terminal_session);
+    tasks.drain();
 }
 
 pub fn run(runtime: tokio::runtime::Handle, plan: crate::cli::TuiPlan) -> Result<TuiExit> {
@@ -134,11 +263,15 @@ pub fn run(runtime: tokio::runtime::Handle, plan: crate::cli::TuiPlan) -> Result
                         restricted: _,
                     },
                 settings,
+                calendar,
+                pricing,
             },
         date:
             crate::cli::ResolvedDateRange {
                 range: date_range,
                 label: _,
+                relative: relative_date_range,
+                effective_date,
             },
         initial_tab,
     } = plan;
@@ -154,12 +287,19 @@ pub fn run(runtime: tokio::runtime::Handle, plan: crate::cli::TuiPlan) -> Result
         no_refresh,
         client_universe: universe.clone(),
         initial_tab,
-        effective_date: Local::now().date_naive(),
+        effective_date,
     };
 
     // Single file read: load cache and check freshness in one pass.
-    let acquisition = acquisition_engine(home_dir, universe, date_range, settings.scanner.clone())?;
-    let (cached_snapshot, needs_background_load) =
+    let acquisition = acquisition_engine(
+        home_dir,
+        universe,
+        date_range,
+        settings.scanner.clone(),
+        calendar,
+        pricing,
+    )?;
+    let (cached_snapshot, mut needs_background_load, retry_backoff, cache_startup_warning) =
         decide_initial_data(load_generation_cache(acquisition.config()));
 
     let original_hook = panic::take_hook();
@@ -171,42 +311,21 @@ pub fn run(runtime: tokio::runtime::Handle, plan: crate::cli::TuiPlan) -> Result
         original_hook(info);
     }));
 
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-
-    let _ = execute!(stdout, SetTitle("Tokenx"));
-
-    if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
-        let _ = disable_raw_mode();
-        let _ = execute!(stdout, SetTitle(""));
-        return Err(e.into());
+    // Declare the task owner first so unwinding or a future early return drops
+    // the terminal session before TaskSupervisor can wait for blocking work.
+    let mut tasks = TaskSupervisor::new(runtime);
+    let mut terminal_session = TerminalSession::enter()?;
+    let mut app = App::new(config, settings)?;
+    if let Some(warning) = cache_startup_warning {
+        tracing::warn!(warning = %warning, "generation cache unavailable at TUI startup");
+        app.set_generation_cache_warning(Some(warning));
     }
-
-    let backend = CrosstermBackend::new(stdout);
-    let terminal_result = Terminal::new(backend);
-    let mut terminal = match terminal_result {
-        Ok(t) => t,
-        Err(e) => {
-            restore_terminal_best_effort();
-            return Err(e.into());
-        }
-    };
-
-    let mut app = match App::new(config, settings) {
-        Ok(a) => a,
-        Err(e) => {
-            restore_terminal(&mut terminal);
-            return Err(e);
-        }
-    };
-    if let Some(cached) = cached_snapshot {
-        app.install_generation(cached)?;
-        app.set_generation_status_with_tone("Loaded from cache", StatusTone::Success);
-    }
+    needs_background_load |= install_cached_generation(&mut app, cached_snapshot);
     let mut view_state = view_state::ViewState::default();
 
-    let mut tasks = TaskSupervisor::new(runtime);
-    let mut generation_controller = GenerationController::new(acquisition, app.refresh_status());
+    let mut generation_controller = GenerationController::new(acquisition, app.refresh_status())
+        .with_relative_date_range(relative_date_range);
+    generation_controller.set_retry_backoff(retry_backoff);
 
     if needs_background_load {
         generation_controller.request_initial_load(true);
@@ -227,7 +346,7 @@ pub fn run(runtime: tokio::runtime::Handle, plan: crate::cli::TuiPlan) -> Result
     let mut events = EventHandler::new(Duration::from_millis(100));
 
     let result = run_loop_with_background(
-        &mut terminal,
+        terminal_session.terminal_mut(),
         &mut app,
         &mut view_state,
         &mut events,
@@ -237,9 +356,7 @@ pub fn run(runtime: tokio::runtime::Handle, plan: crate::cli::TuiPlan) -> Result
         &sigcont_flag,
     );
 
-    tasks.cancel();
-    restore_terminal(&mut terminal);
-    tasks.drain();
+    shutdown_session(&mut tasks, terminal_session);
 
     result
 }
@@ -254,19 +371,8 @@ fn restore_terminal_best_effort() {
     let _ = disable_raw_mode();
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
-    let _ = disable_raw_mode();
-    let _ = execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        SetTitle("")
-    );
-    let _ = terminal.show_cursor();
-}
-
 fn run_loop_with_background(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut TuiTerminal,
     app: &mut App,
     view_state: &mut view_state::ViewState,
     events: &mut EventHandler,
@@ -390,14 +496,15 @@ mod tests {
     use serial_test::serial;
     use std::collections::HashSet;
     use std::ffi::OsString;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
+    use std::sync::Arc;
     use tempfile::TempDir;
     use tokenx_engine::InputFootprint;
 
     struct EnvGuard {
         home: Option<OsString>,
         config_dir: Option<OsString>,
-        pricing_cache_only: Option<OsString>,
     }
 
     impl EnvGuard {
@@ -405,12 +512,10 @@ mod tests {
             let guard = Self {
                 home: std::env::var_os("HOME"),
                 config_dir: std::env::var_os("TOKENX_CONFIG_DIR"),
-                pricing_cache_only: std::env::var_os("TOKENX_PRICING_CACHE_ONLY"),
             };
             unsafe {
                 std::env::set_var("HOME", home);
                 std::env::set_var("TOKENX_CONFIG_DIR", home);
-                std::env::set_var("TOKENX_PRICING_CACHE_ONLY", "1");
             }
             guard
         }
@@ -426,10 +531,6 @@ mod tests {
                 match self.config_dir.take() {
                     Some(value) => std::env::set_var("TOKENX_CONFIG_DIR", value),
                     None => std::env::remove_var("TOKENX_CONFIG_DIR"),
-                }
-                match self.pricing_cache_only.take() {
-                    Some(value) => std::env::set_var("TOKENX_PRICING_CACHE_ONLY", value),
-                    None => std::env::remove_var("TOKENX_PRICING_CACHE_ONLY"),
                 }
             }
         }
@@ -841,13 +942,17 @@ mod tests {
                 0.0,
             )],
             tokenx_engine::DateRange::none(),
-        );
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+        )
+        .unwrap();
         Generation::new(
             AcquisitionConfig::new(
                 std::path::PathBuf::from("/tmp/tokenx-test-home"),
                 tokenx_engine::DateRange::none(),
                 ClientUniverse::new([client]).unwrap(),
                 tokenx_engine::scanner::ScannerSettings::default(),
+                tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+                tokenx_engine::PricingContext::explicit_with_catalog("test-custom", "test-catalog"),
             )
             .unwrap(),
             signature,
@@ -864,6 +969,7 @@ mod tests {
         BackgroundLoad::Loaded {
             generation: Box::new(generation),
             cache_persistence_warning: None,
+            retry_backoff: None,
         }
     }
 
@@ -880,9 +986,84 @@ mod tests {
             ClientUniverse::new([client]).unwrap(),
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+            crate::acquisition::test_pricing_snapshot(),
         )
         .unwrap();
         controller_for(app, acquisition)
+    }
+
+    #[test]
+    fn cached_generation_install_error_warns_and_requests_rebuild() {
+        let restored = Arc::new(AtomicBool::new(false));
+        let restored_by_guard = Arc::clone(&restored);
+        let mut app = app_on_client(Tab::Overview, ClientId::Codex);
+        let cached = generation_fixture_with_health(
+            [ClientId::Amp],
+            tokenx_engine::FrozenUsageIndex::default(),
+            Vec::new(),
+            InputFootprint::default(),
+            tokenx_engine::input_health::HealthSummary::default(),
+        );
+        let (cached, mut needs_background_load, retry_backoff, cache_warning) =
+            decide_initial_data(CacheResult::Fresh(cached));
+        assert!(!needs_background_load);
+        assert!(retry_backoff.is_none());
+        assert!(cache_warning.is_none());
+
+        needs_background_load |= {
+            let _terminal_session = TerminalSession::with_restore_hook(move || {
+                restored_by_guard.store(true, Ordering::Release);
+            });
+            install_cached_generation(&mut app, cached)
+        };
+
+        assert!(needs_background_load);
+        assert!(app
+            .generation_cache_warning()
+            .unwrap()
+            .contains("cached generation rejected"));
+        assert!(app
+            .generation_cache_warning()
+            .unwrap()
+            .contains("generation client universe does not match"));
+        assert!(app.generation_for_test().is_none());
+        assert!(restored.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn shutdown_restores_terminal_before_waiting_for_persistence() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let mut tasks = TaskSupervisor::new(runtime.handle().clone());
+        let persistence_gate = tasks.persistence_gate_for_test();
+        let (gate_held_tx, gate_held_rx) = mpsc::channel();
+        let (restored_tx, restored_rx) = mpsc::channel();
+        let gate_holder = std::thread::spawn(move || {
+            let _persistence_guard = persistence_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            gate_held_tx
+                .send(())
+                .expect("test receiver remains available");
+            restored_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("terminal restoration must precede persistence quiescence");
+        });
+        gate_held_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("persistence gate holder started");
+
+        let restored = Arc::new(AtomicBool::new(false));
+        let restored_by_guard = Arc::clone(&restored);
+        let terminal_session = TerminalSession::with_restore_hook(move || {
+            restored_by_guard.store(true, Ordering::Release);
+            let _ = restored_tx.send(());
+        });
+
+        shutdown_session(&mut tasks, terminal_session);
+
+        gate_holder.join().expect("persistence gate holder");
+        assert!(restored.load(Ordering::Acquire));
     }
 
     #[test]
@@ -891,11 +1072,13 @@ mod tests {
         let signature = tokenx_engine::SourceFingerprint::from_bytes([1; 32]);
         let generation = generation_with_usage(ClientId::Amp, 1, "cached-session", 512, signature);
 
-        let (cached_data, needs_background_load) =
+        let (cached_data, needs_background_load, retry_backoff, cache_warning) =
             decide_initial_data(CacheResult::Fresh(generation));
 
         let cached_data = cached_data.expect("fresh cache must remain immediately visible");
         assert!(!needs_background_load);
+        assert!(retry_backoff.is_none());
+        assert!(cache_warning.is_none());
         assert_eq!(
             cached_data.sessions()[0].session_id.as_ref(),
             "cached-session"
@@ -914,11 +1097,16 @@ mod tests {
             tokenx_engine::SourceFingerprint::from_bytes([2; 32]),
         );
 
-        let (cached_data, needs_background_load) =
-            decide_initial_data(CacheResult::Stale(generation));
+        let (cached_data, needs_background_load, retry_backoff, cache_warning) =
+            decide_initial_data(CacheResult::Stale {
+                generation,
+                retry_backoff: None,
+            });
 
         let cached_data = cached_data.expect("stale cache must remain immediately visible");
         assert!(needs_background_load);
+        assert!(retry_backoff.is_none());
+        assert!(cache_warning.is_none());
         assert_eq!(
             cached_data.sessions()[0].session_id.as_ref(),
             "cached-session"
@@ -926,16 +1114,37 @@ mod tests {
     }
 
     #[test]
-    fn miss_has_no_snapshot_and_requests_background_load() {
-        let (cached_data, needs_background_load) = decide_initial_data(CacheResult::Miss);
+    fn missing_cache_has_no_snapshot_and_requests_background_load_without_warning() {
+        let (cached_data, needs_background_load, retry_backoff, cache_warning) =
+            decide_initial_data(CacheResult::Missing);
 
         assert!(cached_data.is_none());
         assert!(needs_background_load);
+        assert!(retry_backoff.is_none());
+        assert!(cache_warning.is_none());
     }
 
-    #[tokio::test]
+    #[test]
+    fn failed_cache_has_no_snapshot_and_surfaces_startup_warning() {
+        let failure = crate::generation_cache::CacheFailure::new(
+            crate::generation_cache::CacheFailureKind::Decode,
+            "cache digest mismatch",
+        );
+        let (cached_data, needs_background_load, retry_backoff, cache_warning) =
+            decide_initial_data(CacheResult::Failure(failure));
+
+        assert!(cached_data.is_none());
+        assert!(needs_background_load);
+        assert!(retry_backoff.is_none());
+        assert_eq!(
+            cache_warning.as_deref(),
+            Some("Generation cache warning: decode failure: cache digest mismatch")
+        );
+    }
+
+    #[test]
     #[serial]
-    async fn fresh_cache_digest_skips_unchanged_inputs_and_reloads_changed_inputs() {
+    fn fresh_generation_fingerprint_skips_unchanged_inputs_and_reloads_changed_inputs() {
         let home = TempDir::new().unwrap();
         let _guard = EnvGuard::set(home.path());
         write_amp_input(home.path(), 10);
@@ -944,29 +1153,27 @@ mod tests {
             ClientUniverse::new([ClientId::Amp]).unwrap(),
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+            std::sync::Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current()),
         )
         .unwrap();
-        let mut prepared = loader.prepare().unwrap();
-        let signature_a = prepared.refresh_source_fingerprint();
+        let prepared = loader.prepare().unwrap();
+        let signature_a = prepared.source_fingerprint();
         let cached = generation_with_usage(ClientId::Amp, 12, "cached-session", 512, signature_a);
-        let (_, needs_load) = decide_initial_data(CacheResult::Fresh(cached));
-        let baseline = Some(signature_a.process_digest());
+        let (_, needs_load, _, _) = decide_initial_data(CacheResult::Fresh(cached));
+        let baseline = Some(signature_a);
         assert!(!needs_load);
 
         assert!(matches!(
-            load_background_data(&loader, false, baseline)
-                .await
-                .unwrap(),
+            load_background_data(&loader, false, baseline).unwrap(),
             BackgroundLoad::Unchanged
         ));
 
         write_amp_input(home.path(), 1000);
-        let changed = load_background_data(&loader, false, baseline)
-            .await
-            .unwrap();
+        let changed = load_background_data(&loader, false, baseline).unwrap();
         match changed {
             BackgroundLoad::Loaded { generation, .. } => {
-                assert_ne!(Some(generation.source_digest()), baseline);
+                assert_ne!(Some(generation.source_fingerprint()), baseline);
                 let data = generation
                     .project_usage(&tokenx_engine::UsageQuery::full(
                         generation.universe(),
@@ -982,9 +1189,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn background_reload_reprojects_to_group_selected_while_loading() {
+    fn background_reload_reprojects_to_group_selected_while_loading() {
         let home = TempDir::new().unwrap();
         let _guard = EnvGuard::set(home.path());
         write_amp_model_input(home.path(), "old-model", 10);
@@ -993,9 +1200,11 @@ mod tests {
             ClientUniverse::new([ClientId::Amp]).unwrap(),
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+            std::sync::Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current()),
         )
         .unwrap();
-        let old = load_background_data(&loader, true, None).await.unwrap();
+        let old = load_background_data(&loader, true, None).unwrap();
         let mut app = app_on_client(Tab::Models, ClientId::Amp);
         let mut controller = controller_for(&app, loader.clone());
         controller.apply_result_for_test(&mut app, Ok(old), true);
@@ -1003,8 +1212,10 @@ mod tests {
 
         write_amp_model_input(home.path(), "new-model", 100);
         app.set_group_by_for_test(tokenx_engine::GroupBy::ClientProviderModel);
-        let baseline = app.generation_for_test().map(Generation::source_digest);
-        let loaded = load_background_data(&loader, true, baseline).await.unwrap();
+        let baseline = app
+            .generation_for_test()
+            .map(Generation::source_fingerprint);
+        let loaded = load_background_data(&loader, true, baseline).unwrap();
         controller.apply_result_for_test(&mut app, Ok(loaded), true);
 
         assert_eq!(app.group_by(), tokenx_engine::GroupBy::ClientProviderModel);
@@ -1073,8 +1284,9 @@ mod tests {
         assert_eq!(input_bytes_for(&app, ClientId::Amp), Some(4096));
         assert!(app.has_installed_generation());
         assert_eq!(
-            app.generation_for_test().map(Generation::source_digest),
-            Some(new_signature.process_digest())
+            app.generation_for_test()
+                .map(Generation::source_fingerprint),
+            Some(new_signature)
         );
         assert_eq!(
             app.local_usage_status(),
@@ -1083,7 +1295,7 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_probe_does_not_replace_any_snapshot_component() {
+    fn unchanged_inventory_does_not_replace_any_snapshot_component() {
         let signature = tokenx_engine::SourceFingerprint::from_bytes([9; 32]);
         let mut app = app_on_client(Tab::Models, ClientId::Amp);
         let mut controller = controller_for_client(&app, ClientId::Amp);
@@ -1111,8 +1323,9 @@ mod tests {
         assert_eq!(input_bytes_for(&app, ClientId::Amp), Some(2048));
         assert!(app.has_installed_generation());
         assert_eq!(
-            app.generation_for_test().map(Generation::source_digest),
-            Some(signature.process_digest())
+            app.generation_for_test()
+                .map(Generation::source_fingerprint),
+            Some(signature)
         );
         assert_eq!(
             app.local_usage_status(),
@@ -1167,9 +1380,9 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn failed_background_reload_keeps_existing_snapshot_and_marks_it_degraded() {
+    fn failed_background_reload_keeps_existing_snapshot_and_marks_it_degraded() {
         let home = TempDir::new().unwrap();
         let _guard = EnvGuard::set(home.path());
         write_amp_model_input(home.path(), "retained-model", 10);
@@ -1178,9 +1391,11 @@ mod tests {
             ClientUniverse::new([ClientId::Amp]).unwrap(),
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+            std::sync::Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current()),
         )
         .unwrap();
-        let loaded = load_background_data(&loader, true, None).await.unwrap();
+        let loaded = load_background_data(&loader, true, None).unwrap();
         let mut app = app_on_client(Tab::Models, ClientId::Amp);
         let mut controller = controller_for(&app, loader);
         controller.apply_result_for_test(&mut app, Ok(loaded), true);
@@ -1224,6 +1439,7 @@ mod tests {
             BackgroundLoad::Loaded {
                 generation,
                 cache_persistence_warning,
+                retry_backoff: _,
             } => {
                 let data = generation
                     .project_usage(&tokenx_engine::UsageQuery::full(
@@ -1237,7 +1453,7 @@ mod tests {
                     generation.sessions()[0].session_id.as_ref(),
                     "loaded-despite-cache-error"
                 );
-                assert_eq!(generation.source_digest(), signature.process_digest());
+                assert_eq!(generation.source_fingerprint(), signature);
                 let warning = cache_persistence_warning
                     .as_deref()
                     .expect("cache persistence warning must be retained");

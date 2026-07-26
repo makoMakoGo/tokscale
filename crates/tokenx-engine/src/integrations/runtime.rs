@@ -1,32 +1,55 @@
 use std::path::PathBuf;
 
-use crate::input_health::{DataHealth, InputHealth, InputStatus, RejectionSummary};
+use crate::input_health::{
+    DataHealth, InputDiagnosticKind, InputFailure, InputHealth, InputStatus, RejectionSummary,
+};
 use crate::input_record_cache;
 use crate::pricing;
 use crate::records::UsageRecord;
 
 use super::{
-    AttributedUsageSink, DiscoveredInput, ExecutionInput, InputPipelineError, IntegrationBinding,
-    ParseContext, ParsedUnit,
+    AttributedUsageSink, AttributedUsageSinkOutcome, DiscoveredInput, ExecutionInput,
+    InputPipelineError, IntegrationBinding, ParseContext, ParsedUnit,
 };
 
 pub(crate) struct FoldContext<'a> {
     binding: IntegrationBinding,
     pub input_cache: &'a mut input_record_cache::InputRecordShardStore,
     pub pricing: Option<&'a pricing::PricingService>,
+    calendar: crate::CalendarContext,
+    cancellation: crate::engine::AcquisitionCancellation,
     health: DataHealth,
 }
 
 impl<'a> FoldContext<'a> {
+    #[cfg(test)]
     pub(crate) fn new(
         binding: IntegrationBinding,
         input_cache: &'a mut input_record_cache::InputRecordShardStore,
         pricing: Option<&'a pricing::PricingService>,
     ) -> Self {
+        Self::new_with_cancellation(
+            binding,
+            input_cache,
+            pricing,
+            crate::CalendarContext::explicit("UTC").expect("UTC is a valid IANA timezone"),
+            crate::engine::AcquisitionCancellation::default(),
+        )
+    }
+
+    pub(crate) fn new_with_cancellation(
+        binding: IntegrationBinding,
+        input_cache: &'a mut input_record_cache::InputRecordShardStore,
+        pricing: Option<&'a pricing::PricingService>,
+        calendar: crate::CalendarContext,
+        cancellation: crate::engine::AcquisitionCancellation,
+    ) -> Self {
         Self {
             binding,
             input_cache,
             pricing,
+            calendar,
+            cancellation,
             health: DataHealth::default(),
         }
     }
@@ -45,6 +68,21 @@ impl<'a> FoldContext<'a> {
         });
     }
 
+    pub(crate) fn record_cache_diagnostic(
+        &mut self,
+        path: PathBuf,
+        kind: InputDiagnosticKind,
+        operation: &'static str,
+        message: impl Into<String>,
+    ) {
+        self.health.record_diagnostic(
+            self.binding.client,
+            path,
+            kind,
+            InputFailure::new(operation, message),
+        );
+    }
+
     #[cfg(test)]
     pub(crate) fn health(&self) -> &DataHealth {
         &self.health
@@ -52,6 +90,14 @@ impl<'a> FoldContext<'a> {
 
     pub(crate) fn take_health(&mut self) -> DataHealth {
         std::mem::take(&mut self.health)
+    }
+
+    pub(crate) fn cancellation(&self) -> &crate::engine::AcquisitionCancellation {
+        &self.cancellation
+    }
+
+    pub(crate) fn calendar(&self) -> crate::CalendarContext {
+        self.calendar
     }
 
     pub(crate) fn reparse_one(
@@ -73,9 +119,7 @@ impl<'a> FoldContext<'a> {
         };
         let mut reparsed = self.binding.driver.parse_inputs(
             vec![unit],
-            &ParseContext {
-                pricing: self.pricing,
-            },
+            &ParseContext::new(self.pricing, self.calendar, &self.cancellation),
         );
         if reparsed.len() != 1 {
             return Err(InputPipelineError::contract(format!(
@@ -105,13 +149,20 @@ impl<'a> BoundUsageSink<'a> {
         }
     }
 
-    pub(crate) fn emit(&mut self, record: UsageRecord) {
-        self.downstream.push_record(record.attribute(self.client));
+    pub(crate) fn emit(&mut self, record: UsageRecord) -> AttributedUsageSinkOutcome {
+        self.downstream.push_record(record.attribute(self.client))
     }
 
-    pub(crate) fn emit_all(&mut self, records: impl IntoIterator<Item = UsageRecord>) {
+    pub(crate) fn emit_all(
+        &mut self,
+        records: impl IntoIterator<Item = UsageRecord>,
+    ) -> RejectionSummary {
+        let mut rejections = RejectionSummary::default();
         for record in records {
-            self.emit(record);
+            if let AttributedUsageSinkOutcome::Rejected(reason) = self.emit(record) {
+                rejections.record(reason);
+            }
         }
+        rejections
     }
 }

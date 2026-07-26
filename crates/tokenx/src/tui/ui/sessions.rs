@@ -1,4 +1,3 @@
-use chrono::{Local, TimeZone};
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table,
@@ -241,9 +240,10 @@ fn render_clients(
                         ClientColumn::Workspaces => {
                             right_aligned_cell(row.workspace_count.to_string(), width)
                         }
-                        ClientColumn::Active => {
-                            right_aligned_cell(format_timestamp(row.last_seen), width)
-                        }
+                        ClientColumn::Active => right_aligned_cell(
+                            format_timestamp(row.last_seen, app.calendar_context()),
+                            width,
+                        ),
                         ClientColumn::Space => {
                             right_aligned_cell(format_bytes(row.space_bytes), width)
                         }
@@ -303,7 +303,7 @@ fn render_session_details(
             .fg(app.theme.chrome.heading)
             .add_modifier(Modifier::BOLD),
     ));
-    let rows = state.session_rows(app);
+    let order = state.session_order(app);
     let block = panel_block(app, title);
     let inner = block.inner(area);
     let (content_area, status_area) = panel_body_areas(inner, projection_status);
@@ -317,55 +317,30 @@ fn render_session_details(
     }
 
     debug_assert!(
-        !rows.is_empty(),
+        !order.is_empty(),
         "session detail requires at least one session"
     );
 
     let visible = content_area.height.saturating_sub(1).max(1) as usize;
-    state.set_detail_viewport(visible, rows.len());
-    let range = state.detail_visible_range(rows.len());
+    state.set_detail_viewport(visible, order.len());
+    let range = state.detail_visible_range(order.len());
     let selected = state.detail_selected();
-    let session_content_width = rows
-        .iter()
-        .map(|row| display_width(&row.session_id))
-        .max()
-        .unwrap_or(SESSION_MIN_WIDTH);
-    let workspace_content_width = rows
-        .iter()
-        .map(|row| {
-            display_width(
-                row.workspace_label
-                    .as_deref()
-                    .or(row.workspace_key.as_deref())
-                    .unwrap_or("—"),
-            )
-        })
-        .max()
-        .unwrap_or(WORKSPACE_MIN_WIDTH);
-    let models_content_width = rows
-        .iter()
-        .map(|row| {
-            display_width(
-                &row.models
-                    .iter()
-                    .map(|model| model.as_ref())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
-        })
-        .max()
-        .unwrap_or(MODELS_MIN_WIDTH);
+    let display_widths = app.session_snapshot().display_widths_for_client(client);
     let layout = session_table_layout(
         table_area.width,
-        session_content_width,
-        workspace_content_width,
-        models_content_width,
+        display_widths.session.max(SESSION_MIN_WIDTH),
+        display_widths.workspace.max(WORKSPACE_MIN_WIDTH),
+        display_widths.models.max(MODELS_MIN_WIDTH),
     );
     let columns = layout.columns.clone();
-    let table_rows = rows[range.clone()]
+    let table_rows = order[range.clone()]
         .iter()
         .enumerate()
-        .map(|(offset, row)| {
+        .map(|(offset, snapshot_index)| {
+            let row = app
+                .session_snapshot()
+                .session(*snapshot_index)
+                .expect("cached session order must reference the installed snapshot");
             let index = range.start + offset;
             let is_selected = index == selected;
             let style = if is_selected {
@@ -409,9 +384,10 @@ fn render_session_details(
                             right_aligned_cell(format_tokens(row.tokens.total()), width)
                         }
                         SessionColumn::Cost => right_aligned_cell(format_cost(row.cost), width),
-                        SessionColumn::Active => {
-                            right_aligned_cell(format_timestamp(row.last_seen), width)
-                        }
+                        SessionColumn::Active => right_aligned_cell(
+                            format_timestamp(row.last_seen, app.calendar_context()),
+                            width,
+                        ),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -455,7 +431,7 @@ fn render_session_details(
     render_scrollbar(
         frame,
         scrollbar_area(area, status_area.is_some()),
-        rows.len(),
+        order.len(),
         visible,
         state.detail_scroll(),
     );
@@ -500,7 +476,7 @@ fn projection_status_line(
     let (label, message, diagnostic) = match projection_status {
         LocalUsageStatus::Degraded { diagnostic } => (
             "Degraded",
-            " · last refresh failed; showing previous snapshot",
+            " · last refresh failed; showing last successful data",
             diagnostic,
         ),
         LocalUsageStatus::Failed { .. } => {
@@ -541,13 +517,9 @@ fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, visible: usize,
     );
 }
 
-fn format_timestamp(timestamp: i64) -> String {
-    if timestamp <= 0 {
-        return "—".to_string();
-    }
-    Local
-        .timestamp_opt(timestamp, 0)
-        .single()
+fn format_timestamp(timestamp: i64, calendar: tokenx_engine::CalendarContext) -> String {
+    calendar
+        .local_datetime_seconds(timestamp)
         .map(|datetime| datetime.format("%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "—".to_string())
 }
@@ -604,7 +576,7 @@ mod tests {
         let line = projection_status_line(status, &theme).unwrap();
         assert_eq!(
             line_text(line.clone()),
-            "Degraded · last refresh failed; showing previous snapshot · database locked"
+            "Degraded · last refresh failed; showing last successful data · database locked"
         );
         assert_eq!(line.spans[0].style.fg, Some(theme.status.warning));
         assert_eq!(line.spans[1].style.fg, Some(theme.text.secondary));

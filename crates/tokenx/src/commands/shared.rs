@@ -57,7 +57,7 @@ pub(crate) fn emit_client_diagnostics(diagnostics: &[claude_diagnostics::ClientD
 /// degraded inputs are warnings, never a failed exit.
 pub(crate) fn emit_health_summary(health: &tokenx_engine::input_health::HealthSummary) {
     use colored::Colorize;
-    if health.complete {
+    if health.complete() {
         return;
     }
     eprintln!(
@@ -65,9 +65,9 @@ pub(crate) fn emit_health_summary(health: &tokenx_engine::input_health::HealthSu
         format!(
             "  Data health: {} degraded input(s), {} rejected record(s), {} partial input(s), {} failed input(s)",
             health.degraded_inputs,
-            health.rejected_records,
-            health.partial_inputs,
-            health.failed_inputs
+            health.rejected_records(),
+            health.partial_inputs(),
+            health.failed_inputs()
         )
         .yellow()
     );

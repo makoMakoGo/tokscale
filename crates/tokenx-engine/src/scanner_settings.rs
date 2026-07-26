@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +7,7 @@ use crate::clients::ClientId;
 
 /// User-controlled scanner settings loaded from a config file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct ScannerSettings {
     /// Authoritative OpenCode SQLite paths outside its fixed data directory.
     #[serde(default)]
@@ -25,6 +25,12 @@ impl ScannerSettings {
                     setting: "opencodeDbPaths".to_string(),
                 });
             }
+            if !path.is_absolute() {
+                return Err(ScannerSettingsError::RelativePath {
+                    setting: "opencodeDbPaths".to_string(),
+                    path: path.clone(),
+                });
+            }
         }
         for (client, paths) in &self.extra_scan_paths {
             // OpenCode accepts explicit database files through opencodeDbPaths,
@@ -34,10 +40,17 @@ impl ScannerSettings {
                     client: client.to_string(),
                 });
             }
-            if paths.iter().any(|path| path.as_os_str().is_empty()) {
-                return Err(ScannerSettingsError::EmptyPath {
-                    setting: format!("extraScanPaths.{client}"),
-                });
+            for path in paths {
+                let setting = format!("extraScanPaths.{client}");
+                if path.as_os_str().is_empty() {
+                    return Err(ScannerSettingsError::EmptyPath { setting });
+                }
+                if !path.is_absolute() {
+                    return Err(ScannerSettingsError::RelativePath {
+                        setting,
+                        path: path.clone(),
+                    });
+                }
             }
         }
         Ok(())
@@ -50,31 +63,8 @@ pub enum ScannerSettingsError {
     UnsupportedClient { client: String },
     #[error("scanner.{setting} contains an empty path")]
     EmptyPath { setting: String },
-}
-
-pub fn extra_scan_paths_for(
-    settings: &ScannerSettings,
-    enabled: &HashSet<ClientId>,
-) -> Result<Vec<(ClientId, PathBuf)>, ScannerSettingsError> {
-    settings.validate()?;
-    let mut result = Vec::new();
-    for (&client, paths) in &settings.extra_scan_paths {
-        if enabled.contains(&client) {
-            result.extend(paths.iter().cloned().map(|path| (client, path)));
-        }
-    }
-    Ok(result)
-}
-
-pub fn built_in_extra_scan_paths_for(
-    home_dir: &Path,
-    enabled: &HashSet<ClientId>,
-) -> Result<Vec<(ClientId, PathBuf)>, crate::records::error::SessionParseError> {
-    let mut paths = Vec::new();
-    if enabled.contains(&ClientId::Claude) {
-        paths.push((ClientId::Claude, home_dir.join(".claude/transcripts")));
-    }
-    Ok(paths)
+    #[error("scanner.{setting} path `{path}` must be absolute")]
+    RelativePath { setting: String, path: PathBuf },
 }
 
 #[cfg(test)]
@@ -117,18 +107,45 @@ mod tests {
     }
 
     #[test]
-    fn settings_filter_extra_paths_by_enabled_client() {
+    fn settings_reject_relative_paths_before_cache_identity_is_built() {
         let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "opencodeDbPaths": ["relative/opencode.db"],
             "extraScanPaths": {
-                "codex": ["/tmp/codex"],
-                "gemini": ["/tmp/gemini"]
+                "codex": ["relative/codex"]
             }
         }))
         .unwrap();
-        let enabled = HashSet::from([ClientId::Gemini]);
-        assert_eq!(
-            extra_scan_paths_for(&settings, &enabled).unwrap(),
-            vec![(ClientId::Gemini, PathBuf::from("/tmp/gemini"))]
-        );
+
+        assert!(matches!(
+            settings.validate(),
+            Err(ScannerSettingsError::RelativePath { setting, path })
+                if setting == "opencodeDbPaths"
+                    && path.as_path() == std::path::Path::new("relative/opencode.db")
+        ));
+
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {
+                "codex": ["relative/codex"]
+            }
+        }))
+        .unwrap();
+        assert!(matches!(
+            settings.validate(),
+            Err(ScannerSettingsError::RelativePath { setting, path })
+                if setting == "extraScanPaths.codex"
+                    && path.as_path() == std::path::Path::new("relative/codex")
+        ));
+    }
+
+    #[test]
+    fn settings_reject_misspelled_scanner_keys() {
+        for value in [
+            serde_json::json!({"extraScanPath": {"codex": ["/tmp/codex"]}}),
+            serde_json::json!({"opencodeDbPath": ["/tmp/opencode.db"]}),
+        ] {
+            let error = serde_json::from_value::<ScannerSettings>(value)
+                .expect_err("scanner key typos must not silently use defaults");
+            assert!(error.to_string().contains("unknown field"));
+        }
     }
 }

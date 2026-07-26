@@ -7,7 +7,7 @@ use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary,
 use crate::records::error::{SessionParseError, SessionParseResult};
 use crate::records::utils::{extract_i64, extract_string, parse_timestamp_value};
 use crate::records::{workspace_metadata_from_key, UsageRecord, WorkspaceMetadata};
-use crate::{checked_token_add, checked_token_sum, TokenBreakdown};
+use crate::TokenBreakdown;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -321,9 +321,10 @@ fn parse_gemini_session(session: GeminiSessionEnvelope) -> SessionParseResult<Sc
                 continue;
             }
         };
-        scanned.messages.push(build_gemini_token_message(
-            model, session_id, timestamp, tokens,
-        ));
+        match build_gemini_token_message(model, session_id, timestamp, tokens) {
+            Ok(message) => scanned.messages.push(message),
+            Err(error) => record_gemini_rejection(&mut scanned.rejections, &error),
+        }
     }
 
     Ok(scanned)
@@ -347,7 +348,7 @@ fn build_gemini_token_message(
     session_id: &str,
     timestamp: i64,
     tokens: GeminiTokens,
-) -> UsageRecord {
+) -> SessionParseResult<UsageRecord> {
     let (input, cache_read) = normalize_gemini_session_input_and_cache(
         tokens.input.unwrap_or(0),
         tokens.cached.unwrap_or(0),
@@ -355,24 +356,30 @@ fn build_gemini_token_message(
         tokens.thoughts.unwrap_or(0),
         tokens.tool.unwrap_or(0),
         tokens.total,
-    );
+    )?;
 
     let tool = tokens.tool.unwrap_or(0).max(0);
+    let input = input.checked_add(tool).ok_or_else(|| {
+        SessionParseError::invalid(
+            "validate token message usage",
+            "Gemini input and tool token total exceeds i64::MAX",
+        )
+    })?;
 
-    UsageRecord::new(
+    Ok(UsageRecord::new(
         model,
         "google",
         session_id,
         timestamp,
         TokenBreakdown {
-            input: checked_token_add(input, tool),
+            input,
             output: tokens.output.unwrap_or(0).max(0),
             cache_read,
             cache_write: 0,
             reasoning: tokens.thoughts.unwrap_or(0).max(0),
         },
         0.0,
-    )
+    ))
 }
 
 fn has_positive_gemini_tokens(tokens: &GeminiTokens) -> bool {
@@ -427,9 +434,7 @@ fn parse_direct_gemini_token_message(
             )
         })?;
 
-    Ok(Some(build_gemini_token_message(
-        model, session_id, timestamp, tokens,
-    )))
+    build_gemini_token_message(model, session_id, timestamp, tokens).map(Some)
 }
 
 fn parse_gemini_jsonl(path: &Path) -> SessionParseResult<ScannedInput> {
@@ -732,22 +737,35 @@ fn normalize_gemini_session_input_and_cache(
     reasoning: i64,
     tool: i64,
     total: Option<i64>,
-) -> (i64, i64) {
+) -> SessionParseResult<(i64, i64)> {
     let input = input.max(0);
     let cached = cached.max(0);
 
     let Some(total) = total.map(|value| value.max(0)) else {
-        return (input, cached);
+        return Ok((input, cached));
     };
 
-    let inclusive_total = checked_token_sum([input, output.max(0), reasoning.max(0), tool.max(0)]);
-    let exclusive_total = checked_token_add(inclusive_total, cached);
+    let inclusive_total = [input, output.max(0), reasoning.max(0), tool.max(0)]
+        .into_iter()
+        .try_fold(0_i64, i64::checked_add)
+        .ok_or_else(|| {
+            SessionParseError::invalid(
+                "validate token message usage",
+                "Gemini session token total exceeds i64::MAX",
+            )
+        })?;
+    let exclusive_total = inclusive_total.checked_add(cached).ok_or_else(|| {
+        SessionParseError::invalid(
+            "validate token message usage",
+            "Gemini session token total with cache exceeds i64::MAX",
+        )
+    })?;
 
     if cached > 0 && total == inclusive_total && total != exclusive_total {
-        return subtract_cached_overlap(input, cached);
+        return Ok(subtract_cached_overlap(input, cached));
     }
 
-    (input, cached)
+    Ok((input, cached))
 }
 
 struct GeminiUsageStats {

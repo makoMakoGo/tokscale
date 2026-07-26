@@ -313,6 +313,7 @@ mod tests {
     fn subscription_lines_render_provider_errors_without_outputs() {
         let theme = Theme::from_name(ThemeName::Blue);
         let errors = vec![SubscriptionError {
+            provider_id: Some(ProviderId::MiniMaxTokenPlanCn),
             provider: "MiniMax Token Plan CN".to_string(),
             message: "session expired".to_string(),
         }];
@@ -330,6 +331,7 @@ mod tests {
         let theme = Theme::from_name(ThemeName::Blue);
         let output = SubscriptionOutput {
             provider: ProviderId::Zai,
+            stale: false,
             account: Some(UsageAccount {
                 id: "account-1".to_string(),
                 label: Some("Work".to_string()),
@@ -374,6 +376,7 @@ mod tests {
         app.subscription_outputs_mut_for_test()
             .push(SubscriptionOutput {
                 provider: ProviderId::Codex,
+                stale: false,
                 account: None,
                 plan: None,
                 email: None,

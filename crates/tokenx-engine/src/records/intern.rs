@@ -187,7 +187,7 @@ thread_local! {
 pub fn intern(value: &str) -> Arc<str> {
     POOL.get_or_init(|| Mutex::new(WeakInterner::default()))
         .lock()
-        .expect("global string interner mutex poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .intern(value)
 }
 
@@ -197,7 +197,7 @@ pub fn intern(value: &str) -> Arc<str> {
 pub(crate) fn prune_dead() {
     POOL.get_or_init(|| Mutex::new(WeakInterner::default()))
         .lock()
-        .expect("global string interner mutex poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .prune_dead();
     #[cfg(test)]
     PRUNE_COUNT.with(|count| count.set(count.get() + 1));
@@ -206,7 +206,9 @@ pub(crate) fn prune_dead() {
 #[cfg(test)]
 pub(crate) fn indexed_live_count(value: &str) -> usize {
     let pool = POOL.get_or_init(|| Mutex::new(WeakInterner::default()));
-    let interner = pool.lock().expect("global string interner mutex poisoned");
+    let interner = pool
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     interner
         .buckets
         .get(&default_hash(value))

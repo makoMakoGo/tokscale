@@ -145,6 +145,20 @@ jobs:
         shell: bash
         run: ${{ matrix.settings.strip }}
 
+      - name: Smoke native binary
+        shell: bash
+        env:
+          TOKENX_BINARY: target/${{ matrix.settings.target }}/release/${{ matrix.settings.bin_name }}
+        run: |
+          "$TOKENX_BINARY" --version
+          smoke_home="$(mktemp -d)"
+          export TOKENX_CONFIG_DIR="$smoke_home/.tokenx"
+          "$TOKENX_BINARY" models \
+            --home "$smoke_home" \
+            --client amp \
+            --json \
+            --no-spinner >/dev/null
+
       - name: Upload native binary artifact
         uses: actions/upload-artifact@v6
         with:

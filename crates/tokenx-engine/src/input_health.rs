@@ -7,13 +7,272 @@
 //! invariants remain hard errors. See ADR 0001.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::PathBuf;
 
+use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 
 use crate::clients::ClientId;
 use crate::records::error::SessionParseError;
 use crate::records::UsageRecord;
+
+/// Non-authoritative cache failures observed while acquiring one input.
+///
+/// These diagnostics never change the authority of successfully parsed input
+/// records. They exist so disposable cache failures are visible without
+/// turning a valid scan into a failed acquisition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputDiagnosticKind {
+    CacheUnavailable,
+    CacheReadFailed,
+    CacheWriteFailed,
+}
+
+impl InputDiagnosticKind {
+    const fn issue(self) -> HealthIssueKind {
+        match self {
+            Self::CacheUnavailable => HealthIssueKind::InputCacheUnavailable,
+            Self::CacheReadFailed => HealthIssueKind::InputCacheReadFailed,
+            Self::CacheWriteFailed => HealthIssueKind::InputCacheWriteFailed,
+        }
+    }
+
+    const fn handling(self) -> HealthHandling {
+        match self {
+            Self::CacheUnavailable => HealthHandling::CacheBypassed,
+            Self::CacheReadFailed => HealthHandling::InputReparsed,
+            Self::CacheWriteFailed => HealthHandling::AuthoritativeDataKept,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InputDiagnostic {
+    client: Option<ClientId>,
+    path: PathBuf,
+    kind: InputDiagnosticKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthLevel {
+    Warning,
+    Error,
+}
+
+impl HealthLevel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl fmt::Display for HealthLevel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<&str> for HealthLevel {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HealthIssueKind {
+    RecordRejection(String),
+    PartialInput,
+    InputUnavailable,
+    InputCacheUnavailable,
+    InputCacheReadFailed,
+    InputCacheWriteFailed,
+}
+
+impl HealthIssueKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::RecordRejection(key) => key,
+            Self::PartialInput => "partial-input",
+            Self::InputUnavailable => "input-unavailable",
+            Self::InputCacheUnavailable => "input-cache-unavailable",
+            Self::InputCacheReadFailed => "input-cache-read-failed",
+            Self::InputCacheWriteFailed => "input-cache-write-failed",
+        }
+    }
+
+    fn from_key(key: String) -> Self {
+        match key.as_str() {
+            "partial-input" => Self::PartialInput,
+            "input-unavailable" => Self::InputUnavailable,
+            "input-cache-unavailable" => Self::InputCacheUnavailable,
+            "input-cache-read-failed" => Self::InputCacheReadFailed,
+            "input-cache-write-failed" => Self::InputCacheWriteFailed,
+            _ => Self::RecordRejection(key),
+        }
+    }
+
+    pub const fn is_input_retry(&self) -> bool {
+        matches!(self, Self::PartialInput | Self::InputUnavailable)
+    }
+
+    pub const fn is_cache_diagnostic(&self) -> bool {
+        matches!(
+            self,
+            Self::InputCacheUnavailable | Self::InputCacheReadFailed | Self::InputCacheWriteFailed
+        )
+    }
+}
+
+impl Serialize for HealthIssueKind {
+    fn serialize<Serializer>(
+        &self,
+        serializer: Serializer,
+    ) -> Result<Serializer::Ok, Serializer::Error>
+    where
+        Serializer: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for HealthIssueKind {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        struct KindVisitor;
+        impl Visitor<'_> for KindVisitor {
+            type Value = HealthIssueKind;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a health issue key")
+            }
+
+            fn visit_str<Error>(self, value: &str) -> Result<Self::Value, Error>
+            where
+                Error: serde::de::Error,
+            {
+                Ok(HealthIssueKind::from_key(value.to_string()))
+            }
+
+            fn visit_string<Error>(self, value: String) -> Result<Self::Value, Error>
+            where
+                Error: serde::de::Error,
+            {
+                Ok(HealthIssueKind::from_key(value))
+            }
+        }
+        deserializer.deserialize_string(KindVisitor)
+    }
+}
+
+impl PartialEq<&str> for HealthIssueKind {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl fmt::Display for HealthIssueKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HealthHandling {
+    RecordSkipped,
+    ConfirmedDataKept,
+    InputSkipped,
+    CacheBypassed,
+    InputReparsed,
+    AuthoritativeDataKept,
+    Other(String),
+}
+
+impl HealthHandling {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::RecordSkipped => "record-skipped",
+            Self::ConfirmedDataKept => "confirmed-data-kept",
+            Self::InputSkipped => "input-skipped",
+            Self::CacheBypassed => "cache-bypassed",
+            Self::InputReparsed => "input-reparsed",
+            Self::AuthoritativeDataKept => "authoritative-data-kept",
+            Self::Other(value) => value,
+        }
+    }
+
+    fn from_key(key: String) -> Self {
+        match key.as_str() {
+            "record-skipped" => Self::RecordSkipped,
+            "confirmed-data-kept" => Self::ConfirmedDataKept,
+            "input-skipped" => Self::InputSkipped,
+            "cache-bypassed" => Self::CacheBypassed,
+            "input-reparsed" => Self::InputReparsed,
+            "authoritative-data-kept" => Self::AuthoritativeDataKept,
+            _ => Self::Other(key),
+        }
+    }
+}
+
+impl Serialize for HealthHandling {
+    fn serialize<Serializer>(
+        &self,
+        serializer: Serializer,
+    ) -> Result<Serializer::Ok, Serializer::Error>
+    where
+        Serializer: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for HealthHandling {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        struct HandlingVisitor;
+        impl Visitor<'_> for HandlingVisitor {
+            type Value = HealthHandling;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a health handling key")
+            }
+
+            fn visit_str<Error>(self, value: &str) -> Result<Self::Value, Error>
+            where
+                Error: serde::de::Error,
+            {
+                Ok(HealthHandling::from_key(value.to_string()))
+            }
+
+            fn visit_string<Error>(self, value: String) -> Result<Self::Value, Error>
+            where
+                Error: serde::de::Error,
+            {
+                Ok(HealthHandling::from_key(value))
+            }
+        }
+        deserializer.deserialize_string(HandlingVisitor)
+    }
+}
+
+impl PartialEq<&str> for HealthHandling {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl fmt::Display for HealthHandling {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 /// Why a single record inside an otherwise readable input was rejected.
 ///
@@ -22,8 +281,12 @@ use crate::records::UsageRecord;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordRejectionReason {
     MissingModel,
+    MissingSession,
     UnverifiedUsageOwner,
     MissingTimestamp,
+    InvalidUsageRecord,
+    PricingComputationFailed,
+    AggregationOverflow,
     MalformedRecord,
 }
 
@@ -33,8 +296,12 @@ impl RecordRejectionReason {
     pub const fn key(self) -> &'static str {
         match self {
             Self::MissingModel => "missing-model",
+            Self::MissingSession => "missing-session",
             Self::UnverifiedUsageOwner => "unverified-usage-owner",
             Self::MissingTimestamp => "missing-timestamp",
+            Self::InvalidUsageRecord => "invalid-usage-record",
+            Self::PricingComputationFailed => "pricing-computation-failed",
+            Self::AggregationOverflow => "aggregation-overflow",
             Self::MalformedRecord => "malformed-record",
         }
     }
@@ -44,8 +311,12 @@ impl RecordRejectionReason {
     pub fn label_for_key(key: &str) -> &str {
         match key {
             "missing-model" => "Missing model",
+            "missing-session" => "Missing session",
             "unverified-usage-owner" => "Unverified usage owner",
             "missing-timestamp" => "Missing timestamp",
+            "invalid-usage-record" => "Invalid usage record",
+            "pricing-computation-failed" => "Pricing computation failed",
+            "aggregation-overflow" => "Aggregation overflow",
             "malformed-record" => "Malformed record",
             other => other,
         }
@@ -58,6 +329,10 @@ impl RecordRejectionReason {
 /// samples are intentionally discarded once the parser classifies damage.
 /// Reasons are keyed by stable strings so shards written with reasons this
 /// build does not know still round-trip losslessly through the cache.
+///
+/// Health is observational metadata, not usage authority. Its counters
+/// saturate at their integer maximum so damaged or adversarial diagnostics
+/// cannot abort an otherwise valid local-data generation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 // Field attributes stay plain: shards serialize this with bincode, which is
 // not self-describing, so `skip_serializing_if` would corrupt round-trips.
@@ -73,7 +348,8 @@ impl RejectionSummary {
     /// Record a rejection under a raw key. Used when rehydrating cached
     /// summaries whose keys may come from a newer parser.
     pub fn record_key(&mut self, key: &str) {
-        *self.counts.entry(key.to_string()).or_insert(0) += 1;
+        let count = self.counts.entry(key.to_string()).or_insert(0);
+        *count = count.saturating_add(1);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -81,12 +357,16 @@ impl RejectionSummary {
     }
 
     pub fn total(&self) -> u64 {
-        self.counts.values().sum()
+        self.counts
+            .values()
+            .copied()
+            .fold(0_u64, u64::saturating_add)
     }
 
     pub fn merge(&mut self, other: &RejectionSummary) {
         for (key, count) in &other.counts {
-            *self.counts.entry(key.clone()).or_insert(0) += count;
+            let target = self.counts.entry(key.clone()).or_insert(0);
+            *target = target.saturating_add(*count);
         }
     }
 
@@ -179,21 +459,74 @@ impl InputHealth {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DataHealth {
     inputs: Vec<InputHealth>,
+    diagnostics: Vec<InputDiagnostic>,
     examined_inputs: usize,
 }
 
 impl DataHealth {
     /// Retain an input's health only when there is something to report.
     pub fn record(&mut self, health: InputHealth) {
-        self.examined_inputs += 1;
+        self.examined_inputs = self.examined_inputs.saturating_add(1);
         if !health.is_clean() {
+            if let Some(failure) = health.status.failure() {
+                tracing::warn!(
+                    client = health.client.as_str(),
+                    path = %health.path.display(),
+                    operation = %failure.operation,
+                    error = %failure.message,
+                    "input acquisition was degraded"
+                );
+            }
             self.inputs.push(health);
         }
     }
 
     pub fn merge(&mut self, other: DataHealth) {
         self.inputs.extend(other.inputs);
-        self.examined_inputs += other.examined_inputs;
+        self.diagnostics.extend(other.diagnostics);
+        self.examined_inputs = self.examined_inputs.saturating_add(other.examined_inputs);
+    }
+
+    pub(crate) fn record_diagnostic(
+        &mut self,
+        client: ClientId,
+        path: PathBuf,
+        kind: InputDiagnosticKind,
+        failure: InputFailure,
+    ) {
+        tracing::warn!(
+            client = client.as_str(),
+            path = %path.display(),
+            operation = %failure.operation,
+            error = %failure.message,
+            diagnostic = kind.issue().as_str(),
+            "input cache diagnostic"
+        );
+        self.diagnostics.push(InputDiagnostic {
+            client: Some(client),
+            path,
+            kind,
+        });
+    }
+
+    pub(crate) fn record_global_diagnostic(
+        &mut self,
+        path: PathBuf,
+        kind: InputDiagnosticKind,
+        failure: InputFailure,
+    ) {
+        tracing::warn!(
+            path = %path.display(),
+            operation = %failure.operation,
+            error = %failure.message,
+            diagnostic = kind.issue().as_str(),
+            "global input cache diagnostic"
+        );
+        self.diagnostics.push(InputDiagnostic {
+            client: None,
+            path,
+            kind,
+        });
     }
 
     pub fn inputs(&self) -> &[InputHealth] {
@@ -201,14 +534,14 @@ impl DataHealth {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inputs.is_empty()
+        self.inputs.is_empty() && self.diagnostics.is_empty()
     }
 
     pub fn rejected_records(&self) -> u64 {
         self.inputs
             .iter()
             .map(|input| input.rejections.total())
-            .sum()
+            .fold(0_u64, u64::saturating_add)
     }
 
     pub fn partial_inputs(&self) -> usize {
@@ -226,22 +559,60 @@ impl DataHealth {
     }
 
     pub fn clean_inputs(&self) -> usize {
-        self.examined_inputs.saturating_sub(self.inputs.len())
+        let reported_inputs = self
+            .inputs
+            .iter()
+            .map(|input| (input.client, input.path.as_path()))
+            .collect::<std::collections::HashSet<_>>();
+        let diagnostic_only_inputs = self
+            .diagnostics
+            .iter()
+            .filter_map(|diagnostic| {
+                diagnostic
+                    .client
+                    .map(|client| (client, diagnostic.path.as_path()))
+            })
+            .filter(|identity| !reported_inputs.contains(identity))
+            .collect::<std::collections::HashSet<_>>();
+        self.examined_inputs
+            .saturating_sub(self.inputs.len() + diagnostic_only_inputs.len())
     }
 
     pub fn degraded_inputs(&self) -> usize {
-        self.inputs
+        let rejected_inputs = self
+            .inputs
             .iter()
             .filter(|input| {
                 matches!(input.status, InputStatus::Complete) && !input.rejections.is_empty()
             })
-            .count()
+            .count();
+        let reported_inputs = self
+            .inputs
+            .iter()
+            .map(|input| (input.client, input.path.as_path()))
+            .collect::<std::collections::HashSet<_>>();
+        let diagnostic_only_inputs = self
+            .diagnostics
+            .iter()
+            .filter_map(|diagnostic| {
+                diagnostic
+                    .client
+                    .map(|client| (client, diagnostic.path.as_path()))
+            })
+            .filter(|identity| !reported_inputs.contains(identity))
+            .collect::<std::collections::HashSet<_>>();
+        rejected_inputs.saturating_add(diagnostic_only_inputs.len())
     }
 
     /// Total issue count: every rejected record plus every partial or
     /// unavailable input counts as one issue.
     pub fn issue_count(&self) -> u64 {
-        self.rejected_records() + (self.partial_inputs() + self.failed_inputs()) as u64
+        self.rejected_records()
+            .saturating_add(
+                u64::try_from(self.partial_inputs().saturating_add(self.failed_inputs()))
+                    .unwrap_or(u64::MAX),
+            )
+            .saturating_add(u64::try_from(self.diagnostics.len()).unwrap_or(u64::MAX))
     }
 
     /// Serializable summary for generation state, exports, and JSON output.
@@ -250,110 +621,290 @@ impl DataHealth {
     /// boundary. User-visible health contains only stable issue classes and
     /// aggregate counts.
     pub fn summarize(&self) -> HealthSummary {
-        let mut grouped = BTreeMap::<(String, ClientId, String, String), HealthIssue>::new();
+        let mut grouped = BTreeMap::<
+            (
+                HealthLevel,
+                Option<ClientId>,
+                HealthIssueKind,
+                HealthHandling,
+            ),
+            HealthIssue,
+        >::new();
         for input in &self.inputs {
             for rejection in input.rejections.entries() {
+                let issue = HealthIssueKind::RecordRejection(rejection.key.to_string());
                 let entry = grouped
                     .entry((
-                        "warning".to_string(),
-                        input.client,
-                        rejection.key.to_string(),
-                        "record-skipped".to_string(),
+                        HealthLevel::Warning,
+                        Some(input.client),
+                        issue.clone(),
+                        HealthHandling::RecordSkipped,
                     ))
                     .or_insert_with(|| HealthIssue {
-                        level: "warning".to_string(),
-                        client: input.client,
-                        issue: rejection.key.to_string(),
+                        level: HealthLevel::Warning,
+                        client: Some(input.client),
+                        issue,
                         affected_inputs: 0,
                         rejected_records: Some(0),
-                        handling: "record-skipped".to_string(),
+                        handling: HealthHandling::RecordSkipped,
                     });
-                entry.affected_inputs += 1;
-                let rejected_records = entry
-                    .rejected_records
-                    .as_mut()
-                    .expect("record issue must carry a rejected-record count");
-                *rejected_records = rejected_records
-                    .checked_add(rejection.count)
-                    .expect("aggregated rejected record count must fit in u64");
+                entry.affected_inputs = entry.affected_inputs.saturating_add(1);
+                let rejected_records = entry.rejected_records.get_or_insert(0);
+                *rejected_records = rejected_records.saturating_add(rejection.count);
             }
 
             let input_issue = match input.status {
-                InputStatus::Partial { .. } => Some(("partial-input", "confirmed-data-kept")),
-                InputStatus::Unavailable { .. } => Some(("input-unavailable", "input-skipped")),
+                InputStatus::Partial { .. } => Some((
+                    HealthIssueKind::PartialInput,
+                    HealthHandling::ConfirmedDataKept,
+                )),
+                InputStatus::Unavailable { .. } => Some((
+                    HealthIssueKind::InputUnavailable,
+                    HealthHandling::InputSkipped,
+                )),
                 InputStatus::Complete => None,
             };
             if let Some((issue, handling)) = input_issue {
                 let entry = grouped
                     .entry((
-                        "error".to_string(),
-                        input.client,
-                        issue.to_string(),
-                        handling.to_string(),
+                        HealthLevel::Error,
+                        Some(input.client),
+                        issue.clone(),
+                        handling.clone(),
                     ))
                     .or_insert_with(|| HealthIssue {
-                        level: "error".to_string(),
-                        client: input.client,
-                        issue: issue.to_string(),
+                        level: HealthLevel::Error,
+                        client: Some(input.client),
+                        issue,
                         affected_inputs: 0,
                         rejected_records: None,
-                        handling: handling.to_string(),
+                        handling,
                     });
-                entry.affected_inputs += 1;
+                entry.affected_inputs = entry.affected_inputs.saturating_add(1);
             }
+        }
+        for diagnostic in &self.diagnostics {
+            let issue = diagnostic.kind.issue();
+            let handling = diagnostic.kind.handling();
+            let entry = grouped
+                .entry((
+                    HealthLevel::Warning,
+                    diagnostic.client,
+                    issue.clone(),
+                    handling.clone(),
+                ))
+                .or_insert_with(|| HealthIssue {
+                    level: HealthLevel::Warning,
+                    client: diagnostic.client,
+                    issue,
+                    affected_inputs: 0,
+                    rejected_records: None,
+                    handling,
+                });
+            entry.affected_inputs = entry.affected_inputs.saturating_add(1);
         }
 
         HealthSummary {
-            complete: self.is_empty(),
             clean_inputs: self.clean_inputs(),
             degraded_inputs: self.degraded_inputs(),
-            rejected_records: self.rejected_records(),
-            partial_inputs: self.partial_inputs(),
-            failed_inputs: self.failed_inputs(),
             issues: grouped.into_values().collect(),
         }
     }
 }
 
-/// Serializable health summary carried by a generation. `complete: true`
-/// with no issues means every scanned input was healthy.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// Serializable health summary carried by a generation.
+///
+/// Issue classes are the sole authority for completeness and issue counts.
+/// The JSON wire keeps convenient derived counters, but deserialization
+/// verifies them before discarding the redundant copies.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct HealthSummary {
-    pub complete: bool,
     pub clean_inputs: usize,
     pub degraded_inputs: usize,
-    pub rejected_records: u64,
-    pub partial_inputs: usize,
-    pub failed_inputs: usize,
     pub issues: Vec<HealthIssue>,
 }
 
-impl Default for HealthSummary {
-    fn default() -> Self {
-        Self {
-            complete: true,
-            clean_inputs: 0,
-            degraded_inputs: 0,
-            rejected_records: 0,
-            partial_inputs: 0,
-            failed_inputs: 0,
-            issues: Vec::new(),
-        }
-    }
-}
-
 impl HealthSummary {
+    pub fn complete(&self) -> bool {
+        self.issues.is_empty()
+    }
+
+    pub fn rejected_records(&self) -> u64 {
+        self.issues
+            .iter()
+            .filter_map(|issue| issue.rejected_records)
+            .fold(0_u64, u64::saturating_add)
+    }
+
+    pub fn partial_inputs(&self) -> usize {
+        self.affected_inputs_for(HealthIssueKind::PartialInput)
+    }
+
+    pub fn failed_inputs(&self) -> usize {
+        self.affected_inputs_for(HealthIssueKind::InputUnavailable)
+    }
+
     /// Total issue count: every rejected record plus every partial or
     /// unavailable input counts as one issue.
     pub fn issue_count(&self) -> u64 {
-        self.rejected_records + (self.partial_inputs + self.failed_inputs) as u64
+        let input_cache_issues = self
+            .issues
+            .iter()
+            .filter(|issue| issue.issue.is_cache_diagnostic())
+            .map(|issue| issue.affected_inputs)
+            .fold(0_u64, u64::saturating_add);
+        self.rejected_records()
+            .saturating_add(
+                u64::try_from(self.partial_inputs().saturating_add(self.failed_inputs()))
+                    .unwrap_or(u64::MAX),
+            )
+            .saturating_add(input_cache_issues)
     }
 
     /// Input-level failures may be transient even when the input inventory
     /// fingerprint is unchanged, so callers should retry those scans.
     pub fn requires_input_retry(&self) -> bool {
-        self.partial_inputs > 0 || self.failed_inputs > 0
+        self.partial_inputs() > 0 || self.failed_inputs() > 0
+    }
+
+    pub fn validate(&self) -> Result<(), HealthSummaryValidationError> {
+        let mut identities = std::collections::BTreeSet::new();
+        for issue in &self.issues {
+            issue.validate()?;
+            if !identities.insert((issue.client, issue.issue.clone())) {
+                return Err(HealthSummaryValidationError::DuplicateIssue {
+                    client: issue.client,
+                    issue: issue.issue.to_string(),
+                });
+            }
+        }
+        if self.degraded_inputs > 0
+            && !self
+                .issues
+                .iter()
+                .any(|issue| issue.level == HealthLevel::Warning)
+        {
+            return Err(HealthSummaryValidationError::InvalidDegradedInputCount);
+        }
+        Ok(())
+    }
+
+    fn affected_inputs_for(&self, kind: HealthIssueKind) -> usize {
+        self.issues
+            .iter()
+            .filter(|issue| issue.issue == kind)
+            .try_fold(0_usize, |total, issue| {
+                usize::try_from(issue.affected_inputs)
+                    .ok()
+                    .and_then(|count| total.checked_add(count))
+            })
+            .unwrap_or(usize::MAX)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HealthSummaryValidationError {
+    #[error("health issue `{issue}` must affect at least one input")]
+    EmptyIssue { issue: String },
+    #[error("health issue `{issue}` has invalid level `{actual}`; expected `{expected}`")]
+    InvalidLevel {
+        issue: String,
+        expected: HealthLevel,
+        actual: HealthLevel,
+    },
+    #[error("health issue `{issue}` has invalid handling `{actual}`; expected `{expected}`")]
+    InvalidHandling {
+        issue: String,
+        expected: HealthHandling,
+        actual: HealthHandling,
+    },
+    #[error("health issue `{issue}` has an invalid rejected-record count")]
+    InvalidRejectedRecords { issue: String },
+    #[error("health summary repeats issue `{issue}` for client {client:?}")]
+    DuplicateIssue {
+        client: Option<ClientId>,
+        issue: String,
+    },
+    #[error("degraded input count requires at least one warning issue")]
+    InvalidDegradedInputCount,
+    #[error("health summary `{field}` does not match its issues")]
+    DerivedCountMismatch { field: &'static str },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HealthSummaryWire {
+    complete: bool,
+    clean_inputs: usize,
+    degraded_inputs: usize,
+    rejected_records: u64,
+    partial_inputs: usize,
+    failed_inputs: usize,
+    issues: Vec<HealthIssue>,
+}
+
+impl Serialize for HealthSummary {
+    fn serialize<Serializer>(
+        &self,
+        serializer: Serializer,
+    ) -> Result<Serializer::Ok, Serializer::Error>
+    where
+        Serializer: serde::Serializer,
+    {
+        HealthSummaryWire {
+            complete: self.complete(),
+            clean_inputs: self.clean_inputs,
+            degraded_inputs: self.degraded_inputs,
+            rejected_records: self.rejected_records(),
+            partial_inputs: self.partial_inputs(),
+            failed_inputs: self.failed_inputs(),
+            issues: self.issues.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for HealthSummary {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        let wire = HealthSummaryWire::deserialize(deserializer)?;
+        let summary = Self {
+            clean_inputs: wire.clean_inputs,
+            degraded_inputs: wire.degraded_inputs,
+            issues: wire.issues,
+        };
+        summary.validate().map_err(serde::de::Error::custom)?;
+        for (field, actual, expected) in [
+            (
+                "complete",
+                u64::from(wire.complete),
+                u64::from(summary.complete()),
+            ),
+            (
+                "rejectedRecords",
+                wire.rejected_records,
+                summary.rejected_records(),
+            ),
+            (
+                "partialInputs",
+                u64::try_from(wire.partial_inputs).unwrap_or(u64::MAX),
+                u64::try_from(summary.partial_inputs()).unwrap_or(u64::MAX),
+            ),
+            (
+                "failedInputs",
+                u64::try_from(wire.failed_inputs).unwrap_or(u64::MAX),
+                u64::try_from(summary.failed_inputs()).unwrap_or(u64::MAX),
+            ),
+        ] {
+            if actual != expected {
+                return Err(serde::de::Error::custom(
+                    HealthSummaryValidationError::DerivedCountMismatch { field },
+                ));
+            }
+        }
+        Ok(summary)
     }
 }
 
@@ -361,14 +912,69 @@ impl HealthSummary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HealthIssue {
-    pub level: String,
-    pub client: ClientId,
-    pub issue: String,
+    pub level: HealthLevel,
+    #[serde(default)]
+    pub client: Option<ClientId>,
+    pub issue: HealthIssueKind,
     /// Number of input units represented by this issue class.
     pub affected_inputs: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub rejected_records: Option<u64>,
-    pub handling: String,
+    pub handling: HealthHandling,
+}
+
+impl HealthIssue {
+    fn validate(&self) -> Result<(), HealthSummaryValidationError> {
+        let issue = self.issue.to_string();
+        if self.affected_inputs == 0 {
+            return Err(HealthSummaryValidationError::EmptyIssue { issue });
+        }
+        let (expected_level, expected_handling, requires_rejected_records) = match self.issue {
+            HealthIssueKind::RecordRejection(_) => {
+                (HealthLevel::Warning, HealthHandling::RecordSkipped, true)
+            }
+            HealthIssueKind::PartialInput => {
+                (HealthLevel::Error, HealthHandling::ConfirmedDataKept, false)
+            }
+            HealthIssueKind::InputUnavailable => {
+                (HealthLevel::Error, HealthHandling::InputSkipped, false)
+            }
+            HealthIssueKind::InputCacheUnavailable => {
+                (HealthLevel::Warning, HealthHandling::CacheBypassed, false)
+            }
+            HealthIssueKind::InputCacheReadFailed => {
+                (HealthLevel::Warning, HealthHandling::InputReparsed, false)
+            }
+            HealthIssueKind::InputCacheWriteFailed => (
+                HealthLevel::Warning,
+                HealthHandling::AuthoritativeDataKept,
+                false,
+            ),
+        };
+        if self.level != expected_level {
+            return Err(HealthSummaryValidationError::InvalidLevel {
+                issue,
+                expected: expected_level,
+                actual: self.level,
+            });
+        }
+        if self.handling != expected_handling {
+            return Err(HealthSummaryValidationError::InvalidHandling {
+                issue,
+                expected: expected_handling,
+                actual: self.handling.clone(),
+            });
+        }
+        let invalid_rejected_records = if requires_rejected_records {
+            !self.rejected_records.is_some_and(|count| count > 0)
+        } else {
+            self.rejected_records.is_some()
+        };
+        if invalid_rejected_records {
+            return Err(HealthSummaryValidationError::InvalidRejectedRecords { issue });
+        }
+        Ok(())
+    }
 }
 
 /// What a session parser produced from scanning one input unit.
@@ -440,15 +1046,35 @@ mod tests {
     }
 
     #[test]
+    fn observational_health_counts_saturate_instead_of_panicking() {
+        let mut summary = RejectionSummary::default();
+        summary.counts.insert("missing-model".to_string(), u64::MAX);
+        summary.record(RecordRejectionReason::MissingModel);
+        summary.counts.insert("malformed-record".to_string(), 1);
+        assert_eq!(summary.total(), u64::MAX);
+
+        let mut other = RejectionSummary::default();
+        other
+            .counts
+            .insert("malformed-record".to_string(), u64::MAX);
+        summary.merge(&other);
+        assert_eq!(summary.total(), u64::MAX);
+        assert_eq!(
+            summary.counts.get("malformed-record").copied(),
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
     fn default_health_report_represents_a_complete_load() {
         let report = HealthSummary::default();
 
-        assert!(report.complete);
+        assert!(report.complete());
         assert_eq!(report.clean_inputs, 0);
         assert_eq!(report.degraded_inputs, 0);
-        assert_eq!(report.rejected_records, 0);
-        assert_eq!(report.partial_inputs, 0);
-        assert_eq!(report.failed_inputs, 0);
+        assert_eq!(report.rejected_records(), 0);
+        assert_eq!(report.partial_inputs(), 0);
+        assert_eq!(report.failed_inputs(), 0);
         assert!(report.issues.is_empty());
     }
 
@@ -484,16 +1110,109 @@ mod tests {
     #[test]
     fn health_report_issue_count_includes_records_and_input_failures() {
         let report = HealthSummary {
-            complete: false,
             clean_inputs: 4,
             degraded_inputs: 1,
-            rejected_records: 3,
-            partial_inputs: 2,
-            failed_inputs: 1,
-            issues: Vec::new(),
+            issues: vec![
+                HealthIssue {
+                    level: HealthLevel::Warning,
+                    client: None,
+                    issue: HealthIssueKind::RecordRejection("missing-model".into()),
+                    affected_inputs: 1,
+                    rejected_records: Some(3),
+                    handling: HealthHandling::RecordSkipped,
+                },
+                HealthIssue {
+                    level: HealthLevel::Error,
+                    client: None,
+                    issue: HealthIssueKind::PartialInput,
+                    affected_inputs: 2,
+                    rejected_records: None,
+                    handling: HealthHandling::ConfirmedDataKept,
+                },
+                HealthIssue {
+                    level: HealthLevel::Error,
+                    client: None,
+                    issue: HealthIssueKind::InputUnavailable,
+                    affected_inputs: 1,
+                    rejected_records: None,
+                    handling: HealthHandling::InputSkipped,
+                },
+            ],
         };
 
         assert_eq!(report.issue_count(), 6);
+    }
+
+    #[test]
+    fn health_report_issue_count_saturates_for_untrusted_cached_counts() {
+        let report = HealthSummary {
+            issues: vec![
+                HealthIssue {
+                    level: HealthLevel::Warning,
+                    client: None,
+                    issue: HealthIssueKind::RecordRejection("malformed-record".into()),
+                    affected_inputs: 1,
+                    rejected_records: Some(u64::MAX),
+                    handling: HealthHandling::RecordSkipped,
+                },
+                HealthIssue {
+                    level: HealthLevel::Warning,
+                    client: None,
+                    issue: HealthIssueKind::InputCacheUnavailable,
+                    affected_inputs: u64::MAX,
+                    rejected_records: None,
+                    handling: HealthHandling::CacheBypassed,
+                },
+            ],
+            ..HealthSummary::default()
+        };
+
+        assert_eq!(report.issue_count(), u64::MAX);
+    }
+
+    #[test]
+    fn health_report_rejects_contradictory_derived_fields_and_handling() {
+        let mut contradictory = serde_json::to_value(HealthSummary::default()).unwrap();
+        contradictory["complete"] = serde_json::json!(false);
+        let error = serde_json::from_value::<HealthSummary>(contradictory).unwrap_err();
+        assert!(error.to_string().contains("complete"));
+
+        let mut contradictory = serde_json::to_value(HealthSummary::default()).unwrap();
+        contradictory["degradedInputs"] = serde_json::json!(1);
+        let error = serde_json::from_value::<HealthSummary>(contradictory).unwrap_err();
+        assert!(error.to_string().contains("degraded input count"));
+
+        let mut summary = HealthSummary::default();
+        summary.issues.push(HealthIssue {
+            level: HealthLevel::Error,
+            client: None,
+            issue: HealthIssueKind::InputUnavailable,
+            affected_inputs: 1,
+            rejected_records: None,
+            handling: HealthHandling::ConfirmedDataKept,
+        });
+        let error = summary.validate().unwrap_err();
+        assert!(matches!(
+            error,
+            HealthSummaryValidationError::InvalidHandling { .. }
+        ));
+
+        let issue = HealthIssue {
+            level: HealthLevel::Error,
+            client: Some(ClientId::Amp),
+            issue: HealthIssueKind::PartialInput,
+            affected_inputs: 1,
+            rejected_records: None,
+            handling: HealthHandling::ConfirmedDataKept,
+        };
+        let duplicate = HealthSummary {
+            issues: vec![issue.clone(), issue],
+            ..HealthSummary::default()
+        };
+        assert!(matches!(
+            duplicate.validate(),
+            Err(HealthSummaryValidationError::DuplicateIssue { .. })
+        ));
     }
 
     #[test]
@@ -582,8 +1301,8 @@ mod tests {
 
         assert_eq!(report.clean_inputs, 0);
         assert_eq!(report.degraded_inputs, 2);
-        assert_eq!(report.rejected_records, 2);
-        assert_eq!(report.failed_inputs, 2);
+        assert_eq!(report.rejected_records(), 2);
+        assert_eq!(report.failed_inputs(), 2);
         assert_eq!(report.issues.len(), 2);
 
         let records = report
@@ -592,7 +1311,7 @@ mod tests {
             .find(|issue| issue.issue == "malformed-record")
             .unwrap();
         assert_eq!(records.level, "warning");
-        assert_eq!(records.client, ClientId::Codex);
+        assert_eq!(records.client, Some(ClientId::Codex));
         assert_eq!(records.affected_inputs, 2);
         assert_eq!(records.rejected_records, Some(2));
         assert_eq!(records.handling, "record-skipped");
@@ -603,7 +1322,7 @@ mod tests {
             .find(|issue| issue.issue == "input-unavailable")
             .unwrap();
         assert_eq!(failures.level, "error");
-        assert_eq!(failures.client, ClientId::Codex);
+        assert_eq!(failures.client, Some(ClientId::Codex));
         assert_eq!(failures.affected_inputs, 2);
         assert_eq!(failures.rejected_records, None);
         assert_eq!(failures.handling, "input-skipped");
@@ -638,5 +1357,54 @@ mod tests {
         assert!(!encoded.contains("raw rejection detail"));
         assert!(!encoded.contains("decode private input"));
         assert!(!encoded.contains("raw parser failure"));
+    }
+
+    #[test]
+    fn global_cache_diagnostic_is_not_attributed_to_every_client() {
+        let mut data_health = DataHealth::default();
+        data_health.record(health(InputStatus::Complete, RejectionSummary::default()));
+        data_health.record_global_diagnostic(
+            PathBuf::from("/tmp/tokenx/input"),
+            InputDiagnosticKind::CacheUnavailable,
+            InputFailure::new("open shard store", "permission denied"),
+        );
+
+        let report = data_health.summarize();
+        assert!(!report.complete());
+        assert_eq!(report.clean_inputs, 1);
+        assert_eq!(report.degraded_inputs, 0);
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(report.issues[0].client, None);
+        assert_eq!(
+            report.issues[0].issue,
+            HealthIssueKind::InputCacheUnavailable
+        );
+
+        let value = serde_json::to_value(report).unwrap();
+        assert!(value["issues"][0]["client"].is_null());
+        let encoded = serde_json::to_string(&value).unwrap();
+        assert!(!encoded.contains("/tmp/tokenx/input"));
+        assert!(!encoded.contains("permission denied"));
+    }
+
+    #[test]
+    fn typed_health_issue_round_trips_through_json_and_bincode() {
+        let issue = HealthIssue {
+            level: HealthLevel::Warning,
+            client: Some(ClientId::Codex),
+            issue: HealthIssueKind::RecordRejection("future-reason".to_string()),
+            affected_inputs: 2,
+            rejected_records: Some(3),
+            handling: HealthHandling::Other("future-handling".to_string()),
+        };
+
+        let json = serde_json::to_vec(&issue).unwrap();
+        let json_round_trip: HealthIssue = serde_json::from_slice(&json).unwrap();
+        assert_eq!(json_round_trip, issue);
+
+        let binary = bincode::serialize(&issue).unwrap();
+        let binary_round_trip: HealthIssue = bincode::deserialize(&binary).unwrap();
+        assert_eq!(binary_round_trip, issue);
     }
 }

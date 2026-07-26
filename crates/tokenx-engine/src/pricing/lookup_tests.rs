@@ -272,7 +272,9 @@ fn calculate_cost_combines_reasoning_with_output_and_clamps_negative_tokens() {
         HashMap::new(),
     );
 
-    let cost = lookup.calculate_cost("mystery-model", -10, 3, -20, -30, 2);
+    let cost = lookup
+        .calculate_cost("mystery-model", -10, 3, -20, -30, 2)
+        .unwrap();
 
     assert_eq!(cost, 10.0);
 }
@@ -288,7 +290,7 @@ fn compute_cost_applies_multiple_tiers_in_order() {
         ..Default::default()
     };
 
-    let cost = compute_cost(&model_pricing, 300_000, 0, 0, 0, 0);
+    let cost = compute_cost(&model_pricing, 300_000, 0, 0, 0, 0).unwrap();
     let expected = 128_000.0 + 72_000.0 * 2.0 + 56_000.0 * 3.0 + 16_000.0 * 4.0 + 28_000.0 * 5.0;
 
     assert_eq!(cost, expected);
@@ -305,7 +307,7 @@ fn compute_cost_applies_cache_tiers_per_bucket() {
         ..Default::default()
     };
 
-    let cost = compute_cost(&model_pricing, 0, 0, 300_000, 300_000, 0);
+    let cost = compute_cost(&model_pricing, 0, 0, 300_000, 300_000, 0).unwrap();
     let expected_cache_read = 200_000.0 + 72_000.0 * 2.0 + 28_000.0 * 3.0;
     let expected_cache_write = 200_000.0 * 4.0 + 100_000.0 * 5.0;
 
@@ -321,5 +323,27 @@ fn compute_cost_ignores_invalid_prices() {
         ..Default::default()
     };
 
-    assert_eq!(compute_cost(&model_pricing, 10, 10, 10, 10, 10), 0.0);
+    assert_eq!(
+        compute_cost(&model_pricing, 10, 10, 10, 10, 10).unwrap(),
+        0.0
+    );
+}
+
+#[test]
+fn compute_cost_rejects_output_reasoning_token_overflow() {
+    let model_pricing = pricing(0.0, 1.0);
+    let error = compute_cost(&model_pricing, 0, i64::MAX, 0, 0, 1).unwrap_err();
+
+    assert_eq!(error, PricingComputationError::OutputReasoningTokenOverflow);
+}
+
+#[test]
+fn compute_cost_rejects_non_finite_component_cost() {
+    let model_pricing = pricing(f64::MAX, 0.0);
+    let error = compute_cost(&model_pricing, i64::MAX, 0, 0, 0, 0).unwrap_err();
+
+    assert_eq!(
+        error,
+        PricingComputationError::NonFiniteCost { component: "input" }
+    );
 }

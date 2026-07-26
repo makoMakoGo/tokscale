@@ -1,24 +1,21 @@
 pub(crate) mod decode;
 
+use std::collections::HashSet;
+
 use rayon::prelude::*;
 
-use crate::input_record_cache::DecoderId;
 use crate::integrations::cache;
 use crate::integrations::discover;
 use crate::integrations::{
-    BoundUsageSink, DecoderKind, DiscoveredInput, DiscoveryContext, FingerprintPolicy, FoldContext,
-    InputDiscoveryError, InputPipelineError, IntegrationDriver, ParseContext, ParsedUnit,
-    SourceSpec, MODEL_ID_CANONICALIZATION_REVISION,
+    BoundUsageSink, CopilotWorkspaceScope, DecoderKind, DiscoveredInput, DiscoveryContext,
+    FingerprintPolicy, FoldContext, InputDiscoveryError, InputPipelineError, IntegrationDriver,
+    ParseContext, ParsedUnit, SourceSpec,
 };
 
 const SOURCE: SourceSpec = SourceSpec::home(
     ".copilot/otel",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::jsonl),
 );
-const RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 1;
-const WORKSPACE_REVISION: u32 = RECORD_REJECTION_REVISION + 2;
-pub(crate) const DECODER_REVISION: u32 = WORKSPACE_REVISION + 1;
-
 pub(crate) struct Driver;
 
 pub(crate) static DRIVER: Driver = Driver;
@@ -30,18 +27,28 @@ impl IntegrationDriver for Driver {
     ) -> Result<Vec<DiscoveredInput>, InputDiscoveryError> {
         let client = ctx.client;
         let default_root = SOURCE.resolve(ctx.home_dir);
-        let mut paths = discover::scan_roots(client, [default_root], SOURCE.matcher())?;
-        paths.extend(discover::scan_roots(
-            client,
+        let default_paths = discover::scan_roots(ctx, [default_root], SOURCE.matcher())?;
+        let extra_paths = discover::scan_roots(
+            ctx,
             discover::extra_roots_for_client(client, ctx)?,
             SOURCE.matcher(),
-        )?);
-        discover::input_units_from_paths(
+        )?;
+
+        let mut units = discover::input_units_from_paths(
             client,
-            paths,
+            default_paths,
             FingerprintPolicy::PlainFile,
-            DecoderKind::plain(DecoderId::Copilot, DECODER_REVISION),
-        )
+            DecoderKind::copilot(CopilotWorkspaceScope::BuiltInPlatform),
+        )?;
+        units.extend(discover::input_units_from_paths(
+            client,
+            extra_paths,
+            FingerprintPolicy::PlainFile,
+            DecoderKind::copilot(CopilotWorkspaceScope::ExplicitRoot),
+        )?);
+        dedup_units_by_canonical_path(&mut units)?;
+        units.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(units)
     }
 
     fn parse_inputs(
@@ -49,8 +56,15 @@ impl IntegrationDriver for Driver {
         units: Vec<crate::integrations::ExecutionInput>,
         ctx: &ParseContext<'_>,
     ) -> Vec<ParsedUnit> {
-        let workspace_index =
-            decode::CopilotWorkspaceIndex::discover(units.iter().map(|unit| unit.path.as_path()));
+        let workspace_index = decode::CopilotWorkspaceIndex::discover(units.iter().map(|unit| {
+            let DecoderKind::Copilot {
+                workspace_scope, ..
+            } = unit.decoder
+            else {
+                unreachable!("unexpected Copilot decoder");
+            };
+            (unit.path.as_path(), workspace_scope)
+        }));
         units
             .into_par_iter()
             .map(|unit| {
@@ -77,4 +91,23 @@ impl IntegrationDriver for Driver {
     ) -> Result<(), InputPipelineError> {
         cache::fold_units(parsed, ctx, sink)
     }
+}
+
+fn dedup_units_by_canonical_path(
+    units: &mut Vec<DiscoveredInput>,
+) -> Result<(), InputDiscoveryError> {
+    let mut seen = HashSet::new();
+    let mut keys = Vec::with_capacity(units.len());
+    for unit in units.iter() {
+        keys.push(std::fs::canonicalize(&unit.path).map_err(|source| {
+            InputDiscoveryError::new(&unit.path, "canonicalize discovered input", source)
+        })?);
+    }
+    let mut index = 0;
+    units.retain(|_| {
+        let keep = seen.insert(keys[index].clone());
+        index += 1;
+        keep
+    });
+    Ok(())
 }

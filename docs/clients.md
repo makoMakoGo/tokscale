@@ -38,10 +38,10 @@ current home directory. `**` means recursive discovery under the stated root.
 | `mux` | Mux | `~/.mux/sessions/**/session-usage.json` | Reads per-session model usage summaries and applies stable record deduplication. |
 | `kilo` | Kilo | `~/.local/share/kilo/kilo.db` | Reads the Kilo SQLite store with committed WAL state for all Kilo frontends using that data environment. |
 | `hermes` | Hermes | `~/.hermes/state.db` | Reads token records from Hermes state and derives cost from Tokenx pricing. |
-| `copilot` | Copilot | `~/.copilot/otel/*.jsonl` | Reads Copilot OTEL file-export records and workspace metadata. |
-| `goose` | Goose | `~/.local/share/goose/sessions/sessions.db` or `~/Library/Application Support/goose/sessions/sessions.db` | Reads Goose SQLite session stores with committed WAL state. |
+| `copilot` | Copilot | `~/.copilot/otel/*.jsonl` | Reads Copilot OTEL file-export records and workspace metadata from the current platform's VS Code storage. An explicit cross-environment OTEL root may derive metadata only from that root's same home. |
+| `goose` | Goose | Linux `~/.local/share/goose/sessions/sessions.db`; macOS `~/Library/Application Support/goose/sessions/sessions.db`; Windows `%APPDATA%\Block\goose\data\sessions\sessions.db` | Reads the current platform's Goose SQLite session store with committed WAL state. |
 | `codebuff` | Codebuff | `~/.config/{manicode,manicode-dev,manicode-staging}/projects/**/chat-messages.json` | Reads Codebuff conversation token records. |
-| `codebuddy` | CodeBuddy | `~/.codebuddy/projects/**/*.jsonl`; CodeBuddy IDE and VS Code extension `*.log` trees in the platform application-data directories | Reads assistant/function-call usage and final agent usage, then deduplicates mirrored JSONL and extension-log records. |
+| `codebuddy` | CodeBuddy | `~/.codebuddy/projects/**/*.jsonl`; on Windows, CodeBuddy IDE and VS Code extension `*.log` trees under `AppData` | Reads assistant/function-call usage and final agent usage, then deduplicates mirrored JSONL and extension-log records. Other-platform or cross-environment log trees require `scanner.extraScanPaths.codebuddy`. |
 | `antigravity` | Antigravity | `~/.gemini/antigravity-cli/conversations/*.db` | Reads AGY CLI SQLite with committed WAL state and decodes the current protobuf token-accounting fields. |
 | `zed` | Zed Agent | `~/.local/share/zed/threads/threads.db`; fixed macOS and Windows application-data equivalents | Reads hosted Zed assistant usage from SQLite with committed WAL state and excludes external-agent records by ownership fields. |
 | `zcode` | ZCode | `~/.zcode/projects/**/*.jsonl` | Reads Z.ai ADE assistant usage from project transcripts. |

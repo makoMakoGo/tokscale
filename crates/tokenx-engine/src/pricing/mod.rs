@@ -7,15 +7,25 @@ pub mod openrouter;
 
 use custom::CustomPricing;
 use lookup::{compute_cost, LookupResult, PricingLookup};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fs;
+use std::io::Read;
+use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::OnceCell;
 
 use crate::{model_aliases, TokenBreakdown};
 
 pub use litellm::ModelPricing;
+pub use lookup::PricingComputationError;
 
-static PRICING_SERVICE: OnceCell<Arc<PricingService>> = OnceCell::const_new();
+const CACHED_CATALOG_FILES: [&str; 3] = [
+    "pricing-litellm.json",
+    "pricing-openrouter.json",
+    "pricing-models-dev.json",
+];
+const MAX_CUSTOM_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_CATALOG_SNAPSHOT_BYTES: u64 = 32 * 1024 * 1024;
 
 pub type PricingDiagnostics = Vec<PricingDiagnostic>;
 pub(crate) type PricingDiagnosticSink<'a> = Option<&'a mut PricingDiagnostics>;
@@ -262,39 +272,20 @@ impl PricingService {
         )
     }
 
-    pub(crate) fn load_cached_any_age_with_diagnostics(
-        diagnostics: &mut PricingDiagnostics,
-    ) -> Option<Self> {
-        Self::from_cached_datasets(
-            CustomPricing::load_from_default_path_with_diagnostics(diagnostics),
-            litellm::load_cached_any_age(),
-            openrouter::load_cached_any_age(),
-            models_dev::load_cached_any_age(),
-        )
-    }
-
-    pub async fn get_or_init() -> Result<Arc<PricingService>, String> {
-        PRICING_SERVICE
-            .get_or_try_init(|| async { Self::fetch_inner().await.map(Arc::new) })
-            .await
-            .map(Arc::clone)
-    }
-
-    /// Initializes the pricing service while collecting diagnostics for a fresh fetch.
+    /// Fetch a fresh immutable pricing catalog.
     ///
-    /// If the service has already been initialized, `OnceCell` returns the cached
-    /// service and skips the fetch closure, so no new diagnostics are collected.
-    pub async fn get_or_init_with_diagnostics(
+    /// No process-global service is retained: each explicit refresh observes
+    /// the current custom-pricing file and the catalogs fetched in that call.
+    pub async fn fetch_current() -> Result<Arc<PricingService>, String> {
+        Self::fetch_inner().await.map(Arc::new)
+    }
+
+    pub async fn fetch_current_with_diagnostics(
         diagnostics: &mut PricingDiagnostics,
     ) -> Result<Arc<PricingService>, String> {
-        PRICING_SERVICE
-            .get_or_try_init(|| async {
-                Self::fetch_inner_with_diagnostics(diagnostics)
-                    .await
-                    .map(Arc::new)
-            })
+        Self::fetch_inner_with_diagnostics(diagnostics)
             .await
-            .map(Arc::clone)
+            .map(Arc::new)
     }
 
     pub fn lookup_with_pricing_source(
@@ -353,7 +344,7 @@ impl PricingService {
         cache_read: i64,
         cache_write: i64,
         reasoning: i64,
-    ) -> f64 {
+    ) -> Result<f64, PricingComputationError> {
         let usage = TokenBreakdown {
             input,
             output,
@@ -369,7 +360,7 @@ impl PricingService {
         model_id: &str,
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
-    ) -> f64 {
+    ) -> Result<f64, PricingComputationError> {
         let canonical_model_id = model_aliases::canonicalize_model_id(model_id);
         if let Some(result) = self.custom.lookup_with_key(&canonical_model_id) {
             return compute_cost(
@@ -397,9 +388,313 @@ impl PricingService {
     }
 }
 
+/// One immutable pricing authority resolved by the application composition root.
+///
+/// The serializable [`crate::PricingContext`] is the generation/cache identity;
+/// the service and diagnostics are the matching runtime state reused by every
+/// build and refresh started from that command snapshot.
+#[derive(Clone)]
+pub struct ResolvedPricingSnapshot {
+    context: crate::PricingContext,
+    service: Option<Arc<PricingService>>,
+    diagnostics: PricingDiagnostics,
+}
+
+impl std::fmt::Debug for ResolvedPricingSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedPricingSnapshot")
+            .field("context", &self.context)
+            .field("available", &self.service.is_some())
+            .field("diagnostics", &self.diagnostics)
+            .finish()
+    }
+}
+
+impl ResolvedPricingSnapshot {
+    /// Bind explicit identity and runtime pricing state without environment I/O.
+    pub fn explicit(
+        context: crate::PricingContext,
+        service: Option<Arc<PricingService>>,
+        mut diagnostics: PricingDiagnostics,
+    ) -> Self {
+        if service.is_none()
+            && !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == PricingDiagnosticKind::Unavailable)
+        {
+            diagnostics.push(PricingDiagnostic::unavailable(
+                "[tokenx] pricing unavailable: no explicit pricing service",
+            ));
+        }
+        Self {
+            context,
+            service,
+            diagnostics,
+        }
+    }
+
+    /// Resolve one coherent local pricing snapshot without network I/O.
+    ///
+    /// Each bounded file is captured once; identity and parsing derive from the
+    /// same owned bytes. Missing, invalid, or oversized pricing inputs become
+    /// diagnostics and never prevent local usage acquisition.
+    pub fn resolve_current() -> Self {
+        let product_root = match crate::paths::try_get_config_dir() {
+            Ok(product_root) => product_root,
+            Err(error) => {
+                let reason = error.to_string();
+                return Self::explicit(
+                    crate::PricingContext::explicit_with_catalog(
+                        unavailable_pricing_fingerprint("custom", &reason),
+                        unavailable_pricing_fingerprint("catalogs", &reason),
+                    ),
+                    None,
+                    vec![PricingDiagnostic::unavailable(format!(
+                        "[tokenx] pricing unavailable: {reason}"
+                    ))],
+                );
+            }
+        };
+        let custom_path = product_root.join("custom-pricing.json");
+        let custom_file = CapturedPricingFile::read(&custom_path, MAX_CUSTOM_SNAPSHOT_BYTES);
+        let cache_dir = product_root.join("cache");
+        let catalog_files = CACHED_CATALOG_FILES.map(|filename| {
+            CapturedPricingFile::read(&cache_dir.join(filename), MAX_CATALOG_SNAPSHOT_BYTES)
+        });
+        let custom_fingerprint = custom_file.fingerprint(b"tokenx-custom-pricing-v1\0");
+        let mut catalog_digest = Sha256::new();
+        catalog_digest.update(b"tokenx-pricing-catalogs-v1\0");
+        for (filename, file) in CACHED_CATALOG_FILES.iter().zip(&catalog_files) {
+            catalog_digest.update(filename.as_bytes());
+            catalog_digest.update(b"\0");
+            catalog_digest.update(file.fingerprint(b"tokenx-pricing-catalog-v1\0"));
+        }
+        let catalog_fingerprint = finish_pricing_fingerprint(catalog_digest);
+        let mut diagnostics = PricingDiagnostics::new();
+        let custom = match custom_file.content(&custom_path, "custom pricing", &mut diagnostics) {
+            Some(bytes) => CustomPricing::load_from_bytes_with_diagnostics(
+                bytes,
+                &custom_path,
+                &mut diagnostics,
+            ),
+            None => CustomPricing::default(),
+        };
+        let litellm = parse_captured_catalog::<litellm::PricingDataset>(
+            &catalog_files[0],
+            &cache_dir.join(CACHED_CATALOG_FILES[0]),
+            "LiteLLM",
+            &mut diagnostics,
+        );
+        let openrouter = parse_captured_catalog::<HashMap<String, ModelPricing>>(
+            &catalog_files[1],
+            &cache_dir.join(CACHED_CATALOG_FILES[1]),
+            "OpenRouter",
+            &mut diagnostics,
+        );
+        let models_dev = parse_captured_catalog::<models_dev::PricingDataset>(
+            &catalog_files[2],
+            &cache_dir.join(CACHED_CATALOG_FILES[2]),
+            "models.dev",
+            &mut diagnostics,
+        );
+        let service = PricingService::from_cached_datasets(custom, litellm, openrouter, models_dev)
+            .map(Arc::new);
+        if service.is_none() {
+            diagnostics.push(PricingDiagnostic::unavailable(
+                "[tokenx] pricing unavailable: no local pricing snapshot",
+            ));
+        }
+        Self {
+            context: crate::PricingContext::explicit_with_catalog(
+                custom_fingerprint,
+                catalog_fingerprint,
+            ),
+            service,
+            diagnostics,
+        }
+    }
+
+    pub fn context(&self) -> &crate::PricingContext {
+        &self.context
+    }
+
+    pub fn service(&self) -> Option<&PricingService> {
+        self.service.as_deref()
+    }
+
+    pub fn diagnostics(&self) -> &[PricingDiagnostic] {
+        &self.diagnostics
+    }
+
+    pub(crate) fn cloned_runtime_parts(&self) -> (Option<Arc<PricingService>>, PricingDiagnostics) {
+        (self.service.clone(), self.diagnostics.clone())
+    }
+}
+
+enum CapturedPricingFile {
+    Missing,
+    Content(Vec<u8>),
+    Rejected { identity: String, reason: String },
+}
+
+impl CapturedPricingFile {
+    fn read(path: &Path, max_bytes: u64) -> Self {
+        let mut file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::Missing,
+            Err(error) => {
+                return Self::Rejected {
+                    identity: format!("open-error:{:?}", error.kind()),
+                    reason: format!("failed to open file: {error}"),
+                };
+            }
+        };
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return Self::Rejected {
+                    identity: format!("metadata-error:{:?}", error.kind()),
+                    reason: format!("failed to inspect opened file: {error}"),
+                };
+            }
+        };
+        if metadata.len() > max_bytes {
+            return Self::Rejected {
+                identity: "too-large".to_string(),
+                reason: format!(
+                    "file is too large ({} bytes; max {} bytes)",
+                    metadata.len(),
+                    max_bytes
+                ),
+            };
+        }
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(metadata.len())
+                .unwrap_or(usize::MAX)
+                .min(max_bytes as usize),
+        );
+        let mut bounded = (&mut file).take(max_bytes.saturating_add(1));
+        if let Err(error) = bounded.read_to_end(&mut bytes) {
+            return Self::Rejected {
+                identity: format!("read-error:{:?}", error.kind()),
+                reason: format!("failed to read opened file: {error}"),
+            };
+        }
+        if bytes.len() as u64 > max_bytes {
+            return Self::Rejected {
+                identity: "grew-too-large".to_string(),
+                reason: format!(
+                    "file grew beyond the maximum while being read ({max_bytes} bytes)"
+                ),
+            };
+        }
+        Self::Content(bytes)
+    }
+
+    fn fingerprint(&self, domain: &[u8]) -> String {
+        let mut digest = Sha256::new();
+        digest.update(domain);
+        match self {
+            Self::Missing => digest.update(b"missing\0"),
+            Self::Content(bytes) => {
+                digest.update(b"content\0");
+                digest.update(bytes);
+            }
+            Self::Rejected { identity, .. } => {
+                digest.update(b"rejected\0");
+                digest.update(identity.as_bytes());
+            }
+        }
+        finish_pricing_fingerprint(digest)
+    }
+
+    fn content<'a>(
+        &'a self,
+        path: &Path,
+        label: &str,
+        diagnostics: &mut PricingDiagnostics,
+    ) -> Option<&'a [u8]> {
+        match self {
+            Self::Content(bytes) => Some(bytes),
+            Self::Missing => None,
+            Self::Rejected { reason, .. } => {
+                diagnostics.push(PricingDiagnostic::warning(format!(
+                    "[tokenx] {label} ignored at {}: {reason}",
+                    path.display()
+                )));
+                None
+            }
+        }
+    }
+}
+
+fn parse_captured_catalog<T: for<'de> serde::Deserialize<'de>>(
+    file: &CapturedPricingFile,
+    path: &Path,
+    label: &str,
+    diagnostics: &mut PricingDiagnostics,
+) -> Option<T> {
+    let bytes = file.content(path, &format!("{label} pricing cache"), diagnostics)?;
+    match cache::parse_cache_any_age(bytes) {
+        Ok(catalog) => Some(catalog),
+        Err(error) => {
+            diagnostics.push(PricingDiagnostic::warning(format!(
+                "[tokenx] {label} pricing cache ignored at {}: {error}",
+                path.display()
+            )));
+            None
+        }
+    }
+}
+
+fn unavailable_pricing_fingerprint(authority: &str, reason: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"tokenx-pricing-unavailable-v1\0");
+    digest.update(authority.as_bytes());
+    digest.update(b"\0");
+    digest.update(reason.as_bytes());
+    finish_pricing_fingerprint(digest)
+}
+
+fn finish_pricing_fingerprint(digest: Sha256) -> String {
+    digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            use std::fmt::Write;
+            write!(output, "{byte:02x}").expect("writing to a String cannot fail");
+            output
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    struct ConfigDirGuard(Option<std::ffi::OsString>);
+
+    impl ConfigDirGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("TOKENX_CONFIG_DIR");
+            unsafe {
+                std::env::set_var("TOKENX_CONFIG_DIR", path);
+            }
+            Self(previous)
+        }
+    }
+
+    impl Drop for ConfigDirGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("TOKENX_CONFIG_DIR", value),
+                    None => std::env::remove_var("TOKENX_CONFIG_DIR"),
+                }
+            }
+        }
+    }
 
     #[test]
     fn pricing_status_classifies_resolution_diagnostics() {
@@ -426,6 +721,137 @@ mod tests {
             ]),
             PricingStatus::Unavailable
         );
+    }
+
+    #[test]
+    fn captured_file_identity_tracks_content_and_normalizes_oversized_inputs() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("pricing.json");
+        let domain = b"test-pricing-v1\0";
+        let missing = CapturedPricingFile::read(&path, 16).fingerprint(domain);
+        std::fs::write(&path, b"first").unwrap();
+        let first = CapturedPricingFile::read(&path, 16).fingerprint(domain);
+        std::fs::write(&path, b"second").unwrap();
+        let second = CapturedPricingFile::read(&path, 16).fingerprint(domain);
+        std::fs::File::create(&path).unwrap().set_len(17).unwrap();
+        let oversized_a = CapturedPricingFile::read(&path, 16).fingerprint(domain);
+        std::fs::File::create(&path).unwrap().set_len(32).unwrap();
+        let oversized_b = CapturedPricingFile::read(&path, 16).fingerprint(domain);
+
+        assert_ne!(missing, first);
+        assert_ne!(first, second);
+        assert_eq!(oversized_a, oversized_b);
+        assert_eq!(second.len(), 64);
+    }
+
+    #[test]
+    #[serial]
+    fn resolved_snapshot_remains_immutable_after_custom_pricing_changes() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _guard = ConfigDirGuard::set(temp.path());
+        let path = custom::CustomPricing::default_path().unwrap();
+        std::fs::write(
+            &path,
+            r#"{"models":{"snapshot-model":{"input_cost_per_token":0.000001}}}"#,
+        )
+        .unwrap();
+        let first = ResolvedPricingSnapshot::resolve_current();
+        let usage = TokenBreakdown {
+            input: 1_000_000,
+            ..TokenBreakdown::default()
+        };
+        assert_eq!(
+            first
+                .service()
+                .unwrap()
+                .calculate_cost_with_provider("snapshot-model", None, &usage)
+                .unwrap(),
+            1.0
+        );
+
+        std::fs::write(
+            &path,
+            r#"{"models":{"snapshot-model":{"input_cost_per_token":0.000002}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            first
+                .service()
+                .unwrap()
+                .calculate_cost_with_provider("snapshot-model", None, &usage)
+                .unwrap(),
+            1.0,
+            "an installed generation keeps the exact pricing snapshot it started with"
+        );
+
+        let second = ResolvedPricingSnapshot::resolve_current();
+        assert_ne!(first.context(), second.context());
+        assert_eq!(
+            second
+                .service()
+                .unwrap()
+                .calculate_cost_with_provider("snapshot-model", None, &usage)
+                .unwrap(),
+            2.0
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn malformed_and_oversized_inputs_degrade_pricing_without_failing_resolution() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _guard = ConfigDirGuard::set(temp.path());
+        let custom_path = temp.path().join("custom-pricing.json");
+        std::fs::write(&custom_path, b"{not-json").unwrap();
+        let cache_dir = temp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::File::create(cache_dir.join(CACHED_CATALOG_FILES[0]))
+            .unwrap()
+            .set_len(MAX_CATALOG_SNAPSHOT_BYTES + 1)
+            .unwrap();
+
+        let snapshot = ResolvedPricingSnapshot::resolve_current();
+
+        assert!(snapshot.service().is_none());
+        assert_eq!(
+            PricingStatus::from_diagnostics(snapshot.diagnostics()),
+            PricingStatus::Unavailable
+        );
+        assert!(snapshot
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("failed to parse JSON")));
+        assert!(snapshot
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("file is too large")));
+    }
+
+    #[test]
+    #[serial]
+    fn invalid_catalog_keeps_valid_custom_pricing_as_a_partial_snapshot() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _guard = ConfigDirGuard::set(temp.path());
+        std::fs::write(
+            temp.path().join("custom-pricing.json"),
+            r#"{"models":{"snapshot-model":{"input_cost_per_token":0.000001}}}"#,
+        )
+        .unwrap();
+        let cache_dir = temp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(cache_dir.join(CACHED_CATALOG_FILES[1]), b"{not-json").unwrap();
+
+        let snapshot = ResolvedPricingSnapshot::resolve_current();
+
+        assert!(snapshot.service().is_some());
+        assert_eq!(
+            PricingStatus::from_diagnostics(snapshot.diagnostics()),
+            PricingStatus::Available
+        );
+        assert!(snapshot
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("OpenRouter")));
     }
 
     fn model_pricing(input: f64, output: f64) -> ModelPricing {
@@ -509,8 +935,9 @@ mod tests {
             reasoning: 0,
         };
 
-        let cost =
-            service.calculate_cost_with_provider("gpt-fixture-model", Some("openai"), &usage);
+        let cost = service
+            .calculate_cost_with_provider("gpt-fixture-model", Some("openai"), &usage)
+            .unwrap();
 
         let expected = 1.25 + 1.0 + 0.00625 + 0.0375;
         assert!((cost - expected).abs() < 1e-10);
@@ -642,7 +1069,9 @@ mod tests {
         assert_eq!(zero_result.matched_key, "opencode/big-pickle");
         assert_eq!(zero_result.pricing.input_cost_per_token, Some(0.0));
         assert_eq!(
-            without_custom.calculate_cost("big-pickle", 1_000_000, 1_000_000, 0, 0, 0),
+            without_custom
+                .calculate_cost("big-pickle", 1_000_000, 1_000_000, 0, 0, 0)
+                .unwrap(),
             0.0
         );
 
@@ -657,7 +1086,9 @@ mod tests {
         assert_eq!(result.pricing_source, "Custom");
         assert_eq!(result.matched_key, "big-pickle");
         assert_eq!(result.pricing.input_cost_per_token, Some(0.0000006));
-        let custom_cost = with_custom.calculate_cost("big-pickle", 1_000_000, 1_000_000, 0, 0, 0);
+        let custom_cost = with_custom
+            .calculate_cost("big-pickle", 1_000_000, 1_000_000, 0, 0, 0)
+            .unwrap();
         assert!((custom_cost - 2.8).abs() < 1e-12);
     }
 
@@ -698,7 +1129,9 @@ mod tests {
             .lookup_with_pricing_source("composer-2", None)
             .is_none());
         assert_eq!(
-            service.calculate_cost("model1", 1_000_000, 1_000_000, 1_000_000, 0, 0),
+            service
+                .calculate_cost("model1", 1_000_000, 1_000_000, 1_000_000, 0, 0)
+                .unwrap(),
             0.0
         );
     }
@@ -1043,14 +1476,16 @@ mod tests {
         litellm.insert("kimi-k2p6-turbo".into(), model_pricing(0.00001, 0.00003));
 
         let service = custom_service(custom, litellm, HashMap::new());
-        let cost = service.calculate_cost(
-            "accounts/fireworks/routers/kimi-k2p6-turbo",
-            1_000_000,
-            100_000,
-            0,
-            0,
-            0,
-        );
+        let cost = service
+            .calculate_cost(
+                "accounts/fireworks/routers/kimi-k2p6-turbo",
+                1_000_000,
+                100_000,
+                0,
+                0,
+                0,
+            )
+            .unwrap();
 
         let expected = 1_000_000.0 * 0.000002 + 100_000.0 * 0.000008;
         assert!((cost - expected).abs() < 1e-10);

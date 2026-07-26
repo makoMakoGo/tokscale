@@ -1,6 +1,6 @@
 //! Catalog invariant tests against the real cached pricing datasets.
 //!
-//! `#[ignore]`d so CI (which has no `~/.config/tokenx/cache/`) skips them.
+//! `#[ignore]`d so CI (which has no `~/.tokenx/cache/`) skips them.
 //! Run manually when datasets are cached:
 //!
 //! ```sh

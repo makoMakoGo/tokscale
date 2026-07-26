@@ -25,21 +25,27 @@ struct ModelsReport {
 struct ModelsMetadata {
     input_footprint: tokenx_engine::InputFootprint,
     processing_time_ms: u64,
+    pricing_status: tokenx_engine::pricing::PricingStatus,
+    pricing_diagnostics: Vec<tokenx_engine::pricing::PricingDiagnostic>,
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("Models projection token totals exceed u64::MAX")]
+struct ModelsProjectionOverflow;
 
 fn checked_add_tokens(
     total: &UsageTokenBreakdown,
     tokens: &UsageTokenBreakdown,
-) -> UsageTokenBreakdown {
-    total
-        .checked_add(tokens)
-        .expect("Models projection token totals exceed u64::MAX")
+) -> Result<UsageTokenBreakdown, ModelsProjectionOverflow> {
+    total.checked_add(tokens).ok_or(ModelsProjectionOverflow)
 }
 
-fn model_totals(models: &[UsageModelEntry]) -> UsageTokenBreakdown {
+fn model_totals(
+    models: &[UsageModelEntry],
+) -> Result<UsageTokenBreakdown, ModelsProjectionOverflow> {
     models
         .iter()
-        .fold(UsageTokenBreakdown::default(), |total, model| {
+        .try_fold(UsageTokenBreakdown::default(), |total, model| {
             checked_add_tokens(&total, &model.tokens)
         })
 }
@@ -48,7 +54,7 @@ fn model_clients_include(model: &UsageModelEntry, client: ClientId) -> bool {
     model.clients.contains(&client)
 }
 
-pub(crate) async fn run_models(plan: ModelsPlan, no_spinner: bool) -> Result<()> {
+pub(crate) fn run_models(plan: ModelsPlan, no_spinner: bool) -> Result<()> {
     use std::time::Instant;
 
     let ModelsPlan {
@@ -62,11 +68,15 @@ pub(crate) async fn run_models(plan: ModelsPlan, no_spinner: bool) -> Result<()>
                         restricted,
                     },
                 settings,
+                calendar,
+                pricing,
             },
         date:
             ResolvedDateRange {
                 range: date_range_filter,
                 label: date_range,
+                relative: _,
+                effective_date: _,
             },
         benchmark,
         no_spinner: _,
@@ -80,14 +90,18 @@ pub(crate) async fn run_models(plan: ModelsPlan, no_spinner: bool) -> Result<()>
         universe.clone(),
         date_range_filter,
         settings.scanner,
+        calendar,
+        pricing,
     )?;
     let resolved_home_dir = acquisition.config().resolved_home_dir().to_path_buf();
     let prepared = acquisition.prepare()?;
-    let generation = build_generation(&acquisition, prepared).await?;
+    let generation = build_generation(&acquisition, prepared)?;
     let clients = ClientSelection::all(generation.universe());
     let data = generation.project_models(&clients, group_by)?;
     let input_footprint = generation.input_footprint().clone();
     let health = generation.health();
+    let pricing_status = generation.pricing_status();
+    let pricing_diagnostics = generation.pricing_diagnostics().to_vec();
 
     if let Some(spinner) = spinner {
         spinner.stop();
@@ -112,10 +126,13 @@ pub(crate) async fn run_models(plan: ModelsPlan, no_spinner: bool) -> Result<()>
             metadata: ModelsMetadata {
                 input_footprint,
                 processing_time_ms: processing_time_ms as u64,
+                pricing_status,
+                pricing_diagnostics,
             },
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
+        emit_pricing_warning(pricing_status, &pricing_diagnostics);
         render_models_table(&data, &group_by, date_range.as_deref())?;
     }
 
@@ -197,7 +214,7 @@ fn render_models_table(
         table.add_row(row);
     }
 
-    let totals = model_totals(&data.models);
+    let totals = model_totals(&data.models)?;
     debug_assert_eq!(totals.total(), data.total_tokens);
     let mut total_row = Vec::new();
     if workspace_grouping {
@@ -239,6 +256,35 @@ fn render_models_table(
     Ok(())
 }
 
+fn emit_pricing_warning(
+    status: tokenx_engine::pricing::PricingStatus,
+    diagnostics: &[tokenx_engine::pricing::PricingDiagnostic],
+) {
+    use colored::Colorize;
+
+    let summary = match status {
+        tokenx_engine::pricing::PricingStatus::Available => return,
+        tokenx_engine::pricing::PricingStatus::CachedFallback => {
+            "Pricing refresh failed; costs use cached rates"
+        }
+        tokenx_engine::pricing::PricingStatus::Unavailable => {
+            "Pricing unavailable; zero costs may mean missing rates"
+        }
+    };
+    eprintln!("{}", format!("  {summary}").yellow());
+    for diagnostic in diagnostics {
+        eprintln!(
+            "{}",
+            format!(
+                "  pricing {:?}: {}",
+                diagnostic.kind(),
+                diagnostic.message()
+            )
+            .bright_black()
+        );
+    }
+}
+
 fn numeric_cell(value: impl ToString) -> comfy_table::Cell {
     use comfy_table::{Cell, CellAlignment};
     Cell::new(value).set_alignment(CellAlignment::Right)
@@ -249,4 +295,53 @@ fn total_cell(value: impl ToString) -> comfy_table::Cell {
     Cell::new(value)
         .fg(Color::Yellow)
         .set_alignment(CellAlignment::Right)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_totals_return_a_typed_error_on_cross_model_overflow() {
+        let model = |input| UsageModelEntry {
+            model_id: "model".into(),
+            display_name: "Model".into(),
+            provider: "provider".into(),
+            clients: vec![ClientId::Codex],
+            workspace_key: None,
+            workspace_label: None,
+            tokens: UsageTokenBreakdown {
+                input,
+                ..UsageTokenBreakdown::default()
+            },
+            cost: 0.0,
+            session_count: 0,
+        };
+
+        let error = model_totals(&[model(u64::MAX), model(1)]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Models projection token totals exceed u64::MAX"
+        );
+    }
+
+    #[test]
+    fn models_metadata_serializes_pricing_status_and_typed_diagnostics() {
+        let metadata = ModelsMetadata {
+            input_footprint: tokenx_engine::InputFootprint::default(),
+            processing_time_ms: 7,
+            pricing_status: tokenx_engine::pricing::PricingStatus::Unavailable,
+            pricing_diagnostics: vec![tokenx_engine::pricing::PricingDiagnostic::unavailable(
+                "catalog unavailable",
+            )],
+        };
+
+        let value = serde_json::to_value(metadata).unwrap();
+        assert_eq!(value["pricingStatus"], "unavailable");
+        assert_eq!(value["pricingDiagnostics"][0]["kind"], "unavailable");
+        assert_eq!(
+            value["pricingDiagnostics"][0]["message"],
+            "catalog unavailable"
+        );
+    }
 }

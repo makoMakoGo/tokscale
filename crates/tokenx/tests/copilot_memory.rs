@@ -18,7 +18,7 @@ fn prime_pricing_cache(home: &Path) {
         .as_secs();
     let payload = format!(r#"{{"timestamp":{},"data":{{}}}}"#, now);
 
-    let dir = home.join(".config/tokenx/cache");
+    let dir = home.join(".tokenx/cache");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("pricing-litellm.json"), &payload).unwrap();
     fs::write(dir.join("pricing-openrouter.json"), &payload).unwrap();
@@ -122,7 +122,7 @@ fn shard_identity(path: &Path) -> ShardIdentity {
 }
 
 fn input_cache_shards(home: &Path) -> Vec<PathBuf> {
-    let root = home.join(".config/tokenx/cache/shards");
+    let root = home.join(".tokenx/cache/shards");
     let mut shards = Vec::new();
     collect_input_cache_shards(&root, &mut shards);
     shards.sort_unstable();
@@ -170,9 +170,6 @@ fn run_copilot_report(home: &Path) -> (Vec<u8>, u64) {
             "--no-spinner",
         ])
         .env("HOME", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("XDG_CACHE_HOME", home.join(".cache"))
-        .env("TOKENX_PRICING_CACHE_ONLY", "1")
         .env_remove("TOKENX_CONFIG_DIR")
         .output()
         .unwrap();

@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{AttributedUsageRecord, ClientId};
+use crate::{aggregate::UsageAggregationError, AttributedUsageRecord, ClientId};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,36 +22,47 @@ pub struct SessionTokens {
 }
 
 impl SessionTokens {
-    pub fn total(&self) -> u64 {
+    pub fn checked_total(&self) -> Option<u64> {
         self.input
             .checked_add(self.output)
             .and_then(|total| total.checked_add(self.cache_read))
             .and_then(|total| total.checked_add(self.cache_write))
             .and_then(|total| total.checked_add(self.reasoning))
+    }
+
+    pub fn total(&self) -> u64 {
+        self.checked_total()
             .expect("session token total exceeds u64::MAX")
     }
 
-    fn push(&mut self, message: &AttributedUsageRecord) {
-        self.input = self
-            .input
-            .checked_add(message.tokens.input.max(0) as u64)
-            .expect("session input tokens exceed u64::MAX");
-        self.output = self
-            .output
-            .checked_add(message.tokens.output.max(0) as u64)
-            .expect("session output tokens exceed u64::MAX");
-        self.cache_read = self
-            .cache_read
-            .checked_add(message.tokens.cache_read.max(0) as u64)
-            .expect("session cache-read tokens exceed u64::MAX");
-        self.cache_write = self
-            .cache_write
-            .checked_add(message.tokens.cache_write.max(0) as u64)
-            .expect("session cache-write tokens exceed u64::MAX");
-        self.reasoning = self
-            .reasoning
-            .checked_add(message.tokens.reasoning.max(0) as u64)
-            .expect("session reasoning tokens exceed u64::MAX");
+    fn push(&mut self, message: &AttributedUsageRecord) -> Result<(), UsageAggregationError> {
+        let updated = Self {
+            input: self
+                .input
+                .checked_add(message.tokens.input.max(0) as u64)
+                .ok_or_else(|| UsageAggregationError::new("session input tokens"))?,
+            output: self
+                .output
+                .checked_add(message.tokens.output.max(0) as u64)
+                .ok_or_else(|| UsageAggregationError::new("session output tokens"))?,
+            cache_read: self
+                .cache_read
+                .checked_add(message.tokens.cache_read.max(0) as u64)
+                .ok_or_else(|| UsageAggregationError::new("session cache-read tokens"))?,
+            cache_write: self
+                .cache_write
+                .checked_add(message.tokens.cache_write.max(0) as u64)
+                .ok_or_else(|| UsageAggregationError::new("session cache-write tokens"))?,
+            reasoning: self
+                .reasoning
+                .checked_add(message.tokens.reasoning.max(0) as u64)
+                .ok_or_else(|| UsageAggregationError::new("session reasoning tokens"))?,
+        };
+        updated
+            .checked_total()
+            .ok_or_else(|| UsageAggregationError::new("session token total"))?;
+        *self = updated;
+        Ok(())
     }
 }
 
@@ -118,23 +129,74 @@ impl SessionUsageBuilder {
         Self::default()
     }
 
-    pub(crate) fn push(&mut self, message: &AttributedUsageRecord) {
+    pub(crate) fn check_push(
+        &self,
+        message: &AttributedUsageRecord,
+    ) -> Result<(), UsageAggregationError> {
+        let key = (message.client, Arc::clone(&message.session_id));
+        let existing = self.sessions.get(&key);
+        let mut tokens = existing
+            .map(|bucket| bucket.tokens.clone())
+            .unwrap_or_default();
+        tokens.push(message)?;
+        existing
+            .map_or(0, |bucket| bucket.message_count)
+            .checked_add(message.message_count.max(0) as u64)
+            .ok_or_else(|| UsageAggregationError::new("session message count"))?;
+        existing
+            .map_or(0, |bucket| bucket.turn_count)
+            .checked_add(u64::from(message.is_turn_start))
+            .ok_or_else(|| UsageAggregationError::new("session turn count"))?;
+        if message.cost.is_finite() && message.cost > 0.0 {
+            let updated = existing.map_or(0.0, |bucket| bucket.cost) + message.cost;
+            if !updated.is_finite() {
+                return Err(UsageAggregationError::new("session cost"));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        message: &AttributedUsageRecord,
+    ) -> Result<(), UsageAggregationError> {
         let timestamp = timestamp_seconds(message.timestamp);
-        let entry = self
-            .sessions
-            .entry((message.client, Arc::clone(&message.session_id)))
-            .or_insert_with(|| SessionBucket {
-                is_main_session: false,
-                workspace_key: message.workspace_key.as_ref().map(Arc::clone),
-                workspace_label: message.workspace_label.as_ref().map(Arc::clone),
-                models: BTreeSet::new(),
-                tokens: SessionTokens::default(),
-                cost: 0.0,
-                message_count: 0,
-                turn_count: 0,
-                first_seen: timestamp,
-                last_seen: timestamp,
-            });
+        let key = (message.client, Arc::clone(&message.session_id));
+        let existing = self.sessions.get(&key);
+        let mut tokens = existing
+            .map(|bucket| bucket.tokens.clone())
+            .unwrap_or_default();
+        tokens.push(message)?;
+        let message_count = existing
+            .map_or(0, |bucket| bucket.message_count)
+            .checked_add(message.message_count.max(0) as u64)
+            .ok_or_else(|| UsageAggregationError::new("session message count"))?;
+        let turn_count = existing
+            .map_or(0, |bucket| bucket.turn_count)
+            .checked_add(u64::from(message.is_turn_start))
+            .ok_or_else(|| UsageAggregationError::new("session turn count"))?;
+        let cost = if message.cost.is_finite() && message.cost > 0.0 {
+            let updated = existing.map_or(0.0, |bucket| bucket.cost) + message.cost;
+            if !updated.is_finite() {
+                return Err(UsageAggregationError::new("session cost"));
+            }
+            updated
+        } else {
+            existing.map_or(0.0, |bucket| bucket.cost)
+        };
+
+        let entry = self.sessions.entry(key).or_insert_with(|| SessionBucket {
+            is_main_session: false,
+            workspace_key: message.workspace_key.as_ref().map(Arc::clone),
+            workspace_label: message.workspace_label.as_ref().map(Arc::clone),
+            models: BTreeSet::new(),
+            tokens: SessionTokens::default(),
+            cost: 0.0,
+            message_count: 0,
+            turn_count: 0,
+            first_seen: timestamp,
+            last_seen: timestamp,
+        });
 
         entry.is_main_session |= message.is_main_session;
         if entry.workspace_key.is_none() {
@@ -144,27 +206,17 @@ impl SessionUsageBuilder {
             entry.workspace_label = message.workspace_label.as_ref().map(Arc::clone);
         }
         entry.models.insert(Arc::clone(&message.model_id));
-        entry.tokens.push(message);
-        if message.cost.is_finite() && message.cost > 0.0 {
-            entry.cost += message.cost;
-        }
-        entry.message_count = entry
-            .message_count
-            .checked_add(message.message_count.max(0) as u64)
-            .expect("session message count exceeds u64::MAX");
-        if message.is_turn_start {
-            entry.turn_count = entry
-                .turn_count
-                .checked_add(1)
-                .expect("session turn count exceeds u64::MAX");
-        }
+        entry.tokens = tokens;
+        entry.cost = cost;
+        entry.message_count = message_count;
+        entry.turn_count = turn_count;
         entry.first_seen = entry.first_seen.min(timestamp);
         entry.last_seen = entry.last_seen.max(timestamp);
+        Ok(())
     }
 
     pub(crate) fn finish(self) -> Vec<SessionUsage> {
-        let mut sessions = self
-            .sessions
+        self.sessions
             .into_iter()
             .map(|((client, session_id), bucket)| SessionUsage {
                 client,
@@ -180,15 +232,7 @@ impl SessionUsageBuilder {
                 first_seen: bucket.first_seen,
                 last_seen: bucket.last_seen,
             })
-            .collect::<Vec<_>>();
-        sessions.sort_by(|left, right| {
-            right
-                .last_seen
-                .cmp(&left.last_seen)
-                .then_with(|| left.client.cmp(&right.client))
-                .then_with(|| left.session_id.cmp(&right.session_id))
-        });
-        sessions
+            .collect()
     }
 }
 
@@ -243,8 +287,8 @@ mod tests {
         second.is_turn_start = true;
 
         let mut acc = SessionUsageBuilder::new();
-        acc.push(&first);
-        acc.push(&second);
+        acc.push(&first).unwrap();
+        acc.push(&second).unwrap();
         let sessions = acc.finish();
 
         assert_eq!(sessions.len(), 1);
@@ -267,37 +311,39 @@ mod tests {
     }
 
     #[test]
-    fn sorts_by_recent_then_client_then_session() {
+    fn finish_retains_all_session_buckets() {
         let mut acc = SessionUsageBuilder::new();
-        acc.push(&message(ClientId::Zed, "b", 9));
-        acc.push(&message(ClientId::Codex, "z", 9));
-        acc.push(&message(ClientId::Codex, "a", 9));
-        acc.push(&message(ClientId::Amp, "old", 8));
+        acc.push(&message(ClientId::Zed, "b", 9)).unwrap();
+        acc.push(&message(ClientId::Codex, "z", 9)).unwrap();
+        acc.push(&message(ClientId::Codex, "a", 9)).unwrap();
+        acc.push(&message(ClientId::Amp, "old", 8)).unwrap();
 
         let keys = acc
             .finish()
             .into_iter()
             .map(|entry| (entry.client, entry.session_id))
-            .collect::<Vec<_>>();
+            .collect::<BTreeSet<_>>();
         assert_eq!(
             keys,
-            vec![
+            BTreeSet::from([
                 (ClientId::Codex, "a".into()),
                 (ClientId::Codex, "z".into()),
                 (ClientId::Zed, "b".into()),
                 (ClientId::Amp, "old".into()),
-            ]
+            ])
         );
     }
 
     #[test]
     fn accumulator_fans_one_filtered_record_stream_into_usage_and_sessions() {
-        let mut accumulator =
-            crate::aggregate::GenerationAccumulator::new(DateRange::for_year(2024).unwrap());
+        let mut accumulator = crate::aggregate::GenerationAccumulator::new(
+            DateRange::for_year(2024).unwrap(),
+            crate::CalendarContext::explicit("UTC").unwrap(),
+        );
         accumulator.push(&message(ClientId::Codex, "kept", 1_704_110_400_000));
         accumulator.push(&message(ClientId::Codex, "filtered", 1_735_732_800_000));
 
-        let (usage, sessions) = accumulator.into_generation_parts();
+        let (usage, sessions) = accumulator.into_generation_parts().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id.as_ref(), "kept");
         assert_eq!(
@@ -306,6 +352,7 @@ mod tests {
                     &GroupBy::default(),
                     NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
                 )
+                .unwrap()
                 .total_tokens,
             18
         );
@@ -322,7 +369,7 @@ mod tests {
         let model = Arc::clone(&record.model_id);
 
         let mut builder = SessionUsageBuilder::new();
-        builder.push(&record);
+        builder.push(&record).unwrap();
         let sessions = builder.finish();
         let session = &sessions[0];
 
@@ -336,6 +383,58 @@ mod tests {
             &workspace_label
         ));
         assert!(Arc::ptr_eq(session.models.first().unwrap(), &model));
+    }
+
+    #[test]
+    fn rejected_session_token_overflow_does_not_partially_modify_the_bucket() {
+        let record = |model: &str, timestamp| {
+            AttributedUsageRecord::new(
+                ClientId::Codex,
+                model,
+                "openai",
+                "overflow-session",
+                timestamp,
+                TokenBreakdown {
+                    input: i64::MAX,
+                    ..TokenBreakdown::default()
+                },
+                0.0,
+            )
+        };
+        let mut builder = SessionUsageBuilder::new();
+        builder.push(&record("kept", 1)).unwrap();
+        builder.push(&record("kept", 2)).unwrap();
+
+        let error = builder.push(&record("must-not-appear", 3)).unwrap_err();
+        assert_eq!(error.field(), "session input tokens");
+        let sessions = builder.finish();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].tokens.input, u64::MAX - 1);
+        assert_eq!(
+            sessions[0].models,
+            BTreeSet::from([crate::records::intern::intern("kept")])
+        );
+        assert_eq!(sessions[0].last_seen, 2);
+    }
+
+    #[test]
+    fn rejected_session_cost_overflow_does_not_partially_modify_the_bucket() {
+        let mut first = message(ClientId::Codex, "cost-overflow", 1);
+        first.cost = f64::MAX;
+        let mut second = message(ClientId::Codex, "cost-overflow", 2);
+        second.cost = f64::MAX;
+        second.model_id = crate::records::intern::intern("must-not-appear");
+
+        let mut builder = SessionUsageBuilder::new();
+        builder.push(&first).unwrap();
+        let error = builder.push(&second).unwrap_err();
+
+        assert_eq!(error.field(), "session cost");
+        let sessions = builder.finish();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].cost, f64::MAX);
+        assert!(!sessions[0].models.contains("must-not-appear"));
+        assert_eq!(sessions[0].last_seen, 1);
     }
 
     #[test]

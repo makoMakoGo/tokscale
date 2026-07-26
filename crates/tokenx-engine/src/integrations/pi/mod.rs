@@ -18,10 +18,6 @@ pub(crate) struct Driver;
 
 pub(crate) static DRIVER: Driver = Driver;
 
-// Earlier revisions were emitted before malformed inclusive-reasoning
-// breakdowns were clamped to their authoritative output bucket.
-const PI_RECORD_REJECTION_REVISION: u32 =
-    crate::integrations::MODEL_ID_CANONICALIZATION_REVISION + 5;
 const SOURCE: SourceSpec = SourceSpec::home(
     ".pi/agent/sessions",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::jsonl),
@@ -38,7 +34,7 @@ impl IntegrationDriver for Driver {
             SOURCE,
             ctx,
             FingerprintPolicy::PlainFile,
-            DecoderKind::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::Pi),
         )?;
         Ok(units)
     }
@@ -93,6 +89,7 @@ mod tests {
             client: ClientId::Pi,
             home_dir,
             scanner_settings: settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         }
     }
 
@@ -113,7 +110,7 @@ mod tests {
     fn finalized(
         mut messages: Vec<crate::records::UsageRecord>,
     ) -> Vec<crate::AttributedUsageRecord> {
-        crate::finalize_token_priced_messages(&mut messages, None);
+        crate::finalize_message_identities(&mut messages);
         messages
             .into_iter()
             .map(|message| message.attribute(ClientId::Pi))
@@ -127,7 +124,7 @@ mod tests {
     ) -> Vec<crate::AttributedUsageRecord> {
         let parsed = driver.parse_inputs(
             crate::integrations::test_execute_all(units),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         let mut sink = Vec::new();
         let binding = crate::integrations::integration_for(ClientId::Pi);
@@ -165,10 +162,9 @@ mod tests {
         assert!(units
             .iter()
             .all(|unit| unit.fingerprint_policy == FingerprintPolicy::PlainFile));
-        assert!(units.iter().all(|unit| {
-            unit.decoder.version()
-                == DecoderVersion::new(DecoderId::Pi, PI_RECORD_REJECTION_REVISION)
-        }));
+        assert!(units
+            .iter()
+            .all(|unit| { unit.decoder.version() == DecoderVersion::current(DecoderId::Pi) }));
     }
 
     #[test]
@@ -178,7 +174,7 @@ mod tests {
         write_file(&path, PI_CONTENT);
         let units = vec![DiscoveredInput::plain_file(
             path.clone(),
-            DecoderKind::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::Pi),
         )];
         let mut cache = input_record_cache::InputRecordShardStore::default();
 
@@ -193,12 +189,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("missing.jsonl");
 
-        let error = DiscoveredInput::plain_file(
-            path.clone(),
-            DecoderKind::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
-        )
-        .prepare_snapshot()
-        .unwrap_err();
+        let error = DiscoveredInput::plain_file(path.clone(), DecoderKind::plain(DecoderId::Pi))
+            .prepare_snapshot()
+            .unwrap_err();
         assert!(error.to_string().contains(path.to_str().unwrap()));
     }
 
@@ -216,12 +209,9 @@ mod tests {
 
         let parsed = DRIVER.parse_inputs(
             vec![crate::integrations::test_execute(
-                DiscoveredInput::plain_file(
-                    path.clone(),
-                    DecoderKind::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
-                ),
+                DiscoveredInput::plain_file(path.clone(), DecoderKind::plain(DecoderId::Pi)),
             )],
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
 
         assert_eq!(parsed.len(), 1);
@@ -239,14 +229,11 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("partial.jsonl");
         write_file(&path, PI_CONTENT);
-        let unit = DiscoveredInput::plain_file(
-            path.clone(),
-            DecoderKind::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
-        );
+        let unit = DiscoveredInput::plain_file(path.clone(), DecoderKind::plain(DecoderId::Pi));
 
         let parsed = pipeline_cache::load_or_scan_unit_with(
             crate::integrations::test_execute(unit),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
             |input_path| {
                 let mut scanned = decode::parse_pi_file(input_path)?;
                 scanned.interrupted = Some(crate::input_health::InputFailure::new(
@@ -264,7 +251,7 @@ mod tests {
         ));
         assert!(matches!(
             &parsed.messages,
-            UnitRecordPayload::Fresh(messages) if messages.len() == 1
+            UnitRecordPayload::PendingFinalization(messages) if messages.len() == 1
         ));
         assert!(parsed.cache_write.is_none());
         assert!(parsed.invalidate_cache);
@@ -282,7 +269,7 @@ mod tests {
         write_file(&path, PI_CONTENT);
         let units = vec![DiscoveredInput::plain_file(
             path.clone(),
-            DecoderKind::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::Pi),
         )];
         let mut cache = input_record_cache::InputRecordShardStore::load().unwrap();
 
@@ -316,10 +303,7 @@ mod tests {
     #[test]
     fn input_unit_plain_file_digest_is_just_path() {
         let path = PathBuf::from("/tmp/pi.jsonl");
-        let unit = DiscoveredInput::plain_file(
-            path.clone(),
-            DecoderKind::plain(DecoderId::Pi, PI_RECORD_REJECTION_REVISION),
-        );
+        let unit = DiscoveredInput::plain_file(path.clone(), DecoderKind::plain(DecoderId::Pi));
 
         assert_eq!(unit.digest_paths(), vec![path]);
     }

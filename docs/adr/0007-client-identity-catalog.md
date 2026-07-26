@@ -120,8 +120,8 @@ Adding a client requires one atomic contract change containing:
 
 Changing a root, filename rule, companion dependency, database schema, or record
 envelope requires an integration/schema change with focused tests and a matching
-documentation update. A decoder behavior change that affects cached output also
-requires a decoder revision change.
+documentation update. A decoder behavior change that affects cached output
+changes the integration's build-generated decoder contract automatically.
 
 ## Consequences
 

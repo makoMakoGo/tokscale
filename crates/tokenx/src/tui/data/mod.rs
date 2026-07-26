@@ -23,17 +23,41 @@ mod tests {
     use super::*;
     use crate::acquisition::{acquisition_engine, build_generation};
     use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::fs;
     use tempfile::TempDir;
     use tokenx_engine::{build_contribution_graph_for_today, calculate_streaks_for_today};
 
-    async fn load_usage(
+    struct ConfigDirEnvGuard(Option<OsString>);
+
+    impl ConfigDirEnvGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("TOKENX_CONFIG_DIR");
+            unsafe {
+                std::env::set_var("TOKENX_CONFIG_DIR", path);
+            }
+            Self(previous)
+        }
+    }
+
+    impl Drop for ConfigDirEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(previous) => std::env::set_var("TOKENX_CONFIG_DIR", previous),
+                    None => std::env::remove_var("TOKENX_CONFIG_DIR"),
+                }
+            }
+        }
+    }
+
+    fn load_usage(
         acquisition: &tokenx_engine::AcquisitionEngine,
         group_by: GroupBy,
         effective_date: NaiveDate,
     ) -> Result<UsageProjection> {
         let prepared = acquisition.prepare()?;
-        let generation = build_generation(acquisition, prepared).await?;
+        let generation = build_generation(acquisition, prepared)?;
         generation
             .project_usage(&UsageQuery::full(
                 generation.universe(),
@@ -136,7 +160,7 @@ mod tests {
     #[test]
     fn test_build_contribution_graph_uses_provided_today() {
         let today = NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
-        let graph = build_contribution_graph_for_today(&[], today);
+        let graph = build_contribution_graph_for_today(&[], today).unwrap();
         assert!(graph.weeks.is_empty());
 
         let daily = vec![DailyUsage {
@@ -147,7 +171,7 @@ mod tests {
             message_count: 0,
             turn_count: 0,
         }];
-        let graph = build_contribution_graph_for_today(&daily, today);
+        let graph = build_contribution_graph_for_today(&daily, today).unwrap();
         let last_day = graph
             .weeks
             .last()
@@ -157,9 +181,11 @@ mod tests {
         assert_eq!(last_day, Some(today));
     }
 
-    #[tokio::test]
-    async fn generation_loader_loads_agent_usage_from_roocode_files() {
+    #[test]
+    #[serial_test::serial]
+    fn generation_loader_loads_agent_usage_from_roocode_files() {
         let temp_dir = TempDir::new().unwrap();
+        let _config_guard = ConfigDirEnvGuard::set(temp_dir.path());
         let task_root = temp_dir
             .path()
             .join(".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks");
@@ -233,6 +259,8 @@ after"#,
             tokenx_engine::ClientUniverse::new([ClientId::RooCode]).unwrap(),
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+            std::sync::Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current()),
         )
         .unwrap();
         let usage = load_usage(
@@ -240,7 +268,6 @@ after"#,
             GroupBy::Model,
             NaiveDate::from_ymd_opt(2026, 3, 8).unwrap(),
         )
-        .await
         .unwrap();
 
         assert_eq!(usage.agents.len(), 2);
@@ -254,9 +281,11 @@ after"#,
         assert_eq!(usage.agents[1].tokens.total(), 147_000);
     }
 
-    #[tokio::test]
-    async fn generation_loader_keeps_gateway_model_under_its_client() {
+    #[test]
+    #[serial_test::serial]
+    fn generation_loader_keeps_gateway_model_under_its_client() {
         let temp_dir = TempDir::new().unwrap();
+        let _config_guard = ConfigDirEnvGuard::set(temp_dir.path());
         let data_dir = temp_dir.path().join(".local/share/opencode");
         fs::create_dir_all(&data_dir).unwrap();
         let conn = rusqlite::Connection::open(data_dir.join("opencode.db")).unwrap();
@@ -285,6 +314,8 @@ after"#,
             tokenx_engine::ClientUniverse::new([ClientId::OpenCode]).unwrap(),
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+            std::sync::Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current()),
         )
         .unwrap();
         let usage = load_usage(
@@ -292,7 +323,6 @@ after"#,
             GroupBy::ClientProviderModel,
             NaiveDate::from_ymd_opt(2026, 3, 8).unwrap(),
         )
-        .await
         .unwrap();
 
         assert_eq!(usage.models.len(), 1);
@@ -324,7 +354,7 @@ after"#,
                 turn_count: 0,
             },
         ];
-        let (current, longest) = calculate_streaks_for_today(&daily, today);
+        let (current, longest) = calculate_streaks_for_today(&daily, today).unwrap();
         assert_eq!(current, 2);
         assert_eq!(longest, 2);
     }
@@ -380,7 +410,7 @@ after"#,
             period_day("2026-06-14", 20, 2.0),
             period_day("2026-05-01", 5, 0.5),
         ]);
-        let periods = build_period_usage(&usage, PeriodKind::Monthly);
+        let periods = build_period_usage(&usage, PeriodKind::Monthly).unwrap();
 
         assert_eq!(periods.len(), 2);
         assert_eq!(periods[0].section_label, "2026");
@@ -400,7 +430,7 @@ after"#,
     #[test]
     fn test_build_period_usage_counts_zero_token_message_days_as_active() {
         let usage = period_projection(vec![period_day("2026-06-02", 0, 0.0)]);
-        let periods = build_period_usage(&usage, PeriodKind::Monthly);
+        let periods = build_period_usage(&usage, PeriodKind::Monthly).unwrap();
 
         assert_eq!(periods.len(), 1);
         assert_eq!(periods[0].active_days, 1);
@@ -415,7 +445,7 @@ after"#,
             period_day("2025-12-29", 10, 1.0),
             period_day("2025-12-28", 5, 0.5),
         ]);
-        let periods = build_period_usage(&usage, PeriodKind::Weekly);
+        let periods = build_period_usage(&usage, PeriodKind::Weekly).unwrap();
 
         assert_eq!(periods.len(), 2);
         assert_eq!(periods[0].section_label, "2026");

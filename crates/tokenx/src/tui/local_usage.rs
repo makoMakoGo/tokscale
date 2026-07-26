@@ -1,25 +1,53 @@
+#[cfg(test)]
+use std::ops::{Deref, DerefMut};
+
 use anyhow::Result;
 use tokenx_engine::{Generation, UsageQuery};
 
-use super::data::{OverviewSummary, UsageProjection};
+use super::data::{build_period_usage, OverviewSummary, PeriodKind, PeriodUsage, UsageProjection};
 use super::session_data::SessionSnapshot;
+
+struct PeriodUsageCache {
+    monthly: Vec<PeriodUsage>,
+    weekly: Vec<PeriodUsage>,
+}
+
+impl PeriodUsageCache {
+    fn new(view: &UsageProjection) -> Result<Self> {
+        Ok(Self {
+            monthly: build_period_usage(view, PeriodKind::Monthly)?,
+            weekly: build_period_usage(view, PeriodKind::Weekly)?,
+        })
+    }
+
+    fn get(&self, kind: PeriodKind) -> &[PeriodUsage] {
+        match kind {
+            PeriodKind::Monthly => &self.monthly,
+            PeriodKind::Weekly => &self.weekly,
+        }
+    }
+}
 
 /// One coherent installed local generation and its current projection.
 ///
-/// The query, materialized usage projection, overview summary, and Sessions snapshot
-/// are replaced together. Renderers only borrow these values through
-/// [`LocalUsageState`] accessors.
+/// The query, materialized usage projection, period projections, overview summary,
+/// and Sessions snapshot are replaced together. Renderers only borrow these values
+/// through [`LocalUsageState`] accessors.
 pub(crate) struct InstalledGeneration {
-    generation: Generation,
     query: UsageQuery,
     view: UsageProjection,
+    periods: PeriodUsageCache,
     overview: OverviewSummary,
     sessions: SessionSnapshot,
+    // Keep the authority last so renderer projections release their interned
+    // identities before Generation's lifetime guard prunes the weak pool.
+    generation: Generation,
 }
 
 pub(crate) struct PreparedProjection {
     query: UsageQuery,
     view: UsageProjection,
+    periods: PeriodUsageCache,
     overview: OverviewSummary,
 }
 
@@ -59,23 +87,27 @@ pub(crate) enum LocalUsageState {
 impl InstalledGeneration {
     fn new(generation: Generation, query: UsageQuery) -> Result<Self> {
         let view = generation.project_usage(&query)?;
+        let periods = PeriodUsageCache::new(&view)?;
         let sessions = SessionSnapshot::new(generation.sessions(), generation.input_footprint());
         let overview = derive_overview(&view, &sessions, &query);
         Ok(Self {
-            generation,
             query,
             view,
+            periods,
             overview,
             sessions,
+            generation,
         })
     }
 
     fn prepare_projection(&self, query: UsageQuery) -> Result<PreparedProjection> {
         let view = self.generation.project_usage(&query)?;
+        let periods = PeriodUsageCache::new(&view)?;
         let overview = derive_overview(&view, &self.sessions, &query);
         Ok(PreparedProjection {
             query,
             view,
+            periods,
             overview,
         })
     }
@@ -83,6 +115,7 @@ impl InstalledGeneration {
     fn install_projection(&mut self, projection: PreparedProjection) {
         self.query = projection.query;
         self.view = projection.view;
+        self.periods = projection.periods;
         self.overview = projection.overview;
     }
 
@@ -92,6 +125,10 @@ impl InstalledGeneration {
 
     pub(crate) fn view(&self) -> &UsageProjection {
         &self.view
+    }
+
+    pub(crate) fn periods(&self, kind: PeriodKind) -> &[PeriodUsage] {
+        self.periods.get(kind)
     }
 
     pub(crate) fn overview(&self) -> &OverviewSummary {
@@ -188,21 +225,39 @@ impl LocalUsageState {
             .install_projection(projection);
     }
 
+    pub(crate) fn replace_uninstalled_query(&mut self, query: UsageQuery) {
+        match self {
+            Self::Empty {
+                query: current_query,
+            }
+            | Self::Failed {
+                query: current_query,
+                ..
+            } => *current_query = query,
+            Self::Ready(_) | Self::Degraded { .. } => {
+                panic!("installed local usage must be updated through a prepared projection")
+            }
+        }
+    }
+
     #[cfg(test)]
-    pub(crate) fn view_mut(&mut self) -> &mut UsageProjection {
-        &mut self
-            .installed_mut()
-            .expect("test usage mutation requires an installed generation")
-            .view
+    pub(crate) fn view_mut(&mut self) -> UsageProjectionMut<'_> {
+        UsageProjectionMut {
+            installed: self
+                .installed_mut()
+                .expect("test usage mutation requires an installed generation"),
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn replace_view_for_test(&mut self, view: UsageProjection) {
+        let periods = PeriodUsageCache::new(&view).expect("test period projection must succeed");
         let installed = self
             .installed_mut()
             .expect("test usage replacement requires an installed generation");
         installed.overview = derive_overview(&view, &installed.sessions, &installed.query);
         installed.view = view;
+        installed.periods = periods;
     }
 
     #[cfg(test)]
@@ -239,6 +294,35 @@ impl LocalUsageState {
     }
 }
 
+#[cfg(test)]
+pub(crate) struct UsageProjectionMut<'a> {
+    installed: &'a mut InstalledGeneration,
+}
+
+#[cfg(test)]
+impl Deref for UsageProjectionMut<'_> {
+    type Target = UsageProjection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.installed.view
+    }
+}
+
+#[cfg(test)]
+impl DerefMut for UsageProjectionMut<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.installed.view
+    }
+}
+
+#[cfg(test)]
+impl Drop for UsageProjectionMut<'_> {
+    fn drop(&mut self) {
+        self.installed.periods = PeriodUsageCache::new(&self.installed.view)
+            .expect("test period projection must succeed");
+    }
+}
+
 fn derive_overview(
     view: &UsageProjection,
     sessions: &SessionSnapshot,
@@ -255,6 +339,9 @@ fn derive_overview(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use super::super::data::{DailyUsage, UsageTokenBreakdown};
     use super::*;
     use tokenx_engine::{ClientId, ClientSelection, ClientUniverse, GroupBy};
 
@@ -274,6 +361,17 @@ mod tests {
             tokenx_engine::InputFootprint::default(),
             tokenx_engine::input_health::HealthSummary::default(),
         )
+    }
+
+    fn daily_usage(date: chrono::NaiveDate, tokens: UsageTokenBreakdown) -> DailyUsage {
+        DailyUsage {
+            date,
+            tokens,
+            cost: 0.0,
+            client_breakdown: BTreeMap::new(),
+            message_count: 1,
+            turn_count: 1,
+        }
     }
 
     #[test]
@@ -334,5 +432,57 @@ mod tests {
             .is_err());
         assert_eq!(state.status(), LocalUsageStatus::Empty);
         assert!(state.installed().is_none());
+    }
+
+    #[test]
+    fn installed_generation_reuses_materialized_period_projections() {
+        let mut state = LocalUsageState::new(query(ClientId::Codex));
+        state
+            .install_generation(generation(ClientId::Codex))
+            .unwrap();
+        state.view_mut().daily = vec![daily_usage(
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
+            UsageTokenBreakdown {
+                input: 42,
+                ..UsageTokenBreakdown::default()
+            },
+        )];
+
+        let installed = state.installed().unwrap();
+        let monthly = installed.periods(PeriodKind::Monthly);
+        let weekly = installed.periods(PeriodKind::Weekly);
+
+        assert_eq!(monthly.len(), 1);
+        assert_eq!(weekly.len(), 1);
+        assert_eq!(monthly[0].tokens.input, 42);
+        assert_eq!(
+            monthly.as_ptr(),
+            installed.periods(PeriodKind::Monthly).as_ptr()
+        );
+    }
+
+    #[test]
+    fn period_cache_creation_returns_projection_errors_before_install() {
+        let view = UsageProjection {
+            daily: vec![daily_usage(
+                chrono::NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
+                UsageTokenBreakdown {
+                    input: u64::MAX,
+                    output: 1,
+                    ..UsageTokenBreakdown::default()
+                },
+            )],
+            ..UsageProjection::default()
+        };
+
+        let error = PeriodUsageCache::new(&view)
+            .err()
+            .expect("overflowing period projection must fail");
+
+        let diagnostic = format!("{error:#}");
+        assert!(
+            diagnostic.contains("period token totals"),
+            "unexpected projection error: {diagnostic}"
+        );
     }
 }

@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokenx_engine::paths::ConfigDirUnavailable;
 use tokenx_engine::scanner::{ScannerSettings, ScannerSettingsError};
-use tokenx_engine::ClientId;
+use tokenx_engine::{CalendarContext, ClientId};
 
 use crate::subscription::ProviderId;
 use crate::theme::ThemeName;
@@ -56,22 +56,6 @@ pub(crate) enum SettingsValidationError {
     DuplicateSubscriptionProvider { provider: &'static str },
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ExplicitHomeConfigLayout {
-    UnixDotConfig,
-    WindowsRoaming,
-}
-
-impl ExplicitHomeConfigLayout {
-    fn current() -> Self {
-        if cfg!(target_os = "windows") {
-            Self::WindowsRoaming
-        } else {
-            Self::UnixDotConfig
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
@@ -81,9 +65,8 @@ pub struct Settings {
     pub auto_refresh_enabled: bool,
     #[serde(default = "default_auto_refresh_ms")]
     pub auto_refresh_ms: u64,
-    /// Persistent scanner configuration. Allows users to pin additional
-    /// OpenCode SQLite paths (and, in future, other scanner overrides)
-    /// without having to set env vars on every invocation.
+    /// Persistent scanner configuration for explicit extra client roots and
+    /// OpenCode database paths outside built-in discovery.
     ///
     /// An empty `"scanner": {}` is equivalent to not setting it at all.
     #[serde(default)]
@@ -98,6 +81,10 @@ pub struct Settings {
     /// CLI flags always override this list completely.
     #[serde(default)]
     pub default_clients: Vec<ClientId>,
+    /// Explicit IANA timezone for calendar bucketing. When absent, startup
+    /// resolves the operating system timezone exactly once.
+    #[serde(default)]
+    pub time_zone: Option<CalendarContext>,
     /// Remote subscription-quota surface and its explicit provider allowlist.
     #[serde(default)]
     pub subscription: SubscriptionSettings,
@@ -132,6 +119,7 @@ impl Default for Settings {
             auto_refresh_ms: DEFAULT_AUTO_REFRESH_MS,
             scanner: ScannerSettings::default(),
             default_clients: Vec::new(),
+            time_zone: None,
             subscription: SubscriptionSettings::default(),
             save_path_override: None,
         }
@@ -176,27 +164,6 @@ impl Settings {
         Ok(path)
     }
 
-    fn explicit_home_config_path_for_layout(
-        home_dir: &Path,
-        layout: ExplicitHomeConfigLayout,
-    ) -> PathBuf {
-        match layout {
-            ExplicitHomeConfigLayout::UnixDotConfig => home_dir
-                .join(".config")
-                .join("tokenx")
-                .join("settings.json"),
-            ExplicitHomeConfigLayout::WindowsRoaming => home_dir
-                .join("AppData")
-                .join("Roaming")
-                .join("tokenx")
-                .join("settings.json"),
-        }
-    }
-
-    fn explicit_home_config_path(home_dir: &Path) -> PathBuf {
-        Self::explicit_home_config_path_for_layout(home_dir, ExplicitHomeConfigLayout::current())
-    }
-
     fn load_from_path(path: &Path) -> std::result::Result<Self, SettingsLoadError> {
         let content = match fs::read(path) {
             Ok(content) => content,
@@ -227,19 +194,6 @@ impl Settings {
 
     pub fn load() -> std::result::Result<Self, SettingsLoadError> {
         let path = Self::config_path()?;
-        let mut settings = Self::load_from_path(&path)?;
-        settings.save_path_override = Some(path);
-        Ok(settings)
-    }
-
-    pub fn load_for_home_override(
-        home_dir: Option<&Path>,
-    ) -> std::result::Result<Self, SettingsLoadError> {
-        let Some(home_dir) = home_dir else {
-            return Self::load();
-        };
-
-        let path = Self::explicit_home_config_path(home_dir);
         let mut settings = Self::load_from_path(&path)?;
         settings.save_path_override = Some(path);
         Ok(settings)
@@ -283,61 +237,44 @@ impl Settings {
 mod tests {
     use super::*;
     use std::error::Error as _;
-    use std::path::PathBuf;
 
-    #[test]
-    fn explicit_home_config_path_uses_unix_dot_config_layout() {
-        assert_eq!(
-            Settings::explicit_home_config_path_for_layout(
-                Path::new("/home/alice"),
-                ExplicitHomeConfigLayout::UnixDotConfig,
-            ),
-            PathBuf::from("/home/alice/.config/tokenx/settings.json")
-        );
+    fn load_test_path(path: &Path) -> std::result::Result<Settings, SettingsLoadError> {
+        let mut settings = Settings::load_from_path(path)?;
+        settings.save_path_override = Some(path.to_path_buf());
+        Ok(settings)
     }
 
     #[test]
-    fn explicit_home_config_path_uses_windows_roaming_layout() {
-        assert_eq!(
-            Settings::explicit_home_config_path_for_layout(
-                Path::new("C:/Users/Alice"),
-                ExplicitHomeConfigLayout::WindowsRoaming,
-            ),
-            PathBuf::from("C:/Users/Alice/AppData/Roaming/tokenx/settings.json")
-        );
-    }
-
-    #[test]
-    fn load_for_home_override_reads_current_platform_config_path() {
+    fn load_from_product_path_reads_typed_settings() {
         let temp = tempfile::TempDir::new().unwrap();
-        let path = Settings::explicit_home_config_path(temp.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path = temp.path().join("settings.json");
         fs::write(
             &path,
             r#"{"colorPalette":"halloween","defaultClients":["codex"]}"#,
         )
         .unwrap();
 
-        let loaded = Settings::load_for_home_override(Some(temp.path())).unwrap();
+        let loaded = load_test_path(&path).unwrap();
         assert_eq!(loaded.color_palette, ThemeName::Halloween);
         assert_eq!(loaded.default_clients, vec![ClientId::Codex]);
     }
 
     #[test]
-    fn load_for_home_override_defaults_only_when_settings_are_missing() {
+    fn load_from_product_path_defaults_only_when_settings_are_missing() {
         let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
 
-        let loaded = Settings::load_for_home_override(Some(temp.path())).unwrap();
+        let loaded = load_test_path(&path).unwrap();
 
         assert_eq!(loaded.color_palette, Settings::default().color_palette);
         assert!(loaded.default_clients.is_empty());
     }
 
     #[test]
-    fn settings_loaded_for_explicit_home_save_back_to_that_home() {
+    fn settings_save_back_to_the_loaded_product_path() {
         let temp = tempfile::TempDir::new().unwrap();
-        let path = Settings::explicit_home_config_path(temp.path());
-        let mut loaded = Settings::load_for_home_override(Some(temp.path())).unwrap();
+        let path = temp.path().join("settings.json");
+        let mut loaded = load_test_path(&path).unwrap();
         loaded.color_palette = ThemeName::Halloween;
 
         loaded.save().unwrap();
@@ -347,13 +284,12 @@ mod tests {
     }
 
     #[test]
-    fn load_for_home_override_reports_malformed_json_with_path_and_source() {
+    fn load_from_product_path_reports_malformed_json_with_path_and_source() {
         let temp = tempfile::TempDir::new().unwrap();
-        let path = Settings::explicit_home_config_path(temp.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path = temp.path().join("settings.json");
         fs::write(&path, r#"{"colorPalette":"blue""#).unwrap();
 
-        let error = Settings::load_for_home_override(Some(temp.path())).unwrap_err();
+        let error = load_test_path(&path).unwrap_err();
         let message = format!("{error:#}");
 
         assert!(message.contains("parse settings JSON"), "{message}");
@@ -366,13 +302,12 @@ mod tests {
     }
 
     #[test]
-    fn load_for_home_override_reports_non_utf8_json_as_invalid_environment() {
+    fn load_from_product_path_reports_non_utf8_json_as_invalid_environment() {
         let temp = tempfile::TempDir::new().unwrap();
-        let path = Settings::explicit_home_config_path(temp.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path = temp.path().join("settings.json");
         fs::write(&path, b"{\"colorPalette\":\"\xff\"}").unwrap();
 
-        let error = Settings::load_for_home_override(Some(temp.path())).unwrap_err();
+        let error = load_test_path(&path).unwrap_err();
         let message = format!("{error:#}");
 
         assert!(message.contains("parse settings JSON"), "{message}");
@@ -385,12 +320,12 @@ mod tests {
     }
 
     #[test]
-    fn load_for_home_override_reports_non_file_path_with_operation_and_source() {
+    fn load_from_product_path_reports_non_file_path_with_operation_and_source() {
         let temp = tempfile::TempDir::new().unwrap();
-        let path = Settings::explicit_home_config_path(temp.path());
+        let path = temp.path().join("settings.json");
         fs::create_dir_all(&path).unwrap();
 
-        let error = Settings::load_for_home_override(Some(temp.path())).unwrap_err();
+        let error = load_test_path(&path).unwrap_err();
         let message = format!("{error:#}");
 
         assert!(message.contains("read settings file"), "{message}");
@@ -403,13 +338,12 @@ mod tests {
     }
 
     #[test]
-    fn load_for_home_override_rejects_invalid_ranges_instead_of_clamping() {
+    fn load_from_product_path_rejects_invalid_ranges_instead_of_clamping() {
         let temp = tempfile::TempDir::new().unwrap();
-        let path = Settings::explicit_home_config_path(temp.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path = temp.path().join("settings.json");
         fs::write(&path, r#"{"autoRefreshMs":1}"#).unwrap();
 
-        let error = Settings::load_for_home_override(Some(temp.path())).unwrap_err();
+        let error = load_test_path(&path).unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("invalid settings"), "{message}");
         assert!(message.contains("autoRefreshMs 1"), "{message}");
@@ -418,13 +352,12 @@ mod tests {
     }
 
     #[test]
-    fn load_for_home_override_rejects_unknown_color_palette() {
+    fn load_from_product_path_rejects_unknown_color_palette() {
         let temp = tempfile::TempDir::new().unwrap();
-        let path = Settings::explicit_home_config_path(temp.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path = temp.path().join("settings.json");
         fs::write(&path, r#"{"colorPalette":"ultraviolet"}"#).unwrap();
 
-        let error = Settings::load_for_home_override(Some(temp.path())).unwrap_err();
+        let error = load_test_path(&path).unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("unknown theme `ultraviolet`"), "{message}");
         assert!(message.contains(&path.display().to_string()), "{message}");
@@ -448,8 +381,7 @@ mod tests {
 
     #[test]
     fn settings_load_backfills_scanner_when_missing_from_json() {
-        // Older settings.json files predate the `scanner` key. They must
-        // still deserialize cleanly and fall through to ScannerSettings::default.
+        // `scanner` is optional; omission means the typed empty scanner policy.
         let json = r#"{
             "colorPalette": "blue",
             "autoRefreshEnabled": false,
@@ -522,6 +454,28 @@ mod tests {
     }
 
     #[test]
+    fn settings_parse_typed_iana_timezone() {
+        let parsed: Settings = serde_json::from_str(r#"{"timeZone":"Asia/Shanghai"}"#).unwrap();
+
+        assert_eq!(
+            parsed.time_zone.unwrap().timezone().to_string(),
+            "Asia/Shanghai"
+        );
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap()["timeZone"],
+            serde_json::json!("Asia/Shanghai")
+        );
+    }
+
+    #[test]
+    fn settings_reject_invalid_iana_timezone() {
+        let error = serde_json::from_str::<Settings>(r#"{"timeZone":"Mars/Olympus"}"#)
+            .expect_err("an unknown timezone must not become a hidden default");
+
+        assert!(error.to_string().contains("Mars/Olympus"));
+    }
+
+    #[test]
     fn settings_round_trips_scanner_section_through_json() {
         // Saving and loading must preserve scanner paths verbatim so that
         // the TUI settings save flow never drops the key silently.
@@ -576,8 +530,7 @@ mod tests {
 
     #[test]
     fn settings_default_clients_defaults_to_empty() {
-        // Older settings.json files have no `defaultClients` key — they
-        // must still parse and yield the "no defaults configured" state.
+        // Omission means no configured restriction on the startup universe.
         let json = r#"{
             "colorPalette": "blue",
             "autoRefreshEnabled": false,

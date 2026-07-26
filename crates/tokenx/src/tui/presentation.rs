@@ -208,7 +208,9 @@ mod tests {
                 0.0,
             )],
             DateRange::none(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
         )
+        .unwrap()
     }
 
     #[test]
@@ -271,6 +273,7 @@ mod tests {
         let mut results = app(Tab::Subscription, false);
         results.replace_subscription_errors_for_test(vec![
             crate::subscription::SubscriptionError {
+                provider_id: Some(crate::subscription::ProviderId::Codex),
                 provider: "Codex".to_string(),
                 message: "credential expired".to_string(),
             },

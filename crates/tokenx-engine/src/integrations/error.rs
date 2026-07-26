@@ -13,6 +13,7 @@ pub(crate) struct InputDiscoveryError {
     pub(crate) path: PathBuf,
     pub(crate) operation: &'static str,
     source: BoxInputError,
+    cancelled: bool,
 }
 
 impl InputDiscoveryError {
@@ -25,7 +26,25 @@ impl InputDiscoveryError {
             path: path.into(),
             operation,
             source: Box::new(source),
+            cancelled: false,
         }
+    }
+
+    pub(crate) fn cancelled(
+        path: impl Into<PathBuf>,
+        operation: &'static str,
+        source: impl Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            operation,
+            source: Box::new(source),
+            cancelled: true,
+        }
+    }
+
+    pub(crate) const fn is_cancelled(&self) -> bool {
+        self.cancelled
     }
 }
 
@@ -106,6 +125,8 @@ pub(crate) enum InputPlanningError {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum InputPipelineError {
     #[error(transparent)]
+    Cancelled(#[from] crate::engine::AcquisitionCancelled),
+    #[error(transparent)]
     Parse(#[from] InputParseError),
     #[error(transparent)]
     CacheRead(#[from] CacheReadFailure),
@@ -117,12 +138,6 @@ pub(crate) enum InputPipelineError {
     CacheMaintenance(#[from] InputRecordCacheError),
     #[error("local input pipeline contract violation: {detail}")]
     Contract { detail: String },
-    #[error("{primary}; cache finalization also failed: {finalization}")]
-    Finalization {
-        #[source]
-        primary: Box<InputPipelineError>,
-        finalization: InputRecordCacheError,
-    },
 }
 
 impl InputPipelineError {
@@ -132,14 +147,8 @@ impl InputPipelineError {
         }
     }
 
-    pub(crate) fn with_finalization(
-        primary: InputPipelineError,
-        finalization: InputRecordCacheError,
-    ) -> Self {
-        Self::Finalization {
-            primary: Box::new(primary),
-            finalization,
-        }
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled(_))
     }
 }
 

@@ -781,8 +781,8 @@ fn total_inputs(app: &App) -> usize {
     health
         .clean_inputs
         .saturating_add(health.degraded_inputs)
-        .saturating_add(health.partial_inputs)
-        .saturating_add(health.failed_inputs)
+        .saturating_add(health.partial_inputs())
+        .saturating_add(health.failed_inputs())
 }
 
 fn generation_health(app: &App) -> &tokenx_engine::input_health::HealthSummary {

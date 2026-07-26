@@ -5,8 +5,8 @@
 use crate::input_health::{InputFailure, RecordRejectionReason, ScannedInput};
 use crate::records::error::{SessionParseError, SessionParseResult};
 use crate::records::{dedup_hash_str, normalize_agent_name, UsageRecord};
-use crate::{model_aliases, provider_identity, TokenBreakdown};
-use chrono::{Local, LocalResult, NaiveDateTime, TimeZone};
+use crate::{model_aliases, provider_identity, CalendarContext, TokenBreakdown};
+use chrono::{LocalResult, NaiveDateTime, TimeZone};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
@@ -20,12 +20,15 @@ const SKIP_EVENT_KINDS: &[&str] = &[
     "AgentPatchCreatedEvent",
 ];
 
-pub fn parse_junie_file(path: &Path) -> SessionParseResult<ScannedInput> {
+pub fn parse_junie_file(
+    path: &Path,
+    calendar: CalendarContext,
+) -> SessionParseResult<ScannedInput> {
     let file = std::fs::File::open(path)
         .map_err(|error| SessionParseError::new("open Junie events file", error))?;
 
     let session_id = session_id_from_path(path)?;
-    let default_timestamp = session_timestamp_from_id(&session_id);
+    let default_timestamp = session_timestamp_from_id(&session_id, calendar);
     let mut pending_turn_start = false;
     let mut scanned = ScannedInput::default();
     let mut seen = HashSet::new();
@@ -177,7 +180,7 @@ fn session_id_from_path(path: &Path) -> SessionParseResult<String> {
         })
 }
 
-fn session_timestamp_from_id(session_id: &str) -> Option<i64> {
+fn session_timestamp_from_id(session_id: &str, calendar: CalendarContext) -> Option<i64> {
     let mut parts = session_id.split('-');
     if parts.next()? != "session" {
         return None;
@@ -193,7 +196,7 @@ fn session_timestamp_from_id(session_id: &str) -> Option<i64> {
     }
 
     let naive = NaiveDateTime::parse_from_str(&format!("{date}{time}"), "%y%m%d%H%M%S").ok()?;
-    match Local.from_local_datetime(&naive) {
+    match calendar.timezone().from_local_datetime(&naive) {
         LocalResult::Single(datetime) => Some(datetime.timestamp_millis()),
         LocalResult::Ambiguous(earliest, _) => Some(earliest.timestamp_millis()),
         LocalResult::None => None,
@@ -389,6 +392,16 @@ mod tests {
     }
 
     fn parse_events_result(content: &str) -> SessionParseResult<ScannedInput> {
+        parse_events_result_with_calendar(
+            content,
+            CalendarContext::explicit("UTC").expect("UTC is a valid IANA timezone"),
+        )
+    }
+
+    fn parse_events_result_with_calendar(
+        content: &str,
+        calendar: CalendarContext,
+    ) -> SessionParseResult<ScannedInput> {
         let dir = TempDir::new().unwrap();
         let session_dir = dir.path().join("session-250622-101010");
         std::fs::create_dir_all(&session_dir).unwrap();
@@ -396,7 +409,7 @@ mod tests {
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file.flush().unwrap();
-        parse_junie_file(&path)
+        parse_junie_file(&path, calendar)
     }
 
     fn parse_events(content: &str) -> Vec<UsageRecord> {
@@ -431,6 +444,29 @@ mod tests {
         assert_eq!(message.cost, 0.0);
         assert_eq!(message.agent.as_deref(), Some("Main"));
         assert!(message.is_turn_start);
+    }
+
+    #[test]
+    fn session_id_timestamp_uses_explicit_calendar() {
+        let content = r#"{"event":{"agentEvent":{"kind":"LlmResponseMetadataEvent","modelUsage":[{"model":"gpt-5","inputTokens":10,"outputTokens":2}]}}}"#;
+        let utc = parse_events_result_with_calendar(
+            content,
+            CalendarContext::explicit("UTC").expect("UTC is a valid IANA timezone"),
+        )
+        .unwrap();
+        let shanghai = parse_events_result_with_calendar(
+            content,
+            CalendarContext::explicit("Asia/Shanghai")
+                .expect("Asia/Shanghai is a valid IANA timezone"),
+        )
+        .unwrap();
+
+        assert_eq!(utc.messages.len(), 1);
+        assert_eq!(shanghai.messages.len(), 1);
+        assert_eq!(
+            utc.messages[0].timestamp - shanghai.messages[0].timestamp,
+            8 * 60 * 60 * 1000
+        );
     }
 
     #[test]
@@ -628,7 +664,11 @@ mod tests {
         let session_dir = dir.path().join("session-250622-101010");
         std::fs::create_dir_all(&session_dir).unwrap();
 
-        let error = parse_junie_file(&session_dir.join("events.jsonl")).unwrap_err();
+        let error = parse_junie_file(
+            &session_dir.join("events.jsonl"),
+            CalendarContext::explicit("UTC").expect("UTC is a valid IANA timezone"),
+        )
+        .unwrap_err();
 
         assert_eq!(error.operation(), "open Junie events file");
     }

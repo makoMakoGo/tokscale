@@ -1,4 +1,4 @@
-use chrono::{Datelike, Local, NaiveDate};
+use chrono::{Datelike, NaiveDate};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Row, Scrollbar, ScrollbarOrientation, Table};
 use std::collections::BTreeMap;
@@ -466,16 +466,22 @@ pub fn render(
         return;
     }
 
-    let daily = app.get_sorted_daily();
+    let daily_order = app.daily_render_order();
 
-    let has_turn_data = daily.iter().any(|d| d.turn_count > 0);
-    let top_client_content_width = daily
-        .iter()
+    let ordered_daily = || {
+        daily_order.iter().map(|index| {
+            app.usage()
+                .daily
+                .get(*index)
+                .expect("cached daily order must reference the current projection")
+        })
+    };
+    let has_turn_data = ordered_daily().any(|day| day.turn_count > 0);
+    let top_client_content_width = ordered_daily()
         .filter_map(|day| top_daily_client(day).map(|client| display_width(&client.label)))
         .max()
         .unwrap_or(CLIENT_TOP_MIN_WIDTH);
-    let top_model_content_width = daily
-        .iter()
+    let top_model_content_width = ordered_daily()
         .filter_map(|day| top_daily_model(day).map(|model| display_width(&model.label)))
         .max()
         .unwrap_or(MODEL_TOP_MIN_WIDTH);
@@ -492,7 +498,7 @@ pub fn render(
     let metric_cache_write_style = app.theme.metric_cache_write_style();
     let current_row_style = app.theme.current_row_style();
     let striped_row_style = app.theme.striped_row_style();
-    let today = Local::now().date_naive();
+    let today = app.effective_date();
     let table_layout = daily_table_layout(
         table_area.width,
         has_turn_data,
@@ -531,7 +537,7 @@ pub fn render(
     )
     .height(1);
 
-    let daily_len = daily.len();
+    let daily_len = daily_order.len();
     let start = scroll_offset.min(daily_len);
 
     if start >= daily_len {
@@ -549,7 +555,7 @@ pub fn render(
     let mut data_idx = start;
 
     while data_idx < daily_len && lines_used < visible_height {
-        let day = daily[data_idx];
+        let day = &app.usage().daily[daily_order[data_idx]];
         let row_month = (day.date.year(), day.date.month());
 
         if prev_month != Some(row_month) && lines_used + 1 < visible_height {
@@ -665,7 +671,6 @@ pub fn render(
     }
 
     let data_rows_shown = data_idx - start;
-    drop(daily);
     app.set_max_visible_items(data_rows_shown.max(1));
     let widths = table_layout.widths;
 

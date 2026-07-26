@@ -17,9 +17,9 @@ pub(crate) fn discover_default_scanned_units(
 ) -> Result<Vec<DiscoveredInput>, InputDiscoveryError> {
     let default_root = source.resolve(ctx.home_dir);
 
-    let mut paths = scan_roots(client, [default_root], source.matcher())?;
+    let mut paths = scan_roots(ctx, [default_root], source.matcher())?;
     paths.extend(scan_roots(
-        client,
+        ctx,
         extra_roots_for_client(client, ctx)?,
         source.matcher(),
     )?);
@@ -45,7 +45,7 @@ pub(crate) fn extra_roots_for_client(
 }
 
 pub(crate) fn scan_roots<I>(
-    _client: ClientId,
+    ctx: &DiscoveryContext<'_>,
     roots: I,
     matcher: SourceMatcher,
 ) -> Result<Vec<PathBuf>, InputDiscoveryError>
@@ -54,16 +54,28 @@ where
 {
     let mut paths = Vec::new();
     for root in roots {
+        ctx.cancellation
+            .check(crate::engine::AcquisitionPhase::Discovery)
+            .map_err(|source| InputDiscoveryError::cancelled(&root, "walk directory", source))?;
         paths.extend(
             scanner::scan_directory(
                 &root,
                 |path| matcher.matches_file(path),
                 |path, depth| matcher.should_descend(path, depth),
+                &ctx.cancellation,
             )
-            .map_err(|source| InputDiscoveryError::new(&root, "walk directory", source))?,
+            .map_err(|source| discovery_walk_error(&root, source))?,
         );
     }
     Ok(paths)
+}
+
+fn discovery_walk_error(root: &Path, source: scanner::ScanDirectoryError) -> InputDiscoveryError {
+    if source.is_cancelled() {
+        InputDiscoveryError::cancelled(root, "walk directory", source)
+    } else {
+        InputDiscoveryError::new(root, "walk directory", source)
+    }
 }
 
 pub(crate) fn input_units_from_paths(
@@ -174,5 +186,43 @@ fn input_unit_for_policy(
             }
         },
         FingerprintPolicy::NoRecordCache => DiscoveredInput::no_record_cache(path, decoder),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[test]
+    fn cancellation_inside_walk_stays_a_typed_discovery_cancellation() {
+        let root = tempfile::TempDir::new().unwrap();
+        for index in 0..64 {
+            std::fs::write(root.path().join(format!("{index:03}.jsonl")), "").unwrap();
+        }
+        let cancellation = crate::engine::AcquisitionCancellation::default();
+        let worker_cancellation = cancellation.clone();
+        let visited = AtomicUsize::new(0);
+
+        let scan_error = scanner::scan_directory(
+            root.path(),
+            |_| {
+                let count = visited.fetch_add(1, Ordering::Relaxed) + 1;
+                if count == 6 {
+                    worker_cancellation.cancel();
+                }
+                true
+            },
+            |_, _| true,
+            &cancellation,
+        )
+        .unwrap_err();
+        let discovery_error = discovery_walk_error(root.path(), scan_error);
+
+        assert!(discovery_error.is_cancelled());
+        assert_eq!(visited.load(Ordering::Relaxed), 6);
+        let acquisition_error = crate::AcquisitionError::cancelled(discovery_error);
+        assert!(acquisition_error.is_cancelled());
     }
 }

@@ -9,7 +9,7 @@
 use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary};
 use crate::records::error::{SessionParseError, SessionParseResult};
 use crate::records::{normalize_workspace_key, workspace_label_from_key, UsageRecord};
-use crate::{checked_token_sum, TokenBreakdown};
+use crate::TokenBreakdown;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -88,14 +88,13 @@ pub(crate) struct CodexTotals {
 impl CodexTotals {
     fn from_usage(usage: &CodexTokenUsage) -> Self {
         Self {
-            input: usage.input_tokens.unwrap_or(0).max(0),
-            output: usage.output_tokens.unwrap_or(0).max(0),
+            input: usage.input_tokens.unwrap_or(0),
+            output: usage.output_tokens.unwrap_or(0),
             cached: usage
                 .cached_input_tokens
                 .unwrap_or(0)
-                .max(usage.cache_read_input_tokens.unwrap_or(0))
-                .max(0),
-            reasoning: usage.reasoning_output_tokens.unwrap_or(0).max(0),
+                .max(usage.cache_read_input_tokens.unwrap_or(0)),
+            reasoning: usage.reasoning_output_tokens.unwrap_or(0),
         }
     }
 
@@ -116,8 +115,10 @@ impl CodexTotals {
         })
     }
 
-    fn total(self) -> i64 {
-        checked_token_sum([self.input, self.output, self.cached, self.reasoning])
+    fn checked_total(self) -> Option<i64> {
+        [self.input, self.output, self.cached, self.reasoning]
+            .into_iter()
+            .try_fold(0_i64, i64::checked_add)
     }
 
     fn is_within(self, baseline: Self) -> bool {
@@ -128,9 +129,13 @@ impl CodexTotals {
     }
 
     fn looks_like_stale_regression(self, previous: Self, last: Self) -> bool {
-        let previous_total = previous.total();
-        let current_total = self.total();
-        let last_total = last.total();
+        let (Some(previous_total), Some(current_total), Some(last_total)) = (
+            previous.checked_total(),
+            self.checked_total(),
+            last.checked_total(),
+        ) else {
+            return false;
+        };
 
         if previous_total <= 0 || current_total <= 0 || last_total <= 0 {
             return false;
@@ -145,17 +150,49 @@ impl CodexTotals {
     }
 
     fn into_tokens(self) -> TokenBreakdown {
-        // Clamp cached to not exceed input to prevent inflated totals when
-        // malformed data reports more cached tokens than input tokens.
-        let clamped_cached = self.cached.min(self.input).max(0);
         TokenBreakdown {
-            input: (self.input - clamped_cached).max(0),
-            output: self.output.max(0),
-            cache_read: clamped_cached,
+            input: self.input - self.cached,
+            output: self.output,
+            cache_read: self.cached,
             cache_write: 0,
-            reasoning: self.reasoning.max(0),
+            reasoning: self.reasoning,
         }
     }
+}
+
+fn validate_codex_token_usage(usage: &CodexTokenUsage) -> SessionParseResult<CodexTotals> {
+    if [
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cached_input_tokens,
+        usage.cache_read_input_tokens,
+        usage.reasoning_output_tokens,
+        usage.total_tokens,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value < 0)
+    {
+        return Err(SessionParseError::invalid(
+            "validate Codex token-count usage",
+            "token bucket is negative",
+        ));
+    }
+
+    let totals = CodexTotals::from_usage(usage);
+    if totals.cached > totals.input {
+        return Err(SessionParseError::invalid(
+            "validate Codex token-count usage",
+            "cached input tokens exceed input tokens",
+        ));
+    }
+    if totals.checked_total().is_none() {
+        return Err(SessionParseError::invalid(
+            "validate Codex token-count usage",
+            "token total exceeds i64::MAX",
+        ));
+    }
+    Ok(totals)
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -307,6 +344,7 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
     session_id: &str,
     start_offset: u64,
     mut state: CodexParseState,
+    cancellation: Option<&crate::engine::AcquisitionCancellation>,
 ) -> SessionParseResult<ParsedCodexFile> {
     let mut messages = Vec::with_capacity(64);
     let mut buffer = Vec::with_capacity(4096);
@@ -317,6 +355,13 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
     let mut interrupted = None;
 
     'records: loop {
+        if cancellation.is_some_and(crate::engine::AcquisitionCancellation::is_cancelled) {
+            interrupted = Some(InputFailure::new(
+                "parse Codex JSONL input",
+                "acquisition cancelled",
+            ));
+            break;
+        }
         line.clear();
         let bytes_read = match reader.read_line(&mut line) {
             Ok(bytes_read) => bytes_read,
@@ -329,7 +374,15 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
         if bytes_read == 0 {
             break;
         }
-        consumed_offset += bytes_read as u64;
+        let Some(updated_offset) = consumed_offset.checked_add(bytes_read as u64) else {
+            let error = SessionParseError::invalid(
+                "track Codex JSONL input offset",
+                "consumed byte offset exceeds u64::MAX",
+            );
+            interrupted = Some(InputFailure::from(&error));
+            break;
+        };
+        consumed_offset = updated_offset;
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -448,10 +501,8 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                             }
                         }
                         if let Some(info) = token_info {
-                            if let Err(error) =
-                                remember_forked_child_inherited_baseline(&mut state, info)
-                            {
-                                interrupt_on_record!(RecordRejectionReason::MalformedRecord, error);
+                            if remember_forked_child_inherited_baseline(&mut state, info).is_err() {
+                                reject_record!(RecordRejectionReason::MalformedRecord);
                             }
                         }
                         continue;
@@ -575,8 +626,14 @@ fn parse_codex_reader<R: BufRead + ?Sized>(
                                 interrupt_on_record!(RecordRejectionReason::MalformedRecord, error)
                             }
                         };
-                    let total_usage = CodexTotals::from_usage(total_usage_record);
-                    let last_usage = CodexTotals::from_usage(last_usage_record);
+                    let total_usage = match validate_codex_token_usage(total_usage_record) {
+                        Ok(usage) => usage,
+                        Err(_) => reject_record!(RecordRejectionReason::MalformedRecord),
+                    };
+                    let last_usage = match validate_codex_token_usage(last_usage_record) {
+                        Ok(usage) => usage,
+                        Err(_) => reject_record!(RecordRejectionReason::MalformedRecord),
+                    };
 
                     // Forked child logs can replay more than one parent
                     // token_count row after the first child turn_context,
@@ -920,7 +977,13 @@ pub fn parse_codex_file(path: &Path) -> SessionParseResult<Vec<UsageRecord>> {
 
     let session_id = session_id_from_path(path)?;
     let mut reader = BufReader::new(file);
-    let parsed = parse_codex_reader(&mut reader, &session_id, 0, CodexParseState::default())?;
+    let parsed = parse_codex_reader(
+        &mut reader,
+        &session_id,
+        0,
+        CodexParseState::default(),
+        None,
+    )?;
     if let Some(failure) = parsed.interrupted.as_ref() {
         return Err(SessionParseError::invalid(
             "parse Codex JSONL input",
@@ -956,8 +1019,9 @@ fn remember_forked_child_inherited_baseline(
     state: &mut CodexParseState,
     info: &CodexInfo,
 ) -> SessionParseResult<()> {
-    let (total_usage, _) = required_codex_token_usage(info)?;
-    let totals = CodexTotals::from_usage(total_usage);
+    let (total_usage, last_usage) = required_codex_token_usage(info)?;
+    let totals = validate_codex_token_usage(total_usage)?;
+    validate_codex_token_usage(last_usage)?;
     state.previous_totals = Some(totals);
     state.forked_child_inherited_baseline = Some(totals);
     state.forked_child_inherited_reported_total = reported_total_tokens(total_usage);
@@ -982,26 +1046,61 @@ fn forked_child_should_skip_inherited_snapshot(
     false
 }
 
+#[cfg(test)]
 pub(crate) fn parse_codex_file_incremental(
     path: &Path,
     start_offset: u64,
     state: CodexParseState,
 ) -> SessionParseResult<ParsedCodexFile> {
-    parse_codex_file_incremental_hashed(path, start_offset, state, None)?.ok_or_else(|| {
-        SessionParseError::invalid(
-            "validate Codex incremental prefix",
-            "input ended before the requested start offset",
-        )
-    })
+    parse_codex_file_incremental_with_cancellation(path, start_offset, state, None)
 }
 
+pub(crate) fn parse_codex_file_incremental_with_cancellation(
+    path: &Path,
+    start_offset: u64,
+    state: CodexParseState,
+    cancellation: Option<&crate::engine::AcquisitionCancellation>,
+) -> SessionParseResult<ParsedCodexFile> {
+    parse_codex_file_incremental_hashed(path, start_offset, state, None, cancellation)?.ok_or_else(
+        || {
+            SessionParseError::invalid(
+                "validate Codex incremental prefix",
+                "input ended before the requested start offset",
+            )
+        },
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn parse_codex_file_incremental_verified(
     path: &Path,
     start_offset: u64,
     state: CodexParseState,
     expected_prefix_hash: [u8; 32],
 ) -> SessionParseResult<Option<ParsedCodexFile>> {
-    parse_codex_file_incremental_hashed(path, start_offset, state, Some(expected_prefix_hash))
+    parse_codex_file_incremental_verified_with_cancellation(
+        path,
+        start_offset,
+        state,
+        expected_prefix_hash,
+        None,
+    )
+}
+
+pub(crate) fn parse_codex_file_incremental_verified_with_cancellation(
+    path: &Path,
+    start_offset: u64,
+    state: CodexParseState,
+    expected_prefix_hash: [u8; 32],
+    cancellation: Option<&crate::engine::AcquisitionCancellation>,
+) -> SessionParseResult<Option<ParsedCodexFile>> {
+    parse_codex_file_incremental_hashed(
+        path,
+        start_offset,
+        state,
+        Some(expected_prefix_hash),
+        cancellation,
+    )
 }
 
 fn parse_codex_file_incremental_hashed(
@@ -1009,6 +1108,7 @@ fn parse_codex_file_incremental_hashed(
     start_offset: u64,
     state: CodexParseState,
     expected_prefix_hash: Option<[u8; 32]>,
+    cancellation: Option<&crate::engine::AcquisitionCancellation>,
 ) -> SessionParseResult<Option<ParsedCodexFile>> {
     let mut file = std::fs::File::open(path)
         .map_err(|source| SessionParseError::new("open Codex JSONL input", source))?;
@@ -1022,6 +1122,12 @@ fn parse_codex_file_incremental_hashed(
     let mut remaining = start_offset;
     let mut buffer = [0_u8; 64 * 1024];
     while remaining > 0 {
+        if cancellation.is_some_and(crate::engine::AcquisitionCancellation::is_cancelled) {
+            return Err(SessionParseError::invalid(
+                "read Codex incremental prefix",
+                "acquisition cancelled",
+            ));
+        }
         let bytes_to_read = remaining.min(buffer.len() as u64) as usize;
         let read = file
             .read(&mut buffer[..bytes_to_read])
@@ -1057,7 +1163,8 @@ fn parse_codex_file_incremental_hashed(
         path: path.to_path_buf(),
     };
     let mut reader = BufReader::new(hashing_reader);
-    let mut parsed = parse_codex_reader(&mut reader, &session_id, start_offset, state)?;
+    let mut parsed =
+        parse_codex_reader(&mut reader, &session_id, start_offset, state, cancellation)?;
     let hashing_reader = reader.into_inner();
     parsed.content_hash = Some(hashing_reader.hasher.finalize().into());
     parsed.ends_with_newline =
@@ -1236,6 +1343,28 @@ mod tests {
         assert!(parsed.interrupted.is_none());
         assert_eq!(parsed.rejections.total(), 1);
         assert!(super::parse_codex_file(file.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelled_reader_stops_before_consuming_the_next_record() {
+        let cancellation = crate::engine::AcquisitionCancellation::default();
+        cancellation.cancel();
+        let mut reader = Cursor::new(b"{\"type\":\"event_msg\"}\n".as_slice());
+
+        let parsed = parse_codex_reader(
+            &mut reader,
+            "session",
+            0,
+            CodexParseState::default(),
+            Some(&cancellation),
+        )
+        .unwrap();
+
+        assert!(parsed.messages.is_empty());
+        assert_eq!(parsed.consumed_offset, 0);
+        let interrupted = parsed.interrupted.unwrap();
+        assert_eq!(interrupted.operation, "parse Codex JSONL input");
+        assert_eq!(interrupted.message, "acquisition cancelled");
     }
 
     #[test]
@@ -1418,7 +1547,8 @@ mod tests {
         ));
 
         let parsed =
-            parse_codex_reader(&mut reader, "session", 0, CodexParseState::default()).unwrap();
+            parse_codex_reader(&mut reader, "session", 0, CodexParseState::default(), None)
+                .unwrap();
 
         assert!(parsed.messages.is_empty());
         assert!(parsed.rejections.is_empty());
@@ -1545,6 +1675,29 @@ mod tests {
     }
 
     #[test]
+    fn overflowing_token_snapshot_is_rejected_and_later_usage_survives() {
+        let content = concat!(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9223372036854775807,"output_tokens":1},"last_token_usage":{"input_tokens":9223372036854775807,"output_tokens":1}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":2},"last_token_usage":{"input_tokens":10,"output_tokens":2}}}}"#,
+            "\n",
+        );
+        let file = create_test_file(content);
+
+        let parsed =
+            super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
+                .unwrap();
+
+        assert!(parsed.interrupted.is_none());
+        assert_eq!(parsed.rejections.total(), 1);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].tokens.input, 10);
+        assert_eq!(parsed.messages[0].tokens.output, 2);
+    }
+
+    #[test]
     fn test_token_count_rejects_missing_last_usage() {
         let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
         let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5}}}}"#;
@@ -1586,42 +1739,96 @@ mod tests {
     }
 
     #[test]
-    fn test_into_tokens_clamps_cached_to_input() {
-        // When cached > input (malformed data), cached should be clamped to input
-        // so that input + cache_read never exceeds the raw input value.
-        let totals = CodexTotals {
-            input: 50,
-            output: 30,
-            cached: 100, // More than input — malformed
-            reasoning: 5,
-        };
-        let tokens = totals.into_tokens();
-        assert_eq!(tokens.cache_read, 50); // Clamped to input
-        assert_eq!(tokens.input, 0); // input - clamped_cached = 0
-        assert_eq!(tokens.output, 30);
-        assert_eq!(tokens.reasoning, 5);
+    fn test_cached_tokens_above_input_are_rejected_beside_good_sibling() {
+        let content = concat!(
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"cached_input_tokens":100,"output_tokens":30},"last_token_usage":{"input_tokens":50,"cached_input_tokens":100,"output_tokens":30}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+            "\n",
+        );
+        let file = create_test_file(content);
+
+        let parsed =
+            super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
+                .unwrap();
+
+        assert!(parsed.interrupted.is_none());
+        assert_eq!(parsed.rejections.total(), 1);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].tokens.input, 8);
+        assert_eq!(parsed.messages[0].tokens.cache_read, 2);
     }
 
     #[test]
-    fn test_token_count_ignores_negative_last_usage_in_baseline() {
+    fn test_negative_total_and_last_usage_do_not_advance_baseline() {
         let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
         let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5}}}}"#;
-        let line3 = r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":90,"cached_input_tokens":18,"output_tokens":27,"reasoning_output_tokens":4},"last_token_usage":{"input_tokens":-10,"cached_input_tokens":-2,"output_tokens":-3,"reasoning_output_tokens":-1}}}}"#;
-        let line4 = r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":22,"output_tokens":33,"reasoning_output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#;
-        let content = format!("{}\n{}\n{}\n{}", line1, line2, line3, line4);
+        let line3 = r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":105,"cached_input_tokens":21,"cache_read_input_tokens":-2,"output_tokens":31,"reasoning_output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":1,"reasoning_output_tokens":0}}}}"#;
+        let line4 = r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":108,"cached_input_tokens":21,"output_tokens":32,"reasoning_output_tokens":5},"last_token_usage":{"input_tokens":8,"cached_input_tokens":2,"cache_read_input_tokens":-1,"output_tokens":2,"reasoning_output_tokens":0}}}}"#;
+        let line5 = r#"{"timestamp":"2026-01-01T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":22,"output_tokens":33,"reasoning_output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#;
+        let content = format!("{line1}\n{line2}\n{line3}\n{line4}\n{line5}");
         let file = create_test_file(&content);
 
-        let messages = parse_codex_file(file.path());
+        let parsed =
+            super::parse_codex_file_incremental(file.path(), 0, CodexParseState::default())
+                .unwrap();
 
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].tokens.input, 80);
-        assert_eq!(messages[0].tokens.output, 30);
-        assert_eq!(messages[0].tokens.cache_read, 20);
-        assert_eq!(messages[0].tokens.reasoning, 5);
-        assert_eq!(messages[1].tokens.input, 8);
-        assert_eq!(messages[1].tokens.output, 3);
-        assert_eq!(messages[1].tokens.cache_read, 2);
-        assert_eq!(messages[1].tokens.reasoning, 1);
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(parsed.messages[0].tokens.input, 80);
+        assert_eq!(parsed.messages[1].tokens.input, 8);
+        assert_eq!(parsed.messages[1].tokens.output, 3);
+        assert_eq!(parsed.messages[1].tokens.cache_read, 2);
+        assert_eq!(parsed.messages[1].tokens.reasoning, 1);
+        assert_eq!(parsed.rejections.total(), 2);
+        assert!(parsed.interrupted.is_none());
+        let totals = parsed.state.previous_totals.unwrap();
+        assert_eq!(totals.input, 110);
+        assert_eq!(totals.output, 33);
+        assert_eq!(totals.cached, 22);
+        assert_eq!(totals.reasoning, 6);
+    }
+
+    #[test]
+    fn invalid_fork_usage_does_not_replace_inherited_baseline() {
+        let baseline = CodexTotals {
+            input: 7,
+            output: 2,
+            cached: 1,
+            reasoning: 0,
+        };
+        let mut state = CodexParseState {
+            previous_totals: Some(baseline),
+            forked_child_inherited_baseline: Some(baseline),
+            forked_child_inherited_reported_total: Some(9),
+            ..CodexParseState::default()
+        };
+        let info = CodexInfo {
+            model: None,
+            model_name: None,
+            total_token_usage: Some(CodexTokenUsage {
+                input_tokens: Some(20),
+                output_tokens: Some(4),
+                cached_input_tokens: Some(2),
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: Some(1),
+                total_tokens: Some(25),
+            }),
+            last_token_usage: Some(CodexTokenUsage {
+                input_tokens: Some(10),
+                output_tokens: Some(2),
+                cached_input_tokens: Some(2),
+                cache_read_input_tokens: Some(-1),
+                reasoning_output_tokens: Some(0),
+                total_tokens: Some(12),
+            }),
+        };
+
+        assert!(remember_forked_child_inherited_baseline(&mut state, &info).is_err());
+        assert_eq!(state.previous_totals, Some(baseline));
+        assert_eq!(state.forked_child_inherited_baseline, Some(baseline));
+        assert_eq!(state.forked_child_inherited_reported_total, Some(9));
     }
 
     #[test]

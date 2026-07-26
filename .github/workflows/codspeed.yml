@@ -11,9 +11,6 @@ on:
       - "Cargo.lock"
       - ".github/workflows/codspeed.yml"
   pull_request:
-    branches:
-      - main
-      - "codex/**"
     paths:
       - "crates/**"
       - "Cargo.toml"
@@ -49,9 +46,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: codspeed-v2-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: codspeed-tokenx-v1-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            codspeed-v2-${{ runner.os }}-cargo-
+            codspeed-tokenx-v1-${{ runner.os }}-cargo-
 
       - name: Install cargo-codspeed
         run: cargo install cargo-codspeed --locked --version 4.7.0

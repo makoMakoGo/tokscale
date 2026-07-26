@@ -65,6 +65,8 @@ pub(crate) struct UsageMetric {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubscriptionOutput {
     pub provider: ProviderId,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stale: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<UsageAccount>,
     pub plan: Option<String>,
@@ -92,17 +94,35 @@ pub(crate) struct UsageAccount {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SubscriptionError {
+    pub provider_id: Option<ProviderId>,
     pub provider: String,
     pub message: String,
 }
 
 impl SubscriptionError {
-    pub(crate) fn new(provider: impl Into<String>, error: impl std::fmt::Display) -> Self {
+    pub(crate) fn global(provider: impl Into<String>, error: impl std::fmt::Display) -> Self {
         Self {
+            provider_id: None,
             provider: provider.into(),
             message: error.to_string(),
         }
     }
+
+    pub(crate) fn provider(provider: ProviderId, error: impl std::fmt::Display) -> Self {
+        Self {
+            provider_id: Some(provider),
+            provider: provider.label().to_string(),
+            message: error.to_string(),
+        }
+    }
+
+    fn is_for(&self, provider: ProviderId) -> bool {
+        self.provider_id == Some(provider)
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Default)]
@@ -159,11 +179,23 @@ impl SubscriptionState {
         cached: Result<Option<Vec<SubscriptionOutput>>>,
     ) -> Self {
         let (outputs, errors) = match cached {
-            Ok(Some(outputs)) => (outputs, Vec::new()),
+            Ok(Some(outputs)) if enabled.is_empty() => (outputs, Vec::new()),
+            Ok(Some(outputs)) => (
+                enabled
+                    .iter()
+                    .filter_map(|provider| {
+                        outputs
+                            .iter()
+                            .find(|output| output.provider == *provider)
+                            .cloned()
+                    })
+                    .collect(),
+                Vec::new(),
+            ),
             Ok(None) => (Vec::new(), Vec::new()),
             Err(error) => (
                 Vec::new(),
-                vec![SubscriptionError::new("Subscription cache", error)],
+                vec![SubscriptionError::global("Subscription cache", error)],
             ),
         };
         Self {
@@ -265,10 +297,54 @@ impl SubscriptionState {
     ) -> SubscriptionInstall {
         let mut errors = batch.errors;
         self.last_checked = Some(Instant::now());
-        if !batch.outputs.is_empty() {
-            self.outputs = batch.outputs;
+        let previous = std::mem::take(&mut self.outputs);
+        let mut refreshed = batch.outputs;
+        for output in &mut refreshed {
+            output.stale = false;
+        }
+        let merge_order = if self.enabled.is_empty() {
+            let mut providers = previous
+                .iter()
+                .map(|output| output.provider)
+                .collect::<Vec<_>>();
+            for provider in refreshed.iter().map(|output| output.provider) {
+                if !providers.contains(&provider) {
+                    providers.push(provider);
+                }
+            }
+            providers
+        } else {
+            self.enabled.clone()
+        };
+        self.outputs = merge_order
+            .into_iter()
+            .filter_map(|provider| {
+                refreshed
+                    .iter()
+                    .find(|output| output.provider == provider)
+                    .cloned()
+                    .or_else(|| {
+                        let failed = errors.iter().any(|error| error.is_for(provider));
+                        let missing_during_failed_batch = !errors.is_empty()
+                            && refreshed.iter().all(|output| output.provider != provider);
+                        (failed || missing_during_failed_batch)
+                            .then(|| {
+                                previous
+                                    .iter()
+                                    .find(|output| output.provider == provider)
+                                    .cloned()
+                            })
+                            .flatten()
+                            .map(|mut output| {
+                                output.stale = true;
+                                output
+                            })
+                    })
+            })
+            .collect();
+        if !self.outputs.is_empty() {
             if let Err(error) = persist(&self.outputs) {
-                errors.push(SubscriptionError::new("Subscription cache", error));
+                errors.push(SubscriptionError::global("Subscription cache", error));
             }
             self.errors = errors;
             if self.errors.is_empty() {
@@ -288,7 +364,7 @@ impl SubscriptionState {
 
     pub(crate) fn install_disconnected(&mut self) {
         self.last_checked = Some(Instant::now());
-        self.errors = vec![SubscriptionError::new(
+        self.errors = vec![SubscriptionError::global(
             "unknown",
             "subscription fetch worker disconnected",
         )];
@@ -373,6 +449,7 @@ impl SubscriptionOutput {
     pub(super) fn new(provider: ProviderId, payload: SubscriptionPayload) -> Self {
         Self {
             provider,
+            stale: false,
             account: payload.account,
             plan: payload.plan,
             email: payload.email,
@@ -397,13 +474,18 @@ impl SubscriptionOutput {
     }
 
     pub(crate) fn display_name(&self) -> String {
-        match self.account {
+        let display_name = match self.account {
             Some(_) => format!(
                 "{} ({})",
                 self.provider.label(),
                 self.account_display_name().unwrap_or_default()
             ),
             None => self.provider.label().to_string(),
+        };
+        if self.stale {
+            format!("{display_name} (stale)")
+        } else {
+            display_name
         }
     }
 }
@@ -496,6 +578,51 @@ mod state_tests {
     }
 
     #[test]
+    fn nonempty_allowlist_filters_and_orders_cached_outputs() {
+        let payload = || SubscriptionPayload {
+            account: None,
+            plan: None,
+            email: None,
+            metrics: Vec::new(),
+        };
+        let cached = vec![
+            SubscriptionOutput::new(ProviderId::Claude, payload()),
+            SubscriptionOutput::new(ProviderId::Codex, payload()),
+            SubscriptionOutput::new(ProviderId::Zai, payload()),
+        ];
+
+        let state =
+            SubscriptionState::new(vec![ProviderId::Zai, ProviderId::Codex], Ok(Some(cached)));
+
+        assert_eq!(
+            state
+                .outputs()
+                .iter()
+                .map(|output| output.provider)
+                .collect::<Vec<_>>(),
+            vec![ProviderId::Zai, ProviderId::Codex]
+        );
+    }
+
+    #[test]
+    fn empty_allowlist_keeps_all_cached_outputs_for_cache_display_mode() {
+        let payload = || SubscriptionPayload {
+            account: None,
+            plan: None,
+            email: None,
+            metrics: Vec::new(),
+        };
+        let cached = vec![
+            SubscriptionOutput::new(ProviderId::Claude, payload()),
+            SubscriptionOutput::new(ProviderId::Codex, payload()),
+        ];
+
+        let state = SubscriptionState::new(Vec::new(), Ok(Some(cached)));
+
+        assert_eq!(state.outputs().len(), 2);
+    }
+
+    #[test]
     fn disconnected_worker_settles_the_lifecycle() {
         let mut state = SubscriptionState::new(vec![ProviderId::Codex], Ok(None));
         assert_eq!(state.request_fetch(), FetchRequest::Started);
@@ -505,5 +632,59 @@ mod state_tests {
         assert!(matches!(state.poll(), SubscriptionPoll::Disconnected));
         assert!(!state.is_fetching());
         assert!(!state.should_start_initial_fetch(true));
+    }
+
+    #[test]
+    fn partial_refresh_replaces_successes_and_marks_failed_provider_snapshot_stale() {
+        let cached_codex = SubscriptionOutput::new(
+            ProviderId::Codex,
+            SubscriptionPayload {
+                account: None,
+                plan: Some("Old Codex".to_string()),
+                email: None,
+                metrics: Vec::new(),
+            },
+        );
+        let cached_claude = SubscriptionOutput::new(
+            ProviderId::Claude,
+            SubscriptionPayload {
+                account: None,
+                plan: Some("Old Claude".to_string()),
+                email: None,
+                metrics: Vec::new(),
+            },
+        );
+        let refreshed_codex = SubscriptionOutput::new(
+            ProviderId::Codex,
+            SubscriptionPayload {
+                account: None,
+                plan: Some("New Codex".to_string()),
+                email: None,
+                metrics: Vec::new(),
+            },
+        );
+        let mut state = SubscriptionState::new(
+            vec![ProviderId::Codex, ProviderId::Claude],
+            Ok(Some(vec![cached_codex, cached_claude])),
+        );
+
+        let install = state.install(
+            SubscriptionBatch {
+                outputs: vec![refreshed_codex],
+                errors: vec![SubscriptionError::provider(
+                    ProviderId::Claude,
+                    "credential expired",
+                )],
+            },
+            |_| Ok(()),
+        );
+
+        assert_eq!(install, SubscriptionInstall::LoadedWithErrors);
+        assert_eq!(state.outputs.len(), 2);
+        assert_eq!(state.outputs[0].plan.as_deref(), Some("New Codex"));
+        assert!(!state.outputs[0].stale);
+        assert_eq!(state.outputs[1].plan.as_deref(), Some("Old Claude"));
+        assert!(state.outputs[1].stale);
+        assert_eq!(state.outputs[1].display_name(), "Claude (stale)");
     }
 }

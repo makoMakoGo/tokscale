@@ -6,19 +6,17 @@ use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary,
 use crate::records::error::{SessionParseError, SessionParseResult};
 use crate::records::utils::{extract_i64, extract_string, parse_timestamp_value};
 use crate::records::{normalize_workspace_key, workspace_label_from_key, UsageRecord};
-use crate::{checked_token_add, model_aliases, provider_identity, TokenBreakdown};
+use crate::{model_aliases, provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-type ParentSubagentTypeCache = HashMap<PathBuf, HashMap<String, String>>;
 
 /// Claude Code entry structure (from JSONL files)
 #[derive(Debug, Deserialize)]
@@ -75,6 +73,61 @@ struct ClaudeProjectCandidates {
     cwds: HashSet<String>,
 }
 
+#[derive(Debug)]
+struct ParentMetadata {
+    project_candidates: ClaudeProjectCandidates,
+    subagent_types: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct ParentMetadataFailure {
+    operation: &'static str,
+    kind: ErrorKind,
+    detail: String,
+}
+
+impl ParentMetadataFailure {
+    fn at_line(
+        operation: &'static str,
+        kind: ErrorKind,
+        line_number: usize,
+        source: impl std::fmt::Display,
+    ) -> Self {
+        Self {
+            operation,
+            kind,
+            detail: format!("line {line_number}: {source}"),
+        }
+    }
+
+    fn from_io(operation: &'static str, source: std::io::Error) -> Self {
+        Self {
+            operation,
+            kind: source.kind(),
+            detail: source.to_string(),
+        }
+    }
+
+    fn invalid(operation: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            operation,
+            kind: ErrorKind::InvalidData,
+            detail: detail.into(),
+        }
+    }
+
+    fn to_parse_error(&self, path: &Path) -> SessionParseError {
+        SessionParseError::at_path(
+            path,
+            self.operation,
+            std::io::Error::new(self.kind, self.detail.clone()),
+        )
+    }
+}
+
+type ParentMetadataResult = Result<Arc<ParentMetadata>, ParentMetadataFailure>;
+type ParentMetadataCell = OnceLock<ParentMetadataResult>;
+
 impl ClaudeProjectCandidates {
     fn record(&mut self, project_path: Option<&str>, cwd: Option<&str>) {
         if let Some(project_path) = project_path.filter(|path| !path.trim().is_empty()) {
@@ -115,22 +168,26 @@ pub(crate) enum ClaudeProjectDependency {
 #[derive(Debug)]
 pub(crate) struct ClaudeProjectResolver {
     home_dir: Option<PathBuf>,
-    parent_candidates: Mutex<HashMap<PathBuf, ClaudeProjectCandidates>>,
+    parent_metadata: Mutex<HashMap<PathBuf, Arc<ParentMetadataCell>>>,
     external_candidates: OnceLock<ClaudeProjectCandidates>,
     reported_diagnostics: Mutex<HashSet<(String, &'static str)>>,
     #[cfg(test)]
     external_loads: AtomicUsize,
+    #[cfg(test)]
+    parent_metadata_loads: AtomicUsize,
 }
 
 impl ClaudeProjectResolver {
     pub(crate) fn new(home_dir: Option<&Path>) -> Self {
         Self {
             home_dir: home_dir.map(Path::to_path_buf),
-            parent_candidates: Mutex::new(HashMap::new()),
+            parent_metadata: Mutex::new(HashMap::new()),
             external_candidates: OnceLock::new(),
             reported_diagnostics: Mutex::new(HashSet::new()),
             #[cfg(test)]
             external_loads: AtomicUsize::new(0),
+            #[cfg(test)]
+            parent_metadata_loads: AtomicUsize::new(0),
         }
     }
 
@@ -151,17 +208,26 @@ impl ClaudeProjectResolver {
 
         if let Some(parent_session_id) = parent_session_id {
             match find_parent_session_path(input_path, parent_session_id) {
-                Ok(Some(parent_path)) => {
-                    let parent_candidates = self.parent_candidates(&parent_path);
-                    let parent_match =
-                        match_project_candidate_tiers(project_key, &parent_candidates);
-                    if !matches!(parent_match, CandidateMatch::None) {
-                        return (
-                            self.finish_match(project_key, parent_match, input_path),
-                            ClaudeProjectDependency::ParentSession,
+                Ok(Some(parent_path)) => match self.parent_metadata(&parent_path) {
+                    Ok(metadata) => {
+                        let parent_match = match_project_candidate_tiers(
+                            project_key,
+                            &metadata.project_candidates,
                         );
+                        if !matches!(parent_match, CandidateMatch::None) {
+                            return (
+                                self.finish_match(project_key, parent_match, input_path),
+                                ClaudeProjectDependency::ParentSession,
+                            );
+                        }
                     }
-                }
+                    Err(error) => tracing::warn!(
+                        code = "claude_project_parent_unreadable",
+                        input = %parent_path.display(),
+                        error = %error,
+                        "could not read Claude parent session while resolving project path"
+                    ),
+                },
                 Ok(None) => {}
                 Err(error) => tracing::warn!(
                     code = "claude_project_parent_unreadable",
@@ -204,31 +270,38 @@ impl ClaudeProjectResolver {
         }
     }
 
-    fn parent_candidates(&self, parent_path: &Path) -> ClaudeProjectCandidates {
-        if let Some(cached) = self
-            .parent_candidates
+    fn parent_metadata(&self, parent_path: &Path) -> SessionParseResult<Arc<ParentMetadata>> {
+        let canonical_path = std::fs::canonicalize(parent_path).map_err(|source| {
+            SessionParseError::at_path(parent_path, "canonicalize Claude parent session", source)
+        })?;
+        let cell = self
+            .parent_metadata
             .lock()
-            .expect("Claude parent candidate cache poisoned")
-            .get(parent_path)
-            .cloned()
-        {
-            return cached;
-        }
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(canonical_path.clone())
+            .or_insert_with(|| Arc::new(OnceLock::new()))
+            .clone();
+        cell.get_or_init(|| {
+            #[cfg(test)]
+            self.parent_metadata_loads.fetch_add(1, Ordering::Relaxed);
+            read_parent_metadata(&canonical_path).map(Arc::new)
+        })
+        .clone()
+        .map_err(|failure| failure.to_parse_error(&canonical_path))
+    }
 
-        let candidates = read_project_candidates_from_jsonl(parent_path).unwrap_or_else(|error| {
-            tracing::warn!(
-                code = "claude_project_parent_unreadable",
-                    input = %parent_path.display(),
-                error = %error,
-                "could not read Claude parent session while resolving project path"
-            );
-            ClaudeProjectCandidates::default()
-        });
-        self.parent_candidates
-            .lock()
-            .expect("Claude parent candidate cache poisoned")
-            .insert(parent_path.to_path_buf(), candidates.clone());
-        candidates
+    fn lookup_subagent_type(
+        &self,
+        parent_path: &Path,
+        agent_id: &str,
+    ) -> SessionParseResult<Option<String>> {
+        let metadata = self.parent_metadata(parent_path)?;
+        Ok(metadata.subagent_types.get(agent_id).cloned())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parent_metadata_load_count(&self) -> usize {
+        self.parent_metadata_loads.load(Ordering::Relaxed)
     }
 
     fn external_candidates(&self) -> &ClaudeProjectCandidates {
@@ -246,7 +319,7 @@ impl ClaudeProjectResolver {
         let inserted = self
             .reported_diagnostics
             .lock()
-            .expect("Claude project diagnostic cache poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert((project_key.to_string(), code));
         if inserted {
             tracing::warn!(
@@ -305,7 +378,7 @@ fn resolve_subagent_name(
     path: &Path,
     parent_session_id: Option<&str>,
     entry_agent_id: Option<&str>,
-    parent_cache: &mut ParentSubagentTypeCache,
+    project_resolver: &ClaudeProjectResolver,
 ) -> SessionParseResult<String> {
     let stem = match path.file_stem().and_then(|s| s.to_str()) {
         Some(s) => s,
@@ -362,7 +435,7 @@ fn resolve_subagent_name(
     if let (Some(parent_id), Some(agent_id)) = (parent_session_id, lookup_agent_id.as_deref()) {
         if let Some(parent_path) = find_parent_session_path(path, parent_id)? {
             if let Some(subagent_type) =
-                lookup_subagent_type_in_parent(&parent_path, agent_id, parent_cache)?
+                project_resolver.lookup_subagent_type(&parent_path, agent_id)?
             {
                 let subagent_type = subagent_type.trim();
                 if subagent_type.is_empty() {
@@ -445,38 +518,20 @@ fn find_parent_session_path(
     Ok(None)
 }
 
-/// Scan a parent session JSONL to recover `subagent_type` for a given `agent_id`.
+/// Read all parent-session metadata needed by sidechains in one pass.
 ///
 /// The parent session contains:
-/// - Assistant messages with `tool_use` blocks (`name: "Agent"`, `input.subagent_type`)
-/// - User messages with `tool_result` blocks whose text contains `agentId: <hex>`
+/// - project paths and working directories used for workspace resolution;
+/// - Assistant `tool_use` blocks (`name: "Agent"`, `input.subagent_type`);
+/// - User `tool_result` blocks whose text contains `agentId: <hex>`.
 ///
 /// We join on `tool_use_id` to map `agentId → subagent_type`.
-fn lookup_subagent_type_in_parent(
-    parent_path: &Path,
-    target_agent_id: &str,
-    parent_cache: &mut ParentSubagentTypeCache,
-) -> SessionParseResult<Option<String>> {
-    if !parent_cache.contains_key(parent_path) {
-        parent_cache.insert(
-            parent_path.to_path_buf(),
-            build_parent_subagent_type_lookup(parent_path)?,
-        );
-    }
-
-    Ok(parent_cache
-        .get(parent_path)
-        .and_then(|lookup| lookup.get(target_agent_id).cloned()))
-}
-
-fn build_parent_subagent_type_lookup(
-    parent_path: &Path,
-) -> SessionParseResult<HashMap<String, String>> {
-    let file = std::fs::File::open(parent_path).map_err(|source| {
-        SessionParseError::at_path(parent_path, "open Claude parent session", source)
-    })?;
+fn read_parent_metadata(parent_path: &Path) -> Result<ParentMetadata, ParentMetadataFailure> {
+    let file = std::fs::File::open(parent_path)
+        .map_err(|source| ParentMetadataFailure::from_io("open Claude parent metadata", source))?;
     let reader = BufReader::new(file);
 
+    let mut project_candidates = ClaudeProjectCandidates::default();
     // tool_use.id → subagent_type
     let mut tool_use_types: HashMap<String, String> = HashMap::new();
     // tool_use_id → agentId (from tool_result text)
@@ -484,10 +539,11 @@ fn build_parent_subagent_type_lookup(
 
     for (line_index, line) in reader.lines().enumerate() {
         let line = line.map_err(|source| {
-            SessionParseError::at_path(
-                parent_path,
-                "read Claude parent session line",
-                std::io::Error::new(source.kind(), format!("line {}: {source}", line_index + 1)),
+            ParentMetadataFailure::at_line(
+                "read Claude parent metadata",
+                source.kind(),
+                line_index + 1,
+                source,
             )
         })?;
         let trimmed = line.trim();
@@ -498,15 +554,27 @@ fn build_parent_subagent_type_lookup(
         let has_subagent_type = trimmed.contains("subagent_type");
         let has_agent_id_text = trimmed.contains("agentId:");
         let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|source| {
-            SessionParseError::at_path(
-                parent_path,
-                "decode Claude parent session line",
-                std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!("line {}: {source}", line_index + 1),
-                ),
+            ParentMetadataFailure::at_line(
+                "decode Claude parent metadata",
+                ErrorKind::InvalidData,
+                line_index + 1,
+                source,
             )
         })?;
+
+        if value
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|entry_type| !entry_type.trim().is_empty())
+        {
+            project_candidates.record(
+                value
+                    .get("projectPath")
+                    .or_else(|| value.get("project_path"))
+                    .and_then(Value::as_str),
+                value.get("cwd").and_then(Value::as_str),
+            );
+        }
         if !has_subagent_type && !has_agent_id_text {
             continue;
         }
@@ -525,15 +593,11 @@ fn build_parent_subagent_type_lookup(
                 .get("type")
                 .and_then(|value| value.as_str())
                 .ok_or_else(|| {
-                    SessionParseError::at_path(
-                        parent_path,
+                    ParentMetadataFailure::invalid(
                         "validate Claude parent session line",
-                        std::io::Error::new(
-                            ErrorKind::InvalidData,
-                            format!(
-                                "line {}: message content block is missing type",
-                                line_index + 1
-                            ),
+                        format!(
+                            "line {}: message content block is missing type",
+                            line_index + 1
                         ),
                     )
                 })?;
@@ -551,26 +615,15 @@ fn build_parent_subagent_type_lookup(
                         .get("id")
                         .and_then(|value| value.as_str())
                         .ok_or_else(|| {
-                            SessionParseError::at_path(
-                                parent_path,
+                            ParentMetadataFailure::invalid(
                                 "validate Claude parent session line",
-                                std::io::Error::new(
-                                    ErrorKind::InvalidData,
-                                    format!(
-                                        "line {}: subagent tool_use is missing id",
-                                        line_index + 1
-                                    ),
-                                ),
+                                format!("line {}: subagent tool_use is missing id", line_index + 1),
                             )
                         })?;
                     if subagent_type.trim().is_empty() {
-                        return Err(SessionParseError::at_path(
-                            parent_path,
+                        return Err(ParentMetadataFailure::invalid(
                             "validate Claude parent session line",
-                            std::io::Error::new(
-                                ErrorKind::InvalidData,
-                                format!("line {}: subagent_type is blank", line_index + 1),
-                            ),
+                            format!("line {}: subagent_type is blank", line_index + 1),
                         ));
                     }
                     tool_use_types.insert(id.to_string(), subagent_type.to_string());
@@ -585,15 +638,11 @@ fn build_parent_subagent_type_lookup(
                     let tool_use_id = match block.get("tool_use_id").and_then(|i| i.as_str()) {
                         Some(id) => id.to_string(),
                         None => {
-                            return Err(SessionParseError::at_path(
-                                parent_path,
+                            return Err(ParentMetadataFailure::invalid(
                                 "validate Claude parent session line",
-                                std::io::Error::new(
-                                    ErrorKind::InvalidData,
-                                    format!(
-                                        "line {}: agent tool_result is missing tool_use_id",
-                                        line_index + 1
-                                    ),
+                                format!(
+                                    "line {}: agent tool_result is missing tool_use_id",
+                                    line_index + 1
                                 ),
                             ));
                         }
@@ -603,15 +652,11 @@ fn build_parent_subagent_type_lookup(
                         .get("content")
                         .and_then(|content| content.as_array())
                         .ok_or_else(|| {
-                            SessionParseError::at_path(
-                                parent_path,
+                            ParentMetadataFailure::invalid(
                                 "validate Claude parent session line",
-                                std::io::Error::new(
-                                    ErrorKind::InvalidData,
-                                    format!(
-                                        "line {}: agent tool_result content is not an array",
-                                        line_index + 1
-                                    ),
+                                format!(
+                                    "line {}: agent tool_result content is not an array",
+                                    line_index + 1
                                 ),
                             )
                         })?;
@@ -626,15 +671,11 @@ fn build_parent_subagent_type_lookup(
                         }
                     }
                     if !linked_agent {
-                        return Err(SessionParseError::at_path(
-                            parent_path,
+                        return Err(ParentMetadataFailure::invalid(
                             "validate Claude parent session line",
-                            std::io::Error::new(
-                                ErrorKind::InvalidData,
-                                format!(
-                                    "line {}: agent tool_result contains no valid agentId",
-                                    line_index + 1
-                                ),
+                            format!(
+                                "line {}: agent tool_result contains no valid agentId",
+                                line_index + 1
                             ),
                         ));
                     }
@@ -651,7 +692,10 @@ fn build_parent_subagent_type_lookup(
         }
     }
 
-    Ok(subagent_types)
+    Ok(ParentMetadata {
+        project_candidates,
+        subagent_types,
+    })
 }
 
 fn sidechain_agent_id_from_stem(stem: &str) -> Option<String> {
@@ -697,24 +741,23 @@ pub fn parse_claude_file_with_home(
     path: &Path,
     home_dir: Option<&Path>,
 ) -> SessionParseResult<ScannedInput> {
-    let mut parent_cache = ParentSubagentTypeCache::new();
     let project_resolver = ClaudeProjectResolver::new(home_dir);
-    parse_claude_file_with_cache_home_and_resolver(path, &mut parent_cache, &project_resolver)
+    parse_claude_file_with_project_resolver(path, &project_resolver, None)
         .map(|(scanned, _)| scanned)
 }
 
-pub(crate) fn parse_claude_file_with_project_resolver(
+pub(crate) fn parse_claude_file_with_project_resolver_and_cancellation(
     path: &Path,
     project_resolver: &ClaudeProjectResolver,
+    cancellation: Option<&crate::engine::AcquisitionCancellation>,
 ) -> SessionParseResult<(ScannedInput, ClaudeProjectDependency)> {
-    let mut parent_cache = ParentSubagentTypeCache::new();
-    parse_claude_file_with_cache_home_and_resolver(path, &mut parent_cache, project_resolver)
+    parse_claude_file_with_project_resolver(path, project_resolver, cancellation)
 }
 
-fn parse_claude_file_with_cache_home_and_resolver(
+fn parse_claude_file_with_project_resolver(
     path: &Path,
-    parent_cache: &mut ParentSubagentTypeCache,
     project_resolver: &ClaudeProjectResolver,
+    cancellation: Option<&crate::engine::AcquisitionCancellation>,
 ) -> SessionParseResult<(ScannedInput, ClaudeProjectDependency)> {
     if is_workflow_journal(path) {
         return Ok((
@@ -771,6 +814,13 @@ fn parse_claude_file_with_cache_home_and_resolver(
     let mut is_main_session = true;
 
     for (line_index, line) in reader.lines().enumerate() {
+        if cancellation.is_some_and(crate::engine::AcquisitionCancellation::is_cancelled) {
+            interrupted = Some(InputFailure::new(
+                "parse Claude session",
+                "acquisition cancelled",
+            ));
+            break;
+        }
         let line = match line {
             Ok(line) => line,
             Err(source) => {
@@ -886,7 +936,7 @@ fn parse_claude_file_with_cache_home_and_resolver(
                         path,
                         entry.session_id.as_deref(),
                         entry.agent_id.as_deref(),
-                        parent_cache,
+                        project_resolver,
                     ) {
                         Ok(agent) => agent,
                         Err(error) => {
@@ -975,13 +1025,32 @@ fn parse_claude_file_with_cache_home_and_resolver(
                     .usage
                     .as_ref()
                     .map(|usage| TokenBreakdown {
-                        input: usage.input_tokens.unwrap_or(0).max(0),
-                        output: usage.output_tokens.unwrap_or(0).max(0),
-                        cache_read: usage.cache_read_input_tokens.unwrap_or(0).max(0),
-                        cache_write: usage.cache_creation_input_tokens.unwrap_or(0).max(0),
+                        input: usage.input_tokens.unwrap_or(0),
+                        output: usage.output_tokens.unwrap_or(0),
+                        cache_read: usage.cache_read_input_tokens.unwrap_or(0),
+                        cache_write: usage.cache_creation_input_tokens.unwrap_or(0),
                         reasoning: 0,
                     })
                     .unwrap_or_default();
+                if crate::positive_token_total(&token_breakdown).is_none() {
+                    let error = SessionParseError::at_path(
+                        path,
+                        "validate Claude assistant usage",
+                        std::io::Error::new(
+                            ErrorKind::InvalidData,
+                            format!(
+                                "line {}: token bucket is negative or token total exceeds i64::MAX",
+                                line_index + 1
+                            ),
+                        ),
+                    );
+                    record_claude_rejection(
+                        &mut rejections,
+                        RecordRejectionReason::MalformedRecord,
+                        &error,
+                    );
+                    continue;
+                }
                 let has_positive_usage = crate::has_positive_tokens(&token_breakdown);
 
                 if message
@@ -1472,40 +1541,6 @@ fn unsigned_to_base36(mut value: u64) -> String {
     digits.into_iter().rev().collect()
 }
 
-fn read_project_candidates_from_jsonl(path: &Path) -> SessionParseResult<ClaudeProjectCandidates> {
-    let file = std::fs::File::open(path).map_err(|source| {
-        SessionParseError::at_path(path, "open Claude project candidate input", source)
-    })?;
-    let mut candidates = ClaudeProjectCandidates::default();
-    for (line_index, line) in BufReader::new(file).lines().enumerate() {
-        let line = line.map_err(|source| {
-            SessionParseError::at_path(
-                path,
-                "read Claude project candidate input",
-                std::io::Error::new(source.kind(), format!("line {}: {source}", line_index + 1)),
-            )
-        })?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let entry: ClaudeEntry = serde_json::from_str(&line).map_err(|source| {
-            SessionParseError::at_path(
-                path,
-                "decode Claude project candidate input",
-                std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!("line {}: {source}", line_index + 1),
-                ),
-            )
-        })?;
-        if entry.entry_type.trim().is_empty() {
-            continue;
-        }
-        candidates.record(entry.project_path.as_deref(), entry.cwd.as_deref());
-    }
-    Ok(candidates)
-}
-
 fn read_external_project_candidates(home_dir: &Path) -> ClaudeProjectCandidates {
     let mut candidates = ClaudeProjectCandidates::default();
     let history_path = home_dir.join(".claude/history.jsonl");
@@ -1604,14 +1639,12 @@ fn parse_claude_entry_timestamp_checked(
 fn merge_claude_duplicate(existing: &mut UsageRecord, usage: &ClaudeUsage, parsed_timestamp: i64) {
     // Per-field max merge: each token field is updated independently.
     let t = &mut existing.tokens;
-    t.input = t.input.max(usage.input_tokens.unwrap_or(0).max(0));
-    t.output = t.output.max(usage.output_tokens.unwrap_or(0).max(0));
-    t.cache_read = t
-        .cache_read
-        .max(usage.cache_read_input_tokens.unwrap_or(0).max(0));
+    t.input = t.input.max(usage.input_tokens.unwrap_or(0));
+    t.output = t.output.max(usage.output_tokens.unwrap_or(0));
+    t.cache_read = t.cache_read.max(usage.cache_read_input_tokens.unwrap_or(0));
     t.cache_write = t
         .cache_write
-        .max(usage.cache_creation_input_tokens.unwrap_or(0).max(0));
+        .max(usage.cache_creation_input_tokens.unwrap_or(0));
 
     if parsed_timestamp >= existing.timestamp {
         existing.set_timestamp(parsed_timestamp);
@@ -1623,7 +1656,7 @@ fn merge_claude_tool_result_duplicate(
     input_tokens: i64,
     timestamp_ms: i64,
 ) {
-    existing.tokens.input = existing.tokens.input.max(input_tokens.max(0));
+    existing.tokens.input = existing.tokens.input.max(input_tokens);
     if timestamp_ms >= existing.timestamp {
         existing.set_timestamp(timestamp_ms);
     }
@@ -1663,7 +1696,7 @@ fn extract_claude_tool_result_message(
             ),
         )
     })?;
-    let Some(usage) = extract_claude_tool_result_usage(&value) else {
+    let Some(usage) = extract_claude_tool_result_usage(&value)? else {
         return Ok(None);
     };
 
@@ -1764,13 +1797,16 @@ fn extract_claude_tool_result_message(
     Ok(Some(message))
 }
 
-fn extract_claude_tool_result_usage(value: &Value) -> Option<ClaudeToolResultUsage> {
-    let mut total_tokens = 0;
+fn extract_claude_tool_result_usage(
+    value: &Value,
+) -> SessionParseResult<Option<ClaudeToolResultUsage>> {
+    let mut total_tokens = 0_i64;
     let mut first_dedup_id: Option<String> = None;
     let mut seen_ids = HashSet::new();
 
     for tool_result in claude_tool_result_values(value) {
         let tool_result_id = extract_tool_result_id(tool_result);
+        let input_tokens = extract_tool_result_input_tokens(tool_result)?;
         if let Some(id) = tool_result_id.as_ref() {
             if !seen_ids.insert(id.clone()) {
                 continue;
@@ -1779,20 +1815,24 @@ fn extract_claude_tool_result_usage(value: &Value) -> Option<ClaudeToolResultUsa
         if first_dedup_id.is_none() {
             first_dedup_id = tool_result_id;
         }
-        total_tokens = checked_token_add(
-            total_tokens,
-            extract_tool_result_input_tokens(tool_result).unwrap_or(0),
-        );
+        total_tokens = total_tokens
+            .checked_add(input_tokens.unwrap_or(0))
+            .ok_or_else(|| {
+                SessionParseError::invalid(
+                    "validate Claude tool-result usage",
+                    "tool-result input token total exceeds i64::MAX",
+                )
+            })?;
     }
 
-    if total_tokens <= 0 {
-        return None;
+    if total_tokens == 0 {
+        return Ok(None);
     }
 
-    Some(ClaudeToolResultUsage {
+    Ok(Some(ClaudeToolResultUsage {
         input_tokens: total_tokens,
         dedup_key: first_dedup_id.map(|id| format!("tool_result:{id}")),
-    })
+    }))
 }
 
 fn claude_tool_result_values(value: &Value) -> Vec<&Value> {
@@ -1848,14 +1888,18 @@ fn extract_tool_result_id(tool_result: &Value) -> Option<String> {
         .or_else(|| extract_string(tool_result.get("tool_result_id")))
 }
 
-fn extract_tool_result_input_tokens(tool_result: &Value) -> Option<i64> {
-    explicit_tool_result_input_tokens(tool_result).or_else(|| {
+fn extract_tool_result_input_tokens(tool_result: &Value) -> SessionParseResult<Option<i64>> {
+    if let Some(tokens) = explicit_tool_result_input_tokens(tool_result)? {
+        return Ok(Some(tokens));
+    }
+    Ok({
         let chars = tool_result_output_char_count(tool_result);
         (chars > 0).then(|| estimate_tokens_from_chars(chars))
     })
 }
 
-fn explicit_tool_result_input_tokens(tool_result: &Value) -> Option<i64> {
+fn explicit_tool_result_input_tokens(tool_result: &Value) -> SessionParseResult<Option<i64>> {
+    let mut selected = None;
     for candidate in [
         tool_result.get("input_tokens"),
         tool_result.get("token_count"),
@@ -1878,10 +1922,16 @@ fn explicit_tool_result_input_tokens(tool_result: &Value) -> Option<i64> {
             .and_then(|usage| usage.get("input_tokens")),
     ] {
         if let Some(tokens) = extract_i64(candidate) {
-            return Some(tokens.max(0));
+            if tokens < 0 {
+                return Err(SessionParseError::invalid(
+                    "validate Claude tool-result usage",
+                    "tool-result input token bucket is negative",
+                ));
+            }
+            selected.get_or_insert(tokens);
         }
     }
-    None
+    Ok(selected)
 }
 
 fn tool_result_output_char_count(tool_result: &Value) -> usize {
@@ -2216,6 +2266,28 @@ mod tests {
         file
     }
 
+    #[test]
+    fn cancelled_parse_stops_before_decoding_records() {
+        let file = create_test_file(
+            r#"{"type":"assistant","timestamp":"2025-01-01T00:00:00Z","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        );
+        let cancellation = crate::engine::AcquisitionCancellation::default();
+        cancellation.cancel();
+        let resolver = ClaudeProjectResolver::new(None);
+
+        let (scanned, _) = parse_claude_file_with_project_resolver_and_cancellation(
+            file.path(),
+            &resolver,
+            Some(&cancellation),
+        )
+        .unwrap();
+
+        assert!(scanned.messages.is_empty());
+        let interrupted = scanned.interrupted.unwrap();
+        assert_eq!(interrupted.operation, "parse Claude session");
+        assert_eq!(interrupted.message, "acquisition cancelled");
+    }
+
     // Most parser tests assert only the message projection. Health-specific
     // cases call `super::parse_claude_file` directly so rejections cannot be
     // discarded accidentally in the behavior under test.
@@ -2295,6 +2367,28 @@ mod tests {
             scanned.rejections.entries().next().unwrap().key,
             "missing-model"
         );
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn negative_streaming_duplicate_is_rejected_without_mutating_good_records() {
+        let file = create_test_file(
+            r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":10,"output_tokens":5}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:10.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":999,"output_tokens":-1}}}
+{"type":"assistant","timestamp":"2024-12-01T10:00:02.000Z","requestId":"req_002","message":{"id":"msg_002","model":"claude-sonnet-4.6","usage":{"input_tokens":20,"output_tokens":2}}}"#,
+        );
+
+        let scanned = super::parse_claude_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 2);
+        assert_eq!(scanned.messages[0].tokens.input, 10);
+        assert_eq!(scanned.messages[0].tokens.output, 5);
+        assert_eq!(scanned.messages[0].timestamp, 1_733_047_200_000);
+        assert_eq!(scanned.messages[1].tokens.input, 20);
+        assert_eq!(scanned.rejections.total(), 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
         assert!(scanned.interrupted.is_none());
     }
 
@@ -2885,6 +2979,23 @@ mod tests {
     }
 
     #[test]
+    fn test_negative_explicit_tool_result_is_rejected_beside_good_sibling() {
+        let content = r#"{"type":"tool_result","timestamp":"2026-05-27T10:00:00.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_bad","input_tokens":-1}}
+{"type":"tool_result","timestamp":"2026-05-27T10:00:01.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_good","input_tokens":7}}"#;
+
+        let file = create_test_file(content);
+        let scanned = super::parse_claude_file(file.path()).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.input, 7);
+        assert_eq!(scanned.rejections.total(), 1);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, 1);
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
     fn test_tool_result_repeated_in_same_record_is_not_counted_twice() {
         let content = r#"{"type":"tool_result","timestamp":"2026-05-27T10:00:00.000Z","model":"anthropic/claude-4-6-sonnet","tool_result":{"tool_use_id":"toolu_same","tool_output":{"output":"abcdefghijklmnop"}},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_same","tool_output":{"output":"abcdefghijklmnop"}}]}}"#;
 
@@ -3177,10 +3288,8 @@ mod tests {
         .unwrap();
 
         let resolver = ClaudeProjectResolver::new(Some(home.path()));
-        let mut parent_cache = ParentSubagentTypeCache::new();
         let (scanned, dependency) =
-            parse_claude_file_with_cache_home_and_resolver(&path, &mut parent_cache, &resolver)
-                .unwrap();
+            parse_claude_file_with_project_resolver(&path, &resolver, None).unwrap();
 
         assert_eq!(scanned.messages.len(), 1);
         assert_eq!(
@@ -3885,16 +3994,18 @@ mod tests {
     }
 
     #[test]
-    fn test_parent_subagent_lookup_cache_reuses_parsed_parent_results() {
+    fn test_parent_metadata_reuses_parsed_parent_results() {
         let temp_dir = tempfile::tempdir().unwrap();
         let parent_path = temp_dir.path().join("parent.jsonl");
         let initial_parent = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"subagent_type":"explore"}},{"type":"tool_use","id":"toolu_b","name":"Agent","input":{"subagent_type":"executor"}}]}}
 {"type":"user","message":{"content":[{"tool_use_id":"toolu_a","type":"tool_result","content":[{"type":"text","text":"agentId: cacheA"}]},{"tool_use_id":"toolu_b","type":"tool_result","content":[{"type":"text","text":"agentId: cacheB"}]}]}}"#;
         std::fs::write(&parent_path, initial_parent).unwrap();
+        let resolver = ClaudeProjectResolver::new(None);
 
-        let mut parent_cache = ParentSubagentTypeCache::new();
         assert_eq!(
-            lookup_subagent_type_in_parent(&parent_path, "cacheA", &mut parent_cache).unwrap(),
+            resolver
+                .lookup_subagent_type(&parent_path, "cacheA")
+                .unwrap(),
             Some("explore".to_string())
         );
 
@@ -3905,9 +4016,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            lookup_subagent_type_in_parent(&parent_path, "cacheB", &mut parent_cache).unwrap(),
+            resolver
+                .lookup_subagent_type(&parent_path, "cacheB")
+                .unwrap(),
             Some("executor".to_string())
         );
+        assert_eq!(resolver.parent_metadata_load_count(), 1);
     }
 
     #[test]

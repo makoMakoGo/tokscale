@@ -8,6 +8,8 @@ type BoxError = Box<dyn Error + Send + Sync + 'static>;
 pub enum AcquisitionErrorKind {
     /// User-controlled process or scanner configuration is malformed.
     InvalidEnvironment,
+    /// The caller explicitly cancelled this acquisition.
+    Cancelled,
     /// The request was valid but execution failed while reading or processing it.
     Operational,
 }
@@ -28,6 +30,10 @@ impl AcquisitionError {
         Self::new(AcquisitionErrorKind::Operational, source)
     }
 
+    pub(crate) fn cancelled(source: impl Error + Send + Sync + 'static) -> Self {
+        Self::new(AcquisitionErrorKind::Cancelled, source)
+    }
+
     #[cfg(test)]
     pub(crate) fn invalid_environment_message(message: impl Into<String>) -> Self {
         Self::invalid_environment(MessageError(message.into()))
@@ -41,6 +47,11 @@ impl AcquisitionError {
     /// Whether a CLI should classify this as invalid invocation/environment.
     pub const fn is_invalid_invocation(&self) -> bool {
         matches!(self.kind, AcquisitionErrorKind::InvalidEnvironment)
+    }
+
+    /// Whether execution stopped because its caller cancelled the acquisition.
+    pub const fn is_cancelled(&self) -> bool {
+        matches!(self.kind, AcquisitionErrorKind::Cancelled)
     }
 
     fn new(kind: AcquisitionErrorKind, source: impl Error + Send + Sync + 'static) -> Self {

@@ -33,6 +33,8 @@ walkdir = "2"
 
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = { version = "0.10", features = ["serde"] }
+iana-time-zone = "0.1"
 
 # Error handling
 thiserror = "2"
@@ -43,7 +45,7 @@ libc = "0.2"
 reqwest = { version = "0.12", features = ["json", "native-tls-vendored"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
 
-# For disk caching (XDG paths)
+# Platform directory discovery for external client data
 dirs = "5"
 
 # SQLite database support (bundled for cross-compilation)

@@ -16,7 +16,6 @@ use crate::integrations::{
     InputDiscoveryError, IntegrationDriver, ParseContext, ParsedBatchInput, ParsedUnit, SourceSpec,
 };
 
-const HERMES_RECORD_REJECTION_REVISION: u32 = 5;
 const SOURCE: SourceSpec = SourceSpec::home(
     ".hermes/state.db",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::state_db),
@@ -34,7 +33,7 @@ impl IntegrationDriver for Driver {
 
         source_discovery::push_existing_file(client, SOURCE.resolve(ctx.home_dir), &mut paths)?;
         paths.extend(source_discovery::scan_roots(
-            client,
+            ctx,
             source_discovery::extra_roots_for_client(client, ctx)?,
             SOURCE.matcher(),
         )?);
@@ -43,7 +42,7 @@ impl IntegrationDriver for Driver {
             client,
             paths,
             FingerprintPolicy::SqliteWithWal,
-            DecoderKind::plain(DecoderId::Hermes, HERMES_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::Hermes),
         )?;
         Ok(units)
     }
@@ -108,12 +107,10 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("state.db");
         std::fs::write(&path, b"direct parser input").unwrap();
-        let unit = DiscoveredInput::sqlite_with_wal(
-            path.clone(),
-            DecoderKind::plain(DecoderId::Hermes, HERMES_RECORD_REJECTION_REVISION),
-        )
-        .prepare_snapshot()
-        .unwrap();
+        let unit =
+            DiscoveredInput::sqlite_with_wal(path.clone(), DecoderKind::plain(DecoderId::Hermes))
+                .prepare_snapshot()
+                .unwrap();
         let mut cache = crate::input_record_cache::InputRecordShardStore::default();
         cache.insert(
             crate::input_record_cache::CachedInputEntry::new_with_version(
@@ -161,15 +158,15 @@ mod tests {
             client: ClientId::Hermes,
             home_dir: home.path(),
             scanner_settings: &settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         };
 
         let units = DRIVER.discover_inputs(&ctx).unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
 
         assert_eq!(paths, vec![default_db, profile_db]);
-        assert!(units.iter().all(|unit| {
-            unit.decoder.version()
-                == DecoderVersion::new(DecoderId::Hermes, HERMES_RECORD_REJECTION_REVISION)
-        }));
+        assert!(units
+            .iter()
+            .all(|unit| { unit.decoder.version() == DecoderVersion::current(DecoderId::Hermes) }));
     }
 }

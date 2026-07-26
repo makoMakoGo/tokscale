@@ -1,11 +1,10 @@
 use super::{
-    apply_token_pricing, finalize_token_priced_messages, input_record_cache,
-    load_cache_only_pricing_with_diagnostics, load_test_usage, load_test_usage_with_health,
-    normalize_model_for_grouping, parse_all_messages_with_health,
+    apply_token_pricing, finalize_token_priced_messages, input_record_cache, load_test_usage,
+    load_test_usage_with_health, normalize_model_for_grouping, parse_all_messages_with_health,
     parse_all_messages_with_health_with_settings, parse_all_messages_with_pricing,
     parse_all_messages_with_pricing_with_settings, positive_token_total, pricing, scanner,
     AcquisitionConfig, AcquisitionEngine, AttributedUsageRecord, ClientId, ClientUniverse,
-    DateRange, GroupBy, PreparedAcquisition, TestAcquisitionRequest, TokenBreakdown, UsageQuery,
+    DateRange, GroupBy, PreparedAcquisition, TestAcquisitionRequest, TokenBreakdown,
     UNKNOWN_WORKSPACE_LABEL,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -69,7 +68,7 @@ fn input_cache_for_test_home(home: &Path) -> input_record_cache::InputRecordShar
 }
 
 fn test_decoder(decoder_id: input_record_cache::DecoderId) -> crate::integrations::DecoderKind {
-    crate::integrations::DecoderKind::plain(decoder_id, 0)
+    crate::integrations::DecoderKind::plain(decoder_id)
 }
 
 fn plain_test_input(
@@ -89,9 +88,7 @@ fn sqlite_test_input(
 fn opencode_test_input(path: PathBuf) -> crate::integrations::DiscoveredInput {
     crate::integrations::DiscoveredInput::sqlite_with_wal(
         path,
-        crate::integrations::DecoderKind::opencode_sqlite(
-            crate::integrations::opencode::DECODER_REVISION,
-        ),
+        crate::integrations::DecoderKind::opencode_sqlite(),
     )
 }
 
@@ -115,45 +112,38 @@ fn parse_all_messages_with_pricing_in_cache(
     Ok(messages)
 }
 
-struct HomeEnvGuard(Option<OsString>);
+struct HomeEnvGuard {
+    home: Option<OsString>,
+    config_dir: Option<OsString>,
+}
 
 impl HomeEnvGuard {
     fn set(home: &Path) -> Self {
-        let original_home = std::env::var_os("HOME");
+        let guard = Self {
+            home: std::env::var_os("HOME"),
+            config_dir: std::env::var_os("TOKENX_CONFIG_DIR"),
+        };
         std::env::set_var("HOME", home);
-        Self(original_home)
-    }
-}
-
-struct TestEnvGuard {
-    key: &'static str,
-    original: Option<OsString>,
-}
-
-impl TestEnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let original = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, original }
-    }
-}
-
-impl Drop for TestEnvGuard {
-    fn drop(&mut self) {
-        match self.original.take() {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
+        std::env::set_var("TOKENX_CONFIG_DIR", home);
+        guard
     }
 }
 
 impl Drop for HomeEnvGuard {
     fn drop(&mut self) {
-        match self.0.take() {
+        match self.home.take() {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
         }
+        match self.config_dir.take() {
+            Some(config_dir) => std::env::set_var("TOKENX_CONFIG_DIR", config_dir),
+            None => std::env::remove_var("TOKENX_CONFIG_DIR"),
+        }
     }
+}
+
+fn current_pricing_snapshot() -> Arc<crate::pricing::ResolvedPricingSnapshot> {
+    Arc::new(crate::pricing::ResolvedPricingSnapshot::resolve_current())
 }
 
 fn make_workspace_message(
@@ -232,12 +222,17 @@ fn aggregate_model_usage_entries(
     messages: Vec<AttributedUsageRecord>,
     group_by: &GroupBy,
 ) -> Vec<crate::projection::UsageModelEntry> {
-    crate::aggregate_usage_records(
+    crate::build_usage_index(
         &messages,
         DateRange::none(),
-        *group_by,
+        crate::CalendarContext::explicit("UTC").unwrap(),
+    )
+    .unwrap()
+    .project_usage(
+        group_by,
         chrono::NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
     )
+    .unwrap()
     .models
 }
 
@@ -296,36 +291,21 @@ fn reference_usage(options: &TestAcquisitionRequest) -> crate::projection::Usage
         &options.scanner_settings,
     )
     .unwrap();
-    let mut accumulator = crate::aggregate::GenerationAccumulator::new(options.date_range.clone());
+    let mut accumulator = crate::aggregate::GenerationAccumulator::new(
+        options.date_range.clone(),
+        crate::CalendarContext::explicit("UTC").unwrap(),
+    );
     for message in &messages {
         accumulator.push(message);
     }
-    accumulator.into_usage_index().project_usage(
-        &GroupBy::ClientModel,
-        chrono::NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
-    )
-}
-
-#[test]
-fn cache_only_pricing_diagnostics_append_missing_cache_in_order() {
-    let mut diagnostics = vec![
-        pricing::PricingDiagnostic::warning("first diagnostic"),
-        pricing::PricingDiagnostic::warning("second diagnostic"),
-    ];
-
-    let loaded = load_cache_only_pricing_with_diagnostics(&mut diagnostics, || None);
-
-    assert!(loaded.is_none());
-    assert_eq!(
-        diagnostics,
-        vec![
-            pricing::PricingDiagnostic::warning("first diagnostic"),
-            pricing::PricingDiagnostic::warning("second diagnostic"),
-            pricing::PricingDiagnostic::unavailable(
-                "[tokenx] pricing unavailable: cache-only mode and no cached pricing"
-            ),
-        ]
-    );
+    accumulator
+        .into_usage_index()
+        .unwrap()
+        .project_usage(
+            &GroupBy::ClientModel,
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
+        )
+        .unwrap()
 }
 
 #[test]
@@ -349,7 +329,7 @@ fn acquisition_usage_matches_direct_aggregation() {
     // The reference harness exercises aggregation from a bare message list,
     // which intentionally has no data-health envelope. Health propagation
     // is covered by the local loader independently from payload parity.
-    assert!(health.complete);
+    assert!(health.complete());
 
     assert_eq!(format!("{streaming:?}"), format!("{reference:?}"));
 }
@@ -359,14 +339,10 @@ fn acquisition_usage_matches_direct_aggregation() {
 fn generation_footprint_sums_the_two_client_fixture() {
     let home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(home.path());
-    let _pricing_guard = TestEnvGuard::set("TOKENX_PRICING_CACHE_ONLY", "1");
     write_streaming_fold_fixture(home.path());
 
     let (builder, sources) = prepare_generation_sources(home.path(), &["opencode", "codex"]);
-    let generation = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(builder.build(sources))
-        .unwrap();
+    let generation = builder.build(sources).unwrap();
 
     let footprint = generation.input_footprint();
     let opencode_bytes = footprint.bytes_for(ClientId::OpenCode);
@@ -381,30 +357,29 @@ fn generation_footprint_sums_the_two_client_fixture() {
 
 #[test]
 #[serial_test::serial]
-fn generation_carries_confirmed_input_footprint() {
+fn generation_carries_prepared_input_footprint() {
     let home = tempfile::TempDir::new().unwrap();
     let _home_guard = HomeEnvGuard::set(home.path());
-    let _pricing_guard = TestEnvGuard::set("TOKENX_PRICING_CACHE_ONLY", "1");
     write_streaming_fold_fixture(home.path());
 
+    let pricing = current_pricing_snapshot();
     let config = super::AcquisitionConfig::new(
         home.path().to_path_buf(),
         DateRange::none(),
         super::ClientUniverse::new([ClientId::OpenCode, ClientId::Codex]).unwrap(),
         scanner::ScannerSettings::default(),
+        crate::CalendarContext::explicit("UTC").unwrap(),
+        pricing.context().clone(),
     )
     .unwrap();
-    let generation = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(
-            super::AcquisitionEngine::with_input_cache_dir(
-                config,
-                super::input_cache_dir_for_test_home(home.path()),
-            )
-            .unwrap()
-            .acquire(),
-        )
-        .unwrap();
+    let generation = super::AcquisitionEngine::with_input_cache_dir(
+        config,
+        pricing,
+        super::input_cache_dir_for_test_home(home.path()),
+    )
+    .unwrap()
+    .acquire()
+    .unwrap();
 
     assert_ne!(generation.source_fingerprint().as_bytes(), &[0_u8; 32]);
     let footprint = generation.input_footprint();
@@ -416,6 +391,39 @@ fn generation_carries_confirmed_input_footprint() {
         footprint.total_bytes().unwrap(),
         opencode_bytes.checked_add(codex_bytes).unwrap()
     );
+}
+
+#[test]
+fn disabled_input_cache_reports_one_global_issue_and_retries_next_acquisition() {
+    let input_home = tempfile::TempDir::new().unwrap();
+    let cache_home = tempfile::TempDir::new().unwrap();
+    write_streaming_fold_fixture(input_home.path());
+    let cache_path = cache_home.path().join("input-records");
+    std::fs::write(&cache_path, b"cache path intentionally blocked").unwrap();
+    let request = TestAcquisitionRequest {
+        home_dir: Some(input_home.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode, ClientId::Codex]),
+        ..TestAcquisitionRequest::default()
+    };
+    let acquire = |cache_path: &Path| {
+        let mut prepared = super::prepare_test_inventory(request.clone()).unwrap();
+        prepared.input_cache_dir = cache_path.to_path_buf();
+        let mut messages = Vec::new();
+        let outcome =
+            super::fold_prepared_local_inputs_with_pricing(prepared, None, &mut messages).unwrap();
+        (messages, outcome.health.summarize())
+    };
+
+    let (messages, disabled_health) = acquire(&cache_path);
+    assert!(!messages.is_empty());
+    assert_eq!(disabled_health.issue_count(), 1);
+    assert_eq!(disabled_health.issues[0].issue, "input-cache-unavailable");
+    assert_eq!(disabled_health.issues[0].handling, "cache-bypassed");
+
+    std::fs::remove_file(&cache_path).unwrap();
+    let (retried_messages, retried_health) = acquire(&cache_path);
+    assert_eq!(retried_messages, messages);
+    assert_eq!(retried_health.issue_count(), 0);
 }
 
 #[test]
@@ -1686,12 +1694,13 @@ fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_p
         .unwrap()
         .is_some());
 
-    let mut prepared = super::prepare_test_inventory(options).unwrap();
+    let prepared = super::prepare_test_inventory(options.clone()).unwrap();
     let regular_config_signature = prepared.source_fingerprint();
     let config_path = input_home.path().join(".kimi-code/config.toml");
     std::fs::remove_file(&config_path).unwrap();
     std::fs::create_dir(&config_path).unwrap();
-    let unavailable_config_signature = prepared.refresh_source_fingerprint();
+    let prepared = super::prepare_test_inventory(options).unwrap();
+    let unavailable_config_signature = prepared.source_fingerprint();
     assert_ne!(regular_config_signature, unavailable_config_signature);
     assert_eq!(prepared.health.failed_inputs(), 0);
 
@@ -1823,16 +1832,22 @@ fn prepare_generation_sources(
             .map(|client| ClientId::from_str(client).unwrap()),
     )
     .unwrap();
+    let pricing = current_pricing_snapshot();
     let config = AcquisitionConfig::new(
         home.to_path_buf(),
         DateRange::none(),
         universe,
         scanner::ScannerSettings::default(),
+        crate::CalendarContext::explicit("UTC").unwrap(),
+        pricing.context().clone(),
     )
     .unwrap();
-    let engine =
-        AcquisitionEngine::with_input_cache_dir(config, super::input_cache_dir_for_test_home(home))
-            .unwrap();
+    let engine = AcquisitionEngine::with_input_cache_dir(
+        config,
+        pricing,
+        super::input_cache_dir_for_test_home(home),
+    )
+    .unwrap();
     let sources = engine.prepare().unwrap();
     (engine, sources)
 }
@@ -1881,26 +1896,7 @@ fn input_footprint_counts_related_inputs_once_by_file_identity() {
 
     let group = prepared_test_group(ClientId::Amp, vec![with_dependency, duplicate]);
     let universe = ClientUniverse::new([ClientId::Amp]).unwrap();
-    let footprint = super::prepared_input_footprint(&universe, std::slice::from_ref(&group));
-    assert_eq!(footprint.bytes_for(ClientId::Amp), 13);
-}
-
-#[test]
-fn inventory_probe_refreshes_input_footprint_from_metadata() {
-    let home = tempfile::TempDir::new().unwrap();
-    let amp_dir = home.path().join(".local/share/amp/threads");
-    std::fs::create_dir_all(&amp_dir).unwrap();
-    let input = amp_dir.join("T-first.json");
-    std::fs::write(&input, b"12345678").unwrap();
-
-    let mut prepared =
-        super::prepare_test_inventory(inventory_options(home.path(), &["amp"])).unwrap();
-    let footprint = super::prepared_input_footprint(&prepared.clients, &prepared.groups);
-    assert_eq!(footprint.bytes_for(ClientId::Amp), 8);
-
-    std::fs::write(&input, b"1234567890123").unwrap();
-    prepared.refresh_source_fingerprint();
-    let footprint = super::prepared_input_footprint(&prepared.clients, &prepared.groups);
+    let footprint = super::inventory_input_footprint(&universe, std::slice::from_ref(&group));
     assert_eq!(footprint.bytes_for(ClientId::Amp), 13);
 }
 
@@ -1970,198 +1966,6 @@ fn inventory_signature_changes_for_same_size_same_mtime_atomic_replacement() {
         .unwrap()
         .source_fingerprint();
     assert_ne!(before, after);
-}
-
-#[test]
-fn inventory_probe_revalidates_identity_without_rediscovery_or_input_reads() {
-    let home = tempfile::TempDir::new().unwrap();
-    let amp_dir = home.path().join(".local/share/amp/threads");
-    std::fs::create_dir_all(&amp_dir).unwrap();
-    let input = amp_dir.join("T-first.json");
-    let replacement = amp_dir.join("replacement.json");
-    std::fs::write(&input, b"aaaaaaaa").unwrap();
-    let original_mtime = std::fs::metadata(&input).unwrap().modified().unwrap();
-
-    super::reset_prepare_discovery_count();
-    let mut prepared =
-        super::prepare_test_inventory(inventory_options(home.path(), &["amp"])).unwrap();
-    let stale = prepared.source_fingerprint();
-    assert_eq!(super::prepare_discovery_count(), 1);
-    input_record_cache::reset_input_read_stats(&input);
-
-    std::fs::write(&replacement, b"bbbbbbbb").unwrap();
-    std::fs::File::open(&replacement)
-        .unwrap()
-        .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
-        .unwrap();
-    #[cfg(windows)]
-    std::fs::remove_file(&input).unwrap();
-    std::fs::rename(&replacement, &input).unwrap();
-
-    let refreshed = prepared.refresh_source_fingerprint();
-    assert_ne!(stale, refreshed);
-    assert_eq!(super::prepare_discovery_count(), 1);
-    assert_eq!(
-        input_record_cache::get_input_read_stats(&input),
-        input_record_cache::InputReadStats::default(),
-        "inventory revalidation must not read or hash input bodies"
-    );
-}
-
-#[test]
-#[serial_test::serial]
-fn inventory_probe_isolates_an_input_that_disappears_after_prepare() {
-    let home = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(home.path());
-    let amp_dir = home.path().join(".local/share/amp/threads");
-    std::fs::create_dir_all(&amp_dir).unwrap();
-    let retained = amp_dir.join("T-retained.json");
-    let removed = amp_dir.join("T-removed.json");
-    let input = |session: &str, input: u64| {
-        format!(
-            r#"{{"id":"{session}","created":1747800000000,"messages":[{{"role":"assistant","messageId":1,"usage":{{"timestamp":"2026-05-21T04:00:00Z","model":"gpt-5","inputTokens":{input},"outputTokens":2}}}}]}}"#
-        )
-    };
-    std::fs::write(&retained, input("retained", 10)).unwrap();
-    std::fs::write(&removed, input("removed", 20)).unwrap();
-
-    let (builder, mut sources) = prepare_generation_sources(home.path(), &["amp"]);
-    std::fs::remove_file(&removed).unwrap();
-
-    sources.refresh_source_fingerprint();
-    let generation = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(builder.build(sources))
-        .unwrap();
-
-    assert_eq!(
-        generation
-            .project_usage(&UsageQuery::full(
-                generation.universe(),
-                GroupBy::Model,
-                chrono::NaiveDate::from_ymd_opt(2026, 5, 21).unwrap(),
-            ))
-            .unwrap()
-            .total_tokens,
-        12
-    );
-    assert_eq!(generation.health().failed_inputs, 1);
-    assert_eq!(generation.health().issues[0].client, ClientId::Amp);
-    assert_eq!(generation.health().issues[0].affected_inputs, 1);
-}
-
-#[test]
-#[serial_test::serial]
-fn generation_uses_signature_revalidated_after_pricing_boundary() {
-    let home = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(home.path());
-    let _pricing_guard = TestEnvGuard::set("TOKENX_PRICING_CACHE_ONLY", "1");
-    let amp_dir = home.path().join(".local/share/amp/threads");
-    std::fs::create_dir_all(&amp_dir).unwrap();
-    let input = amp_dir.join("T-first.json");
-    let replacement = amp_dir.join("replacement.json");
-    let original = r#"{"id":"session-a","created":1747800000000,"messages":[{"role":"assistant","messageId":1,"usage":{"timestamp":"2026-05-21T04:00:00Z","model":"gpt-5","inputTokens":10,"outputTokens":2}}]}"#;
-    let changed = original
-        .replace("session-a", "session-b")
-        .replace("10", "11");
-    assert_eq!(original.len(), changed.len());
-    std::fs::write(&input, original).unwrap();
-    let original_mtime = std::fs::metadata(&input).unwrap().modified().unwrap();
-    let (builder, sources) = prepare_generation_sources(home.path(), &["amp"]);
-    let stale_signature = sources.source_fingerprint();
-
-    std::fs::write(&replacement, changed).unwrap();
-    std::fs::File::open(&replacement)
-        .unwrap()
-        .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
-        .unwrap();
-    #[cfg(windows)]
-    std::fs::remove_file(&input).unwrap();
-    std::fs::rename(&replacement, &input).unwrap();
-
-    let generation = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(builder.build(sources))
-        .unwrap();
-    let confirmed_signature =
-        super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
-            .unwrap()
-            .source_fingerprint();
-    assert_ne!(stale_signature, generation.source_fingerprint());
-    assert_eq!(confirmed_signature, generation.source_fingerprint());
-    assert_eq!(
-        generation
-            .project_usage(&UsageQuery::full(
-                generation.universe(),
-                GroupBy::Model,
-                chrono::NaiveDate::from_ymd_opt(2026, 5, 21).unwrap(),
-            ))
-            .unwrap()
-            .total_tokens,
-        13
-    );
-}
-
-#[test]
-#[serial_test::serial]
-fn generation_footprint_uses_confirmed_inventory() {
-    let home = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(home.path());
-    let _pricing_guard = TestEnvGuard::set("TOKENX_PRICING_CACHE_ONLY", "1");
-    let amp_dir = home.path().join(".local/share/amp/threads");
-    std::fs::create_dir_all(&amp_dir).unwrap();
-    let input = amp_dir.join("T-first.json");
-    let replacement = amp_dir.join("replacement.json");
-    let original = r#"{"id":"session-a","created":1747800000000,"messages":[{"role":"assistant","messageId":1,"usage":{"timestamp":"2026-05-21T04:00:00Z","model":"gpt-5","inputTokens":10,"outputTokens":2}}]}"#;
-    let changed = r#"{"id":"session-confirmed-after-prepare","created":1747800000000,"messages":[{"role":"assistant","messageId":1,"usage":{"timestamp":"2026-05-21T04:00:00Z","model":"gpt-5","inputTokens":111,"outputTokens":2}}]}"#;
-    assert!(changed.len() > original.len());
-    std::fs::write(&input, original).unwrap();
-    let original_mtime = std::fs::metadata(&input).unwrap().modified().unwrap();
-    let (builder, sources) = prepare_generation_sources(home.path(), &["amp"]);
-    let stale_signature = sources.source_fingerprint();
-
-    std::fs::write(&replacement, changed).unwrap();
-    std::fs::File::open(&replacement)
-        .unwrap()
-        .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
-        .unwrap();
-    #[cfg(windows)]
-    std::fs::remove_file(&input).unwrap();
-    std::fs::rename(&replacement, &input).unwrap();
-    let confirmed_bytes = std::fs::metadata(&input).unwrap().len();
-
-    let generation = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(builder.build(sources))
-        .unwrap();
-    let confirmed_signature =
-        super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
-            .unwrap()
-            .source_fingerprint();
-
-    assert_ne!(stale_signature, generation.source_fingerprint());
-    assert_eq!(confirmed_signature, generation.source_fingerprint());
-    assert_eq!(
-        generation.input_footprint().bytes_for(ClientId::Amp),
-        confirmed_bytes
-    );
-    assert_eq!(
-        generation
-            .project_usage(&UsageQuery::full(
-                generation.universe(),
-                GroupBy::Model,
-                chrono::NaiveDate::from_ymd_opt(2026, 5, 21).unwrap(),
-            ))
-            .unwrap()
-            .total_tokens,
-        113
-    );
-    let sessions = generation.sessions();
-    assert_eq!(sessions.len(), 1);
-    assert_eq!(
-        sessions[0].session_id.as_ref(),
-        "session-confirmed-after-prepare"
-    );
 }
 
 #[test]
@@ -2238,7 +2042,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
         ClientId::Amp,
         vec![crate::integrations::DiscoveredInput::plain_file(
             first,
-            crate::integrations::DecoderKind::plain(input_record_cache::DecoderId::Amp, 999),
+            crate::integrations::DecoderKind::plain(input_record_cache::DecoderId::Amp),
         )],
     );
     assert_ne!(canonical_clients, decoder_changed);
@@ -2250,7 +2054,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
         ClientId::CodeBuddy,
         vec![crate::integrations::DiscoveredInput::plain_file(
             codebuddy_path.clone(),
-            crate::integrations::DecoderKind::codebuddy_jsonl(0),
+            crate::integrations::DecoderKind::codebuddy_jsonl(),
         )],
     );
     let extension_decoder = signature_for_test_units(
@@ -2259,7 +2063,6 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
         vec![crate::integrations::DiscoveredInput::plain_file(
             codebuddy_path.clone(),
             crate::integrations::DecoderKind::codebuddy_extension_log(
-                0,
                 crate::integrations::CodeBuddyLogOrigin::Extension,
             ),
         )],
@@ -2274,7 +2077,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
         ClientId::CodeBuddy,
         vec![crate::integrations::DiscoveredInput::plain_file(
             codebuddy_path.clone(),
-            crate::integrations::DecoderKind::codebuddy_jsonl(0),
+            crate::integrations::DecoderKind::codebuddy_jsonl(),
         )],
     );
     let no_cache_policy = signature_for_test_units(
@@ -2282,7 +2085,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
         ClientId::CodeBuddy,
         vec![crate::integrations::DiscoveredInput::no_record_cache(
             codebuddy_path,
-            crate::integrations::DecoderKind::codebuddy_jsonl(0),
+            crate::integrations::DecoderKind::codebuddy_jsonl(),
         )],
     );
     assert_ne!(plain_policy, no_cache_policy, "input policy is significant");
@@ -2306,7 +2109,7 @@ fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
             ClientId::CodeBuddy,
             vec![crate::integrations::DiscoveredInput::plain_file(
                 codebuddy_group_path.clone(),
-                crate::integrations::DecoderKind::codebuddy_jsonl(0),
+                crate::integrations::DecoderKind::codebuddy_jsonl(),
             )
             .prepare_snapshot()
             .unwrap()],
@@ -2630,9 +2433,18 @@ fn test_clean_empty_opencode_scan_result_is_not_cached() {
         )
         .unwrap();
         assert!(second_messages.is_empty());
+        assert_eq!(
+            input_record_cache::get_input_read_stats(&path).hash_passes,
+            0,
+            "an uncached ordinary input must not add a separate fingerprint hash pass"
+        );
+        let cache = input_record_cache::InputRecordShardStore::load().unwrap();
         assert!(
-            input_record_cache::get_input_read_stats(&path).hash_passes > 0,
-            "a clean empty input has no shard and must be scanned again"
+            cache
+                .get_meta(&path, unit.decoder.version())
+                .unwrap()
+                .is_none(),
+            "a second clean empty scan must still leave no shard"
         );
     }
 
@@ -3355,10 +3167,7 @@ fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
         assert!(input_cache_for_test_home(input_home.path())
             .get_meta(
                 &path,
-                input_record_cache::DecoderVersion::new(
-                    input_record_cache::DecoderId::Codex,
-                    crate::integrations::codex::DECODER_REVISION
-                )
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
             )
             .unwrap()
             .and_then(|meta| meta.codex_incremental)
@@ -3452,10 +3261,7 @@ fn test_codex_untimestamped_token_row_is_partial_without_cache_shard() {
             .unwrap()
             .get_meta(
                 &path,
-                input_record_cache::DecoderVersion::new(
-                    input_record_cache::DecoderId::Codex,
-                    crate::integrations::codex::DECODER_REVISION
-                )
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
             )
             .unwrap()
             .is_none());
@@ -3520,10 +3326,7 @@ fn test_codex_malformed_json_suffix_keeps_prefix_without_cache_shard() {
             .unwrap()
             .get_meta(
                 &path,
-                input_record_cache::DecoderVersion::new(
-                    input_record_cache::DecoderId::Codex,
-                    crate::integrations::codex::DECODER_REVISION
-                )
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
             )
             .unwrap()
             .is_none());
@@ -3588,10 +3391,7 @@ fn test_codex_invalid_utf8_suffix_keeps_prefix_without_cache_shard() {
         assert!(cache
             .get_meta(
                 &path,
-                input_record_cache::DecoderVersion::new(
-                    input_record_cache::DecoderId::Codex,
-                    crate::integrations::codex::DECODER_REVISION
-                )
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
             )
             .unwrap()
             .is_none());
@@ -3653,10 +3453,7 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
         assert!(input_cache_for_test_home(input_home.path())
             .get_meta(
                 &path,
-                input_record_cache::DecoderVersion::new(
-                    input_record_cache::DecoderId::Codex,
-                    crate::integrations::codex::DECODER_REVISION
-                )
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
             )
             .unwrap()
             .is_none());
@@ -3696,10 +3493,7 @@ fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
         assert!(input_cache_for_test_home(input_home.path())
             .get_meta(
                 &path,
-                input_record_cache::DecoderVersion::new(
-                    input_record_cache::DecoderId::Codex,
-                    crate::integrations::codex::DECODER_REVISION
-                )
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
             )
             .unwrap()
             .is_some());
@@ -3740,10 +3534,7 @@ fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
             .unwrap()
             .get_meta(
                 &path,
-                input_record_cache::DecoderVersion::new(
-                    input_record_cache::DecoderId::Codex,
-                    crate::integrations::codex::DECODER_REVISION
-                )
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
             )
             .unwrap()
             .is_none());
@@ -3855,8 +3646,7 @@ fn test_apply_token_pricing_clears_existing_cost_without_pricing() {
         Some("planner".to_string()),
     );
 
-    apply_token_pricing(&mut msg, None);
-
+    apply_token_pricing(&mut msg, None).unwrap();
     assert_eq!(msg.cost, 0.0);
 }
 
@@ -3937,7 +3727,7 @@ fn test_parse_all_messages_with_pricing_prices_canonical_gpt_5_6_factory_model()
 }
 
 #[test]
-fn test_finalize_token_priced_messages_drops_rows_without_positive_tokens() {
+fn test_finalize_token_priced_messages_rejects_negative_and_filters_zero_tokens() {
     let mut litellm = HashMap::new();
     litellm.insert(
         "gpt-4o".into(),
@@ -3989,15 +3779,27 @@ fn test_finalize_token_priced_messages_drops_rows_without_positive_tokens() {
             },
             0.42,
         ),
+        {
+            let mut record = AttributedUsageRecord::new(
+                ClientId::Gemini,
+                "gpt-4o",
+                "openai",
+                "negative-message-count",
+                1_733_011_200_000,
+                TokenBreakdown::default(),
+                0.42,
+            );
+            record.message_count = -1;
+            record
+        },
     ];
 
-    finalize_token_priced_messages(&mut messages, Some(&pricing));
-
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].session_id.as_ref(), "mixed");
-    assert_eq!(messages[0].tokens.input, 0);
-    assert_eq!(messages[0].tokens.output, 5);
-    assert_eq!(messages[0].cost, 0.01);
+    let rejections = finalize_token_priced_messages(&mut messages, Some(&pricing));
+    assert!(messages.is_empty());
+    assert_eq!(rejections.total(), 3);
+    let rejection = rejections.entries().next().unwrap();
+    assert_eq!(rejection.key, "invalid-usage-record");
+    assert_eq!(rejection.count, 3);
 }
 
 #[test]
@@ -4185,8 +3987,7 @@ fn test_finalize_token_priced_messages_canonicalizes_provider() {
         ),
     ];
 
-    finalize_token_priced_messages(&mut messages, None);
-
+    let _ = finalize_token_priced_messages(&mut messages, None);
     assert_eq!(messages[0].provider_id.as_ref(), "openai");
     assert_eq!(messages[1].provider_id.as_ref(), "fireworks");
     assert_eq!(messages[2].provider_id.as_ref(), "xai");
@@ -4241,8 +4042,7 @@ fn test_finalize_token_priced_messages_preserves_custom_provider_literal_tag() {
         0.0,
     )];
 
-    finalize_token_priced_messages(&mut messages, Some(&pricing));
-
+    let _ = finalize_token_priced_messages(&mut messages, Some(&pricing));
     assert_eq!(messages[0].provider_id.as_ref(), "venice");
     assert_eq!(messages[0].cost, 0.2);
 }
@@ -4265,13 +4065,11 @@ fn test_finalize_token_priced_messages_preserves_owl_provider_identity() {
         0.0,
     )];
 
-    finalize_token_priced_messages(&mut messages, None);
-
+    let _ = finalize_token_priced_messages(&mut messages, None);
     assert_eq!(messages[0].provider_id.as_ref(), "owl");
 }
 
 #[test]
-#[should_panic(expected = "token count exceeds i64::MAX while aggregating usage")]
 fn test_positive_token_total_rejects_overflow() {
     let tokens = TokenBreakdown {
         input: i64::MAX,
@@ -4281,7 +4079,20 @@ fn test_positive_token_total_rejects_overflow() {
         reasoning: i64::MAX,
     };
 
-    let _ = positive_token_total(&tokens);
+    assert_eq!(positive_token_total(&tokens), None);
+}
+
+#[test]
+fn test_positive_token_total_rejects_negative_bucket() {
+    let tokens = TokenBreakdown {
+        input: 10,
+        output: -1,
+        cache_read: 0,
+        cache_write: 0,
+        reasoning: 0,
+    };
+
+    assert_eq!(positive_token_total(&tokens), None);
 }
 
 #[test]
@@ -4353,9 +4164,41 @@ fn test_apply_token_pricing_overrides_cost_when_pricing_exists() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.02);
+}
+
+#[test]
+fn test_apply_token_pricing_returns_non_finite_cost_as_typed_error() {
+    let pricing = pricing::PricingService::new(
+        HashMap::from([(
+            "overflow-model".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(f64::MAX),
+                ..Default::default()
+            },
+        )]),
+        HashMap::new(),
+    );
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::Codex,
+        "overflow-model",
+        "openai",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: i64::MAX,
+            ..TokenBreakdown::default()
+        },
+        0.0,
+    );
+
+    let error = apply_token_pricing(&mut msg, Some(&pricing)).unwrap_err();
+    assert_eq!(
+        error,
+        pricing::PricingComputationError::NonFiniteCost { component: "input" }
+    );
+    assert_eq!(msg.cost, 0.0);
 }
 
 #[test]
@@ -4387,8 +4230,7 @@ fn test_apply_token_pricing_resolves_canonical_longcat_model() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.02);
 }
 
@@ -4431,9 +4273,8 @@ fn test_apply_token_pricing_uses_same_price_for_zed_and_other_clients() {
         0.0,
     );
 
-    apply_token_pricing(&mut zed_msg, Some(&pricing));
-    apply_token_pricing(&mut claude_msg, Some(&pricing));
-
+    apply_token_pricing(&mut zed_msg, Some(&pricing)).unwrap();
+    apply_token_pricing(&mut claude_msg, Some(&pricing)).unwrap();
     assert_eq!(zed_msg.cost, claude_msg.cost);
     assert!((zed_msg.cost - 0.020).abs() < 1e-12);
 }
@@ -4471,8 +4312,7 @@ fn test_apply_token_pricing_custom_zed_price_is_final_price() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert!((msg.cost - 0.050).abs() < 1e-12);
 }
 
@@ -4505,8 +4345,7 @@ fn test_apply_token_pricing_uses_upstream_provider_for_zed_byok() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert!((msg.cost - 0.020).abs() < 1e-12);
 }
 
@@ -4539,8 +4378,7 @@ fn test_apply_token_pricing_uses_reasoning_for_gemini() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.034);
 }
 
@@ -4574,8 +4412,7 @@ fn test_apply_token_pricing_uses_cache_read_pricing_for_gemini() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.0267);
 }
 
@@ -4609,8 +4446,7 @@ fn test_finalize_token_pricing_cleans_free_variant_before_lookup() {
     );
     let mut messages = vec![msg];
 
-    finalize_token_priced_messages(&mut messages, Some(&pricing));
-
+    let _ = finalize_token_priced_messages(&mut messages, Some(&pricing));
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].model_id.as_ref(), "nemotron-3-ultra");
     assert!(messages[0].cost > 0.0);
@@ -4646,8 +4482,7 @@ fn test_finalize_token_pricing_cleans_date_variant_before_lookup() {
     );
     let mut messages = vec![msg];
 
-    finalize_token_priced_messages(&mut messages, Some(&pricing));
-
+    let _ = finalize_token_priced_messages(&mut messages, Some(&pricing));
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].model_id.as_ref(), "gpt-4o-mini");
     assert!(messages[0].cost > 0.0);
@@ -4699,8 +4534,7 @@ fn test_finalize_token_pricing_cleans_repeated_date_variant_before_lookup() {
         ),
     ];
 
-    finalize_token_priced_messages(&mut messages, Some(&pricing));
-
+    let _ = finalize_token_priced_messages(&mut messages, Some(&pricing));
     assert_eq!(messages.len(), 2);
     assert!(messages
         .iter()
@@ -4745,8 +4579,7 @@ fn test_apply_token_pricing_prefers_provider_aware_match() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.2);
 }
 
@@ -4787,8 +4620,7 @@ fn test_apply_token_pricing_uses_nested_reseller_exact_match() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.2);
 }
 
@@ -4831,8 +4663,7 @@ fn test_apply_token_pricing_clears_cost_without_exact_pricing() {
         0.123,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.0);
 }
 
@@ -4878,8 +4709,7 @@ fn test_apply_token_pricing_prefers_provider_specific_exact_match_over_plain_exa
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.05);
 }
 
@@ -4920,8 +4750,7 @@ fn test_apply_token_pricing_normalizes_openai_codex_provider() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.2);
 }
 
@@ -4954,8 +4783,7 @@ fn test_apply_token_pricing_normalizes_openai_pro_provider() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.2);
 }
 
@@ -4988,8 +4816,7 @@ fn test_apply_token_pricing_honors_observed_owl_scope_for_gpt() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.2);
 }
 
@@ -5022,8 +4849,7 @@ fn test_apply_token_pricing_honors_observed_owl_scope_for_claude() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.2);
 }
 
@@ -5056,8 +4882,7 @@ fn test_apply_token_pricing_honors_observed_owl_scope_for_minimax() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.2);
 }
 
@@ -5091,8 +4916,7 @@ fn test_apply_token_pricing_prices_claude_code_gpt_5_3_codex() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     let expected = 1.75 + 1.4 + 0.00875;
     assert!((msg.cost - expected).abs() < 1e-12);
 }
@@ -5126,8 +4950,7 @@ fn test_apply_token_pricing_prices_claude_code_minimax_model() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     assert_eq!(msg.cost, 0.2);
 }
 
@@ -5160,8 +4983,7 @@ fn test_apply_token_pricing_prices_canonical_kimi_k2_6() {
         0.0,
     );
 
-    apply_token_pricing(&mut msg, Some(&pricing));
-
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
     let expected = 1_000_000.0 * 9.5e-7 + 250_000.0 * 0.000004;
     assert!((msg.cost - expected).abs() < 1e-12);
     assert!(msg.cost > 0.0);
@@ -5368,9 +5190,9 @@ fn usage_projection_preserves_input_health() {
     .expect("a broken third-party input must not abort the usage projection");
 
     assert_eq!(usage.total_tokens, 0);
-    assert!(!health.complete);
-    assert_eq!(health.failed_inputs, 1);
-    assert_eq!(health.issues[0].client, ClientId::OpenCode);
+    assert!(!health.complete());
+    assert_eq!(health.failed_inputs(), 1);
+    assert_eq!(health.issues[0].client, Some(ClientId::OpenCode));
     assert_eq!(health.issues[0].issue, "input-unavailable");
 }
 

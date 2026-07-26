@@ -217,6 +217,7 @@ fn resolved_custom_date_range_is_typed_and_labeled() {
         resolved.label.as_deref(),
         Some("from 2024-01-01 to 2024-12-31")
     );
+    assert_eq!(resolved.relative, None);
 }
 
 #[test]
@@ -229,6 +230,7 @@ fn resolved_date_range_without_flags_is_unfiltered() {
 
     assert_eq!(resolved.range, tokenx_engine::DateRange::none());
     assert_eq!(resolved.label, None);
+    assert_eq!(resolved.relative, None);
 }
 
 #[test]
@@ -246,6 +248,7 @@ fn resolved_today_uses_provided_local_date() {
     assert_eq!(resolved.range.since(), Some(today));
     assert_eq!(resolved.range.until(), Some(today));
     assert_eq!(resolved.label.as_deref(), Some("Today"));
+    assert_eq!(resolved.relative, Some(RelativeDateRange::Today));
 }
 
 #[test]
@@ -266,6 +269,7 @@ fn resolved_week_uses_provided_local_date() {
     );
     assert_eq!(resolved.range.until(), Some(today));
     assert_eq!(resolved.label.as_deref(), Some("Last 7 days"));
+    assert_eq!(resolved.relative, Some(RelativeDateRange::LastSevenDays));
 }
 
 #[test]
@@ -286,6 +290,16 @@ fn resolved_month_uses_provided_local_date() {
     );
     assert_eq!(resolved.range.until(), Some(today));
     assert_eq!(resolved.label.as_deref(), Some("March 2026"));
+    assert_eq!(resolved.relative, Some(RelativeDateRange::CurrentMonth));
+}
+
+#[test]
+fn relative_month_re_resolves_when_local_midnight_enters_a_new_month() {
+    let next_month = chrono::NaiveDate::from_ymd_opt(2026, 4, 1).unwrap();
+    let range = RelativeDateRange::CurrentMonth.resolve(next_month);
+
+    assert_eq!(range.since(), Some(next_month));
+    assert_eq!(range.until(), Some(next_month));
 }
 
 #[test]
@@ -477,20 +491,36 @@ fn models_execution_plan_does_not_depend_on_terminal_state() {
 }
 
 #[test]
+#[serial_test::serial]
 fn one_startup_snapshot_resolves_all_settings_driven_policy() {
-    let home = tempfile::TempDir::new().unwrap();
-    let settings_path = if cfg!(target_os = "windows") {
-        home.path()
-            .join("AppData")
-            .join("Roaming")
-            .join("tokenx")
-            .join("settings.json")
-    } else {
-        home.path()
-            .join(".config")
-            .join("tokenx")
-            .join("settings.json")
-    };
+    struct ConfigDirGuard(Option<std::ffi::OsString>);
+    impl Drop for ConfigDirGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("TOKENX_CONFIG_DIR", value),
+                    None => std::env::remove_var("TOKENX_CONFIG_DIR"),
+                }
+            }
+        }
+    }
+
+    let input_home = tempfile::TempDir::new().unwrap();
+    let product_root = tempfile::TempDir::new().unwrap();
+    let settings_path = product_root.path().join("settings.json");
+    let previous_config_dir = std::env::var_os("TOKENX_CONFIG_DIR");
+    unsafe {
+        std::env::set_var("TOKENX_CONFIG_DIR", product_root.path());
+    }
+    let _guard = ConfigDirGuard(previous_config_dir);
+
+    let decoy_settings = input_home.path().join(".tokenx").join("settings.json");
+    std::fs::create_dir_all(decoy_settings.parent().unwrap()).unwrap();
+    std::fs::write(
+        decoy_settings,
+        r#"{"colorPalette":"halloween","defaultClients":["amp"]}"#,
+    )
+    .unwrap();
     std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
     std::fs::write(
         &settings_path,
@@ -512,12 +542,17 @@ fn one_startup_snapshot_resolves_all_settings_driven_policy() {
         .unwrap(),
     )
     .unwrap();
+    std::fs::write(
+        product_root.path().join("custom-pricing.json"),
+        b"{not-json",
+    )
+    .unwrap();
 
     let cli = Cli::try_parse_from([
         "tokenx",
         "tui",
         "--home",
-        home.path().to_str().unwrap(),
+        input_home.path().to_str().unwrap(),
         "--tab",
         "subscription",
     ])
@@ -534,7 +569,10 @@ fn one_startup_snapshot_resolves_all_settings_driven_policy() {
         panic!("expected TUI plan");
     };
 
-    assert_eq!(plan.startup.input.home, home.path().canonicalize().unwrap());
+    assert_eq!(
+        plan.startup.input.home,
+        input_home.path().canonicalize().unwrap()
+    );
     assert_eq!(
         plan.startup.input.universe.iter().collect::<Vec<_>>(),
         vec![ClientId::Claude, ClientId::Codex]
@@ -560,8 +598,19 @@ fn one_startup_snapshot_resolves_all_settings_driven_policy() {
     assert_eq!(
         plan.startup.settings.save_path_override.as_deref(),
         Some(settings_path.as_path()),
-        "an explicit input home must keep selecting that home's settings file"
+        "input discovery home must not redirect Tokenx product state"
     );
+    assert_eq!(
+        tokenx_engine::pricing::PricingStatus::from_diagnostics(plan.startup.pricing.diagnostics()),
+        tokenx_engine::pricing::PricingStatus::Unavailable,
+        "invalid optional pricing metadata must not prevent startup resolution"
+    );
+    assert!(plan
+        .startup
+        .pricing
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.message().contains("failed to parse JSON")));
 }
 
 #[test]

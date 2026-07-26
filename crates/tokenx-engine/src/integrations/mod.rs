@@ -37,31 +37,29 @@ pub(crate) mod warp;
 pub(crate) mod zcode;
 pub(crate) mod zed;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
 use crate::clients::ClientId;
-use crate::input_health::{DataHealth, InputFailure, InputHealth, InputStatus, RejectionSummary};
+use crate::input_health::{
+    DataHealth, InputFailure, InputStatus, RecordRejectionReason, RejectionSummary,
+};
 #[cfg(test)]
 use crate::input_record_cache::DecoderId;
-use crate::input_record_cache::{DecoderRevision, InputFileIdentity};
 use crate::{
     input_record_cache, pricing, records::UsageRecord, scanner, AttributedUsageRecord,
     ClientUniverse,
 };
 
-pub(crate) use decoder::DecoderKind;
+pub(crate) use decoder::{CopilotWorkspaceScope, DecoderKind};
 pub(crate) use error::{
     InputDiscoveryError, InputParseError, InputPipelineError, InputPlanningError,
 };
 pub(crate) use runtime::{BoundUsageSink, FoldContext};
 pub(crate) use source::{matchers as source_matchers, SourceMatcher, SourceSpec};
-
-pub(crate) const MODEL_ID_CANONICALIZATION_REVISION: DecoderRevision = 3;
-pub(crate) const EXPLICIT_TOKEN_OVERFLOW_REVISION: DecoderRevision =
-    MODEL_ID_CANONICALIZATION_REVISION + 1;
 
 pub(crate) trait IntegrationDriver: Sync {
     fn discover_inputs(
@@ -93,7 +91,9 @@ pub(crate) trait IntegrationDriver: Sync {
         sink: &mut BoundUsageSink<'_>,
     ) -> Result<(), InputPipelineError> {
         while let Some(parsed) = batches.next(ctx)? {
+            batches.check_cancelled(crate::engine::AcquisitionPhase::Folding)?;
             self.fold(parsed, ctx, sink)?;
+            batches.check_cancelled(crate::engine::AcquisitionPhase::Folding)?;
         }
         Ok(())
     }
@@ -103,19 +103,65 @@ pub(crate) struct DiscoveryContext<'a> {
     pub client: ClientId,
     pub home_dir: &'a Path,
     pub scanner_settings: &'a scanner::ScannerSettings,
+    pub cancellation: crate::engine::AcquisitionCancellation,
 }
 
 pub(crate) struct ParseContext<'a> {
-    pub pricing: Option<&'a pricing::PricingService>,
+    _pricing: Option<&'a pricing::PricingService>,
+    calendar: crate::CalendarContext,
+    cancellation: crate::engine::AcquisitionCancellation,
+}
+
+impl<'a> ParseContext<'a> {
+    pub(crate) fn new(
+        pricing: Option<&'a pricing::PricingService>,
+        calendar: crate::CalendarContext,
+        cancellation: &crate::engine::AcquisitionCancellation,
+    ) -> Self {
+        Self {
+            _pricing: pricing,
+            calendar,
+            cancellation: cancellation.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn uncancelled(pricing: Option<&'a pricing::PricingService>) -> Self {
+        Self {
+            _pricing: pricing,
+            calendar: crate::CalendarContext::explicit("UTC")
+                .expect("UTC is a valid IANA timezone"),
+            cancellation: crate::engine::AcquisitionCancellation::default(),
+        }
+    }
+
+    pub(crate) fn calendar(&self) -> crate::CalendarContext {
+        self.calendar
+    }
+
+    pub(crate) fn cancellation(&self) -> &crate::engine::AcquisitionCancellation {
+        &self.cancellation
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+}
+
+pub(crate) enum AttributedUsageSinkOutcome {
+    Retained,
+    Rejected(RecordRejectionReason),
+    Failed,
 }
 
 pub(crate) trait AttributedUsageSink {
-    fn push_record(&mut self, message: AttributedUsageRecord);
+    fn push_record(&mut self, message: AttributedUsageRecord) -> AttributedUsageSinkOutcome;
 }
 
 impl AttributedUsageSink for Vec<AttributedUsageRecord> {
-    fn push_record(&mut self, message: AttributedUsageRecord) {
+    fn push_record(&mut self, message: AttributedUsageRecord) -> AttributedUsageSinkOutcome {
         self.push(message);
+        AttributedUsageSinkOutcome::Retained
     }
 }
 
@@ -124,6 +170,10 @@ pub(crate) struct DiscoveredInput {
     pub path: PathBuf,
     pub fingerprint_policy: FingerprintPolicy,
     pub decoder: DecoderKind,
+    // Claude's lossy project-name resolution is acquisition-local state. It
+    // deliberately travels with the input but is excluded from persisted
+    // inventory identity and record-cache payloads.
+    claude_project_resolver: Option<Arc<claude::decode::ClaudeProjectResolver>>,
 }
 
 impl DiscoveredInput {
@@ -132,6 +182,7 @@ impl DiscoveredInput {
             path,
             fingerprint_policy: FingerprintPolicy::PlainFile,
             decoder,
+            claude_project_resolver: None,
         }
     }
 
@@ -140,6 +191,7 @@ impl DiscoveredInput {
             path,
             fingerprint_policy: FingerprintPolicy::SqliteWithWal,
             decoder,
+            claude_project_resolver: None,
         }
     }
 
@@ -148,6 +200,7 @@ impl DiscoveredInput {
             path,
             fingerprint_policy: FingerprintPolicy::NoRecordCache,
             decoder,
+            claude_project_resolver: None,
         }
     }
 
@@ -159,7 +212,22 @@ impl DiscoveredInput {
                 parent_session_path: None,
             },
             decoder,
+            claude_project_resolver: None,
         }
+    }
+
+    pub(crate) fn with_claude_project_resolver(
+        mut self,
+        resolver: Arc<claude::decode::ClaudeProjectResolver>,
+    ) -> Self {
+        self.claude_project_resolver = Some(resolver);
+        self
+    }
+
+    pub(crate) fn claude_project_resolver(
+        &self,
+    ) -> Option<&Arc<claude::decode::ClaudeProjectResolver>> {
+        self.claude_project_resolver.as_ref()
     }
 
     pub(crate) fn with_dependency(mut self, dependency_path: PathBuf) -> Self {
@@ -233,7 +301,8 @@ impl DiscoveredInput {
             hasher,
             self.decoder.version().decoder_id.stable_name().as_bytes(),
         );
-        hasher.update(self.decoder.version().revision.to_le_bytes());
+        hasher.update(self.decoder.version().contract().bytes());
+        hasher.update([self.decoder.version().variant() as u8]);
         self.update_decoder_inventory_signature(hasher);
         self.update_policy_inventory_signature(hasher);
         self.input_policy()
@@ -358,20 +427,6 @@ pub(crate) struct PreparedInput {
 }
 
 impl PreparedInput {
-    pub(crate) fn refresh_for_inventory(
-        &mut self,
-    ) -> Result<(), input_record_cache::InputSnapshotError> {
-        self.snapshot = self.input.input_policy().snapshot()?;
-        Ok(())
-    }
-
-    pub(crate) fn refresh_for_execution(
-        &mut self,
-    ) -> Result<(), input_record_cache::InputSnapshotError> {
-        self.snapshot = self.input.input_policy().snapshot()?;
-        Ok(())
-    }
-
     pub(crate) fn snapshot(&self) -> &input_record_cache::InputSnapshot {
         &self.snapshot
     }
@@ -456,18 +511,6 @@ impl ExecutionInput {
                 Some(snapshot)
             }
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inventory_signature_digest(&self) -> [u8; 32] {
-        let prepared = PreparedInput {
-            input: self.input.clone(),
-            snapshot: self
-                .snapshot()
-                .expect("test execution input must retain an inventory snapshot")
-                .clone(),
-        };
-        prepared.inventory_signature_digest()
     }
 
     pub(crate) fn take_cache_candidate(&mut self) -> Option<input_record_cache::CachedInputMeta> {
@@ -589,7 +632,11 @@ pub(crate) enum FingerprintPolicy {
 
 #[derive(Debug)]
 pub(crate) enum UnitRecordPayload {
+    /// Immediately available records. The fold still applies the common
+    /// eligibility, cache, canonicalization, and pricing boundary.
     Fresh(Vec<UsageRecord>),
+    /// Generic raw scan output awaiting the common fold boundary.
+    PendingFinalization(Vec<UsageRecord>),
     CodexFresh(Vec<UsageRecord>),
     CacheHit(input_record_cache::CacheReadPlan),
     CodexCacheHit(input_record_cache::CacheReadPlan),
@@ -704,20 +751,12 @@ pub(crate) struct PreparedIntegrationInputs {
     pub units: Vec<PreparedInput>,
 }
 
-pub(crate) struct ConfirmedIntegrationInputs {
-    pub client: ClientId,
-    pub unit_digests: Vec<[u8; 32]>,
-    pub present_files: Vec<(InputFileIdentity, u64)>,
-}
-
 pub(crate) struct ParsedBatchInput {
     binding: IntegrationBinding,
     units: Option<Vec<PreparedInput>>,
     planned: VecDeque<PlannedExecutionInput>,
-    confirmed_inventory_digests: Vec<[u8; 32]>,
-    confirmed_present_files: HashMap<InputFileIdentity, u64>,
-    failed_health: Vec<InputHealth>,
     batch_width: usize,
+    cancellation: crate::engine::AcquisitionCancellation,
 }
 
 enum PlannedExecutionInput {
@@ -737,15 +776,26 @@ enum BatchSlot {
 }
 
 impl ParsedBatchInput {
+    #[cfg(test)]
     fn new(binding: IntegrationBinding, units: Vec<PreparedInput>) -> Self {
+        Self::with_cancellation(
+            binding,
+            units,
+            crate::engine::AcquisitionCancellation::default(),
+        )
+    }
+
+    fn with_cancellation(
+        binding: IntegrationBinding,
+        units: Vec<PreparedInput>,
+        cancellation: crate::engine::AcquisitionCancellation,
+    ) -> Self {
         Self {
             binding,
             units: Some(units),
             planned: VecDeque::new(),
-            confirmed_inventory_digests: Vec::new(),
-            confirmed_present_files: HashMap::new(),
-            failed_health: Vec::new(),
             batch_width: rayon::current_num_threads().max(1),
+            cancellation,
         }
     }
 
@@ -753,6 +803,7 @@ impl ParsedBatchInput {
         &mut self,
         ctx: &FoldContext<'_>,
     ) -> Result<Option<Vec<ParsedUnit>>, InputPipelineError> {
+        self.check_cancelled(crate::engine::AcquisitionPhase::Planning)?;
         self.plan_remaining_units(ctx)?;
         if self.planned.is_empty() {
             return Ok(None);
@@ -786,13 +837,13 @@ impl ParsedBatchInput {
         let parsed_misses = if miss_units.is_empty() {
             Vec::new()
         } else {
+            self.check_cancelled(crate::engine::AcquisitionPhase::Parsing)?;
             self.binding.driver.parse_inputs(
                 miss_units,
-                &ParseContext {
-                    pricing: ctx.pricing,
-                },
+                &ParseContext::new(ctx.pricing, ctx.calendar(), &self.cancellation),
             )
         };
+        self.check_cancelled(crate::engine::AcquisitionPhase::Parsing)?;
         let mut parsed_misses = parsed_misses.into_iter();
         let mut parsed = Vec::with_capacity(slots.len());
         for slot in slots {
@@ -825,6 +876,7 @@ impl ParsedBatchInput {
         &mut self,
         ctx: &FoldContext<'_>,
     ) -> Result<Vec<CacheHitPlan>, InputPipelineError> {
+        self.check_cancelled(crate::engine::AcquisitionPhase::Planning)?;
         self.plan_remaining_units(ctx)?;
         Ok(self
             .planned
@@ -840,75 +892,56 @@ impl ParsedBatchInput {
         self.batch_width
     }
 
-    fn take_failed_health(&mut self) -> Vec<InputHealth> {
-        std::mem::take(&mut self.failed_health)
-    }
-
     fn plan_remaining_units(&mut self, ctx: &FoldContext<'_>) -> Result<(), InputPipelineError> {
+        self.check_cancelled(crate::engine::AcquisitionPhase::Planning)?;
         let Some(units) = self.units.take() else {
             return Ok(());
         };
-        // A unit whose input snapshot fails is isolated as unavailable. A
-        // cache-planning failure belongs to tokenx's cache infrastructure
-        // and must remain a pipeline error instead of being attributed to
-        // third-party input data.
         #[allow(clippy::large_enum_variant)] // transient per-unit planning slot
         enum PlannedOrFailed {
-            Planned(
-                PlannedExecutionInput,
-                [u8; 32],
-                Vec<(InputFileIdentity, u64)>,
-            ),
-            Failed(InputHealth),
+            Planned(PlannedExecutionInput),
             PipelineError(InputPlanningError),
+            Cancelled(crate::engine::AcquisitionCancelled),
         }
+        let cancellation = self.cancellation.clone();
         let planned: Vec<PlannedOrFailed> = units
             .into_par_iter()
-            .map(|mut unit| {
-                let path = unit.path.clone();
-                if let Err(source) = unit.refresh_for_execution() {
-                    return PlannedOrFailed::Failed(InputHealth {
-                        client: self.binding.client,
-                        path,
-                        status: InputStatus::Unavailable {
-                            failure: InputFailure::new(
-                                "snapshot input metadata for cache planning",
-                                source.to_string(),
-                            ),
-                        },
-                        rejections: RejectionSummary::default(),
-                    });
+            .map(|unit| {
+                if let Err(error) = cancellation.check(crate::engine::AcquisitionPhase::Planning) {
+                    return PlannedOrFailed::Cancelled(error);
                 }
-                let inventory_digest = unit.inventory_signature_digest();
-                let mut present_files = Vec::new();
-                unit.snapshot()
-                    .visit_present_files(|identity, size| present_files.push((identity, size)));
-                match self.binding.driver.plan_cache_hit(unit, &*ctx.input_cache) {
+                let outcome = match self.binding.driver.plan_cache_hit(unit, &*ctx.input_cache) {
                     Ok(plan) => {
                         let planned = match plan {
                             CacheHitPlan::Hit(parsed) => PlannedExecutionInput::Hit(parsed),
                             CacheHitPlan::Miss(unit) => PlannedExecutionInput::Miss(unit),
                         };
-                        PlannedOrFailed::Planned(planned, inventory_digest, present_files)
+                        PlannedOrFailed::Planned(planned)
                     }
                     Err(error) => PlannedOrFailed::PipelineError(error),
+                };
+                match cancellation.check(crate::engine::AcquisitionPhase::Planning) {
+                    Ok(()) => outcome,
+                    Err(error) => PlannedOrFailed::Cancelled(error),
                 }
             })
             .collect();
         for outcome in planned {
             match outcome {
-                PlannedOrFailed::Planned(planned, digest, present_files) => {
-                    self.confirmed_inventory_digests.push(digest);
-                    for (identity, size) in present_files {
-                        self.confirmed_present_files.entry(identity).or_insert(size);
-                    }
-                    self.planned.push_back(planned);
-                }
-                PlannedOrFailed::Failed(health) => self.failed_health.push(health),
+                PlannedOrFailed::Planned(planned) => self.planned.push_back(planned),
                 PlannedOrFailed::PipelineError(error) => return Err(error.into()),
+                PlannedOrFailed::Cancelled(error) => return Err(error.into()),
             }
         }
+        self.check_cancelled(crate::engine::AcquisitionPhase::Planning)?;
         Ok(())
+    }
+
+    fn check_cancelled(
+        &self,
+        phase: crate::engine::AcquisitionPhase,
+    ) -> Result<(), InputPipelineError> {
+        self.cancellation.check(phase).map_err(Into::into)
     }
 }
 
@@ -916,28 +949,32 @@ pub(crate) fn run_prepared_integrations(
     prepared: Vec<PreparedIntegrationInputs>,
     input_cache: &mut input_record_cache::InputRecordShardStore,
     pricing: Option<&pricing::PricingService>,
+    calendar: crate::CalendarContext,
     sink: &mut dyn AttributedUsageSink,
     health: &mut DataHealth,
-) -> Result<Vec<ConfirmedIntegrationInputs>, InputPipelineError> {
-    let mut confirmed = Vec::with_capacity(prepared.len());
+    cancellation: &crate::engine::AcquisitionCancellation,
+) -> Result<(), InputPipelineError> {
+    cancellation.check(crate::engine::AcquisitionPhase::Planning)?;
     for PreparedIntegrationInputs { binding, units } in prepared {
-        let mut batches = ParsedBatchInput::new(binding, units);
-        let mut fold_ctx = FoldContext::new(binding, input_cache, pricing);
+        cancellation.check(crate::engine::AcquisitionPhase::Planning)?;
+        let mut batches = ParsedBatchInput::with_cancellation(binding, units, cancellation.clone());
+        let mut fold_ctx = FoldContext::new_with_cancellation(
+            binding,
+            input_cache,
+            pricing,
+            calendar,
+            cancellation.clone(),
+        );
         let mut bound_sink = BoundUsageSink::new(binding, sink);
+        cancellation.check(crate::engine::AcquisitionPhase::Folding)?;
         binding
             .driver
             .fold_batches(&mut batches, &mut fold_ctx, &mut bound_sink)?;
+        cancellation.check(crate::engine::AcquisitionPhase::Folding)?;
         health.merge(fold_ctx.take_health());
-        for failed in batches.take_failed_health() {
-            health.record(failed);
-        }
-        confirmed.push(ConfirmedIntegrationInputs {
-            client: binding.client,
-            unit_digests: batches.confirmed_inventory_digests,
-            present_files: batches.confirmed_present_files.into_iter().collect(),
-        });
     }
-    Ok(confirmed)
+    cancellation.check(crate::engine::AcquisitionPhase::Folding)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -962,7 +999,7 @@ mod tests {
     }
 
     fn amp_decoder() -> DecoderKind {
-        DecoderKind::plain(DecoderId::Amp, 0)
+        DecoderKind::plain(DecoderId::Amp)
     }
 
     fn test_binding(driver: &'static dyn IntegrationDriver) -> IntegrationBinding {
@@ -1007,6 +1044,26 @@ mod tests {
         assert_eq!(messages[0].client, ClientId::Amp);
     }
 
+    #[test]
+    fn cancelled_batch_stops_before_planning_or_parsing() {
+        let cancellation = crate::engine::AcquisitionCancellation::default();
+        cancellation.cancel();
+        let driver = Box::leak(Box::new(RecordingDriver {
+            batch_sizes: Mutex::new(Vec::new()),
+        }));
+        let binding = test_binding(driver);
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut cache =
+            input_record_cache::InputRecordShardStore::open(&dir.path().join("cache")).unwrap();
+        let context = FoldContext::new(binding, &mut cache, None);
+        let mut batches = ParsedBatchInput::with_cancellation(binding, Vec::new(), cancellation);
+
+        let error = batches.next(&context).unwrap_err();
+
+        assert!(error.is_cancelled());
+        assert!(driver.batch_sizes.lock().unwrap().is_empty());
+    }
+
     impl IntegrationDriver for RecordingDriver {
         fn discover_inputs(
             &self,
@@ -1029,8 +1086,11 @@ mod tests {
                         "model",
                         "provider",
                         unit.path.to_string_lossy(),
-                        index as i64,
-                        crate::TokenBreakdown::default(),
+                        index as i64 + 1,
+                        crate::TokenBreakdown {
+                            input: 1,
+                            ..Default::default()
+                        },
                         0.0,
                     );
                     ParsedUnit::healthy(unit, UnitRecordPayload::Fresh(vec![message]), None, false)
@@ -1078,7 +1138,10 @@ mod tests {
                     "provider",
                     "placeholder",
                     1,
-                    crate::TokenBreakdown::default(),
+                    crate::TokenBreakdown {
+                        input: 1,
+                        ..Default::default()
+                    },
                     0.0,
                 );
                 message.session_id = session_id;
@@ -1157,7 +1220,9 @@ mod tests {
     struct DroppingSink;
 
     impl AttributedUsageSink for DroppingSink {
-        fn push_record(&mut self, _message: AttributedUsageRecord) {}
+        fn push_record(&mut self, _message: AttributedUsageRecord) -> AttributedUsageSinkOutcome {
+            AttributedUsageSinkOutcome::Retained
+        }
     }
 
     #[test]
@@ -1457,38 +1522,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_batch_planning_records_confirmed_inventory_digests() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("input.jsonl");
-        std::fs::write(&path, b"input").unwrap();
-        let driver = Box::leak(Box::new(RecordingDriver {
-            batch_sizes: Mutex::new(Vec::new()),
-        }));
-        let binding = test_binding(driver);
-        let mut batches = ParsedBatchInput::new(
-            binding,
-            vec![test_prepare(DiscoveredInput::plain_file(
-                path,
-                amp_decoder(),
-            ))],
-        );
-        let mut cache = input_record_cache::InputRecordShardStore::default();
-        let fold_context = FoldContext::new(binding, &mut cache, None);
-
-        let planned = batches.take_all_planned_units(&fold_context).unwrap();
-
-        assert_eq!(planned.len(), 1);
-        assert_eq!(batches.confirmed_inventory_digests.len(), 1);
-        let CacheHitPlan::Miss(unit) = &planned[0] else {
-            panic!("recording driver must use its default cache-miss plan");
-        };
-        assert_eq!(
-            batches.confirmed_inventory_digests[0],
-            unit.inventory_signature_digest()
-        );
-    }
-
-    #[test]
     fn plain_db_input_does_not_guess_a_wal_input() {
         let path = PathBuf::from("/tmp/plain-history.db");
         let unit = DiscoveredInput::plain_file(path.clone(), amp_decoder());
@@ -1503,23 +1536,22 @@ mod tests {
         let dependency = dir.path().join("parent.jsonl");
         std::fs::write(&primary, b"child").unwrap();
 
-        let unit =
-            DiscoveredInput::plain_file(primary.clone(), DecoderKind::plain(DecoderId::Omp, 0))
-                .with_dependency(dependency.clone());
+        let unit = DiscoveredInput::plain_file(primary.clone(), DecoderKind::plain(DecoderId::Omp))
+            .with_dependency(dependency.clone());
         assert_eq!(
             unit.digest_paths(),
             vec![primary.clone(), dependency.clone()]
         );
-        let mut unit = unit.prepare_snapshot().unwrap();
+        let unit = unit.prepare_snapshot().unwrap();
         let absent = unit.inventory_signature_digest();
 
         std::fs::write(&dependency, b"reviewer").unwrap();
-        unit.refresh_for_inventory().unwrap();
+        let unit = unit.into_discovered().prepare_snapshot().unwrap();
         let reviewer = unit.inventory_signature_digest();
         assert_ne!(absent, reviewer);
 
         std::fs::write(&dependency, b"oracle-agent").unwrap();
-        unit.refresh_for_inventory().unwrap();
+        let unit = unit.into_discovered().prepare_snapshot().unwrap();
         assert_ne!(reviewer, unit.inventory_signature_digest());
     }
 }

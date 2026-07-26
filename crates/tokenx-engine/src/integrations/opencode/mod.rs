@@ -15,10 +15,6 @@ use crate::integrations::{
 };
 
 pub(crate) struct Driver;
-// Record-level rejection and parsed Agent identity changes alter the cached
-// scan outcome, so old OpenCode shards must be rebuilt.
-pub(crate) const DECODER_REVISION: u32 =
-    crate::integrations::MODEL_ID_CANONICALIZATION_REVISION + 6;
 
 impl IntegrationDriver for Driver {
     fn discover_inputs(
@@ -34,12 +30,7 @@ impl IntegrationDriver for Driver {
         db_paths.dedup();
         Ok(db_paths
             .into_iter()
-            .map(|path| {
-                DiscoveredInput::sqlite_with_wal(
-                    path,
-                    DecoderKind::opencode_sqlite(DECODER_REVISION),
-                )
-            })
+            .map(|path| DiscoveredInput::sqlite_with_wal(path, DecoderKind::opencode_sqlite()))
             .collect())
     }
 
@@ -51,7 +42,7 @@ impl IntegrationDriver for Driver {
         units
             .into_par_iter()
             .map(|unit| match unit.decoder {
-                DecoderKind::OpenCodeSqlite { .. } => {
+                DecoderKind::OpenCodeSqlite => {
                     pipeline_cache::load_or_scan_unit_with(unit, ctx, |path| {
                         decode::parse_opencode_sqlite(path).map_err(|error| {
                             crate::records::error::SessionParseError::new(
@@ -111,25 +102,27 @@ fn fold_opencode_unit(
 ) -> Result<(), InputPipelineError> {
     let pipeline_cache::ResolvedUnit {
         unit,
-        messages,
+        mut messages,
         cache_write,
         invalidate_cache,
         status,
-        rejections,
+        mut rejections,
     } = pipeline_cache::resolve_unit(parsed, ctx)?;
-    ctx.record_health(unit.path.clone(), status, rejections);
     let path = unit.path.clone();
+    rejections.merge(&crate::retain_source_eligible_messages(&mut messages));
+    let cache_write = cache_write.map(|plan| Box::new(plan.with_rejections(rejections.clone())));
     let cache_write_outcome = pipeline_cache::write_cache(cache_write, ctx, &messages);
-    if cache_write_outcome.is_err() && invalidate_cache {
-        ctx.input_cache.remove(&path, unit.decoder.version());
-    }
-    let cache_write_outcome = cache_write_outcome?;
-    pipeline_cache::emit_messages(
+    rejections.merge(&crate::price_source_eligible_messages(
+        &mut messages,
+        ctx.pricing,
+    ));
+    rejections.merge(&pipeline_cache::emit_messages(
         messages
             .into_iter()
             .filter(|message| message.dedup_key.is_none_or(|key| seen.insert(key))),
         sink,
-    );
+    ));
+    ctx.record_health(unit.path.clone(), status, rejections);
 
     if cache_write_outcome == pipeline_cache::CacheWriteOutcome::NotPlanned && invalidate_cache {
         ctx.input_cache.remove(&path, unit.decoder.version());
@@ -195,6 +188,7 @@ mod tests {
             client: ClientId::OpenCode,
             home_dir: home.path(),
             scanner_settings: &settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         };
 
         let units = DRIVER.discover_inputs(&ctx).unwrap();
@@ -207,7 +201,7 @@ mod tests {
         );
         assert!(units
             .iter()
-            .all(|unit| matches!(unit.decoder, DecoderKind::OpenCodeSqlite { .. })));
+            .all(|unit| matches!(unit.decoder, DecoderKind::OpenCodeSqlite)));
         assert!(units.iter().all(|unit| unit.digest_paths().len() == 2));
     }
 
@@ -235,7 +229,7 @@ mod tests {
                 ParsedUnit::healthy(
                     DiscoveredInput::sqlite_with_wal(
                         dir.path().join(name),
-                        DecoderKind::opencode_sqlite(DECODER_REVISION),
+                        DecoderKind::opencode_sqlite(),
                     ),
                     UnitRecordPayload::Fresh(vec![message]),
                     None,
@@ -265,12 +259,9 @@ mod tests {
         let units = vec![first, second]
             .into_iter()
             .map(|path| {
-                DiscoveredInput::sqlite_with_wal(
-                    path,
-                    DecoderKind::opencode_sqlite(DECODER_REVISION),
-                )
-                .prepare_snapshot()
-                .unwrap()
+                DiscoveredInput::sqlite_with_wal(path, DecoderKind::opencode_sqlite())
+                    .prepare_snapshot()
+                    .unwrap()
             })
             .collect();
 
@@ -302,20 +293,17 @@ mod tests {
         conn.execute_batch("CREATE TABLE message (id TEXT, session_id TEXT, data TEXT);")
             .unwrap();
         drop(conn);
-        let unit = DiscoveredInput::sqlite_with_wal(
-            path.clone(),
-            DecoderKind::opencode_sqlite(DECODER_REVISION),
-        )
-        .prepare_snapshot()
-        .unwrap();
+        let unit = DiscoveredInput::sqlite_with_wal(path.clone(), DecoderKind::opencode_sqlite())
+            .prepare_snapshot()
+            .unwrap();
         let decoder_version = unit.decoder.version();
         let fingerprint = unit.input_policy().fingerprint().unwrap();
         let mut cache = input_record_cache::InputRecordShardStore::default();
         cache.insert(input_record_cache::CachedInputEntry::new_with_version(
             &path,
-            input_record_cache::DecoderVersion::new(
+            input_record_cache::DecoderVersion::for_test_contract_marker(
                 input_record_cache::DecoderId::OpenCodeSqlite,
-                crate::integrations::MODEL_ID_CANONICALIZATION_REVISION,
+                1,
             ),
             fingerprint,
             vec![UsageRecord::new(
@@ -334,7 +322,7 @@ mod tests {
 
         let parsed = DRIVER.parse_inputs(
             vec![unit.into_lookup_miss()],
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         assert_eq!(parsed.len(), 1);
         let health = &parsed[0].health;
@@ -371,18 +359,15 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let unit = DiscoveredInput::sqlite_with_wal(
-            path.clone(),
-            DecoderKind::opencode_sqlite(DECODER_REVISION),
-        )
-        .prepare_snapshot()
-        .unwrap();
+        let unit = DiscoveredInput::sqlite_with_wal(path.clone(), DecoderKind::opencode_sqlite())
+            .prepare_snapshot()
+            .unwrap();
         let decoder_version = unit.decoder.version();
         let mut cache = input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
 
         let parsed = DRIVER.parse_inputs(
             vec![unit.clone().into_lookup_miss()],
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         assert_eq!(parsed.len(), 1);
         let health = &parsed[0].health;
@@ -438,16 +423,13 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let unit = DiscoveredInput::sqlite_with_wal(
-            path.clone(),
-            DecoderKind::opencode_sqlite(DECODER_REVISION),
-        )
-        .prepare_snapshot()
-        .unwrap();
+        let unit = DiscoveredInput::sqlite_with_wal(path.clone(), DecoderKind::opencode_sqlite())
+            .prepare_snapshot()
+            .unwrap();
         let decoder_version = unit.decoder.version();
         let parsed = DRIVER.parse_inputs(
             vec![unit.into_lookup_miss()],
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         assert_eq!(parsed.len(), 1);
         let health = &parsed[0].health;

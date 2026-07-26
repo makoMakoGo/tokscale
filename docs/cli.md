@@ -154,7 +154,8 @@ writing the generation cache, or resetting refresh. Manual and automatic
 refresh scan the original universe. Data Health continues to describe that
 complete universe.
 
-Date boundaries are inclusive and use the local timezone:
+Date boundaries are inclusive and use the one IANA calendar resolved from
+`timeZone` or the operating-system timezone at command startup:
 
 ```bash
 tokenx models --today
@@ -196,7 +197,7 @@ tokenx cache prune
 scope. Models never writes that generation cache. Input-record shards remain an
 internal derived cache and are written while parsing.
 
-`cache prune` removes orphaned Inputs and superseded decoder revisions.
+`cache prune` removes orphaned Inputs and stale decoder contracts.
 Unreadable or unclassifiable shards make the explicit maintenance command fail
 instead of reporting partial success.
 

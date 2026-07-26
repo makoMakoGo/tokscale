@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,8 +15,8 @@ use tokenx_engine::{
 use ratatui::style::Color;
 
 use super::data::{
-    build_period_usage, AgentEntry, DailyClientInfo, DailyUsage, HourlyUsage, OverviewSummary,
-    PeriodKind, PeriodUsage, UsageModelEntry, UsageProjection, UsageTokenBreakdown,
+    AgentEntry, DailyClientInfo, DailyUsage, HourlyUsage, OverviewSummary, PeriodKind, PeriodUsage,
+    UsageModelEntry, UsageProjection, UsageTokenBreakdown,
 };
 use super::generation_controller::{RefreshControl, RefreshRequest, RefreshStatus};
 use super::interaction::{
@@ -196,6 +197,34 @@ fn pricing_warning(status: PricingStatus) -> Option<&'static str> {
 pub enum SortDirection {
     Ascending,
     Descending,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelOrderKey {
+    usage_revision: u64,
+    sort_field: SortField,
+    sort_direction: SortDirection,
+    detail: Option<ModelDetailSelection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UsageOrderKey {
+    usage_revision: u64,
+    sort_field: SortField,
+    sort_direction: SortDirection,
+}
+
+#[derive(Debug)]
+struct CachedRenderOrder<K> {
+    key: K,
+    order: Arc<[usize]>,
+}
+
+#[derive(Debug, Default)]
+struct RenderOrderCache {
+    models: Option<CachedRenderOrder<ModelOrderKey>>,
+    daily: Option<CachedRenderOrder<UsageOrderKey>>,
+    hourly: Option<CachedRenderOrder<UsageOrderKey>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -481,6 +510,8 @@ pub struct App {
     pub selected_model_detail: Option<ModelDetailSelection>,
     model_detail_models: Option<Vec<UsageModelEntry>>,
     detail_sort_contexts: HashMap<DetailSortContextKind, DetailSortContext>,
+    usage_revision: u64,
+    render_order_cache: RefCell<RenderOrderCache>,
 
     pub selected_graph_cell: Option<(usize, usize)>,
     stats_auto_select_today_pending: bool,
@@ -493,7 +524,7 @@ pub struct App {
     pub status_message_time: Option<Instant>,
     status_message_kind: StatusMessageKind,
     status_message_tone: StatusTone,
-    cache_persistence_warning: Option<String>,
+    generation_cache_warning: Option<String>,
     pricing_status: PricingStatus,
     pub subscription_status_message: Option<String>,
     pub subscription_status_message_time: Option<Instant>,
@@ -603,6 +634,8 @@ impl App {
             selected_model_detail: None,
             model_detail_models: None,
             detail_sort_contexts: HashMap::new(),
+            usage_revision: 0,
+            render_order_cache: RefCell::new(RenderOrderCache::default()),
             selected_graph_cell: None,
             stats_auto_select_today_pending: current_tab == Tab::Stats,
             refresh_status: RefreshStatus::new(auto_refresh, auto_refresh_interval, Duration::ZERO),
@@ -612,7 +645,7 @@ impl App {
             status_message_time: None,
             status_message_kind: StatusMessageKind::General,
             status_message_tone: StatusTone::Info,
-            cache_persistence_warning: None,
+            generation_cache_warning: None,
             pricing_status: PricingStatus::Available,
             subscription_status_message: None,
             subscription_status_message_time: None,
@@ -673,6 +706,10 @@ impl App {
         self.require_installed_generation().view()
     }
 
+    pub(crate) fn period_usage(&self, kind: PeriodKind) -> &[PeriodUsage] {
+        self.require_installed_generation().periods(kind)
+    }
+
     pub(crate) fn session_snapshot(&self) -> &SessionSnapshot {
         self.require_installed_generation().sessions()
     }
@@ -709,8 +746,20 @@ impl App {
             })
     }
 
-    fn effective_date(&self) -> NaiveDate {
+    pub(crate) fn effective_date(&self) -> NaiveDate {
         self.local_usage.query().effective_date
+    }
+
+    pub(crate) fn current_calendar_hour(&self) -> chrono::NaiveDateTime {
+        self.calendar_context().current_hour()
+    }
+
+    pub(crate) fn calendar_context(&self) -> tokenx_engine::CalendarContext {
+        *self
+            .require_installed_generation()
+            .generation()
+            .acquisition_config()
+            .calendar()
     }
 
     pub fn has_enabled_subscription_providers(&self) -> bool {
@@ -959,7 +1008,7 @@ impl App {
             return;
         }
 
-        if let Some(cell) = self.graph_cell_for_date(chrono::Local::now().date_naive()) {
+        if let Some(cell) = self.graph_cell_for_date(self.effective_date()) {
             self.selected_graph_cell = Some(cell);
             self.stats_auto_select_today_pending = false;
         }
@@ -1012,13 +1061,9 @@ impl App {
             }
         }
         if let Some(selection) = self.selected_period_detail {
-            let period_still_exists =
-                build_period_usage(self.usage(), selection.kind)
-                    .iter()
-                    .any(|period| {
-                        period.start_date == selection.start_date
-                            && period.end_date == selection.end_date
-                    });
+            let period_still_exists = self.period_usage(selection.kind).iter().any(|period| {
+                period.start_date == selection.start_date && period.end_date == selection.end_date
+            });
             if !period_still_exists {
                 let tab = Self::period_tab(selection.kind);
                 self.leave_period_detail_sort_context();
@@ -1033,6 +1078,7 @@ impl App {
     fn replace_usage_projection(&mut self, projection: PreparedProjection, mark_refresh: bool) {
         let (had_graph_selection, selected_graph_date) = self.capture_usage_selection(mark_refresh);
         self.local_usage.install_projection(projection);
+        self.bump_usage_revision();
         self.reconcile_usage_selection(had_graph_selection, selected_graph_date);
     }
 
@@ -1040,7 +1086,13 @@ impl App {
     fn replace_usage_data_for_test(&mut self, data: UsageProjection, mark_refresh: bool) {
         let (had_graph_selection, selected_graph_date) = self.capture_usage_selection(mark_refresh);
         self.local_usage.replace_view_for_test(data);
+        self.bump_usage_revision();
         self.reconcile_usage_selection(had_graph_selection, selected_graph_date);
+    }
+
+    fn bump_usage_revision(&mut self) {
+        self.usage_revision = self.usage_revision.wrapping_add(1);
+        *self.render_order_cache.get_mut() = RenderOrderCache::default();
     }
 
     fn project_generation(
@@ -1064,6 +1116,7 @@ impl App {
         let pricing_status = generation.pricing_status();
         let (had_graph_selection, selected_graph_date) = self.capture_usage_selection(true);
         self.local_usage.install_generation(generation)?;
+        self.bump_usage_revision();
         self.pricing_status = pricing_status;
         self.reconcile_usage_selection(had_graph_selection, selected_graph_date);
         crate::acquisition::trim_allocator();
@@ -1133,8 +1186,9 @@ impl App {
     }
 
     #[cfg(test)]
-    pub(crate) fn usage_mut_for_test(&mut self) -> &mut UsageProjection {
+    pub(crate) fn usage_mut_for_test(&mut self) -> super::local_usage::UsageProjectionMut<'_> {
         self.ensure_test_generation();
+        self.bump_usage_revision();
         self.local_usage.view_mut()
     }
 
@@ -1142,6 +1196,7 @@ impl App {
     pub(crate) fn replace_session_snapshot_for_test(&mut self, snapshot: SessionSnapshot) {
         self.ensure_test_generation();
         self.local_usage.replace_sessions_for_test(snapshot);
+        self.bump_usage_revision();
     }
 
     #[cfg(test)]
@@ -1152,6 +1207,7 @@ impl App {
             effective_date: self.effective_date(),
         };
         self.local_usage.set_query_for_test(query);
+        self.bump_usage_revision();
     }
 
     #[cfg(test)]
@@ -1162,6 +1218,7 @@ impl App {
             effective_date: self.effective_date(),
         };
         self.local_usage.set_query_for_test(query);
+        self.bump_usage_revision();
     }
 
     #[cfg(test)]
@@ -1193,12 +1250,12 @@ impl App {
         self.theme.client_identity_color(Some(client))
     }
 
-    pub(crate) fn set_cache_persistence_warning(&mut self, warning: Option<String>) {
-        self.cache_persistence_warning = warning;
+    pub(crate) fn set_generation_cache_warning(&mut self, warning: Option<String>) {
+        self.generation_cache_warning = warning;
     }
 
-    pub(crate) fn cache_persistence_warning(&self) -> Option<&str> {
-        self.cache_persistence_warning.as_deref()
+    pub(crate) fn generation_cache_warning(&self) -> Option<&str> {
+        self.generation_cache_warning.as_deref()
     }
 
     pub(crate) fn pricing_warning(&self) -> Option<&'static str> {
@@ -1206,8 +1263,13 @@ impl App {
     }
 
     pub fn on_tick(&mut self) {
+        self.on_tick_for_date(self.effective_date());
+    }
+
+    pub(super) fn on_tick_for_date(&mut self, current_date: NaiveDate) {
         self.spinner_frame = (self.spinner_frame + 1) % 20;
         self.ticker_tick = self.ticker_tick.wrapping_add(1);
+        self.advance_effective_date(current_date);
 
         if let Some(status_time) = self.status_message_time {
             if status_time.elapsed() > Duration::from_secs(3) {
@@ -1237,6 +1299,42 @@ impl App {
                 );
             }
             SubscriptionPoll::Pending => {}
+        }
+    }
+
+    pub(super) fn advance_effective_date(&mut self, current_date: NaiveDate) {
+        let previous_date = self.effective_date();
+        if previous_date == current_date {
+            return;
+        }
+
+        let selected_previous_today = self
+            .selected_graph_cell
+            .and_then(|cell| self.graph_date_for_cell(cell))
+            .is_some_and(|date| date == previous_date);
+        let query = UsageQuery {
+            clients: self.local_usage.query().clients.clone(),
+            group_by: self.local_usage.query().group_by,
+            effective_date: current_date,
+        };
+
+        if self.has_installed_generation() {
+            match self.local_usage.prepare_projection(query) {
+                Ok(projection) => self.replace_usage_projection(projection, false),
+                Err(error) => {
+                    self.set_generation_status_with_tone(
+                        &format!("Failed to advance local calendar: {error:#}"),
+                        StatusTone::Danger,
+                    );
+                    return;
+                }
+            }
+        } else {
+            self.local_usage.replace_uninstalled_query(query);
+        }
+
+        if selected_previous_today {
+            self.request_stats_today_selection();
         }
     }
 
@@ -1700,7 +1798,16 @@ impl App {
 
     /// Clamp selection and scroll offset to valid bounds after data/resize changes.
     fn clamp_selection(&mut self) {
-        let len = self.get_current_list_len();
+        let len = match self.get_current_list_len() {
+            Ok(len) => len,
+            Err(error) => {
+                self.set_status_with_tone(
+                    &format!("Usage view projection failed: {error:#}"),
+                    StatusTone::Danger,
+                );
+                0
+            }
+        };
         let mut interaction = self.current_list_interaction();
         interaction.set_visible(self.max_visible_items, len);
         self.set_current_list_interaction(interaction);
@@ -1982,7 +2089,16 @@ impl App {
     }
 
     fn apply_list_move(&mut self, command: MoveCommand) -> InteractionOutcome {
-        let len = self.get_current_list_len();
+        let len = match self.get_current_list_len() {
+            Ok(len) => len,
+            Err(error) => {
+                self.set_status_with_tone(
+                    &format!("Usage view projection failed: {error:#}"),
+                    StatusTone::Danger,
+                );
+                0
+            }
+        };
         let wrap = if self.current_tab == Tab::Stats {
             WrapMode::Clamp
         } else {
@@ -1995,14 +2111,14 @@ impl App {
         outcome
     }
 
-    fn get_current_list_len(&self) -> usize {
+    fn get_current_list_len(&self) -> Result<usize> {
         if self.current_tab.depends_on_local_generation() && !self.has_installed_generation() {
-            return 0;
+            return Ok(0);
         }
 
-        match self.current_tab {
+        Ok(match self.current_tab {
             Tab::Overview => self.usage().models.len(),
-            Tab::Models if self.is_model_detail_active() => self.get_sorted_models().len(),
+            Tab::Models if self.is_model_detail_active() => self.model_row_count(),
             Tab::Models => self.usage().models.len(),
             Tab::Agents => self.usage().agents.len(),
             Tab::Daily if self.is_daily_detail_active() => {
@@ -2014,8 +2130,8 @@ impl App {
             Tab::Weekly if self.is_period_detail_active_for_kind(PeriodKind::Weekly) => {
                 self.get_sorted_period_detail_rows().len()
             }
-            Tab::Monthly => build_period_usage(self.usage(), PeriodKind::Monthly).len(),
-            Tab::Weekly => build_period_usage(self.usage(), PeriodKind::Weekly).len(),
+            Tab::Monthly => self.period_usage(PeriodKind::Monthly).len(),
+            Tab::Weekly => self.period_usage(PeriodKind::Weekly).len(),
             Tab::Daily => self.usage().daily.len(),
             Tab::Hourly => self.usage().hourly.len(),
             Tab::Stats => 0,
@@ -2025,7 +2141,7 @@ impl App {
                 .map(|u| u.metrics.len())
                 .sum(),
             Tab::Sessions => 0,
-        }
+        })
     }
 
     fn set_sort(&mut self, field: SortField) {
@@ -2170,17 +2286,14 @@ impl App {
             return;
         }
 
-        let selection = {
-            let models = self.get_sorted_models();
-            models
-                .get(self.selected_index)
-                .map(|model| ModelDetailSelection {
-                    model: model.model_id.to_string(),
-                    client: (self.group_by() == tokenx_engine::GroupBy::ClientModel)
-                        .then(|| model.clients.first().copied())
-                        .flatten(),
-                })
-        };
+        let selection = self
+            .model_at_sorted_index(self.selected_index)
+            .map(|model| ModelDetailSelection {
+                model: model.model_id.to_string(),
+                client: (self.group_by() == tokenx_engine::GroupBy::ClientModel)
+                    .then(|| model.clients.first().copied())
+                    .flatten(),
+            });
         let Some(selection) = selection else {
             return;
         };
@@ -2252,9 +2365,12 @@ impl App {
         self.selected_model_detail = None;
 
         let restored_index = self
-            .get_sorted_models()
+            .model_render_order()
             .iter()
-            .position(|model| Self::model_detail_matches(&selection, model))
+            .position(|index| {
+                self.model_at_source_index(*index)
+                    .is_some_and(|model| Self::model_detail_matches(&selection, model))
+            })
             .unwrap_or_else(|| self.stored_list_interaction(Tab::Models).selected);
         let model_interaction = self.stored_list_interaction(Tab::Models);
         let max_visible = model_interaction.visible.max(1);
@@ -2280,10 +2396,9 @@ impl App {
             return;
         }
 
-        let selected_date = {
-            let daily = self.get_sorted_daily();
-            daily.get(self.selected_index).map(|day| day.date)
-        };
+        let selected_date = self
+            .daily_at_sorted_index(self.selected_index)
+            .map(|day| day.date);
 
         if let Some(date) = selected_date {
             self.persist_list_interaction_for(Tab::Daily);
@@ -2307,9 +2422,9 @@ impl App {
         // Re-anchor by date so a sort change inside detail mode still
         // restores the same day rather than the stale list index.
         let restored_index = self
-            .get_sorted_daily()
+            .daily_render_order()
             .iter()
-            .position(|day| day.date == detail_date)
+            .position(|index| self.usage().daily[*index].date == detail_date)
             .unwrap_or_else(|| self.stored_list_interaction(Tab::Daily).selected);
 
         let daily_interaction = self.stored_list_interaction(Tab::Daily);
@@ -2405,7 +2520,7 @@ impl App {
     fn selected_copy_text(&self) -> Option<String> {
         match self.current_tab {
             Tab::Overview | Tab::Models => {
-                self.get_sorted_models().get(self.selected_index).map(|m| {
+                self.model_at_sorted_index(self.selected_index).map(|m| {
                     format!(
                         "{}: {} tokens, ${:.4}",
                         m.display_name,
@@ -2439,6 +2554,7 @@ impl App {
             Tab::Monthly | Tab::Weekly if self.is_period_detail_active() => self
                 .get_sorted_period_detail_rows()
                 .get(self.selected_index)
+                .cloned()
                 .map(|row| {
                     format!(
                         "{} / {}: {} tokens, ${:.4}",
@@ -2449,12 +2565,12 @@ impl App {
                     )
                 }),
             Tab::Daily => self
-                .get_sorted_daily()
-                .get(self.selected_index)
+                .daily_at_sorted_index(self.selected_index)
                 .map(|d| format!("{}: {} tokens, ${:.4}", d.date, d.tokens.total(), d.cost)),
             Tab::Monthly => self
                 .get_sorted_periods(PeriodKind::Monthly)
                 .get(self.selected_index)
+                .copied()
                 .map(|p| {
                     format!(
                         "{} {}: {} tokens, ${:.4}",
@@ -2467,6 +2583,7 @@ impl App {
             Tab::Weekly => self
                 .get_sorted_periods(PeriodKind::Weekly)
                 .get(self.selected_index)
+                .copied()
                 .map(|p| {
                     format!(
                         "{} {}: {} tokens, ${:.4}",
@@ -2476,7 +2593,7 @@ impl App {
                         p.cost
                     )
                 }),
-            Tab::Hourly => self.get_sorted_hourly().get(self.selected_index).map(|h| {
+            Tab::Hourly => self.hourly_at_sorted_index(self.selected_index).map(|h| {
                 format!(
                     "{}: {} tokens, ${:.4}",
                     h.datetime.format("%Y-%m-%d %H:%M"),
@@ -2601,19 +2718,44 @@ impl App {
         self.subscription_status_message_tone
     }
 
-    pub fn get_sorted_models(&self) -> Vec<&UsageModelEntry> {
-        let mut models: Vec<&UsageModelEntry> = match &self.selected_model_detail {
-            Some(selection) => self
-                .model_detail_models
-                .as_deref()
-                .unwrap_or_default()
+    fn model_order_source(&self) -> &[UsageModelEntry] {
+        if self.selected_model_detail.is_some() {
+            self.model_detail_models.as_deref().unwrap_or_default()
+        } else {
+            &self.usage().models
+        }
+    }
+
+    pub(crate) fn model_render_order(&self) -> Arc<[usize]> {
+        let key = ModelOrderKey {
+            usage_revision: self.usage_revision,
+            sort_field: self.sort_field,
+            sort_direction: self.sort_direction,
+            detail: self.selected_model_detail.clone(),
+        };
+        if let Some(cached) = self
+            .render_order_cache
+            .borrow()
+            .models
+            .as_ref()
+            .filter(|cached| cached.key == key)
+        {
+            return Arc::clone(&cached.order);
+        }
+
+        let source = self.model_order_source();
+        let mut order = match self.selected_model_detail.as_ref() {
+            Some(selection) => source
                 .iter()
-                .filter(|model| Self::model_detail_matches(selection, model))
-                .collect(),
-            None => self.usage().models.iter().collect(),
+                .enumerate()
+                .filter_map(|(index, model)| {
+                    Self::model_detail_matches(selection, model).then_some(index)
+                })
+                .collect::<Vec<_>>(),
+            None => (0..source.len()).collect::<Vec<_>>(),
         };
 
-        let tie_breaker = |a: &&UsageModelEntry, b: &&UsageModelEntry| {
+        let tie_breaker = |a: &UsageModelEntry, b: &UsageModelEntry| {
             a.model_id
                 .cmp(&b.model_id)
                 .then_with(|| a.workspace_label.cmp(&b.workspace_label))
@@ -2623,30 +2765,74 @@ impl App {
         };
 
         match (self.sort_field, self.sort_direction) {
-            (SortField::Cost, SortDirection::Descending) => {
-                models.sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| tie_breaker(a, b)))
-            }
-            (SortField::Cost, SortDirection::Ascending) => {
-                models.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| tie_breaker(a, b)))
-            }
-            (SortField::Tokens, SortDirection::Descending) => models.sort_by(|a, b| {
+            (SortField::Cost, SortDirection::Descending) => order.sort_by(|a, b| {
+                let a = &source[*a];
+                let b = &source[*b];
+                b.cost.total_cmp(&a.cost).then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Cost, SortDirection::Ascending) => order.sort_by(|a, b| {
+                let a = &source[*a];
+                let b = &source[*b];
+                a.cost.total_cmp(&b.cost).then_with(|| tie_breaker(a, b))
+            }),
+            (SortField::Tokens, SortDirection::Descending) => order.sort_by(|a, b| {
+                let a = &source[*a];
+                let b = &source[*b];
                 b.tokens
                     .total()
                     .cmp(&a.tokens.total())
                     .then_with(|| tie_breaker(a, b))
             }),
-            (SortField::Tokens, SortDirection::Ascending) => models.sort_by(|a, b| {
+            (SortField::Tokens, SortDirection::Ascending) => order.sort_by(|a, b| {
+                let a = &source[*a];
+                let b = &source[*b];
                 a.tokens
                     .total()
                     .cmp(&b.tokens.total())
                     .then_with(|| tie_breaker(a, b))
             }),
             (SortField::Date, _) => {
-                models.sort_by(|a, b| tie_breaker(a, b));
+                order.sort_by(|a, b| tie_breaker(&source[*a], &source[*b]));
             }
         }
 
-        models
+        let order: Arc<[usize]> = order.into();
+        self.render_order_cache.borrow_mut().models = Some(CachedRenderOrder {
+            key,
+            order: Arc::clone(&order),
+        });
+        order
+    }
+
+    pub(crate) fn model_at_source_index(&self, index: usize) -> Option<&UsageModelEntry> {
+        self.model_order_source().get(index)
+    }
+
+    pub(crate) fn model_at_sorted_index(&self, index: usize) -> Option<&UsageModelEntry> {
+        let order = self.model_render_order();
+        self.model_at_source_index(*order.get(index)?)
+    }
+
+    pub(crate) fn model_row_count(&self) -> usize {
+        match self.selected_model_detail.as_ref() {
+            Some(selection) => self
+                .model_order_source()
+                .iter()
+                .filter(|model| Self::model_detail_matches(selection, model))
+                .count(),
+            None => self.usage().models.len(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn get_sorted_models(&self) -> Vec<&UsageModelEntry> {
+        self.model_render_order()
+            .iter()
+            .map(|index| {
+                self.model_at_source_index(*index)
+                    .expect("cached model index must reference the current projection")
+            })
+            .collect()
     }
 
     pub fn get_sorted_agents(&self) -> Vec<&AgentEntry> {
@@ -2683,35 +2869,79 @@ impl App {
         agents
     }
 
-    pub fn get_sorted_daily(&self) -> Vec<&DailyUsage> {
-        let mut daily: Vec<&DailyUsage> = self.usage().daily.iter().collect();
+    pub(crate) fn daily_render_order(&self) -> Arc<[usize]> {
+        let key = UsageOrderKey {
+            usage_revision: self.usage_revision,
+            sort_field: self.sort_field,
+            sort_direction: self.sort_direction,
+        };
+        if let Some(cached) = self
+            .render_order_cache
+            .borrow()
+            .daily
+            .as_ref()
+            .filter(|cached| cached.key == key)
+        {
+            return Arc::clone(&cached.order);
+        }
+
+        let daily = &self.usage().daily;
+        let mut order = (0..daily.len()).collect::<Vec<_>>();
 
         match (self.sort_field, self.sort_direction) {
-            (SortField::Cost, SortDirection::Descending) => {
-                daily.sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| a.date.cmp(&b.date)))
-            }
-            (SortField::Cost, SortDirection::Ascending) => {
-                daily.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| a.date.cmp(&b.date)))
-            }
-            (SortField::Tokens, SortDirection::Descending) => daily.sort_by(|a, b| {
+            (SortField::Cost, SortDirection::Descending) => order.sort_by(|a, b| {
+                let a = &daily[*a];
+                let b = &daily[*b];
+                b.cost.total_cmp(&a.cost).then_with(|| a.date.cmp(&b.date))
+            }),
+            (SortField::Cost, SortDirection::Ascending) => order.sort_by(|a, b| {
+                let a = &daily[*a];
+                let b = &daily[*b];
+                a.cost.total_cmp(&b.cost).then_with(|| a.date.cmp(&b.date))
+            }),
+            (SortField::Tokens, SortDirection::Descending) => order.sort_by(|a, b| {
+                let a = &daily[*a];
+                let b = &daily[*b];
                 b.tokens
                     .total()
                     .cmp(&a.tokens.total())
                     .then_with(|| a.date.cmp(&b.date))
             }),
-            (SortField::Tokens, SortDirection::Ascending) => daily.sort_by(|a, b| {
+            (SortField::Tokens, SortDirection::Ascending) => order.sort_by(|a, b| {
+                let a = &daily[*a];
+                let b = &daily[*b];
                 a.tokens
                     .total()
                     .cmp(&b.tokens.total())
                     .then_with(|| a.date.cmp(&b.date))
             }),
             (SortField::Date, SortDirection::Descending) => {
-                daily.sort_by_key(|b| std::cmp::Reverse(b.date))
+                order.sort_by_key(|index| std::cmp::Reverse(daily[*index].date))
             }
-            (SortField::Date, SortDirection::Ascending) => daily.sort_by_key(|a| a.date),
+            (SortField::Date, SortDirection::Ascending) => {
+                order.sort_by_key(|index| daily[*index].date)
+            }
         }
 
-        daily
+        let order: Arc<[usize]> = order.into();
+        self.render_order_cache.borrow_mut().daily = Some(CachedRenderOrder {
+            key,
+            order: Arc::clone(&order),
+        });
+        order
+    }
+
+    pub(crate) fn daily_at_sorted_index(&self, index: usize) -> Option<&DailyUsage> {
+        let order = self.daily_render_order();
+        self.usage().daily.get(*order.get(index)?)
+    }
+
+    #[cfg(test)]
+    pub fn get_sorted_daily(&self) -> Vec<&DailyUsage> {
+        self.daily_render_order()
+            .iter()
+            .map(|index| &self.usage().daily[*index])
+            .collect()
     }
 
     pub fn is_daily_detail_active(&self) -> bool {
@@ -2733,8 +2963,8 @@ impl App {
 
     pub fn period_detail_label(&self) -> Option<String> {
         let selection = self.selected_period_detail?;
-        build_period_usage(self.usage(), selection.kind)
-            .into_iter()
+        self.period_usage(selection.kind)
+            .iter()
             .find(|period| {
                 period.start_date == selection.start_date && period.end_date == selection.end_date
             })
@@ -2754,16 +2984,25 @@ impl App {
         rows
     }
 
+    pub(crate) fn daily_detail_row_count(&self) -> usize {
+        let Some(date) = self.selected_daily_detail_date else {
+            return 0;
+        };
+        self.usage()
+            .daily
+            .iter()
+            .find(|day| day.date == date)
+            .map(|day| build_detail_rows(&day.client_breakdown, self.group_by()).len())
+            .unwrap_or(0)
+    }
+
     pub fn get_sorted_period_detail_rows(&self) -> Vec<PeriodDetailRow> {
         let Some(selection) = self.selected_period_detail else {
             return Vec::new();
         };
-        let Some(period) = build_period_usage(self.usage(), selection.kind)
-            .into_iter()
-            .find(|period| {
-                period.start_date == selection.start_date && period.end_date == selection.end_date
-            })
-        else {
+        let Some(period) = self.period_usage(selection.kind).iter().find(|period| {
+            period.start_date == selection.start_date && period.end_date == selection.end_date
+        }) else {
             return Vec::new();
         };
 
@@ -2772,43 +3011,92 @@ impl App {
         rows
     }
 
-    pub fn get_sorted_hourly(&self) -> Vec<&HourlyUsage> {
-        let mut hourly: Vec<&HourlyUsage> = self.usage().hourly.iter().collect();
+    pub(crate) fn period_detail_row_count(&self) -> usize {
+        let Some(selection) = self.selected_period_detail else {
+            return 0;
+        };
+        self.period_usage(selection.kind)
+            .iter()
+            .find(|period| {
+                period.start_date == selection.start_date && period.end_date == selection.end_date
+            })
+            .map(|period| build_detail_rows(&period.client_breakdown, self.group_by()).len())
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn hourly_render_order(&self) -> Arc<[usize]> {
+        let key = UsageOrderKey {
+            usage_revision: self.usage_revision,
+            sort_field: self.sort_field,
+            sort_direction: self.sort_direction,
+        };
+        if let Some(cached) = self
+            .render_order_cache
+            .borrow()
+            .hourly
+            .as_ref()
+            .filter(|cached| cached.key == key)
+        {
+            return Arc::clone(&cached.order);
+        }
+
+        let hourly = &self.usage().hourly;
+        let mut order = (0..hourly.len()).collect::<Vec<_>>();
 
         match (self.sort_field, self.sort_direction) {
-            (SortField::Cost, SortDirection::Descending) => hourly.sort_by(|a, b| {
+            (SortField::Cost, SortDirection::Descending) => order.sort_by(|a, b| {
+                let a = &hourly[*a];
+                let b = &hourly[*b];
                 b.cost
                     .total_cmp(&a.cost)
                     .then_with(|| a.datetime.cmp(&b.datetime))
             }),
-            (SortField::Cost, SortDirection::Ascending) => hourly.sort_by(|a, b| {
+            (SortField::Cost, SortDirection::Ascending) => order.sort_by(|a, b| {
+                let a = &hourly[*a];
+                let b = &hourly[*b];
                 a.cost
                     .total_cmp(&b.cost)
                     .then_with(|| a.datetime.cmp(&b.datetime))
             }),
-            (SortField::Tokens, SortDirection::Descending) => hourly.sort_by(|a, b| {
+            (SortField::Tokens, SortDirection::Descending) => order.sort_by(|a, b| {
+                let a = &hourly[*a];
+                let b = &hourly[*b];
                 b.tokens
                     .total()
                     .cmp(&a.tokens.total())
                     .then_with(|| a.datetime.cmp(&b.datetime))
             }),
-            (SortField::Tokens, SortDirection::Ascending) => hourly.sort_by(|a, b| {
+            (SortField::Tokens, SortDirection::Ascending) => order.sort_by(|a, b| {
+                let a = &hourly[*a];
+                let b = &hourly[*b];
                 a.tokens
                     .total()
                     .cmp(&b.tokens.total())
                     .then_with(|| a.datetime.cmp(&b.datetime))
             }),
             (SortField::Date, SortDirection::Descending) => {
-                hourly.sort_by_key(|b| std::cmp::Reverse(b.datetime))
+                order.sort_by_key(|index| std::cmp::Reverse(hourly[*index].datetime))
             }
-            (SortField::Date, SortDirection::Ascending) => hourly.sort_by_key(|a| a.datetime),
+            (SortField::Date, SortDirection::Ascending) => {
+                order.sort_by_key(|index| hourly[*index].datetime)
+            }
         }
 
-        hourly
+        let order: Arc<[usize]> = order.into();
+        self.render_order_cache.borrow_mut().hourly = Some(CachedRenderOrder {
+            key,
+            order: Arc::clone(&order),
+        });
+        order
     }
 
-    pub fn get_sorted_periods(&self, kind: PeriodKind) -> Vec<PeriodUsage> {
-        let mut periods = build_period_usage(self.usage(), kind);
+    pub(crate) fn hourly_at_sorted_index(&self, index: usize) -> Option<&HourlyUsage> {
+        let order = self.hourly_render_order();
+        self.usage().hourly.get(*order.get(index)?)
+    }
+
+    pub fn get_sorted_periods(&self, kind: PeriodKind) -> Vec<&PeriodUsage> {
+        let mut periods = self.period_usage(kind).iter().collect::<Vec<_>>();
 
         // Metric sorts keep Year sections newest-first; ordering is metric-based within each year.
         match (self.sort_field, self.sort_direction) {
@@ -2863,7 +3151,7 @@ mod tests {
     use crate::tui::data::{DailyClientInfo, DailyModelInfo, UsageModelEntry, UsageTokenBreakdown};
     use chrono::NaiveDate;
     use serial_test::serial;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::OsString;
 
     type ClientModelCosts<'a> = Vec<(&'a str, Vec<(&'a str, &'a str, f64)>)>;
@@ -2877,6 +3165,95 @@ mod tests {
             initial_tab: None,
             effective_date: chrono::NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
         }
+    }
+
+    fn cached_order_model(id: &str, tokens: u64) -> UsageModelEntry {
+        UsageModelEntry {
+            model_id: id.into(),
+            display_name: id.into(),
+            provider: "openai".into(),
+            clients: vec![ClientId::Codex],
+            tokens: UsageTokenBreakdown {
+                input: tokens,
+                ..UsageTokenBreakdown::default()
+            },
+            cost: tokens as f64,
+            session_count: 1,
+            workspace_key: None,
+            workspace_label: None,
+        }
+    }
+
+    #[test]
+    fn render_order_cache_reuses_matching_keys_and_invalidates_semantic_changes() {
+        let mut app = App::new_for_test(config_with_theme(None)).unwrap();
+        app.usage_mut_for_test().models = vec![
+            cached_order_model("slow", 1),
+            cached_order_model("fast", 10),
+        ];
+
+        let first = app.model_render_order();
+        let repeated = app.model_render_order();
+        assert!(Arc::ptr_eq(&first, &repeated));
+
+        app.sort_direction = SortDirection::Ascending;
+        let resorted = app.model_render_order();
+        assert!(!Arc::ptr_eq(&first, &resorted));
+
+        app.model_detail_models = Some(vec![
+            cached_order_model("fast", 3),
+            cached_order_model("other", 4),
+        ]);
+        app.selected_model_detail = Some(ModelDetailSelection {
+            model: "fast".to_string(),
+            client: None,
+        });
+        let detail = app.model_render_order();
+        assert!(!Arc::ptr_eq(&resorted, &detail));
+        assert_eq!(detail.len(), 1);
+
+        app.selected_model_detail = None;
+        app.usage_mut_for_test().models[0].cost = 99.0;
+        let replaced = app.model_render_order();
+        assert!(!Arc::ptr_eq(&resorted, &replaced));
+    }
+
+    #[test]
+    fn daily_and_hourly_orders_share_only_an_identical_revision_and_sort_key() {
+        let mut app = App::new_for_test(config_with_theme(None)).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 7, 26).unwrap();
+        app.usage_mut_for_test().daily = vec![DailyUsage {
+            date,
+            tokens: UsageTokenBreakdown::default(),
+            cost: 1.0,
+            client_breakdown: BTreeMap::new(),
+            message_count: 0,
+            turn_count: 0,
+        }];
+        app.usage_mut_for_test().hourly = vec![HourlyUsage {
+            datetime: date.and_hms_opt(10, 0, 0).unwrap(),
+            tokens: UsageTokenBreakdown::default(),
+            cost: 1.0,
+            clients: BTreeSet::new(),
+            models: Vec::new(),
+            message_count: 0,
+            turn_count: 0,
+        }];
+
+        let daily = app.daily_render_order();
+        let hourly = app.hourly_render_order();
+        assert!(Arc::ptr_eq(&daily, &app.daily_render_order()));
+        assert!(Arc::ptr_eq(&hourly, &app.hourly_render_order()));
+
+        app.sort_field = SortField::Tokens;
+        assert!(!Arc::ptr_eq(&daily, &app.daily_render_order()));
+        assert!(!Arc::ptr_eq(&hourly, &app.hourly_render_order()));
+
+        let before_revision = app.usage_revision;
+        app.update_data(UsageProjection::default());
+        assert_ne!(app.usage_revision, before_revision);
+        assert!(app.daily_render_order().is_empty());
+        assert!(app.hourly_render_order().is_empty());
     }
 
     #[test]
@@ -3172,18 +3549,18 @@ mod tests {
 
     struct EnvGuard {
         home: Option<OsString>,
-        pricing_cache_only: Option<OsString>,
+        config_dir: Option<OsString>,
     }
 
     impl EnvGuard {
         fn set(home: &std::path::Path) -> Self {
             let guard = Self {
                 home: std::env::var_os("HOME"),
-                pricing_cache_only: std::env::var_os("TOKENX_PRICING_CACHE_ONLY"),
+                config_dir: std::env::var_os("TOKENX_CONFIG_DIR"),
             };
             unsafe {
                 std::env::set_var("HOME", home);
-                std::env::set_var("TOKENX_PRICING_CACHE_ONLY", "1");
+                std::env::set_var("TOKENX_CONFIG_DIR", home);
             }
             guard
         }
@@ -3196,15 +3573,15 @@ mod tests {
                     Some(value) => std::env::set_var("HOME", value),
                     None => std::env::remove_var("HOME"),
                 }
-                match self.pricing_cache_only.take() {
-                    Some(value) => std::env::set_var("TOKENX_PRICING_CACHE_ONLY", value),
-                    None => std::env::remove_var("TOKENX_PRICING_CACHE_ONLY"),
+                match self.config_dir.take() {
+                    Some(value) => std::env::set_var("TOKENX_CONFIG_DIR", value),
+                    None => std::env::remove_var("TOKENX_CONFIG_DIR"),
                 }
             }
         }
     }
 
-    async fn load_test_generation() -> (tempfile::TempDir, tokenx_engine::Generation) {
+    fn load_test_generation() -> (tempfile::TempDir, tokenx_engine::Generation) {
         let home = tempfile::TempDir::new().unwrap();
         for (project, workspace, input_tokens) in
             [("project-a", "/work/a", 10), ("project-b", "/work/b", 20)]
@@ -3225,10 +3602,12 @@ mod tests {
             ClientUniverse::new([ClientId::Claude]).unwrap(),
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+            std::sync::Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current()),
         )
         .unwrap();
         let prepared = acquisition.prepare().unwrap();
-        let generation = build_generation(&acquisition, prepared).await.unwrap();
+        let generation = build_generation(&acquisition, prepared).unwrap();
         (home, generation)
     }
 
@@ -3403,7 +3782,12 @@ mod tests {
                 input as f64 / 100.0,
             )
         });
-        tokenx_engine::build_usage_index(&messages, tokenx_engine::DateRange::none())
+        tokenx_engine::build_usage_index(
+            &messages,
+            tokenx_engine::DateRange::none(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+        )
+        .unwrap()
     }
 
     fn make_app_with_model_projection(group_by: tokenx_engine::GroupBy) -> App {
@@ -3520,7 +3904,7 @@ mod tests {
             1.0,
             vec![("gpt-5.4", "openai", 1.0)],
         )];
-        let graph = tokenx_engine::build_contribution_graph_for_today(&daily, graph_today);
+        let graph = tokenx_engine::build_contribution_graph_for_today(&daily, graph_today).unwrap();
         UsageProjection {
             daily,
             graph,
@@ -3902,7 +4286,7 @@ mod tests {
         app.handle_key_event(key(KeyCode::Down));
         app.handle_key_event(key(KeyCode::Enter));
 
-        assert_eq!(app.get_current_list_len(), 2);
+        assert_eq!(app.get_current_list_len().unwrap(), 2);
     }
 
     #[test]
@@ -3962,7 +4346,7 @@ mod tests {
         assert_eq!(app.scroll_offset, 1);
         assert_eq!(app.max_visible_items, 2);
         assert_eq!(app.stored_list_interaction(Tab::Daily).visible, 2);
-        assert_eq!(app.get_current_list_len(), 3);
+        assert_eq!(app.get_current_list_len().unwrap(), 3);
     }
 
     #[test]
@@ -4147,7 +4531,7 @@ mod tests {
         assert!(app.is_period_detail_active_for_kind(PeriodKind::Monthly));
         assert_eq!(app.sort_field, SortField::Tokens);
         assert_eq!(app.sort_direction, SortDirection::Descending);
-        assert_eq!(app.get_current_list_len(), 2);
+        assert_eq!(app.get_current_list_len().unwrap(), 2);
         assert_eq!(app.get_sorted_period_detail_rows()[0].model, "target-a");
         assert_eq!(
             app.selected_period_detail.unwrap().start_date,
@@ -4939,10 +5323,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn group_by_change_reprojects_the_installed_generation() {
-        let (_home, generation) = load_test_generation().await;
+    fn group_by_change_reprojects_the_installed_generation() {
+        let (_home, generation) = load_test_generation();
         let mut app = make_app();
         let universe = generation.universe().clone();
         let clients = universe.as_hash_set();
@@ -4950,11 +5334,11 @@ mod tests {
         app.current_tab = Tab::Models;
         app.set_group_by_for_test(tokenx_engine::GroupBy::ClientModel);
         app.install_generation(generation).unwrap();
-        let health_complete = app.generation_health().unwrap().complete;
-        let failed_inputs = app.generation_health().unwrap().failed_inputs;
+        let health_complete = app.generation_health().unwrap().complete();
+        let failed_inputs = app.generation_health().unwrap().failed_inputs();
         app.set_refresh_loading_for_test(true);
         app.fail_refresh_for_test("retained error".to_string());
-        app.set_cache_persistence_warning(Some("retained cache warning".to_string()));
+        app.set_generation_cache_warning(Some("retained cache warning".to_string()));
         let refresh_status = app.refresh_status();
 
         app.handle_key_event(key(KeyCode::Char('g')));
@@ -4972,9 +5356,9 @@ mod tests {
         assert!(app.take_refresh_requests().is_empty());
         assert!(!app.is_background_loading());
         assert_eq!(app.refresh_status(), refresh_status);
-        assert_eq!(app.generation_health().unwrap().complete, health_complete);
+        assert_eq!(app.generation_health().unwrap().complete(), health_complete);
         assert_eq!(
-            app.generation_health().unwrap().failed_inputs,
+            app.generation_health().unwrap().failed_inputs(),
             failed_inputs
         );
         assert!(matches!(
@@ -4984,7 +5368,7 @@ mod tests {
             }
         ));
         assert_eq!(
-            app.cache_persistence_warning(),
+            app.generation_cache_warning(),
             Some("retained cache warning")
         );
         assert_eq!(
@@ -5235,9 +5619,9 @@ mod tests {
 
     #[test]
     fn test_entering_stats_selects_today_instead_of_latest_subscription_day() {
-        let today = chrono::Local::now().date_naive();
-        let activity_date = today - chrono::Duration::days(1);
         let mut app = make_app();
+        let today = app.effective_date();
+        let activity_date = today - chrono::Duration::days(1);
         app.update_data(usage_data_with_graph_for_today(today, activity_date));
         let today_cell = app.graph_cell_for_date(today).unwrap();
         let activity_cell = app.graph_cell_for_date(activity_date).unwrap();
@@ -5252,7 +5636,7 @@ mod tests {
 
     #[test]
     fn test_initial_stats_tab_selects_today_from_cached_graph() {
-        let today = chrono::Local::now().date_naive();
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 7, 26).unwrap();
         let activity_date = today - chrono::Duration::days(2);
         let config = TuiConfig {
             theme: Some(ThemeName::Blue),
@@ -5275,8 +5659,8 @@ mod tests {
 
     #[test]
     fn test_stats_selects_today_when_graph_arrives_after_entry() {
-        let today = chrono::Local::now().date_naive();
         let mut app = make_app();
+        let today = app.effective_date();
 
         app.switch_tab(Tab::Stats);
         assert_eq!(app.selected_graph_cell, None);
@@ -5295,9 +5679,9 @@ mod tests {
 
     #[test]
     fn test_stats_tab_reclick_keeps_manual_day_selection() {
-        let today = chrono::Local::now().date_naive();
-        let activity_date = today - chrono::Duration::days(3);
         let mut app = make_app();
+        let today = app.effective_date();
+        let activity_date = today - chrono::Duration::days(3);
         app.update_data(usage_data_with_graph_for_today(today, activity_date));
         app.switch_tab(Tab::Stats);
         let activity_cell = app.graph_cell_for_date(activity_date).unwrap();
@@ -5312,9 +5696,9 @@ mod tests {
 
     #[test]
     fn test_stats_escape_prevents_refresh_from_reselecting_today() {
-        let today = chrono::Local::now().date_naive();
-        let activity_date = today - chrono::Duration::days(1);
         let mut app = make_app();
+        let today = app.effective_date();
+        let activity_date = today - chrono::Duration::days(1);
         app.update_data(usage_data_with_graph_for_today(today, activity_date));
         app.switch_tab(Tab::Stats);
         assert!(app.selected_graph_cell.is_some());
@@ -5328,9 +5712,9 @@ mod tests {
 
     #[test]
     fn test_stats_selection_is_remapped_by_date_after_graph_rebuild() {
-        let today = chrono::Local::now().date_naive();
-        let selected_date = today - chrono::Duration::days(10);
         let mut app = make_app();
+        let today = app.effective_date();
+        let selected_date = today - chrono::Duration::days(10);
         app.update_data(usage_data_with_graph_for_today(today, selected_date));
         app.switch_tab(Tab::Stats);
         let old_cell = app.graph_cell_for_date(selected_date).unwrap();
@@ -5421,6 +5805,7 @@ mod tests {
     fn subscription_output(provider: ProviderId) -> SubscriptionOutput {
         SubscriptionOutput {
             provider,
+            stale: false,
             account: None,
             plan: None,
             email: None,
@@ -5444,18 +5829,21 @@ mod tests {
             SubscriptionBatch {
                 outputs: Vec::new(),
                 errors: vec![crate::subscription::SubscriptionError {
+                    provider_id: Some(ProviderId::Claude),
                     provider: "Claude".to_string(),
                     message: "credential expired".to_string(),
                 }],
             },
-            |_| panic!("empty fetch must not overwrite the persisted snapshot"),
+            |_| Ok(()),
         );
 
-        assert_eq!(app.subscription_outputs(), &[installed]);
+        let retained = &app.subscription_outputs()[0];
+        assert_eq!(retained.provider, installed.provider);
+        assert!(retained.stale);
         assert_eq!(app.subscription_errors().len(), 1);
         assert_eq!(
             app.subscription_status_message.as_deref(),
-            Some("Subscription fetch failed")
+            Some("Subscription data loaded with provider errors")
         );
     }
 
@@ -5469,6 +5857,7 @@ mod tests {
             SubscriptionBatch {
                 outputs: vec![replacement.clone()],
                 errors: vec![crate::subscription::SubscriptionError {
+                    provider_id: Some(ProviderId::Claude),
                     provider: "Claude".to_string(),
                     message: "credential rejected".to_string(),
                 }],
@@ -5476,7 +5865,10 @@ mod tests {
             |_| Err(anyhow::anyhow!("cache directory is read-only")),
         );
 
-        assert_eq!(app.subscription_outputs(), &[replacement]);
+        assert_eq!(app.subscription_outputs().len(), 2);
+        assert_eq!(app.subscription_outputs()[0].provider, ProviderId::Claude);
+        assert!(app.subscription_outputs()[0].stale);
+        assert_eq!(app.subscription_outputs()[1], replacement);
         assert_eq!(app.subscription_errors().len(), 2);
         assert_eq!(app.subscription_errors()[1].provider, "Subscription cache");
         assert_eq!(
@@ -5782,6 +6174,33 @@ mod tests {
 
         app.on_tick();
         assert_eq!(app.spinner_frame, 2);
+    }
+
+    #[test]
+    fn tick_advances_effective_date_without_an_installed_generation() {
+        let mut app = make_app();
+        let next_day = NaiveDate::from_ymd_opt(2026, 7, 27).unwrap();
+
+        app.on_tick_for_date(next_day);
+
+        assert_eq!(app.effective_date(), next_day);
+        assert!(!app.has_installed_generation());
+    }
+
+    #[test]
+    fn tick_reprojects_an_installed_generation_at_local_midnight() {
+        let mut app = make_app();
+        app.install_generation_fixture(
+            tokenx_engine::FrozenUsageIndex::new(),
+            Vec::new(),
+            tokenx_engine::InputFootprint::default(),
+        );
+        let next_day = NaiveDate::from_ymd_opt(2026, 7, 27).unwrap();
+
+        app.on_tick_for_date(next_day);
+
+        assert_eq!(app.effective_date(), next_day);
+        assert!(app.has_installed_generation());
     }
 
     #[test]

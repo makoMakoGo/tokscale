@@ -156,7 +156,7 @@ pub fn parse_hermes_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
             0.0,
             Some(HERMES_AGENT_NAME.to_string()),
         );
-        msg.message_count = message_count.max(0);
+        msg.message_count = message_count;
         msg.dedup_key = Some(crate::records::dedup_hash_str(&session_id));
         scanned.messages.push(msg);
     }

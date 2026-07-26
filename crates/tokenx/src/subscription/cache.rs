@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use super::SubscriptionOutput;
 
 const CACHE_SCHEMA: &str = "tokenx.subscription-usage";
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 1;
 const CACHE_MAX_AGE_SECS: u64 = 300;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -72,6 +72,14 @@ fn load_at(path: &std::path::Path, now: u64) -> Result<Option<Vec<SubscriptionOu
             envelope.version
         );
     }
+    if envelope.timestamp > now {
+        anyhow::bail!(
+            "subscription cache `{}` has a future timestamp {} (current time {})",
+            path.display(),
+            envelope.timestamp,
+            now
+        );
+    }
     if now.saturating_sub(envelope.timestamp) > CACHE_MAX_AGE_SECS {
         return Ok(None);
     }
@@ -86,6 +94,7 @@ mod tests {
     fn output() -> SubscriptionOutput {
         SubscriptionOutput {
             provider: ProviderId::Codex,
+            stale: false,
             account: Some(UsageAccount {
                 id: "account-1".to_string(),
                 label: Some("Work".to_string()),
@@ -104,7 +113,18 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_uses_typed_provider_identity_in_v2_envelope() -> Result<()> {
+    fn future_cache_timestamp_is_rejected_instead_of_treated_as_fresh() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("subscription-usage-cache.json");
+        save_at(&path, &[output()], 1_001)?;
+
+        let error = load_at(&path, 1_000).unwrap_err();
+        assert!(error.to_string().contains("future timestamp"));
+        Ok(())
+    }
+
+    #[test]
+    fn round_trip_uses_typed_provider_identity_in_v3_envelope() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("subscription-usage-cache.json");
         let output = output();

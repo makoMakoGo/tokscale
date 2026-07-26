@@ -16,8 +16,6 @@ use crate::integrations::{
 
 pub(crate) struct Driver;
 
-const OPENCLAW_RECORD_REJECTION_REVISION: u32 =
-    crate::integrations::MODEL_ID_CANONICALIZATION_REVISION + 2;
 const SOURCE: SourceSpec = SourceSpec::home(
     ".openclaw/agents",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::archived_jsonl),
@@ -34,9 +32,9 @@ impl IntegrationDriver for Driver {
 
         source_discovery::input_units_from_paths(
             client,
-            source_discovery::scan_roots(client, roots, SOURCE.matcher())?,
+            source_discovery::scan_roots(ctx, roots, SOURCE.matcher())?,
             FingerprintPolicy::PlainFile,
-            DecoderKind::plain(DecoderId::OpenClaw, OPENCLAW_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::OpenClaw),
         )
     }
 
@@ -106,6 +104,7 @@ mod tests {
             client: ClientId::OpenClaw,
             home_dir: home.path(),
             scanner_settings: &settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         };
 
         let units = DRIVER.discover_inputs(&ctx).unwrap();
@@ -115,8 +114,7 @@ mod tests {
 
         assert_eq!(paths, expected);
         assert!(units.iter().all(|unit| {
-            unit.decoder.version()
-                == DecoderVersion::new(DecoderId::OpenClaw, OPENCLAW_RECORD_REJECTION_REVISION)
+            unit.decoder.version() == DecoderVersion::current(DecoderId::OpenClaw)
         }));
     }
 }

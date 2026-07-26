@@ -117,7 +117,6 @@ fn run_tui_with_input(input: &[u8]) -> (ExitStatus, Vec<u8>) {
         .args(["tui", "--no-refresh"])
         .env("HOME", home.path())
         .env("TOKENX_CONFIG_DIR", home.path().join("tokenx-config"))
-        .env("TOKENX_PRICING_CACHE_ONLY", "1")
         .env("TERM", "xterm-256color")
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))

@@ -417,22 +417,6 @@ impl AttributedUsageRecord {
 }
 
 impl UsageRecord {
-    /// Local calendar date derived from `timestamp`; `None` when the
-    /// timestamp is outside the representable range.
-    pub fn local_date(&self) -> Option<chrono::NaiveDate> {
-        use chrono::TimeZone;
-        match chrono::Local.timestamp_millis_opt(self.timestamp) {
-            chrono::LocalResult::Single(dt) => Some(dt.date_naive()),
-            _ => None,
-        }
-    }
-
-    /// Local `YYYY-MM-DD` string derived from `timestamp` (empty when out of
-    /// range). Allocates; prefer [`Self::local_date`] in hot paths.
-    pub fn date_string(&self) -> String {
-        timestamp_to_date(self.timestamp)
-    }
-
     pub fn set_workspace(
         &mut self,
         workspace_key: Option<String>,
@@ -523,49 +507,9 @@ pub fn workspace_label_from_key(key: &str) -> Option<String> {
         .map(|segment| segment.to_string())
 }
 
-/// Convert Unix milliseconds to a local YYYY-MM-DD date string.
-fn timestamp_to_date(timestamp_ms: i64) -> String {
-    timestamp_to_date_with_timezone(timestamp_ms, &chrono::Local)
-}
-
-fn timestamp_to_date_with_timezone<Tz>(timestamp_ms: i64, timezone: &Tz) -> String
-where
-    Tz: chrono::TimeZone,
-    Tz::Offset: std::fmt::Display,
-{
-    match timezone.timestamp_millis_opt(timestamp_ms) {
-        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
-        _ => String::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::FixedOffset;
-
-    #[test]
-    fn test_timestamp_to_date_with_positive_offset() {
-        let kst = FixedOffset::east_opt(9 * 60 * 60).unwrap();
-        let ts = 1772512200000_i64; // 2026-03-03T04:30:00Z
-        let date = timestamp_to_date_with_timezone(ts, &kst);
-        assert_eq!(date, "2026-03-03");
-    }
-
-    #[test]
-    fn test_timestamp_to_date_with_negative_offset() {
-        let pst = FixedOffset::west_opt(8 * 60 * 60).unwrap();
-        let ts = 1772512200000_i64; // 2026-03-03T04:30:00Z
-        let date = timestamp_to_date_with_timezone(ts, &pst);
-        assert_eq!(date, "2026-03-02");
-    }
-
-    #[test]
-    fn test_timestamp_to_date_invalid_timestamp() {
-        let utc = FixedOffset::east_opt(0).unwrap();
-        let date = timestamp_to_date_with_timezone(i64::MAX, &utc);
-        assert_eq!(date, "");
-    }
 
     #[test]
     fn attributed_usage_record_creation() {
@@ -590,7 +534,7 @@ mod tests {
         assert_eq!(msg.client, ClientId::OpenCode);
         assert_eq!(msg.model_id.as_ref(), "claude-sonnet-4.6");
         assert_eq!(msg.session_id.as_ref(), "test-session-id");
-        assert_eq!(msg.date_string(), timestamp_to_date(1733011200000));
+        assert_eq!(msg.timestamp, 1733011200000);
         assert_eq!(msg.cost, 0.05);
         assert_eq!(msg.agent, None);
         assert_eq!(msg.workspace_key, None);

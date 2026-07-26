@@ -51,6 +51,18 @@ pub fn load_cache_any_age<T: for<'de> Deserialize<'de>>(filename: &str) -> Optio
     load_cache_with_policy(filename, true)
 }
 
+pub(crate) fn parse_cache_any_age<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, String> {
+    let cached: CachedData<T> = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs();
+    if cached.timestamp > now {
+        return Err("cache timestamp is later than the current system clock".to_string());
+    }
+    Ok(cached.data)
+}
+
 pub fn save_cache<T: Serialize>(filename: &str, data: &T) -> Result<(), std::io::Error> {
     let dir = get_cache_dir().map_err(std::io::Error::other)?;
     fs::create_dir_all(&dir)?;

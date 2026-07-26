@@ -12,10 +12,9 @@ use crate::integrations::discover as source_discovery;
 use crate::integrations::{
     BoundUsageSink, DecoderKind, DiscoveredInput, DiscoveryContext, FingerprintPolicy, FoldContext,
     InputDiscoveryError, InputPipelineError, IntegrationDriver, ParseContext, ParsedUnit,
-    SourceSpec, MODEL_ID_CANONICALIZATION_REVISION,
+    SourceSpec,
 };
 
-const CLINE_SDK_V1_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 4;
 const SOURCE: SourceSpec = SourceSpec::home(
     ".cline/data/sessions",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::messages_json),
@@ -34,9 +33,9 @@ impl IntegrationDriver for Driver {
 
         Ok(source_discovery::input_units_from_paths(
             client,
-            source_discovery::scan_roots(client, roots, SOURCE.matcher())?,
+            source_discovery::scan_roots(ctx, roots, SOURCE.matcher())?,
             FingerprintPolicy::PlainFile,
-            DecoderKind::plain(DecoderId::Cline, CLINE_SDK_V1_REVISION),
+            DecoderKind::plain(DecoderId::Cline),
         )?
         .into_iter()
         .map(
@@ -98,6 +97,7 @@ mod tests {
             client: ClientId::Cline,
             home_dir,
             scanner_settings: settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         }
     }
 
@@ -118,7 +118,7 @@ mod tests {
         assert_eq!(units[0].path, current);
         assert_eq!(
             units[0].decoder.version(),
-            DecoderVersion::new(DecoderId::Cline, CLINE_SDK_V1_REVISION)
+            DecoderVersion::current(DecoderId::Cline)
         );
         assert_eq!(
             units[0].fingerprint_policy,
@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_content_participates_in_the_input_fingerprint() {
+    fn manifest_stamp_participates_in_the_input_fingerprint() {
         let home = tempfile::TempDir::new().unwrap();
         let current = home
             .path()
@@ -178,7 +178,7 @@ mod tests {
             .fingerprint()
             .unwrap();
 
-        write_file(&manifest, r#"{"workspace_root":"/tmp/project-b"}"#);
+        write_file(&manifest, r#"{"workspace_root":"/tmp/project-b-longer"}"#);
         let second = DRIVER
             .discover_inputs(&scan_context(home.path(), &settings))
             .unwrap()

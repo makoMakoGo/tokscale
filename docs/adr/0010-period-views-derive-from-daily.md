@@ -64,7 +64,8 @@ reinterpret runtime labels. Agent aggregation uses the structured
 `(client, agent)` identity and every public Agent entry carries exactly one
 Client, so equal labels from different Clients never merge. Identity-semantic
 changes invalidate affected input-record shards and the canonical generation
-cache through the appropriate decoder revision and schema/version change.
+cache through the source-derived decoder contract and the appropriate
+schema/version change.
 
 ### Group By projections
 

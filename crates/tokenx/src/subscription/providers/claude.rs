@@ -99,7 +99,7 @@ fn window_metric(label: &str, w: &Window) -> UsageMetric {
     }
 }
 
-pub async fn fetch() -> Result<SubscriptionPayload> {
+pub async fn fetch(client: &reqwest::Client) -> Result<SubscriptionPayload> {
     let creds = read_credentials()?;
     let oauth = creds
         .claude_ai_oauth
@@ -119,8 +119,7 @@ pub async fn fetch() -> Result<SubscriptionPayload> {
         }
     });
 
-    let client = reqwest::Client::new();
-    let resp = fetch_usage(&client, &access_token).await?;
+    let resp = fetch_usage(client, &access_token).await?;
 
     let mut metrics = Vec::new();
     if let Some(ref w) = resp.five_hour {

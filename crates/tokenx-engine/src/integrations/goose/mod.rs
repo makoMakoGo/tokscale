@@ -15,7 +15,6 @@ use crate::integrations::{
     InputDiscoveryError, IntegrationDriver, ParseContext, ParsedUnit, SourceSpec,
 };
 
-const GOOSE_RECORD_REJECTION_REVISION: u32 = 5;
 const SOURCE: SourceSpec = SourceSpec::local_share(
     "goose/sessions/sessions.db",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::sessions_db),
@@ -33,7 +32,7 @@ impl IntegrationDriver for Driver {
             client,
             goose_db_paths(client, ctx)?,
             crate::integrations::FingerprintPolicy::SqliteWithWal,
-            DecoderKind::plain(DecoderId::Goose, GOOSE_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::Goose),
         )
     }
 
@@ -62,24 +61,46 @@ fn goose_db_paths(
     client: ClientId,
     ctx: &DiscoveryContext<'_>,
 ) -> Result<Vec<PathBuf>, InputDiscoveryError> {
-    let default_candidates = [
-        SOURCE.resolve(ctx.home_dir),
-        ctx.home_dir
-            .join("Library/Application Support/goose/sessions/sessions.db"),
-    ];
-
     let mut existing_defaults = Vec::new();
-    for candidate in default_candidates {
+    for candidate in goose_default_db_candidates(ctx.home_dir) {
         source_discovery::push_existing_file(client, candidate, &mut existing_defaults)?;
     }
 
     let mut paths: Vec<_> = existing_defaults.into_iter().take(1).collect();
     paths.extend(source_discovery::scan_roots(
-        client,
+        ctx,
         source_discovery::extra_roots_for_client(client, ctx)?,
         SOURCE.matcher(),
     )?);
     Ok(paths)
+}
+
+fn goose_default_db_candidates(home_dir: &std::path::Path) -> Vec<PathBuf> {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        vec![SOURCE.resolve(home_dir)]
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        vec![home_dir.join("Library/Application Support/goose/sessions/sessions.db")]
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        vec![home_dir.join("AppData/Roaming/Block/goose/data/sessions/sessions.db")]
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos",
+        target_os = "windows"
+    )))]
+    {
+        let _ = home_dir;
+        Vec::new()
+    }
 }
 
 pub(crate) static DRIVER: Driver = Driver;
@@ -89,13 +110,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn goose_driver_uses_first_existing_default_candidate() {
+    fn goose_driver_uses_only_the_current_platform_default_candidate() {
         let home = tempfile::TempDir::new().unwrap();
         let xdg_db = home.path().join(".local/share/goose/sessions/sessions.db");
         let macos_db = home
             .path()
             .join("Library/Application Support/goose/sessions/sessions.db");
-        for path in [&xdg_db, &macos_db] {
+        let windows_db = home
+            .path()
+            .join("AppData/Roaming/Block/goose/data/sessions/sessions.db");
+        for path in [&xdg_db, &macos_db, &windows_db] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, "").unwrap();
         }
@@ -104,22 +128,63 @@ mod tests {
             client: ClientId::Goose,
             home_dir: home.path(),
             scanner_settings: &settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         };
 
         let units = DRIVER.discover_inputs(&ctx).unwrap();
 
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].path, xdg_db);
+        assert_eq!(
+            units[0].path,
+            goose_default_db_candidates(home.path())
+                .into_iter()
+                .next()
+                .unwrap()
+        );
         assert_eq!(
             units[0].decoder.version(),
-            DecoderVersion::new(DecoderId::Goose, GOOSE_RECORD_REJECTION_REVISION)
+            DecoderVersion::current(DecoderId::Goose)
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn goose_linux_default_excludes_macos_and_windows_layouts() {
+        let home = std::path::Path::new("/home/alice");
+        assert_eq!(
+            goose_default_db_candidates(home),
+            vec![home.join(".local/share/goose/sessions/sessions.db")]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn goose_macos_default_excludes_linux_and_windows_layouts() {
+        let home = std::path::Path::new("/Users/alice");
+        assert_eq!(
+            goose_default_db_candidates(home),
+            vec![home.join("Library/Application Support/goose/sessions/sessions.db")]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn goose_windows_default_excludes_linux_and_macos_layouts() {
+        let home = std::path::Path::new(r"C:\Users\alice");
+        assert_eq!(
+            goose_default_db_candidates(home),
+            vec![home.join("AppData/Roaming/Block/goose/data/sessions/sessions.db")]
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]
     fn goose_driver_recursively_scans_multiple_extra_roots_and_deduplicates_defaults() {
         let home = tempfile::TempDir::new().unwrap();
-        let default_db = home.path().join(".local/share/goose/sessions/sessions.db");
+        let default_db = goose_default_db_candidates(home.path())
+            .into_iter()
+            .next()
+            .unwrap();
         let first_extra_root = home.path().join("imports/one");
         let first_extra_db = first_extra_root.join("nested/sessions.db");
         let second_extra_root = home.path().join("imports/two");
@@ -134,7 +199,7 @@ mod tests {
         extra_scan_paths.insert(
             ClientId::Goose,
             vec![
-                home.path().join(".local/share/goose"),
+                default_db.parent().unwrap().to_path_buf(),
                 first_extra_root,
                 second_extra_root,
             ],
@@ -147,6 +212,7 @@ mod tests {
             client: ClientId::Goose,
             home_dir: home.path(),
             scanner_settings: &settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         };
 
         let units = DRIVER.discover_inputs(&ctx).unwrap();

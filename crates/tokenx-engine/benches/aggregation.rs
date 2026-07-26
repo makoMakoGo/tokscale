@@ -4,14 +4,18 @@ use codspeed_criterion_compat::{
 use std::collections::HashSet;
 use std::sync::OnceLock;
 use tokenx_engine::{
-    aggregate_usage_records, build_usage_index, AttributedUsageRecord, ClientId, DateRange,
-    GroupBy, TokenBreakdown,
+    build_usage_index, AttributedUsageRecord, CalendarContext, ClientId, DateRange, GroupBy,
+    TokenBreakdown,
 };
 
 const MESSAGE_COUNT: usize = 100_000;
 
 fn effective_date() -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(2026, 7, 26).unwrap()
+}
+
+fn calendar() -> CalendarContext {
+    CalendarContext::explicit("UTC").unwrap()
 }
 
 const CLIENTS: &[ClientId] = &[
@@ -214,12 +218,10 @@ fn pair_heavy_messages() -> &'static [AttributedUsageRecord] {
 }
 
 fn push_finish_and_project(messages: &[AttributedUsageRecord], group_by: GroupBy) -> usize {
-    let usage = aggregate_usage_records(
-        black_box(messages),
-        DateRange::none(),
-        group_by,
-        effective_date(),
-    );
+    let usage = build_usage_index(black_box(messages), DateRange::none(), calendar())
+        .unwrap()
+        .project_usage(&group_by, effective_date())
+        .unwrap();
 
     let graph_days = usage
         .graph
@@ -296,7 +298,7 @@ fn bench_frozen_usage_index_build(c: &mut Criterion) {
             |b, messages| {
                 b.iter_batched(
                     || (),
-                    |_| build_usage_index(black_box(*messages), DateRange::none()),
+                    |_| build_usage_index(black_box(*messages), DateRange::none(), calendar()),
                     BatchSize::PerIteration,
                 );
             },
@@ -312,7 +314,7 @@ fn bench_frozen_usage_index_build(c: &mut Criterion) {
     group.bench_function("production_shaped_typed_date_filter_100k", |b| {
         b.iter_batched(
             || january.clone(),
-            |date_range| build_usage_index(black_box(messages), date_range),
+            |date_range| build_usage_index(black_box(messages), date_range, calendar()),
             BatchSize::PerIteration,
         );
     });
@@ -357,7 +359,8 @@ fn bench_frozen_usage_index_project_usage(c: &mut Criterion) {
             BenchmarkId::from_parameter(name),
             &(messages, group_by),
             |b, (messages, group_by)| {
-                let frozen_index = build_usage_index(messages, DateRange::none());
+                let frozen_index =
+                    build_usage_index(messages, DateRange::none(), calendar()).unwrap();
                 b.iter_batched(
                     || (),
                     |_| frozen_index.project_usage(black_box(group_by), effective_date()),
@@ -387,7 +390,8 @@ fn bench_frozen_usage_index_project_usage_for_clients(c: &mut Criterion) {
             BenchmarkId::from_parameter(name),
             &selected,
             |b, selected| {
-                let frozen_index = build_usage_index(messages, DateRange::none());
+                let frozen_index =
+                    build_usage_index(messages, DateRange::none(), calendar()).unwrap();
                 b.iter_batched(
                     || (),
                     |_| {
@@ -444,7 +448,8 @@ fn bench_frozen_usage_index_lifecycle(c: &mut Criterion) {
                     || (),
                     |_| {
                         let frozen_index =
-                            build_usage_index(black_box(messages), DateRange::none());
+                            build_usage_index(black_box(messages), DateRange::none(), calendar())
+                                .unwrap();
                         let mut projections = Vec::with_capacity(switches.len() + 1);
                         projections
                             .push(frozen_index.project_usage(&GroupBy::Model, effective_date()));

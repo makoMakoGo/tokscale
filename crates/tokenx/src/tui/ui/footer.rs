@@ -7,7 +7,7 @@ use unicode_width::UnicodeWidthStr;
 use super::widgets::{format_cost, format_tokens, truncate_display_width};
 use crate::tui::actions::{Action, ActionSet};
 use crate::tui::app::{App, ClickAction, SortField, StatusTone, Tab};
-use crate::tui::data::{build_period_usage, PeriodKind};
+use crate::tui::data::PeriodKind;
 use crate::tui::presentation::SubscriptionPresentation;
 
 pub(super) const HEIGHT: u16 = 5;
@@ -740,27 +740,21 @@ fn current_count_label(app: &App) -> String {
             )
         }
         Tab::Models if app.is_model_detail_active() => {
-            format!(" ({} provider rows)", app.get_sorted_models().len())
+            format!(" ({} provider rows)", app.model_row_count())
         }
         Tab::Models => format!(" ({} models)", app.usage().models.len()),
         Tab::Agents => format!(" ({} agents)", app.usage().agents.len()),
         Tab::Daily if app.is_daily_detail_active() => {
-            format!(" ({} models)", app.get_sorted_daily_detail_rows().len())
+            format!(" ({} models)", app.daily_detail_row_count())
         }
         Tab::Monthly if app.is_period_detail_active_for_kind(PeriodKind::Monthly) => {
-            format!(" ({} models)", app.get_sorted_period_detail_rows().len())
+            format!(" ({} models)", app.period_detail_row_count())
         }
         Tab::Weekly if app.is_period_detail_active_for_kind(PeriodKind::Weekly) => {
-            format!(" ({} models)", app.get_sorted_period_detail_rows().len())
+            format!(" ({} models)", app.period_detail_row_count())
         }
-        Tab::Monthly => format!(
-            " ({} months)",
-            build_period_usage(app.usage(), PeriodKind::Monthly).len()
-        ),
-        Tab::Weekly => format!(
-            " ({} weeks)",
-            build_period_usage(app.usage(), PeriodKind::Weekly).len()
-        ),
+        Tab::Monthly => format!(" ({} months)", app.period_usage(PeriodKind::Monthly).len()),
+        Tab::Weekly => format!(" ({} weeks)", app.period_usage(PeriodKind::Weekly).len()),
         Tab::Daily => format!(" ({} days)", app.usage().daily.len()),
         Tab::Hourly => format!(" ({} hours)", app.usage().hourly.len()),
         Tab::Sessions => unreachable!("sessions footer supplies its own summary"),
@@ -952,7 +946,7 @@ fn status_style(app: &App, tone: StatusTone) -> Style {
 }
 
 fn status_row_line(app: &App) -> Line<'static> {
-    if let Some(warning) = app.cache_persistence_warning() {
+    if let Some(warning) = app.generation_cache_warning() {
         return Line::from(Span::styled(
             warning.to_string(),
             Style::default()
@@ -1540,7 +1534,7 @@ mod tests {
             "Pricing unavailable; costs may be missing"
         );
 
-        app.set_cache_persistence_warning(Some(
+        app.set_generation_cache_warning(Some(
             "Cache persistence warning: permission denied".to_string(),
         ));
         app.current_tab = Tab::Subscription;
@@ -1559,6 +1553,7 @@ mod tests {
         app.subscription_outputs_mut_for_test()
             .push(SubscriptionOutput {
                 provider: ProviderId::Codex,
+                stale: false,
                 account: None,
                 plan: None,
                 email: None,
@@ -1597,7 +1592,7 @@ mod tests {
     fn cache_persistence_warning_stays_visible_over_transient_status() {
         let mut app = make_app_on(Tab::Models);
         app.set_status("Data loaded");
-        app.set_cache_persistence_warning(Some(
+        app.set_generation_cache_warning(Some(
             "Cache persistence warning: permission denied".to_string(),
         ));
 

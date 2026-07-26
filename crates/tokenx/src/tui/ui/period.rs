@@ -1,4 +1,3 @@
-use chrono::Local;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Row, Scrollbar, ScrollbarOrientation, Table};
 use std::collections::BTreeMap;
@@ -795,7 +794,7 @@ fn render_period(
     let metric_cache_write_style = app.theme.metric_cache_write_style();
     let current_row_style = app.theme.current_row_style();
     let striped_row_style = app.theme.striped_row_style();
-    let today = Local::now().date_naive();
+    let today = app.effective_date();
     let table_layout = period_table_layout(
         table_area.width,
         has_turn_data,
@@ -968,6 +967,7 @@ fn render_period(
     }
 
     let data_rows_shown = data_idx - start;
+    drop(periods);
     app.set_max_visible_items(data_rows_shown.max(1));
     let widths = table_layout.widths;
 
@@ -1247,7 +1247,7 @@ mod tests {
     }
 
     fn select_monthly_period(app: &mut App) {
-        let periods = crate::tui::data::build_period_usage(app.usage(), PeriodKind::Monthly);
+        let periods = app.period_usage(PeriodKind::Monthly);
         let period = periods.first().expect("one monthly period");
         app.selected_period_detail = Some(PeriodDetailSelection {
             kind: PeriodKind::Monthly,

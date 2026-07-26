@@ -1069,7 +1069,7 @@ mod tests {
     fn selected_month_starting_midweek_remains_visible_at_the_right_edge() {
         let today = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
         let daily = vec![day_usage(today, 42, 0.5, vec![])];
-        let graph = tokenx_engine::build_contribution_graph_for_today(&daily, today);
+        let graph = tokenx_engine::build_contribution_graph_for_today(&daily, today).unwrap();
         let selected_cell = graph
             .weeks
             .iter()

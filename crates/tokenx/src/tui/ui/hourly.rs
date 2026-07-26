@@ -1,4 +1,4 @@
-use chrono::{Local, NaiveDate, NaiveDateTime, Timelike};
+use chrono::{NaiveDate, NaiveDateTime};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Row, Scrollbar, ScrollbarOrientation, Table};
 
@@ -240,11 +240,18 @@ fn render_table(
         return;
     }
 
-    let hourly = app.get_sorted_hourly();
+    let hourly_order = app.hourly_render_order();
 
-    let has_turn_data = hourly.iter().any(|h| h.turn_count > 0);
-    let client_content_width = hourly
-        .iter()
+    let ordered_hourly = || {
+        hourly_order.iter().map(|index| {
+            app.usage()
+                .hourly
+                .get(*index)
+                .expect("cached hourly order must reference the current projection")
+        })
+    };
+    let has_turn_data = ordered_hourly().any(|hour| hour.turn_count > 0);
+    let client_content_width = ordered_hourly()
         .map(|hour| display_width(&hourly_client_text(hour.clients.iter())))
         .max()
         .unwrap_or(0);
@@ -260,8 +267,7 @@ fn render_table(
     let metric_cache_write_style = app.theme.metric_cache_write_style();
     let current_row_style = app.theme.current_row_style();
     let striped_row_style = app.theme.striped_row_style();
-    let now = Local::now().naive_local();
-    let current_hour = now.date().and_hms_opt(now.hour(), 0, 0).unwrap_or(now);
+    let current_hour = app.current_calendar_hour();
     let table_layout = hourly_table_layout(table_area.width, has_turn_data, client_content_width);
     let columns = table_layout.columns.clone();
 
@@ -295,7 +301,7 @@ fn render_table(
     )
     .height(1);
 
-    let hourly_len = hourly.len();
+    let hourly_len = hourly_order.len();
     let start = scroll_offset.min(hourly_len);
 
     if start >= hourly_len {
@@ -313,7 +319,7 @@ fn render_table(
     let mut data_idx = start;
 
     while data_idx < hourly_len && lines_used < visible_height {
-        let hour = hourly[data_idx];
+        let hour = &app.usage().hourly[hourly_order[data_idx]];
         let row_date = hour.datetime.date();
 
         if prev_date != Some(row_date) && lines_used + 1 < visible_height {
@@ -400,7 +406,6 @@ fn render_table(
     }
 
     let data_rows_shown = data_idx - start;
-    drop(hourly);
     app.set_max_visible_items(data_rows_shown.max(1));
 
     let widths = table_layout.widths;
@@ -726,6 +731,7 @@ mod tests {
             table_outputs.push(render_lines(&mut app, 120, 20).join("\n"));
             profile_outputs.push(
                 hourly_profile::build_hourly_profile_lines(&app, 120)
+                    .unwrap()
                     .iter()
                     .map(|line| {
                         line.spans

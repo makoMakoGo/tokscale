@@ -37,17 +37,19 @@ fn model_display_name(model: &crate::tui::data::UsageModelEntry) -> &str {
     &model.display_name
 }
 
-fn model_content_width(models: &[&crate::tui::data::UsageModelEntry]) -> u16 {
+fn model_content_width<'a>(
+    models: impl Iterator<Item = &'a crate::tui::data::UsageModelEntry>,
+) -> u16 {
     models
-        .iter()
         .map(|model| display_width(model_display_name(model)))
         .max()
         .unwrap_or(MODEL_MIN_WIDTH)
 }
 
-fn workspace_content_width(models: &[&crate::tui::data::UsageModelEntry]) -> u16 {
+fn workspace_content_width<'a>(
+    models: impl Iterator<Item = &'a crate::tui::data::UsageModelEntry>,
+) -> u16 {
     models
-        .iter()
         .map(|model| display_width(workspace_label(model)))
         .max()
         .unwrap_or(WORKSPACE_MIN_WIDTH)
@@ -168,7 +170,7 @@ pub fn render(
     let metric_cache_write_style = app.theme.metric_cache_write_style();
     let striped_row_style = app.theme.striped_row_style();
 
-    let models = app.get_sorted_models();
+    let model_order = app.model_render_order();
 
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
@@ -181,7 +183,7 @@ pub fn render(
         }
     };
 
-    let models_len = models.len();
+    let models_len = model_order.len();
     let start = scroll_offset.min(models_len.saturating_sub(1));
     let end = (start + visible_height).min(models_len);
 
@@ -189,23 +191,27 @@ pub fn render(
         return;
     }
 
-    let model_content_width = model_content_width(&models);
-    let provider_content_width = models
-        .iter()
+    let ordered_models = || {
+        model_order.iter().map(|index| {
+            app.model_at_source_index(*index)
+                .expect("cached model order must reference the current projection")
+        })
+    };
+    let model_content_width = model_content_width(ordered_models());
+    let provider_content_width = ordered_models()
         .map(|model| display_width(&get_provider_display_name(&model.provider)))
         .max()
         .unwrap_or(DETAIL_PROVIDER_WIDTH);
-    let client_content_width = models
-        .iter()
+    let client_content_width = ordered_models()
         .map(|model| display_width(&get_client_display_names(&model.clients)))
         .max()
         .unwrap_or(DETAIL_CLIENT_WIDTH);
     let workspace_content_width = if group_by == GroupBy::WorkspaceModel {
-        workspace_content_width(&models)
+        workspace_content_width(ordered_models())
     } else {
         0
     };
-    let visible_models = &models[start..end];
+    let visible_models = &model_order[start..end];
     let table_layout = models_table_layout(
         table_area.width,
         model_content_width,
@@ -238,7 +244,10 @@ pub fn render(
     let rows: Vec<Row> = visible_models
         .iter()
         .enumerate()
-        .map(|(i, model)| {
+        .map(|(i, source_index)| {
+            let model = app
+                .model_at_source_index(*source_index)
+                .expect("cached model order must reference the current projection");
             let idx = i + start;
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
@@ -579,11 +588,11 @@ mod tests {
             cost: 0.0,
             session_count: 0,
         };
-        let models = vec![&model];
+        let models = [&model];
 
-        assert_eq!(model_content_width(&models), 5);
+        assert_eq!(model_content_width(models.iter().copied()), 5);
         assert_eq!(
-            workspace_content_width(&models),
+            workspace_content_width(models.iter().copied()),
             display_width("project-with-long-name")
         );
         assert_eq!(model_display_name(&model), "gpt-5");
@@ -669,8 +678,12 @@ mod tests {
                 0.2,
             ),
         ];
-        let accumulator =
-            tokenx_engine::build_usage_index(&messages, tokenx_engine::DateRange::none());
+        let accumulator = tokenx_engine::build_usage_index(
+            &messages,
+            tokenx_engine::DateRange::none(),
+            tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
+        )
+        .unwrap();
         let mut app = make_models_app(180, group_by);
         app.set_group_by_for_test(group_by);
         app.install_generation_fixture(accumulator, Vec::new(), Default::default());

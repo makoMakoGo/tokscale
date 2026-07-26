@@ -139,7 +139,10 @@ fn token_breakdown(metrics: &Map<String, Value>) -> Option<TokenBreakdown> {
     let cache_read = nonnegative_i64(metrics, "cacheReadTokens")?;
     let cache_write = nonnegative_i64(metrics, "cacheWriteTokens")?;
     let cached_input = cache_read.checked_add(cache_write)?;
-    let input = inclusive_input.saturating_sub(cached_input);
+    if cached_input > inclusive_input {
+        return None;
+    }
+    let input = inclusive_input.checked_sub(cached_input)?;
     let tokens = TokenBreakdown {
         input,
         output,
@@ -561,6 +564,9 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("cacheWriteTokens");
+        let mut cache_exceeds_input = valid.clone();
+        cache_exceeds_input["metrics"]["inputTokens"] = json!(3);
+        cache_exceeds_input["metrics"]["cacheReadTokens"] = json!(4);
         let mut missing_model = valid.clone();
         missing_model["modelInfo"]["id"] = json!("  ");
         let mut missing_timestamp = valid.clone();
@@ -585,6 +591,7 @@ mod tests {
                     bad_token,
                     float_token,
                     missing_token,
+                    cache_exceeds_input,
                     missing_model,
                     missing_timestamp,
                     zero,
@@ -594,14 +601,23 @@ mod tests {
         );
 
         let scanned = parse_cline_file(&path).unwrap();
-        assert_eq!(scanned.messages.len(), 1);
-        assert_eq!(scanned.rejections.total(), 5);
+        assert_eq!(
+            scanned.messages.len(),
+            1,
+            "accepted token shapes: {:?}",
+            scanned
+                .messages
+                .iter()
+                .map(|message| &message.tokens)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(scanned.rejections.total(), 6);
         let keys: Vec<_> = scanned
             .rejections
             .entries()
             .map(|entry| (entry.key, entry.count))
             .collect();
-        assert!(keys.contains(&("malformed-record", 3)));
+        assert!(keys.contains(&("malformed-record", 4)));
         assert!(keys.contains(&("missing-model", 1)));
         assert!(keys.contains(&("missing-timestamp", 1)));
     }

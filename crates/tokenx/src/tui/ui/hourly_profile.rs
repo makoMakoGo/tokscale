@@ -37,7 +37,19 @@ pub fn render(
         return;
     }
 
-    let lines = build_hourly_profile_lines(app, content.width);
+    let lines = match build_hourly_profile_lines(app, content.width) {
+        Ok(lines) => lines,
+        Err(error) => {
+            app.set_hourly_profile_text_viewport(content.height as usize, 0);
+            frame.render_widget(
+                Paragraph::new(format!("Hourly profile projection failed: {error}"))
+                    .style(Style::default().fg(app.theme.status.danger))
+                    .wrap(ratatui::widgets::Wrap { trim: true }),
+                content,
+            );
+            return;
+        }
+    };
     let total_lines = lines.len();
     let visible_height = content.height as usize;
     app.set_hourly_profile_text_viewport(visible_height, total_lines);
@@ -74,11 +86,14 @@ fn period_contains_hour(label: &str, hour: u32) -> bool {
     }
 }
 
-pub(crate) fn build_hourly_profile_lines(app: &App, area_width: u16) -> Vec<Line<'static>> {
+pub(crate) fn build_hourly_profile_lines(
+    app: &App,
+    area_width: u16,
+) -> Result<Vec<Line<'static>>, tokenx_engine::UsageProjectionError> {
     let hourly = &app.usage().hourly;
     let total_tokens = app.usage().total_tokens;
-    let periods = aggregate_by_period(hourly);
-    let peak_hour = find_peak_hour(hourly);
+    let periods = aggregate_by_period(hourly)?;
+    let peak_hour = find_peak_hour(hourly)?;
     let width = area_width as usize;
     let mut lines = usage_profile::summary_lines(
         app,
@@ -124,7 +139,7 @@ pub(crate) fn build_hourly_profile_lines(app: &App, area_width: u16) -> Vec<Line
     }
     lines.extend([Line::default(), usage_profile::switch_to_table_line(app)]);
 
-    lines
+    Ok(lines)
 }
 
 #[cfg(test)]
@@ -202,6 +217,7 @@ mod tests {
         app.usage_mut_for_test().total_cost = 10.0;
 
         let text = build_hourly_profile_lines(&app, 120)
+            .unwrap()
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
@@ -233,6 +249,26 @@ mod tests {
         assert!(period_contains_hour("Night", 4));
         assert!(!period_contains_hour("Morning", 20));
         assert!(!period_contains_hour("Evening", 8));
+    }
+
+    #[test]
+    fn hourly_profile_renders_projection_overflow_as_an_explicit_error() {
+        let mut app = make_app();
+        app.usage_mut_for_test().hourly = vec![
+            hour("2026-07-17", 8, u64::MAX, 0.0),
+            hour("2026-07-18", 8, 1, 0.0),
+        ];
+
+        let buffer = render_buffer(&mut app, 120, 8);
+        let body = (0..8)
+            .map(|y| buffer_row(&buffer, 120, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            body.contains("Hourly profile projection failed"),
+            "expected explicit projection diagnostic\n{body}"
+        );
     }
 
     #[test]

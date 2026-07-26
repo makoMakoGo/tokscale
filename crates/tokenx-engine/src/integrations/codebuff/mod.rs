@@ -18,8 +18,6 @@ use crate::integrations::{
 
 pub(crate) struct Driver;
 
-const CODEBUFF_RECORD_REJECTION_REVISION: u32 =
-    crate::integrations::MODEL_ID_CANONICALIZATION_REVISION + 2;
 const SOURCE: SourceSpec = SourceSpec::home(
     ".config/manicode/projects",
     crate::integrations::SourceMatcher::new(
@@ -38,9 +36,9 @@ impl IntegrationDriver for Driver {
 
         source_discovery::input_units_from_paths(
             client,
-            source_discovery::scan_roots(client, roots, SOURCE.matcher())?,
+            source_discovery::scan_roots(ctx, roots, SOURCE.matcher())?,
             FingerprintPolicy::PlainFile,
-            DecoderKind::plain(DecoderId::Codebuff, CODEBUFF_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::Codebuff),
         )
     }
 
@@ -116,6 +114,7 @@ mod tests {
             client: ClientId::Codebuff,
             home_dir: home.path(),
             scanner_settings: &settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         };
         let units = DRIVER.discover_inputs(&ctx).unwrap();
         let paths: Vec<_> = units.iter().map(|unit| unit.path.clone()).collect();
@@ -123,8 +122,7 @@ mod tests {
         assert!(paths.contains(&default_file));
         assert!(paths.contains(&extra_file));
         assert!(units.iter().all(|unit| {
-            unit.decoder.version()
-                == DecoderVersion::new(DecoderId::Codebuff, CODEBUFF_RECORD_REJECTION_REVISION)
+            unit.decoder.version() == DecoderVersion::current(DecoderId::Codebuff)
         }));
     }
 

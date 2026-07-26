@@ -22,12 +22,6 @@ pub(crate) struct Driver;
 
 pub(crate) static DRIVER: Driver = Driver;
 
-// Earlier OMP revisions emitted per-agent swarm labels, could bind a
-// precomputed parent digest to a newer input snapshot, or missed dynamic and
-// nested task-agent names.
-const OMP_RECORD_REJECTION_REVISION: u32 =
-    crate::integrations::MODEL_ID_CANONICALIZATION_REVISION + 11;
-const OMP_PARENT_HEALTH_REVISION: u32 = 2;
 const SOURCE: SourceSpec = SourceSpec::home(
     ".omp/agent/sessions",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::jsonl),
@@ -44,7 +38,7 @@ impl IntegrationDriver for Driver {
             SOURCE,
             ctx,
             FingerprintPolicy::PlainFile,
-            DecoderKind::plain(DecoderId::Omp, OMP_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::Omp),
         )?
         .into_iter()
         .map(|unit| {
@@ -123,9 +117,7 @@ impl IntegrationDriver for Driver {
             let parent_index = decode::build_omp_parent_task_agent_index(&miss_paths);
             let owned_paths = miss_paths.into_iter().collect();
             let mut reparsed = {
-                let parse_ctx = ParseContext {
-                    pricing: ctx.pricing,
-                };
+                let parse_ctx = ParseContext::new(ctx.pricing, ctx.calendar(), ctx.cancellation());
                 parse_omp_miss_units(all_miss_units, &parse_ctx, &parent_index)
             };
             reparsed.extend(omp_parent_health_units(&parent_index, &owned_paths));
@@ -222,9 +214,7 @@ impl IntegrationDriver for Driver {
         pipeline_cache::fold_units(
             parse_parent_health_cache_misses(
                 parent_health_misses,
-                &ParseContext {
-                    pricing: ctx.pricing,
-                },
+                &ParseContext::new(ctx.pricing, ctx.calendar(), ctx.cancellation()),
                 &parent_index,
             ),
             ctx,
@@ -237,9 +227,7 @@ impl IntegrationDriver for Driver {
                 break;
             }
             let mut parsed = {
-                let parse_ctx = ParseContext {
-                    pricing: ctx.pricing,
-                };
+                let parse_ctx = ParseContext::new(ctx.pricing, ctx.calendar(), ctx.cancellation());
                 parse_omp_miss_units(units, &parse_ctx, &parent_index)
             };
             let recovered_in_batch = remaining_failed_hits.min(parsed.len());
@@ -323,7 +311,7 @@ fn child_only_parent_health_candidates(
 }
 
 fn omp_parent_health_unit(path: PathBuf, cacheable: bool) -> DiscoveredInput {
-    let decoder = DecoderKind::plain(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION);
+    let decoder = DecoderKind::plain(DecoderId::OmpParentHealth);
     if cacheable {
         DiscoveredInput::plain_file(path, decoder)
     } else {
@@ -417,19 +405,19 @@ fn parse_parent_health_cache_misses(
                         .cache_input
                         .expect("complete OMP parent health must carry its cache input");
                     let rejections = health.rejections;
-                    let mut parsed = pipeline_cache::load_or_scan_empty_sentinel_with_primary_hash(
-                        miss.unit,
-                        ctx,
-                        cache_input.content_hash,
-                        cache_input.snapshot,
-                        move |_| {
-                            Ok(crate::input_health::ScannedInput {
-                                messages: Vec::new(),
-                                rejections: rejections.clone(),
-                                interrupted: None,
-                            })
-                        },
-                    );
+                    let mut parsed =
+                        pipeline_cache::load_or_scan_empty_sentinel_with_primary_snapshot(
+                            miss.unit,
+                            ctx,
+                            cache_input.snapshot,
+                            move |_| {
+                                Ok(crate::input_health::ScannedInput {
+                                    messages: Vec::new(),
+                                    rejections: rejections.clone(),
+                                    interrupted: None,
+                                })
+                            },
+                        );
                     if matches!(
                         parsed.health.status,
                         crate::input_health::InputStatus::Partial { .. }
@@ -487,15 +475,23 @@ fn fold_omp_cache_hits(
             ));
         }
         match pipeline_cache::resolve_messages(messages, ctx) {
-            Ok(messages) => {
-                let crate::integrations::UnitScanHealth { status, rejections } = *health;
-                ctx.record_health(unit.path.clone(), status, rejections);
+            Ok(mut messages) => {
+                let crate::integrations::UnitScanHealth {
+                    status,
+                    mut rejections,
+                } = *health;
+                rejections.merge(&crate::retain_source_eligible_messages(&mut messages));
+                rejections.merge(&crate::price_source_eligible_messages(
+                    &mut messages,
+                    ctx.pricing,
+                ));
                 message_count += messages.len();
                 if let Some(sink) = sink.as_deref_mut() {
-                    pipeline_cache::emit_messages(messages, sink);
+                    rejections.merge(&pipeline_cache::emit_messages(messages, sink));
                 }
+                ctx.record_health(unit.path.clone(), status, rejections);
             }
-            Err(failure) => {
+            Err(InputPipelineError::CacheRead(failure)) => {
                 if !failure.can_reparse_input() {
                     return Err(failure.into());
                 }
@@ -515,6 +511,7 @@ fn fold_omp_cache_hits(
                     invalidate_cache: remove_failed_shard,
                 });
             }
+            Err(error) => return Err(error),
         }
     }
     Ok((failed_units, message_count))
@@ -539,10 +536,9 @@ fn parse_omp_miss_units(
                 FingerprintPolicy::PrimaryWithDependency { .. }
             );
             if let (true, Some(cache_input)) = (has_dependency_policy, dependency_cache_input) {
-                pipeline_cache::load_or_scan_unit_with_dependency_hash(
+                pipeline_cache::load_or_scan_unit_with_dependency_snapshot(
                     unit,
                     ctx,
-                    cache_input.content_hash,
                     cache_input.snapshot,
                     |path| decode::parse_omp_file_with_parent_task_agent_index(path, parent_index),
                 )
@@ -566,7 +562,7 @@ fn omp_parent_health_units(
         .map(|health| {
             let unit = DiscoveredInput::no_record_cache(
                 health.path,
-                DecoderKind::plain(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION),
+                DecoderKind::plain(DecoderId::OmpParentHealth),
             );
             let mut parsed = ParsedUnit::healthy(
                 unit,
@@ -606,6 +602,7 @@ mod tests {
             client: ClientId::Omp,
             home_dir,
             scanner_settings: settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         }
     }
 
@@ -619,7 +616,7 @@ mod tests {
     }
 
     fn decoder() -> DecoderKind {
-        DecoderKind::plain(DecoderId::Omp, OMP_RECORD_REJECTION_REVISION)
+        DecoderKind::plain(DecoderId::Omp)
     }
 
     fn unit(path: PathBuf) -> DiscoveredInput {
@@ -650,7 +647,7 @@ mod tests {
     fn finalized(
         mut messages: Vec<crate::records::UsageRecord>,
     ) -> Vec<crate::AttributedUsageRecord> {
-        crate::finalize_token_priced_messages(&mut messages, None);
+        crate::finalize_message_identities(&mut messages);
         messages
             .into_iter()
             .map(|message| message.attribute(ClientId::Omp))
@@ -663,7 +660,7 @@ mod tests {
     ) -> Vec<crate::AttributedUsageRecord> {
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(units),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         let mut messages = Vec::new();
         let binding = binding();
@@ -768,10 +765,9 @@ mod tests {
                 } if dependency_path == &unit.path.parent().unwrap().with_extension("jsonl")
             )
         }));
-        assert!(units.iter().all(|unit| {
-            unit.decoder.version()
-                == DecoderVersion::new(DecoderId::Omp, OMP_RECORD_REJECTION_REVISION)
-        }));
+        assert!(units
+            .iter()
+            .all(|unit| { unit.decoder.version() == DecoderVersion::current(DecoderId::Omp) }));
     }
 
     #[test]
@@ -852,7 +848,7 @@ mod tests {
         let mut cache = input_record_cache::InputRecordShardStore::default();
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(vec![child_unit.clone()]),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         let first = fold_parsed(parsed, &mut cache);
         assert_eq!(first[0].session_id.as_ref(), "child-session");
@@ -889,7 +885,7 @@ mod tests {
             CacheHitPlan::Miss(unit) => unit,
             CacheHitPlan::Hit(_) => panic!("parent-only change must invalidate child cache"),
         };
-        let parsed = DRIVER.parse_inputs(vec![miss], &ParseContext { pricing: None });
+        let parsed = DRIVER.parse_inputs(vec![miss], &ParseContext::uncancelled(None));
         let second = fold_parsed(parsed, &mut cache);
         assert_eq!(second[0].session_id.as_ref(), "child-session");
         assert_eq!(second[0].agent.as_deref(), Some("OMP Oracle"));
@@ -943,7 +939,7 @@ mod tests {
 
         let parsed = parse_omp_miss_units(
             vec![crate::integrations::test_execute(unit)],
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
             &parent_index,
         );
 
@@ -976,7 +972,7 @@ mod tests {
 
         let parsed = parse_parent_health_cache_misses(
             misses,
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
             &parent_index,
         );
 
@@ -1103,7 +1099,7 @@ mod tests {
         assert_eq!(units.len(), 1);
         assert_eq!(
             units[0].unit.decoder.version(),
-            DecoderVersion::new(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION)
+            DecoderVersion::current(DecoderId::OmpParentHealth)
         );
     }
 
@@ -1205,8 +1201,7 @@ mod tests {
             ..Default::default()
         };
         let scan_ctx = scan_context(home.path(), &settings);
-        let parent_decoder_version =
-            DecoderVersion::new(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION);
+        let parent_decoder_version = DecoderVersion::current(DecoderId::OmpParentHealth);
 
         let mut cold_cache =
             input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
@@ -1312,7 +1307,7 @@ mod tests {
         assert!(cache
             .get_meta(
                 &parent_path,
-                DecoderVersion::new(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION),
+                DecoderVersion::current(DecoderId::OmpParentHealth),
             )
             .unwrap()
             .is_some());
@@ -1388,7 +1383,7 @@ mod tests {
         assert!(cache
             .get_meta(
                 &parent_path,
-                DecoderVersion::new(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION),
+                DecoderVersion::current(DecoderId::OmpParentHealth),
             )
             .unwrap()
             .is_none());
@@ -1418,8 +1413,7 @@ mod tests {
             ..Default::default()
         };
         let scan_ctx = scan_context(home.path(), &settings);
-        let parent_decoder_version =
-            DecoderVersion::new(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION);
+        let parent_decoder_version = DecoderVersion::current(DecoderId::OmpParentHealth);
         let mut cache = input_record_cache::InputRecordShardStore::default();
         let cold_units = DRIVER.discover_inputs(&scan_ctx).unwrap();
         fold_batches_with_omp_adapter(cold_units, &mut cache);
@@ -1522,7 +1516,7 @@ mod tests {
         assert!(cache
             .get_meta(
                 &parent_path,
-                DecoderVersion::new(DecoderId::OmpParentHealth, OMP_PARENT_HEALTH_REVISION),
+                DecoderVersion::current(DecoderId::OmpParentHealth),
             )
             .unwrap()
             .is_none());
@@ -1554,7 +1548,7 @@ mod tests {
         let mut cache = input_record_cache::InputRecordShardStore::default();
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(units),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         let binding = binding();
         let mut messages = Vec::new();
@@ -1576,7 +1570,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("cached.jsonl");
         write_file(&path, OMP_CHILD_CONTENT);
-        let decoder_version = DecoderVersion::new(DecoderId::Omp, OMP_RECORD_REJECTION_REVISION);
+        let decoder_version = DecoderVersion::current(DecoderId::Omp);
         let dependency_path = path.parent().unwrap().with_extension("jsonl");
         let unit = unit_with_parent(path.clone(), dependency_path)
             .prepare_snapshot()

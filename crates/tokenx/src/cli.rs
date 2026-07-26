@@ -1,10 +1,11 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{Datelike, Duration, NaiveDate};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use tokenx_engine::{ClientId, ClientUniverse, DateRange, GroupBy};
+use tokenx_engine::{CalendarContext, ClientId, ClientUniverse, DateRange, GroupBy};
 
 use crate::commands::shared::{parse_client_id_arg, resolve_client_universe};
 use crate::failure::CliFailure;
@@ -243,12 +244,45 @@ pub(crate) struct ResolvedInputScope {
 pub(crate) struct StartupSnapshot {
     pub(crate) input: ResolvedInputScope,
     pub(crate) settings: Settings,
+    pub(crate) calendar: CalendarContext,
+    pub(crate) pricing: Arc<tokenx_engine::pricing::ResolvedPricingSnapshot>,
 }
 
 #[derive(Debug)]
 pub(crate) struct ResolvedDateRange {
     pub(crate) range: DateRange,
     pub(crate) label: Option<String>,
+    pub(crate) relative: Option<RelativeDateRange>,
+    pub(crate) effective_date: NaiveDate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelativeDateRange {
+    Today,
+    LastSevenDays,
+    CurrentMonth,
+}
+
+impl RelativeDateRange {
+    pub(crate) fn resolve(self, current_date: NaiveDate) -> DateRange {
+        match self {
+            Self::Today => DateRange::bounded(Some(current_date), Some(current_date))
+                .expect("a single-day range must be valid"),
+            Self::LastSevenDays => {
+                DateRange::bounded(Some(current_date - Duration::days(6)), Some(current_date))
+                    .expect("the last-seven-days range must be valid")
+            }
+            Self::CurrentMonth => DateRange::bounded(
+                Some(
+                    current_date
+                        .with_day(1)
+                        .expect("every valid date has a first day of its month"),
+                ),
+                Some(current_date),
+            )
+            .expect("a current-month range must be valid"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -304,6 +338,7 @@ fn resolve_tui(args: TuiArgs, terminal: TerminalState) -> Result<TuiPlan, CliFai
     }
 
     let startup = resolve_startup(args.input)?;
+    let date = resolve_date(args.date, startup.calendar)?;
     let initial_tab = args.tab;
     if initial_tab == Some(Tab::Subscription) && !startup.settings.subscription.enabled {
         return Err(CliFailure::invalid_message(
@@ -317,16 +352,18 @@ fn resolve_tui(args: TuiArgs, terminal: TerminalState) -> Result<TuiPlan, CliFai
         no_refresh: args.no_refresh,
         debug: args.debug,
         startup,
-        date: resolve_date(args.date)?,
+        date,
         initial_tab,
     })
 }
 
 fn resolve_models(args: ModelsArgs) -> Result<ModelsPlan, CliFailure> {
+    let startup = resolve_startup(args.input)?;
+    let date = resolve_date(args.date, startup.calendar)?;
     Ok(ModelsPlan {
         json: args.json,
-        startup: resolve_startup(args.input)?,
-        date: resolve_date(args.date)?,
+        startup,
+        date,
         benchmark: args.benchmark,
         no_spinner: args.no_spinner,
         group_by: args.group_by,
@@ -334,12 +371,16 @@ fn resolve_models(args: ModelsArgs) -> Result<ModelsPlan, CliFailure> {
 }
 
 fn resolve_startup(args: InputScopeArgs) -> Result<StartupSnapshot, CliFailure> {
-    let explicit_home = args.home;
-    // An explicit input home also selects its settings path. Without
-    // `--home`, settings retain the platform config-directory semantics while
-    // acquisition receives the process home resolved exactly once here.
-    let settings = Settings::load_for_home_override(explicit_home.as_deref())?;
-    let home = explicit_home.or_else(dirs::home_dir).ok_or_else(|| {
+    // Product state and input discovery are deliberately separate authorities:
+    // settings always come from Tokenx's product root, while `--home` changes
+    // only the home used to derive built-in client input paths.
+    let settings = Settings::load()?;
+    let calendar = match settings.time_zone {
+        Some(calendar) => calendar,
+        None => CalendarContext::system().map_err(anyhow::Error::new)?,
+    };
+    let pricing = Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current());
+    let home = args.home.or_else(dirs::home_dir).ok_or_else(|| {
         CliFailure::invalid_message(
             "could not determine the home directory; pass --home PATH".to_string(),
         )
@@ -352,11 +393,16 @@ fn resolve_startup(args: InputScopeArgs) -> Result<StartupSnapshot, CliFailure> 
             restricted,
         },
         settings,
+        calendar,
+        pricing,
     })
 }
 
-fn resolve_date(date: DateRangeFlags) -> Result<ResolvedDateRange, CliFailure> {
-    resolve_date_for_date(date, chrono::Local::now().date_naive())
+fn resolve_date(
+    date: DateRangeFlags,
+    calendar: CalendarContext,
+) -> Result<ResolvedDateRange, CliFailure> {
+    resolve_date_for_date(date, calendar.current_date())
 }
 
 pub(crate) fn resolve_date_for_date(
@@ -371,31 +417,29 @@ pub(crate) fn resolve_date_for_date(
         }
     }
 
-    let (range, label) = if date.today {
+    let (range, label, relative) = if date.today {
         (
-            DateRange::bounded(Some(current_date), Some(current_date))
-                .expect("a single-day range must be valid"),
+            RelativeDateRange::Today.resolve(current_date),
             Some("Today".to_string()),
+            Some(RelativeDateRange::Today),
         )
     } else if date.week {
         (
-            DateRange::bounded(Some(current_date - Duration::days(6)), Some(current_date))
-                .expect("the last-seven-days range must be valid"),
+            RelativeDateRange::LastSevenDays.resolve(current_date),
             Some("Last 7 days".to_string()),
+            Some(RelativeDateRange::LastSevenDays),
         )
     } else if date.month {
-        let month_start = current_date
-            .with_day(1)
-            .expect("every valid date has a first day of its month");
         (
-            DateRange::bounded(Some(month_start), Some(current_date))
-                .expect("the current-month range must be valid"),
+            RelativeDateRange::CurrentMonth.resolve(current_date),
             Some(current_date.format("%B %Y").to_string()),
+            Some(RelativeDateRange::CurrentMonth),
         )
     } else if let Some(year) = date.year {
         (
             DateRange::for_year(year).expect("Clap year parser must validate --year"),
             Some(year.to_string()),
+            None,
         )
     } else {
         let mut label_parts = Vec::new();
@@ -409,10 +453,16 @@ pub(crate) fn resolve_date_for_date(
             DateRange::bounded(date.since, date.until)
                 .expect("custom bounds must be ordered before construction"),
             (!label_parts.is_empty()).then(|| label_parts.join(" ")),
+            None,
         )
     };
 
-    Ok(ResolvedDateRange { range, label })
+    Ok(ResolvedDateRange {
+        range,
+        label,
+        relative,
+        effective_date: current_date,
+    })
 }
 
 fn parse_home_arg(raw: &str) -> Result<PathBuf, String> {

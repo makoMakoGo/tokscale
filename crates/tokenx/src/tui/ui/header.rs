@@ -602,9 +602,26 @@ mod tests {
             Vec::new(),
             Default::default(),
             tokenx_engine::input_health::HealthSummary {
-                complete: false,
-                rejected_records: 2,
-                failed_inputs: 1,
+                issues: vec![
+                    tokenx_engine::input_health::HealthIssue {
+                        level: tokenx_engine::input_health::HealthLevel::Warning,
+                        client: Some(tokenx_engine::ClientId::Amp),
+                        issue: tokenx_engine::input_health::HealthIssueKind::RecordRejection(
+                            "missing-model".into(),
+                        ),
+                        affected_inputs: 1,
+                        rejected_records: Some(2),
+                        handling: tokenx_engine::input_health::HealthHandling::RecordSkipped,
+                    },
+                    tokenx_engine::input_health::HealthIssue {
+                        level: tokenx_engine::input_health::HealthLevel::Error,
+                        client: Some(tokenx_engine::ClientId::Amp),
+                        issue: tokenx_engine::input_health::HealthIssueKind::InputUnavailable,
+                        affected_inputs: 1,
+                        rejected_records: None,
+                        handling: tokenx_engine::input_health::HealthHandling::InputSkipped,
+                    },
+                ],
                 ..Default::default()
             },
         );

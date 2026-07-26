@@ -14,11 +14,10 @@ use crate::integrations::discover as source_discovery;
 use crate::integrations::{
     BoundUsageSink, DecoderKind, DiscoveredInput, DiscoveryContext, FingerprintPolicy, FoldContext,
     InputDiscoveryError, InputPipelineError, IntegrationDriver, ParseContext, ParsedUnit,
-    SourceSpec, MODEL_ID_CANONICALIZATION_REVISION,
+    SourceSpec,
 };
 
 const ROOCODE_SIBLINGS: &[&str] = &["api_conversation_history.json"];
-const ROOCODE_RECORD_REJECTION_REVISION: u32 = MODEL_ID_CANONICALIZATION_REVISION + 4;
 const SOURCE: SourceSpec = SourceSpec::home(
     ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::ui_messages_json),
@@ -37,12 +36,12 @@ impl IntegrationDriver for Driver {
 
         source_discovery::input_units_from_paths(
             client,
-            source_discovery::scan_roots(client, roots, SOURCE.matcher())?,
+            source_discovery::scan_roots(ctx, roots, SOURCE.matcher())?,
             FingerprintPolicy::PrimaryWithSiblings {
                 sibling_names: ROOCODE_SIBLINGS,
                 related_failure_policy: RelatedInputFailurePolicy::FailInput,
             },
-            DecoderKind::plain(DecoderId::RooCode, ROOCODE_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::RooCode),
         )
     }
 
@@ -101,6 +100,7 @@ mod tests {
             client: ClientId::RooCode,
             home_dir,
             scanner_settings: settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         }
     }
 
@@ -183,14 +183,14 @@ mod tests {
         assert_eq!(unit.path, path);
         assert_eq!(
             unit.decoder.version(),
-            DecoderVersion::new(DecoderId::RooCode, ROOCODE_RECORD_REJECTION_REVISION)
+            DecoderVersion::current(DecoderId::RooCode)
         );
 
         let cache_dir = tempfile::TempDir::new().unwrap();
         let mut cache = input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(vec![unit.clone()]),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         assert_eq!(parsed.len(), 1);
         let health = &parsed[0].health;

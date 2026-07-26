@@ -26,18 +26,22 @@ pub use acquisition_error::{AcquisitionError, AcquisitionErrorKind};
 pub use aggregate::{
     aggregate_by_period, build_contribution_graph_for_today, build_period_usage,
     calculate_streaks_for_today, find_peak_hour, DateRange, DateRangeError, FrozenUsageIndex,
-    PeriodBucket, SessionTokens, SessionUsage, UsageIndexValidationError, UNKNOWN_WORKSPACE_LABEL,
+    InvalidCostKind, PeriodBucket, SessionTokens, SessionUsage, UsageAggregationError,
+    UsageIndexValidationError, UsageProjectionError, UNKNOWN_WORKSPACE_LABEL,
 };
 pub use clients::{ClientId, ClientIdentity};
-pub use engine::{AcquisitionEngine, GenerationBuildError, PreparedAcquisition};
+pub use engine::{
+    AcquisitionCancellation, AcquisitionCancelled, AcquisitionEngine, AcquisitionPhase,
+    GenerationBuildError, PreparedAcquisition,
+};
 pub use generation::{
-    AcquisitionConfig, AcquisitionConfigError, ClientSelection, ClientUniverse, Generation,
-    GenerationError, UsageQuery,
+    AcquisitionConfig, AcquisitionConfigError, CalendarContext, ClientSelection, ClientUniverse,
+    Generation, GenerationError, PricingContext, UsageQuery,
 };
 pub use input_footprint::{InputFootprint, InputFootprintOverflow};
 pub use input_health::{
-    DataHealth, InputFailure, InputHealth, InputStatus, RecordRejectionReason, RejectionEntry,
-    RejectionSummary, ScannedInput,
+    DataHealth, InputDiagnosticKind, InputFailure, InputHealth, InputStatus, RecordRejectionReason,
+    RejectionEntry, RejectionSummary, ScannedInput,
 };
 pub use input_record_cache::{
     prune_input_record_cache, InputRecordCachePruneError, InputRecordCachePruneStats,
@@ -47,7 +51,6 @@ pub use provider_identity::{inferred_provider_from_model, normalize_provider_for
 pub use records::AttributedUsageRecord;
 
 use std::collections::{HashMap, HashSet};
-use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -66,29 +69,16 @@ pub fn normalize_model_for_grouping(model_id: &str) -> String {
 }
 
 #[doc(hidden)]
-pub fn aggregate_usage_records(
-    messages: &[AttributedUsageRecord],
-    date_range: DateRange,
-    group_by: GroupBy,
-    effective_date: chrono::NaiveDate,
-) -> projection::UsageProjection {
-    let mut accumulator = aggregate::GenerationAccumulator::new(date_range);
-    for message in messages {
-        accumulator.push(message);
-    }
-    accumulator
-        .into_usage_index()
-        .project_usage(&group_by, effective_date)
-}
-
-#[doc(hidden)]
 pub fn build_usage_index(
     messages: &[AttributedUsageRecord],
     date_range: DateRange,
-) -> FrozenUsageIndex {
-    let mut accumulator = aggregate::GenerationAccumulator::new(date_range);
+    calendar: CalendarContext,
+) -> Result<FrozenUsageIndex, UsageAggregationError> {
+    let mut accumulator = aggregate::GenerationAccumulator::new(date_range, calendar);
     for message in messages {
-        accumulator.push(message);
+        if let aggregate::RecordAggregationOutcome::Rejected(error) = accumulator.push(message) {
+            return Err(error);
+        }
     }
     accumulator.into_usage_index()
 }
@@ -168,18 +158,6 @@ impl TokenBreakdown {
     }
 }
 
-pub(crate) fn checked_token_add(left: i64, right: i64) -> i64 {
-    left.checked_add(right)
-        .expect("token count exceeds i64::MAX while aggregating usage")
-}
-
-pub(crate) fn checked_token_sum(values: impl IntoIterator<Item = i64>) -> i64 {
-    values
-        .into_iter()
-        .try_fold(0_i64, i64::checked_add)
-        .expect("token count exceeds i64::MAX while aggregating usage")
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct SourceFingerprint([u8; 32]);
@@ -192,14 +170,6 @@ impl SourceFingerprint {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
-
-    /// Compact comparison key for the lifetime of one process. The persisted
-    /// SHA-256 signature remains the cross-process authority.
-    pub fn process_digest(self) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        hasher.write(&self.0);
-        hasher.finish()
-    }
 }
 
 /// A one-shot inventory of discovered local inputs and their pre-parse
@@ -207,9 +177,9 @@ impl SourceFingerprint {
 /// the exact units whose signature was compared by the caller.
 struct PreparedInventory {
     date_range: DateRange,
-    clients: ClientUniverse,
     groups: Vec<integrations::PreparedIntegrationInputs>,
     signature: SourceFingerprint,
+    input_footprint: InputFootprint,
     health: DataHealth,
     input_cache_dir: PathBuf,
 }
@@ -218,49 +188,13 @@ impl PreparedInventory {
     fn source_fingerprint(&self) -> SourceFingerprint {
         self.signature
     }
-
-    /// Refresh metadata and stable identity without rediscovering inputs or
-    /// reading their bodies. This is the narrow probe used by TUI auto-refresh
-    /// before it decides that a prepared inventory is unchanged.
-    fn refresh_source_fingerprint(&mut self) -> SourceFingerprint {
-        let mut unavailable = Vec::new();
-        for group in &mut self.groups {
-            let client = group.binding.client;
-            group.units.retain_mut(|unit| {
-                let path = unit.path.clone();
-                match unit.refresh_for_inventory() {
-                    Ok(()) => true,
-                    Err(source) => {
-                        unavailable.push(InputHealth {
-                            client,
-                            path,
-                            status: InputStatus::Unavailable {
-                                failure: InputFailure::new(
-                                    "refresh input inventory metadata and identity",
-                                    source.to_string(),
-                                ),
-                            },
-                            rejections: RejectionSummary::default(),
-                        });
-                        false
-                    }
-                }
-            });
-        }
-        for health in unavailable {
-            self.health.record(health);
-        }
-        self.signature = source_fingerprint(&self.clients, &self.groups);
-        self.signature
-    }
 }
 
 fn selected_client_footprint(clients: &ClientUniverse) -> InputFootprint {
     InputFootprint::for_clients(clients.iter())
 }
 
-#[cfg(test)]
-fn prepared_input_footprint(
+fn inventory_input_footprint(
     clients: &ClientUniverse,
     groups: &[integrations::PreparedIntegrationInputs],
 ) -> InputFootprint {
@@ -276,21 +210,6 @@ fn prepared_input_footprint(
                         .expect("input data size must fit in u64");
                 }
             });
-        }
-    }
-    footprint
-}
-
-fn confirmed_input_footprint(
-    clients: &ClientUniverse,
-    groups: &[integrations::ConfirmedIntegrationInputs],
-) -> InputFootprint {
-    let mut footprint = selected_client_footprint(clients);
-    for group in groups {
-        for &(_, size) in &group.present_files {
-            footprint
-                .add_bytes(group.client, size)
-                .expect("input data size must fit in u64");
         }
     }
     footprint
@@ -380,67 +299,139 @@ fn input_cache_dir_for_test_home(home_dir: &Path) -> PathBuf {
     home_dir.join(".tokenx-test-cache/input")
 }
 
+#[cfg(test)]
 fn fold_prepared_local_inputs_with_pricing(
     prepared: PreparedInventory,
     pricing: Option<&pricing::PricingService>,
     sink: &mut dyn integrations::AttributedUsageSink,
 ) -> Result<FoldOutcome, AcquisitionError> {
+    fold_prepared_local_inputs_with_pricing_with_cancellation(
+        prepared,
+        pricing,
+        CalendarContext::explicit("UTC").expect("UTC is a valid IANA timezone"),
+        sink,
+        &AcquisitionCancellation::default(),
+    )
+}
+
+fn fold_prepared_local_inputs_with_pricing_with_cancellation(
+    prepared: PreparedInventory,
+    pricing: Option<&pricing::PricingService>,
+    calendar: CalendarContext,
+    sink: &mut dyn integrations::AttributedUsageSink,
+    cancellation: &AcquisitionCancellation,
+) -> Result<FoldOutcome, AcquisitionError> {
+    cancellation
+        .check(AcquisitionPhase::Planning)
+        .map_err(AcquisitionError::cancelled)?;
     let PreparedInventory {
-        clients,
         groups,
+        signature: source_fingerprint,
+        input_footprint,
         mut health,
         input_cache_dir,
         ..
     } = prepared;
-    let mut input_cache = input_record_cache::InputRecordShardStore::open(&input_cache_dir)
-        .map_err(integrations::InputPipelineError::from)
-        .map_err(AcquisitionError::operational)?;
+    let mut input_cache = match input_record_cache::InputRecordShardStore::open(&input_cache_dir) {
+        Ok(cache) => cache,
+        Err(error) => input_record_cache::InputRecordShardStore::without_initialization(
+            &input_cache_dir,
+            &error,
+        ),
+    };
 
     let parse_result = integrations::run_prepared_integrations(
         groups,
         &mut input_cache,
         pricing,
+        calendar,
         sink,
         &mut health,
+        cancellation,
     );
 
+    cancellation
+        .check(AcquisitionPhase::CacheFinalization)
+        .map_err(AcquisitionError::cancelled)?;
     let cache_result = input_cache.save_if_dirty();
     let result = match (parse_result, cache_result) {
-        (Ok(confirmed), Ok(())) => Ok(confirmed),
+        (Ok(()), Ok(())) => Ok(()),
         (Err(parse_error), Ok(())) => Err(parse_error),
-        (Ok(_), Err(cache_error)) => Err(cache_error.into()),
-        (Err(parse_error), Err(cache_error)) => Err(
-            integrations::InputPipelineError::with_finalization(parse_error, cache_error),
-        ),
+        (Ok(()), Err(_)) => Ok(()),
+        (Err(parse_error), Err(_)) => Err(parse_error),
     };
+    if let Some((kind, failure)) = input_cache.disabled_diagnostic() {
+        health.record_global_diagnostic(input_cache_dir, kind, failure);
+    }
     result
-        .map(|confirmed| {
-            let source_fingerprint = confirmed_source_fingerprint(&clients, &confirmed);
-            let input_footprint = confirmed_input_footprint(&clients, &confirmed);
-            FoldOutcome {
-                source_fingerprint,
-                input_footprint,
-                health,
+        .map(|()| FoldOutcome {
+            source_fingerprint,
+            input_footprint,
+            health,
+        })
+        .map_err(|error| {
+            if error.is_cancelled() {
+                AcquisitionError::cancelled(error)
+            } else {
+                AcquisitionError::operational(error)
             }
         })
-        .map_err(AcquisitionError::operational)
 }
 
 struct AccumulationSink<'a>(&'a mut crate::aggregate::GenerationAccumulator);
 
 impl integrations::AttributedUsageSink for AccumulationSink<'_> {
-    fn push_record(&mut self, message: AttributedUsageRecord) {
-        self.0.push(&message);
+    fn push_record(
+        &mut self,
+        message: AttributedUsageRecord,
+    ) -> integrations::AttributedUsageSinkOutcome {
+        match self.0.push(&message) {
+            aggregate::RecordAggregationOutcome::Retained
+            | aggregate::RecordAggregationOutcome::Filtered => {
+                integrations::AttributedUsageSinkOutcome::Retained
+            }
+            aggregate::RecordAggregationOutcome::Rejected(_) => {
+                integrations::AttributedUsageSinkOutcome::Rejected(
+                    input_health::RecordRejectionReason::AggregationOverflow,
+                )
+            }
+            aggregate::RecordAggregationOutcome::Failed => {
+                integrations::AttributedUsageSinkOutcome::Failed
+            }
+        }
     }
 }
 
+#[cfg(test)]
 fn stream_local_inputs_into_accumulator(
     prepared: PreparedInventory,
     pricing: Option<&pricing::PricingService>,
     accumulator: &mut crate::aggregate::GenerationAccumulator,
 ) -> Result<FoldOutcome, AcquisitionError> {
+    stream_local_inputs_into_accumulator_with_cancellation(
+        prepared,
+        pricing,
+        accumulator,
+        CalendarContext::explicit("UTC").expect("UTC is a valid IANA timezone"),
+        &AcquisitionCancellation::default(),
+    )
+}
+
+fn stream_local_inputs_into_accumulator_with_cancellation(
+    prepared: PreparedInventory,
+    pricing: Option<&pricing::PricingService>,
+    accumulator: &mut crate::aggregate::GenerationAccumulator,
+    calendar: CalendarContext,
+    cancellation: &AcquisitionCancellation,
+) -> Result<FoldOutcome, AcquisitionError> {
     let mut sink = AccumulationSink(accumulator);
-    fold_prepared_local_inputs_with_pricing(prepared, pricing, &mut sink)
+    fold_prepared_local_inputs_with_pricing_with_cancellation(
+        prepared,
+        pricing,
+        calendar,
+        &mut sink,
+        cancellation,
+    )
 }
 
 fn prepare_inventory(
@@ -449,74 +440,91 @@ fn prepare_inventory(
     date_range: DateRange,
     scanner_settings: &scanner::ScannerSettings,
     input_cache_dir: PathBuf,
+    cancellation: &AcquisitionCancellation,
 ) -> Result<PreparedInventory, AcquisitionError> {
+    cancellation
+        .check(AcquisitionPhase::Discovery)
+        .map_err(AcquisitionError::cancelled)?;
     scanner_settings
         .validate()
         .map_err(AcquisitionError::invalid_environment)?;
     let selected_integrations = integrations::selected_integrations(&clients);
     let mut health = DataHealth::default();
-    let groups: Vec<_> = selected_integrations
-        .into_iter()
-        .map(|binding| -> Result<_, AcquisitionError> {
-            #[cfg(test)]
-            PREPARE_DISCOVERY_COUNT.with(|count| count.set(count.get() + 1));
-            let scan_ctx = integrations::DiscoveryContext {
-                client: binding.client,
-                home_dir,
-                scanner_settings,
-            };
-            // Third-party input and snapshot failures stay inside their
-            // input's failure domain.
-            let units = match binding.driver.discover_inputs(&scan_ctx) {
-                Ok(units) => units,
-                Err(error) => {
+    let mut groups = Vec::with_capacity(selected_integrations.len());
+    for binding in selected_integrations {
+        cancellation
+            .check(AcquisitionPhase::Discovery)
+            .map_err(AcquisitionError::cancelled)?;
+        #[cfg(test)]
+        PREPARE_DISCOVERY_COUNT.with(|count| count.set(count.get() + 1));
+        let scan_ctx = integrations::DiscoveryContext {
+            client: binding.client,
+            home_dir,
+            scanner_settings,
+            cancellation: cancellation.clone(),
+        };
+        // Third-party input and snapshot failures stay inside their
+        // input's failure domain.
+        let discovered = match binding.driver.discover_inputs(&scan_ctx) {
+            Ok(units) => units,
+            Err(error) => {
+                if error.is_cancelled() {
+                    return Err(AcquisitionError::cancelled(error));
+                }
+                health.record(InputHealth {
+                    client: binding.client,
+                    path: error.path.clone(),
+                    status: InputStatus::Unavailable {
+                        failure: InputFailure::new(error.operation, error.to_string()),
+                    },
+                    rejections: RejectionSummary::default(),
+                });
+                groups.push(integrations::PreparedIntegrationInputs {
+                    binding,
+                    units: Vec::new(),
+                });
+                continue;
+            }
+        };
+        cancellation
+            .check(AcquisitionPhase::Discovery)
+            .map_err(AcquisitionError::cancelled)?;
+        let mut units = Vec::with_capacity(discovered.len());
+        for unit in discovered {
+            cancellation
+                .check(AcquisitionPhase::Discovery)
+                .map_err(AcquisitionError::cancelled)?;
+            let client = binding.client;
+            let path = unit.path.clone();
+            match unit.prepare_snapshot() {
+                Ok(unit) => units.push(unit),
+                Err(source) => {
                     health.record(InputHealth {
-                        client: binding.client,
-                        path: error.path.clone(),
+                        client,
+                        path,
                         status: InputStatus::Unavailable {
-                            failure: InputFailure::new(error.operation, error.to_string()),
+                            failure: InputFailure::new(
+                                "snapshot input metadata and identity",
+                                source.to_string(),
+                            ),
                         },
                         rejections: RejectionSummary::default(),
                     });
-                    return Ok(integrations::PreparedIntegrationInputs {
-                        binding,
-                        units: Vec::new(),
-                    });
                 }
-            };
-            let units = units
-                .into_iter()
-                .filter_map(|unit| {
-                    let client = binding.client;
-                    let path = unit.path.clone();
-                    match unit.prepare_snapshot() {
-                        Ok(unit) => Some(unit),
-                        Err(source) => {
-                            health.record(InputHealth {
-                                client,
-                                path,
-                                status: InputStatus::Unavailable {
-                                    failure: InputFailure::new(
-                                        "snapshot input metadata and identity",
-                                        source.to_string(),
-                                    ),
-                                },
-                                rejections: RejectionSummary::default(),
-                            });
-                            None
-                        }
-                    }
-                })
-                .collect();
-            Ok(integrations::PreparedIntegrationInputs { binding, units })
-        })
-        .collect::<Result<_, _>>()?;
+            }
+        }
+        groups.push(integrations::PreparedIntegrationInputs { binding, units });
+    }
+    cancellation
+        .check(AcquisitionPhase::Discovery)
+        .map_err(AcquisitionError::cancelled)?;
     let signature = source_fingerprint(&clients, &groups);
+    let input_footprint = inventory_input_footprint(&clients, &groups);
     Ok(PreparedInventory {
         date_range,
-        clients,
         groups,
         signature,
+        input_footprint,
         health,
         input_cache_dir,
     })
@@ -545,6 +553,7 @@ fn prepare_test_inventory(
         options.date_range,
         &options.scanner_settings,
         input_cache_dir_for_test_home(&home_dir),
+        &AcquisitionCancellation::default(),
     )
 }
 
@@ -563,13 +572,15 @@ fn prepare_discovery_count() -> usize {
     PREPARE_DISCOVERY_COUNT.with(std::cell::Cell::get)
 }
 
+const SOURCE_FINGERPRINT_VERSION: u32 = 1;
+
 fn source_fingerprint(
     clients: &ClientUniverse,
     groups: &[integrations::PreparedIntegrationInputs],
 ) -> SourceFingerprint {
     let mut hasher = Sha256::new();
     input_record_cache::hash_inventory_bytes(&mut hasher, b"tokenx/local-input-inventory");
-    hasher.update(3_u32.to_le_bytes());
+    hasher.update(SOURCE_FINGERPRINT_VERSION.to_le_bytes());
     input_record_cache::hash_inventory_len(&mut hasher, clients.iter().len());
     for client in clients.iter() {
         input_record_cache::hash_inventory_bytes(&mut hasher, client.as_str().as_bytes());
@@ -588,28 +599,6 @@ fn source_fingerprint(
     SourceFingerprint(hasher.finalize().into())
 }
 
-fn confirmed_source_fingerprint(
-    clients: &ClientUniverse,
-    groups: &[integrations::ConfirmedIntegrationInputs],
-) -> SourceFingerprint {
-    let mut hasher = Sha256::new();
-    input_record_cache::hash_inventory_bytes(&mut hasher, b"tokenx/local-input-inventory");
-    hasher.update(3_u32.to_le_bytes());
-    input_record_cache::hash_inventory_len(&mut hasher, clients.iter().len());
-    for client in clients.iter() {
-        input_record_cache::hash_inventory_bytes(&mut hasher, client.as_str().as_bytes());
-    }
-    input_record_cache::hash_inventory_len(&mut hasher, groups.len());
-    for group in groups {
-        input_record_cache::hash_inventory_bytes(&mut hasher, group.client.as_str().as_bytes());
-        input_record_cache::hash_inventory_len(&mut hasher, group.unit_digests.len());
-        for digest in &group.unit_digests {
-            hasher.update(digest);
-        }
-    }
-    SourceFingerprint(hasher.finalize().into())
-}
-
 #[cfg(test)]
 fn filter_usage_records(
     messages: Vec<AttributedUsageRecord>,
@@ -617,27 +606,29 @@ fn filter_usage_records(
 ) -> Vec<AttributedUsageRecord> {
     let mut filtered = messages;
     if !options.date_range.is_unfiltered() {
+        let calendar = CalendarContext::explicit("UTC").expect("UTC is a valid IANA timezone");
         filtered.retain(|message| {
-            message
-                .local_date()
+            calendar
+                .local_date_and_hour(message.timestamp)
+                .map(|(date, _)| date)
                 .is_some_and(|date| options.date_range.contains(date))
         });
     }
     filtered
 }
 
-pub(crate) fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
-    checked_token_sum(
-        [
-            tokens.input,
-            tokens.output,
-            tokens.cache_read,
-            tokens.cache_write,
-            tokens.reasoning,
-        ]
-        .into_iter()
-        .map(|value| value.max(0)),
-    )
+pub(crate) fn positive_token_total(tokens: &TokenBreakdown) -> Option<i64> {
+    let buckets = [
+        tokens.input,
+        tokens.output,
+        tokens.cache_read,
+        tokens.cache_write,
+        tokens.reasoning,
+    ];
+    if buckets.into_iter().any(|value| value < 0) {
+        return None;
+    }
+    buckets.into_iter().try_fold(0_i64, i64::checked_add)
 }
 
 pub(crate) fn has_positive_tokens(tokens: &TokenBreakdown) -> bool {
@@ -648,33 +639,26 @@ pub(crate) fn has_positive_tokens(tokens: &TokenBreakdown) -> bool {
         || tokens.reasoning > 0
 }
 
-fn normalize_token_breakdown(tokens: &mut TokenBreakdown) {
-    tokens.input = tokens.input.max(0);
-    tokens.output = tokens.output.max(0);
-    tokens.cache_read = tokens.cache_read.max(0);
-    tokens.cache_write = tokens.cache_write.max(0);
-    tokens.reasoning = tokens.reasoning.max(0);
-}
-
 fn apply_token_pricing(
     message: &mut records::UsageRecord,
     pricing: Option<&pricing::PricingService>,
-) {
+) -> Result<(), pricing::PricingComputationError> {
     message.cost = 0.0;
 
     let Some(pricing) = pricing else {
-        return;
+        return Ok(());
     };
 
     let calculated_cost = pricing.calculate_cost_with_provider(
         &message.model_id,
         Some(message.provider_id.as_ref()),
         &message.tokens,
-    );
+    )?;
 
     if calculated_cost > 0.0 {
         message.cost = calculated_cost;
     }
+    Ok(())
 }
 
 fn refresh_derived_message_fields(message: &mut records::UsageRecord) {
@@ -713,70 +697,98 @@ fn canonicalize_message_model(
     message.model_id = canonical;
 }
 
+enum RecordFinalization {
+    Accept,
+    Filter,
+    Reject(input_health::RecordRejectionReason),
+}
+
+fn record_finalization(record: &records::UsageRecord) -> RecordFinalization {
+    use input_health::RecordRejectionReason;
+
+    if record.model_id.trim().is_empty() {
+        return RecordFinalization::Reject(RecordRejectionReason::MissingModel);
+    }
+    if record.session_id.trim().is_empty() {
+        return RecordFinalization::Reject(RecordRejectionReason::MissingSession);
+    }
+    if record.timestamp <= 0
+        || chrono::DateTime::<chrono::Utc>::from_timestamp_millis(record.timestamp).is_none()
+    {
+        return RecordFinalization::Reject(RecordRejectionReason::MissingTimestamp);
+    }
+    if [
+        record.tokens.input,
+        record.tokens.output,
+        record.tokens.cache_read,
+        record.tokens.cache_write,
+        record.tokens.reasoning,
+    ]
+    .into_iter()
+    .any(|value| value < 0)
+        || record.tokens.checked_total().is_none()
+    {
+        return RecordFinalization::Reject(RecordRejectionReason::InvalidUsageRecord);
+    }
+    if record.message_count < 0 {
+        return RecordFinalization::Reject(RecordRejectionReason::InvalidUsageRecord);
+    }
+    if !has_positive_tokens(&record.tokens) {
+        return RecordFinalization::Filter;
+    }
+    RecordFinalization::Accept
+}
+
+#[cfg(test)]
+fn finalize_message_identities<M: AsMut<records::UsageRecord>>(messages: &mut Vec<M>) {
+    let _ = retain_source_eligible_messages(messages);
+    let _ = price_source_eligible_messages(messages, None);
+}
+
+fn retain_source_eligible_messages<M: AsMut<records::UsageRecord>>(
+    messages: &mut Vec<M>,
+) -> input_health::RejectionSummary {
+    let mut rejections = input_health::RejectionSummary::default();
+    messages.retain_mut(|message| match record_finalization(message.as_mut()) {
+        RecordFinalization::Accept => true,
+        RecordFinalization::Filter => false,
+        RecordFinalization::Reject(reason) => {
+            rejections.record(reason);
+            false
+        }
+    });
+    rejections
+}
+
+#[cfg(test)]
 fn finalize_token_priced_messages<M: AsMut<records::UsageRecord>>(
     messages: &mut Vec<M>,
     pricing: Option<&pricing::PricingService>,
-) {
+) -> input_health::RejectionSummary {
+    let mut rejections = retain_source_eligible_messages(messages);
+    rejections.merge(&price_source_eligible_messages(messages, pricing));
+    rejections
+}
+
+fn price_source_eligible_messages<M: AsMut<records::UsageRecord>>(
+    messages: &mut Vec<M>,
+    pricing: Option<&pricing::PricingService>,
+) -> input_health::RejectionSummary {
     let mut model_cache = HashMap::new();
+    let mut rejections = input_health::RejectionSummary::default();
 
     messages.retain_mut(|message| {
         let message = message.as_mut();
-        normalize_token_breakdown(&mut message.tokens);
         canonicalize_message_model(message, &mut model_cache);
         refresh_derived_message_fields(message);
         canonicalize_message_provider(message);
-        if !has_positive_tokens(&message.tokens) {
+        if apply_token_pricing(message, pricing).is_err() {
+            rejections.record(input_health::RecordRejectionReason::PricingComputationFailed);
             return false;
         }
-        apply_token_pricing(message, pricing);
         true
     });
-}
-
-fn pricing_cache_only_enabled() -> bool {
-    std::env::var("TOKENX_PRICING_CACHE_ONLY")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
-}
-
-fn load_cache_only_pricing_with_diagnostics(
-    diagnostics: &mut pricing::PricingDiagnostics,
-    load_cached: impl FnOnce() -> Option<pricing::PricingService>,
-) -> Option<Arc<pricing::PricingService>> {
-    let cached = load_cached().map(Arc::new);
-    if cached.is_none() {
-        diagnostics.push(pricing::PricingDiagnostic::unavailable(
-            "[tokenx] pricing unavailable: cache-only mode and no cached pricing",
-        ));
-    }
-    cached
-}
-
-async fn load_pricing_for_acquisition_with_diagnostics(
-    diagnostics: &mut pricing::PricingDiagnostics,
-) -> Option<Arc<pricing::PricingService>> {
-    if pricing_cache_only_enabled() {
-        let cached = pricing::PricingService::load_cached_any_age_with_diagnostics(diagnostics);
-        return load_cache_only_pricing_with_diagnostics(diagnostics, || cached);
-    }
-
-    match pricing::PricingService::get_or_init_with_diagnostics(diagnostics).await {
-        Ok(pricing) => Some(pricing),
-        Err(error) => {
-            let stale = pricing::PricingService::load_cached_any_age_with_diagnostics(diagnostics)
-                .map(Arc::new);
-            if stale.is_some() {
-                diagnostics.push(pricing::PricingDiagnostic::cached_fallback(format!(
-                    "[tokenx] pricing refresh failed; using cached pricing: {error}"
-                )));
-            } else {
-                diagnostics.push(pricing::PricingDiagnostic::unavailable(format!(
-                    "[tokenx] pricing unavailable; costs may be missing: {error}"
-                )));
-            }
-            stale
-        }
-    }
+    rejections
 }
 
 #[cfg(test)]
@@ -815,7 +827,10 @@ fn load_prepared_test_usage_with_health(
     pricing: Option<&pricing::PricingService>,
 ) -> Result<(projection::UsageProjection, input_health::HealthSummary), AcquisitionError> {
     let date_range = prepared.date_range.clone();
-    let mut accumulator = crate::aggregate::GenerationAccumulator::new(date_range);
+    let mut accumulator = crate::aggregate::GenerationAccumulator::new(
+        date_range,
+        CalendarContext::explicit("UTC").expect("UTC is a valid IANA timezone"),
+    );
     let health = match stream_local_inputs_into_accumulator(prepared, pricing, &mut accumulator) {
         Ok(outcome) => outcome.health,
         Err(error) => {
@@ -826,9 +841,13 @@ fn load_prepared_test_usage_with_health(
     };
     let effective_date =
         chrono::NaiveDate::from_ymd_opt(2026, 7, 26).expect("test projection date is valid");
-    let usage_index = accumulator.into_usage_index();
+    let usage_index = accumulator
+        .into_usage_index()
+        .map_err(AcquisitionError::operational)?;
     records::intern::prune_dead();
-    let data = usage_index.project_usage(&group_by, effective_date);
+    let data = usage_index
+        .project_usage(&group_by, effective_date)
+        .map_err(AcquisitionError::operational)?;
     Ok((data, health.summarize()))
 }
 

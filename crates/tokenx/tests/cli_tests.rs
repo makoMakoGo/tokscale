@@ -16,7 +16,7 @@ fn prime_pricing_cache(base: &Path) {
         .as_secs();
     let payload = format!(r#"{{"timestamp":{},"data":{{}}}}"#, now);
 
-    let dir = base.join(".config/tokenx/cache");
+    let dir = base.join(".tokenx/cache");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("pricing-litellm.json"), &payload).unwrap();
     fs::write(dir.join("pricing-openrouter.json"), &payload).unwrap();
@@ -450,32 +450,20 @@ fn create_conflicting_codex_fixture_dir() -> TempDir {
 /// Build a Command pointing HOME at the given temp dir and hermetic scan env.
 fn cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokenx");
-    cmd.env("HOME", tmp)
-        .env("XDG_CONFIG_HOME", tmp.join(".config"))
-        .env("XDG_CACHE_HOME", tmp.join(".cache"))
-        .env("TOKENX_PRICING_CACHE_ONLY", "1")
-        .env_remove("TOKENX_CONFIG_DIR");
+    cmd.env("HOME", tmp).env_remove("TOKENX_CONFIG_DIR");
     cmd
 }
 
 fn cmd_with_process_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokenx");
-    cmd.env("HOME", tmp)
-        .env("XDG_CONFIG_HOME", tmp.join(".config"))
-        .env("XDG_CACHE_HOME", tmp.join(".cache"));
+    cmd.env("HOME", tmp);
     cmd
 }
 
 fn offline_cmd_with_home(tmp: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tokenx");
-    // Pin Tokenx's config/cache roots so test artifacts stay inside the sandbox.
-    // Without XDG_CONFIG_HOME the post-#470 cache root can leak to the
-    // host's $XDG_CONFIG_HOME (set globally on some CI runners) and
-    // either find pricing data outside the fixture or write to the
-    // host filesystem. Mirrors what cmd_with_home does.
+    // Pin HOME so Tokenx's `~/.tokenx` product root stays inside the fixture.
     cmd.env("HOME", tmp)
-        .env("XDG_CONFIG_HOME", tmp.join(".config"))
-        .env("XDG_CACHE_HOME", tmp.join(".cache"))
         .env("HTTP_PROXY", "http://127.0.0.1:9")
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env("ALL_PROXY", "http://127.0.0.1:9")
@@ -507,7 +495,7 @@ fn write_pricing_cache(base: &Path, timestamp: u64) {
     );
     let openrouter = format!(r#"{{"timestamp":{},"data":{{}}}}"#, timestamp);
 
-    let dir = base.join(".config/tokenx/cache");
+    let dir = base.join(".tokenx/cache");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("pricing-litellm.json"), &litellm).unwrap();
     fs::write(dir.join("pricing-openrouter.json"), &openrouter).unwrap();
@@ -547,7 +535,7 @@ fn write_fireworks_pricing_cache(base: &Path) {
         }
     });
 
-    let dir = base.join(".config/tokenx/cache");
+    let dir = base.join(".tokenx/cache");
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("pricing-litellm.json"),
@@ -568,14 +556,7 @@ fn write_settings_json(base: &Path, body: &str) {
 }
 
 fn settings_json_path(base: &Path) -> std::path::PathBuf {
-    if cfg!(target_os = "windows") {
-        base.join("AppData")
-            .join("Roaming")
-            .join("tokenx")
-            .join("settings.json")
-    } else {
-        base.join(".config").join("tokenx").join("settings.json")
-    }
+    base.join(".tokenx").join("settings.json")
 }
 
 // ── Existing tests ─────────────────────────────────────────────────────────
@@ -1286,7 +1267,6 @@ fn test_models_json_offline_uses_stale_pricing_cache_when_available() {
     write_pricing_cache(tmp.path(), 1);
 
     let output = offline_cmd_with_home(tmp.path())
-        .env("TOKENX_PRICING_CACHE_ONLY", "1")
         .args(["models", "--json", "--client", "opencode", "--no-spinner"])
         .output()
         .unwrap();

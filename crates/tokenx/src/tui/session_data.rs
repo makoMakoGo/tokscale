@@ -1,8 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub(crate) use tokenx_engine::SessionUsage as SessionEntry;
 use tokenx_engine::{ClientId, InputFootprint};
+use unicode_width::UnicodeWidthStr;
+
+static NEXT_SNAPSHOT_REVISION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub(crate) struct ClientSummary {
@@ -14,16 +18,31 @@ pub(crate) struct ClientSummary {
     pub space_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SessionDisplayWidths {
+    pub session: u16,
+    pub workspace: u16,
+    pub models: u16,
+}
+
 /// Immutable Sessions-page data owned by an `App` snapshot.
 ///
 /// Parsing and aggregation happen in the core streaming pipeline. This type only
 /// prepares the indexes and summaries required by the TUI, so constructing it
 /// never performs filesystem I/O or starts another runtime.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct SessionSnapshot {
+    revision: u64,
     sessions: Arc<[SessionEntry]>,
     client_summaries: Vec<ClientSummary>,
     session_indices_by_client: BTreeMap<ClientId, Vec<usize>>,
+    display_widths_by_client: BTreeMap<ClientId, SessionDisplayWidths>,
+}
+
+impl Default for SessionSnapshot {
+    fn default() -> Self {
+        Self::new(Vec::<SessionEntry>::new(), &InputFootprint::default())
+    }
 }
 
 impl SessionSnapshot {
@@ -34,12 +53,25 @@ impl SessionSnapshot {
         let sessions = sessions.into();
         let mut summaries = BTreeMap::<ClientId, (usize, usize, BTreeSet<Arc<str>>, i64)>::new();
         let mut session_indices_by_client = BTreeMap::<ClientId, Vec<usize>>::new();
+        let mut display_widths_by_client = BTreeMap::<ClientId, SessionDisplayWidths>::new();
 
         for (index, session) in sessions.iter().enumerate() {
             session_indices_by_client
                 .entry(session.client)
                 .or_default()
                 .push(index);
+            let widths = display_widths_by_client.entry(session.client).or_default();
+            widths.session = widths.session.max(display_width(&session.session_id));
+            widths.workspace = widths.workspace.max(display_width(
+                session
+                    .workspace_label
+                    .as_deref()
+                    .or(session.workspace_key.as_deref())
+                    .unwrap_or("—"),
+            ));
+            widths.models = widths
+                .models
+                .max(models_display_width(session.models.iter()));
             let entry = summaries
                 .entry(session.client)
                 .or_insert_with(|| (0, 0, BTreeSet::new(), 0));
@@ -86,9 +118,11 @@ impl SessionSnapshot {
             .collect();
 
         Self {
+            revision: NEXT_SNAPSHOT_REVISION.fetch_add(1, Ordering::Relaxed),
             sessions,
             client_summaries,
             session_indices_by_client,
+            display_widths_by_client,
         }
     }
 
@@ -97,20 +131,29 @@ impl SessionSnapshot {
         &self.sessions
     }
 
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub(crate) fn session(&self, index: usize) -> Option<&SessionEntry> {
+        self.sessions.get(index)
+    }
+
     pub(crate) fn client_summaries(&self) -> &[ClientSummary] {
         &self.client_summaries
     }
 
-    /// Borrow the pre-indexed sessions for a client without cloning the entries.
-    pub(crate) fn session_refs_for_client<'a>(
-        &'a self,
-        client: ClientId,
-    ) -> impl Iterator<Item = &'a SessionEntry> + 'a {
+    pub(crate) fn session_indices_for_client(&self, client: ClientId) -> &[usize] {
         self.session_indices_by_client
             .get(&client)
-            .into_iter()
-            .flatten()
-            .map(|index| &self.sessions[*index])
+            .map_or(&[], Vec::as_slice)
+    }
+
+    pub(crate) fn display_widths_for_client(&self, client: ClientId) -> SessionDisplayWidths {
+        self.display_widths_by_client
+            .get(&client)
+            .copied()
+            .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -128,6 +171,18 @@ impl SessionSnapshot {
             .get(&client)
             .map_or(0, Vec::len)
     }
+}
+
+fn display_width(value: &str) -> u16 {
+    value.width().min(usize::from(u16::MAX)) as u16
+}
+
+fn models_display_width<'a>(models: impl ExactSizeIterator<Item = &'a Arc<str>>) -> u16 {
+    let separators = models.len().saturating_sub(1).saturating_mul(2);
+    let width = models.fold(separators, |total, model| {
+        total.saturating_add(model.width())
+    });
+    width.min(usize::from(u16::MAX)) as u16
 }
 
 #[cfg(test)]
@@ -175,8 +230,9 @@ mod tests {
         assert_eq!(snapshot.session_count_for_client(ClientId::Claude), 0);
         assert_eq!(
             snapshot
-                .session_refs_for_client(ClientId::Codex)
-                .map(|entry| entry.session_id.as_ref())
+                .session_indices_for_client(ClientId::Codex)
+                .iter()
+                .map(|index| snapshot.session(*index).unwrap().session_id.as_ref())
                 .collect::<Vec<_>>(),
             ["c-new", "c-old"]
         );
@@ -242,5 +298,29 @@ mod tests {
             .sum::<u64>();
         assert_eq!(input_footprint.total_bytes().unwrap(), client_total);
         assert_eq!(client_total, 148);
+    }
+
+    #[test]
+    fn snapshot_precomputes_display_widths_without_materializing_model_labels() {
+        let mut session = session(
+            ClientId::Codex,
+            "会话-alpha",
+            true,
+            None,
+            Some("工作区"),
+            10,
+        );
+        session.models = BTreeSet::from([Arc::from("gpt-5"), Arc::from("模型")]);
+
+        let snapshot = SessionSnapshot::new(vec![session], &InputFootprint::default());
+
+        assert_eq!(
+            snapshot.display_widths_for_client(ClientId::Codex),
+            SessionDisplayWidths {
+                session: 10,
+                workspace: 6,
+                models: 11,
+            }
+        );
     }
 }

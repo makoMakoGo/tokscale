@@ -13,7 +13,6 @@ use crate::integrations::{
 };
 
 pub(crate) struct Driver;
-pub(crate) const DECODER_REVISION: u32 = crate::integrations::EXPLICIT_TOKEN_OVERFLOW_REVISION + 2;
 
 const SOURCE: SourceSpec = SourceSpec::local_share(
     "zed/threads/threads.db",
@@ -37,7 +36,7 @@ impl IntegrationDriver for Driver {
         )?;
 
         paths.extend(source_discovery::scan_roots(
-            client,
+            ctx,
             source_discovery::extra_roots_for_client(client, ctx)?,
             SOURCE.matcher(),
         )?);
@@ -46,7 +45,7 @@ impl IntegrationDriver for Driver {
             client,
             paths,
             FingerprintPolicy::SqliteWithWal,
-            DecoderKind::plain(DecoderId::Zed, DECODER_REVISION),
+            DecoderKind::plain(DecoderId::Zed),
         )?;
         Ok(units)
     }
@@ -124,6 +123,7 @@ mod tests {
             client: ClientId::Zed,
             home_dir,
             scanner_settings: settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         }
     }
 
@@ -178,7 +178,7 @@ mod tests {
     fn finalized(
         mut messages: Vec<crate::records::UsageRecord>,
     ) -> Vec<crate::AttributedUsageRecord> {
-        crate::finalize_token_priced_messages(&mut messages, None);
+        crate::finalize_message_identities(&mut messages);
         messages
             .into_iter()
             .map(|message| message.attribute(ClientId::Zed))
@@ -238,12 +238,12 @@ mod tests {
 
         let units = vec![DiscoveredInput::sqlite_with_wal(
             db_path.clone(),
-            DecoderKind::plain(DecoderId::Zed, DECODER_REVISION),
+            DecoderKind::plain(DecoderId::Zed),
         )];
         let mut cache = input_record_cache::InputRecordShardStore::default();
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(units),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         let mut sink = Vec::new();
         let binding = crate::integrations::integration_for(ClientId::Zed);
@@ -285,15 +285,13 @@ mod tests {
         drop(conn);
 
         let mut cache = input_record_cache::InputRecordShardStore::with_cache_dir(cache_dir.path());
-        let unit = DiscoveredInput::sqlite_with_wal(
-            db_path.clone(),
-            DecoderKind::plain(DecoderId::Zed, DECODER_REVISION),
-        )
-        .prepare_snapshot()
-        .unwrap();
+        let unit =
+            DiscoveredInput::sqlite_with_wal(db_path.clone(), DecoderKind::plain(DecoderId::Zed))
+                .prepare_snapshot()
+                .unwrap();
         let cold = DRIVER.parse_inputs(
             vec![unit.clone().into_lookup_miss()],
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         let mut sink = Vec::new();
         let binding = crate::integrations::integration_for(ClientId::Zed);
@@ -330,12 +328,12 @@ mod tests {
 
         let units = vec![DiscoveredInput::sqlite_with_wal(
             db_path.clone(),
-            DecoderKind::plain(DecoderId::Zed, DECODER_REVISION),
+            DecoderKind::plain(DecoderId::Zed),
         )];
         let mut cache = input_record_cache::InputRecordShardStore::default();
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(units),
-            &ParseContext { pricing: None },
+            &ParseContext::uncancelled(None),
         );
         let mut actual = Vec::new();
         let binding = crate::integrations::integration_for(ClientId::Zed);

@@ -307,20 +307,23 @@ async fn fetch_with_credential(client: &reqwest::Client) -> Result<UsageResponse
     fetch_usage(client, access_token, CREDENTIAL_SOURCE).await
 }
 
-async fn fetch_with_token(token: &str, source: &str) -> Result<SubscriptionPayload> {
-    let client = reqwest::Client::new();
-    let resp = fetch_usage(&client, token, source).await?;
+async fn fetch_with_token(
+    client: &reqwest::Client,
+    token: &str,
+    source: &str,
+) -> Result<SubscriptionPayload> {
+    let resp = fetch_usage(client, token, source).await?;
     Ok(payload_from_response(resp))
 }
 
-pub async fn fetch_key() -> Result<SubscriptionPayload> {
+pub async fn fetch_key(client: &reqwest::Client) -> Result<SubscriptionPayload> {
     let api_key = read_api_key()
         .ok_or_else(|| anyhow::anyhow!("{API_KEY_ENV} is required for {KEY_SOURCE}"))?;
-    fetch_with_token(&api_key, KEY_SOURCE).await
+    fetch_with_token(client, &api_key, KEY_SOURCE).await
 }
 
-pub async fn fetch_credential() -> Result<SubscriptionPayload> {
-    let response = fetch_with_credential(&reqwest::Client::new()).await?;
+pub async fn fetch_credential(client: &reqwest::Client) -> Result<SubscriptionPayload> {
+    let response = fetch_with_credential(client).await?;
     Ok(payload_from_response(response))
 }
 

@@ -52,6 +52,21 @@ cargo test -p tokenx
 When running Tokenx itself from automated scripts, pass `--no-spinner` unless
 spinner behavior is what you are testing.
 
+## Performance benchmarks
+
+Engine microbenchmarks use `codspeed-criterion-compat` and run in CI through
+`.github/workflows/codspeed.yml`. The workflow authenticates with GitHub OIDC;
+it does not require a long-lived `CODSPEED_TOKEN`.
+
+Every new GitHub repository must still be imported in the CodSpeed settings and
+authorized for the CodSpeed GitHub App before its workflow can publish a
+baseline. Repository history and baselines are external CodSpeed state, not
+files carried by a source-tree copy.
+
+Use the local real-data harness only for end-to-end acquisition, startup, RSS,
+and cache-size comparisons. CodSpeed microbenchmarks do not substitute for
+those process-level measurements.
+
 ## Client identity
 
 Client identity is catalog-driven:

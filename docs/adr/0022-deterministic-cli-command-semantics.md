@@ -68,12 +68,14 @@ progress presentation, or other semantically equivalent formatting.
 Every accepted explicit argument changes the plan. An option that cannot affect
 its command is rejected.
 
-An explicit `--home` must be an existing directory and is authoritative for
-settings and input discovery. Every built-in input root is derived from that
-directory; configured extra scan inputs remain explicit additional
-authorities. Client ids come from the current ADR 0007 catalog and are
-deduplicated. Date presets are mutually exclusive, dates use inclusive
-local-time boundaries, and `since` cannot be later than `until`.
+An explicit `--home` must be an existing directory and is authoritative only
+for input discovery. Every built-in input root is derived from that directory;
+configured extra scan inputs remain explicit additional authorities. Tokenx
+product state remains under `~/.tokenx` or `TOKENX_CONFIG_DIR`, so selecting a
+source home cannot silently redirect settings, pricing, or caches. Client ids
+come from the current ADR 0007 catalog and are deduplicated. Date presets are
+mutually exclusive, dates use inclusive local-time boundaries, and `since`
+cannot be later than `until`.
 
 A TUI requires interactive stdin and stdout. Otherwise invocation fails as
 invalid usage with a report-command hint. A disabled optional tab also fails

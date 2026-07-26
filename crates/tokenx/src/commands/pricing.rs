@@ -27,7 +27,7 @@ pub(crate) async fn run_pricing_lookup(
     };
 
     let result = match async {
-        let svc = PricingService::get_or_init().await?;
+        let svc = PricingService::fetch_current().await?;
         Ok::<_, String>(
             svc.lookup_with_pricing_source(model_id, pricing_source_normalized.as_deref()),
         )
@@ -210,7 +210,7 @@ pub(crate) fn run_pricing_list_overrides(json: bool) -> Result<()> {
 
     println!("\n  {}", "Custom pricing overrides".bold());
     println!("  Path: {}", path.display());
-    println!("  Loaded once at startup; restart tokenx after editing this file.");
+    println!("  Read into an immutable snapshot for each Tokenx command.");
     println!();
 
     for entry in entries {

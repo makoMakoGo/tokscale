@@ -10,14 +10,12 @@ use crate::integrations::discover as source_discovery;
 use crate::integrations::{
     BoundUsageSink, DecoderKind, DiscoveredInput, DiscoveryContext, FingerprintPolicy, FoldContext,
     InputDiscoveryError, IntegrationDriver, ParseContext, ParsedUnit, SourceSpec,
-    EXPLICIT_TOKEN_OVERFLOW_REVISION,
 };
 #[cfg(test)]
 use crate::ClientId;
 
 pub(crate) struct Driver;
 
-const JUNIE_RECORD_REJECTION_REVISION: u32 = EXPLICIT_TOKEN_OVERFLOW_REVISION + 3;
 const SOURCE: SourceSpec = SourceSpec::home(
     ".junie/sessions",
     crate::integrations::SourceMatcher::new(crate::integrations::source_matchers::events_jsonl),
@@ -33,8 +31,8 @@ impl IntegrationDriver for Driver {
             client,
             SOURCE,
             ctx,
-            FingerprintPolicy::PlainFile,
-            DecoderKind::plain(DecoderId::Junie, JUNIE_RECORD_REJECTION_REVISION),
+            FingerprintPolicy::NoRecordCache,
+            DecoderKind::plain(DecoderId::Junie),
         )?;
         Ok(units)
     }
@@ -48,7 +46,7 @@ impl IntegrationDriver for Driver {
             .into_par_iter()
             .map(|unit| {
                 pipeline_cache::load_or_scan_unit_with(unit, ctx, |path| {
-                    decode::parse_junie_file(path)
+                    decode::parse_junie_file(path, ctx.calendar())
                 })
             })
             .collect()
@@ -91,6 +89,7 @@ mod tests {
             client: ClientId::Junie,
             home_dir,
             scanner_settings: settings,
+            cancellation: crate::engine::AcquisitionCancellation::default(),
         }
     }
 
@@ -119,7 +118,7 @@ mod tests {
     ) -> Vec<crate::AttributedUsageRecord> {
         let parsed = DRIVER.parse_inputs(
             crate::integrations::test_execute_all(units),
-            &ParseContext { pricing },
+            &ParseContext::uncancelled(pricing),
         );
         let mut messages = Vec::new();
         let binding = crate::integrations::integration_for(ClientId::Junie);
@@ -135,7 +134,7 @@ mod tests {
     fn finalized(
         mut messages: Vec<crate::records::UsageRecord>,
     ) -> Vec<crate::AttributedUsageRecord> {
-        crate::finalize_token_priced_messages(&mut messages, None);
+        crate::finalize_message_identities(&mut messages);
         messages
             .into_iter()
             .map(|message| message.attribute(ClientId::Junie))
@@ -169,10 +168,13 @@ mod tests {
 
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].path, path);
-        assert_eq!(units[0].fingerprint_policy, FingerprintPolicy::PlainFile);
+        assert_eq!(
+            units[0].fingerprint_policy,
+            FingerprintPolicy::NoRecordCache
+        );
         assert_eq!(
             units[0].decoder.version(),
-            DecoderVersion::new(DecoderId::Junie, JUNIE_RECORD_REJECTION_REVISION)
+            DecoderVersion::current(DecoderId::Junie)
         );
     }
 
@@ -185,12 +187,19 @@ mod tests {
         let actual = fold_with_adapter(
             vec![DiscoveredInput::plain_file(
                 path.clone(),
-                DecoderKind::plain(DecoderId::Junie, JUNIE_RECORD_REJECTION_REVISION),
+                DecoderKind::plain(DecoderId::Junie),
             )],
             &mut cache,
             None,
         );
-        let expected = finalized(decode::parse_junie_file(&path).unwrap().messages);
+        let expected = finalized(
+            decode::parse_junie_file(
+                &path,
+                crate::CalendarContext::explicit("UTC").expect("UTC is a valid IANA timezone"),
+            )
+            .unwrap()
+            .messages,
+        );
 
         assert!(actual
             .iter()
@@ -210,7 +219,7 @@ mod tests {
         let mut cache = input_record_cache::InputRecordShardStore::load().unwrap();
         let units = vec![DiscoveredInput::plain_file(
             path.clone(),
-            DecoderKind::plain(DecoderId::Junie, JUNIE_RECORD_REJECTION_REVISION),
+            DecoderKind::plain(DecoderId::Junie),
         )];
 
         let fresh = fold_with_adapter(units.clone(), &mut cache, None);
@@ -257,7 +266,7 @@ mod tests {
         let messages = fold_with_adapter(
             vec![DiscoveredInput::plain_file(
                 path,
-                DecoderKind::plain(DecoderId::Junie, JUNIE_RECORD_REJECTION_REVISION),
+                DecoderKind::plain(DecoderId::Junie),
             )],
             &mut cache,
             Some(&pricing),

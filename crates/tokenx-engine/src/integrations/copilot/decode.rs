@@ -5,6 +5,7 @@
 //! aggregate agent records are only used as a fallback to avoid double counting.
 
 use crate::input_health::{InputFailure, RecordRejectionReason, RejectionSummary, ScannedInput};
+use crate::integrations::CopilotWorkspaceScope;
 use crate::provider_identity::observed_provider_id;
 use crate::records::error::{SessionParseError, SessionParseResult};
 use crate::records::{workspace_metadata_from_key, UsageRecord, WorkspaceMetadata};
@@ -21,16 +22,19 @@ pub(crate) struct CopilotWorkspaceIndex {
 }
 
 impl CopilotWorkspaceIndex {
-    /// VS Code keeps remote-workspace chat records on the Windows host. For
-    /// the observed WSL layout, derive the matching host roots from the home
-    /// that owns `.copilot/otel`, then index only exact Copilot response IDs.
-    pub(crate) fn discover<'a>(otel_paths: impl IntoIterator<Item = &'a Path>) -> Self {
+    /// Derive VS Code storage only from the same home that owns each
+    /// `.copilot/otel` root, then index exact Copilot response IDs. An explicit
+    /// cross-environment OTEL root therefore carries its own home without
+    /// making built-in discovery cross platform boundaries.
+    pub(crate) fn discover<'a>(
+        otel_paths: impl IntoIterator<Item = (&'a Path, CopilotWorkspaceScope)>,
+    ) -> Self {
         let mut roots = BTreeSet::new();
-        for otel_path in otel_paths {
+        for (otel_path, workspace_scope) in otel_paths {
             let Some(home) = copilot_home_from_otel_path(otel_path) else {
                 continue;
             };
-            roots.extend(vscode_workspace_storage_roots(home));
+            roots.extend(vscode_workspace_storage_roots(home, workspace_scope));
         }
         Self::from_workspace_storage_roots(roots)
     }
@@ -112,22 +116,70 @@ fn copilot_home_from_otel_path(path: &Path) -> Option<&Path> {
         .parent()
 }
 
-fn vscode_workspace_storage_roots(home: &Path) -> Vec<PathBuf> {
+fn vscode_workspace_storage_roots(
+    home: &Path,
+    workspace_scope: CopilotWorkspaceScope,
+) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     for product in ["Code", "Code - Insiders"] {
-        roots.push(
-            home.join(".config")
-                .join(product)
-                .join("User/workspaceStorage"),
-        );
-        roots.push(
-            home.join("AppData/Roaming")
-                .join(product)
-                .join("User/workspaceStorage"),
-        );
+        match workspace_scope {
+            CopilotWorkspaceScope::BuiltInPlatform => {
+                push_platform_workspace_storage_root(&mut roots, home, product);
+            }
+            CopilotWorkspaceScope::ExplicitRoot => {
+                roots.push(
+                    home.join(".config")
+                        .join(product)
+                        .join("User/workspaceStorage"),
+                );
+                roots.push(
+                    home.join("Library/Application Support")
+                        .join(product)
+                        .join("User/workspaceStorage"),
+                );
+                roots.push(
+                    home.join("AppData/Roaming")
+                        .join(product)
+                        .join("User/workspaceStorage"),
+                );
+            }
+        }
     }
 
     roots
+}
+
+fn push_platform_workspace_storage_root(roots: &mut Vec<PathBuf>, home: &Path, product: &str) {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    roots.push(
+        home.join(".config")
+            .join(product)
+            .join("User/workspaceStorage"),
+    );
+
+    #[cfg(target_os = "macos")]
+    roots.push(
+        home.join("Library/Application Support")
+            .join(product)
+            .join("User/workspaceStorage"),
+    );
+
+    #[cfg(target_os = "windows")]
+    roots.push(
+        home.join("AppData/Roaming")
+            .join(product)
+            .join("User/workspaceStorage"),
+    );
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos",
+        target_os = "windows"
+    )))]
+    {
+        let _ = (roots, home, product);
+    }
 }
 
 fn workspace_from_vscode_storage_dir(storage_dir: &Path) -> Option<WorkspaceMetadata> {
@@ -941,17 +993,18 @@ fn normalize_input_tokens(
     cache_write: i64,
     reasoning: i64,
 ) -> TokenBreakdown {
-    // OTEL reports input_tokens inclusive of cache reads. Normalize only the
-    // cached-read portion out of input, but preserve the reported cache buckets
-    // intact because pricing totals account for them separately.
-    let cache_read_for_input = cache_read.max(0).min(input.max(0));
+    // Copilot exporters disagree on whether `input_tokens` is cache-inclusive;
+    // some cache-only records omit it entirely. Treat the independently
+    // reported cache buckets as authoritative and subtract only their proven
+    // overlap with the reported input bucket.
+    let cache_read_for_input = cache_read.min(input);
 
     TokenBreakdown {
-        input: input.saturating_sub(cache_read_for_input).max(0),
-        output: output.max(0),
-        cache_read: cache_read.max(0),
-        cache_write: cache_write.max(0),
-        reasoning: reasoning.max(0),
+        input: input - cache_read_for_input,
+        output,
+        cache_read,
+        cache_write,
+        reasoning,
     }
 }
 
@@ -1055,6 +1108,86 @@ mod tests {
         file.write_all(content.as_bytes()).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn copilot_linux_built_in_workspace_roots_exclude_other_platforms() {
+        let home = Path::new("/home/alice");
+        let roots = vscode_workspace_storage_roots(home, CopilotWorkspaceScope::BuiltInPlatform);
+
+        assert_eq!(roots.len(), 2);
+        assert!(roots
+            .iter()
+            .all(|root| root.starts_with(home.join(".config"))));
+        assert!(roots.iter().all(|root| {
+            let root = root.to_string_lossy();
+            !root.contains("Library") && !root.contains("AppData")
+        }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn copilot_macos_built_in_workspace_roots_exclude_other_platforms() {
+        let home = Path::new("/Users/alice");
+        let roots = vscode_workspace_storage_roots(home, CopilotWorkspaceScope::BuiltInPlatform);
+
+        assert_eq!(roots.len(), 2);
+        assert!(roots
+            .iter()
+            .all(|root| root.starts_with(home.join("Library/Application Support"))));
+        assert!(roots.iter().all(|root| {
+            let root = root.to_string_lossy();
+            !root.contains(".config") && !root.contains("AppData")
+        }));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn copilot_windows_built_in_workspace_roots_exclude_other_platforms() {
+        let home = Path::new(r"C:\Users\alice");
+        let roots = vscode_workspace_storage_roots(home, CopilotWorkspaceScope::BuiltInPlatform);
+
+        assert_eq!(roots.len(), 2);
+        assert!(roots
+            .iter()
+            .all(|root| root.starts_with(home.join("AppData/Roaming"))));
+        assert!(roots.iter().all(|root| {
+            let root = root.to_string_lossy();
+            !root.contains(".config") && !root.contains("Library")
+        }));
+    }
+
+    #[test]
+    fn copilot_explicit_windows_otel_root_derives_metadata_from_the_same_home() {
+        let home = tempfile::TempDir::new().unwrap();
+        let otel_path = home.path().join(".copilot/otel/session.jsonl");
+        let workspace_storage = home
+            .path()
+            .join("AppData/Roaming/Code/User/workspaceStorage");
+        let storage_dir = workspace_storage.join("workspace-id");
+        let chat_dir = storage_dir.join("chatSessions");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        std::fs::write(
+            storage_dir.join("workspace.json"),
+            r#"{"folder":"vscode-remote://wsl%2Bubuntu/home/alice/project"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            chat_dir.join("session.jsonl"),
+            r#"{"kind":2,"v":[{"responseId":"explicit-windows-response"}]}"#,
+        )
+        .unwrap();
+
+        let index = CopilotWorkspaceIndex::discover([(
+            otel_path.as_path(),
+            CopilotWorkspaceScope::ExplicitRoot,
+        )]);
+
+        assert_eq!(
+            index.workspace_for_response_id("explicit-windows-response"),
+            workspace_metadata_from_key("/home/alice/project").as_ref()
+        );
     }
 
     #[test]
@@ -1389,7 +1522,7 @@ not-json
     }
 
     #[test]
-    fn test_parse_copilot_clamps_only_cache_read_to_input() {
+    fn test_parse_copilot_bounds_cache_overlap_without_discarding_cache_buckets() {
         let content = r#"{"type":"span","traceId":"trace-clamp","spanId":"span-clamp","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":5,"gen_ai.usage.cache_read.input_tokens":90,"gen_ai.usage.cache_write.input_tokens":20}}"#;
         let file = create_test_file(content);
 

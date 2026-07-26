@@ -465,11 +465,11 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedInput, OpenCodeSql
         let Some(tokens) = tokens.0 else {
             continue;
         };
-        let input = tokens.input.max(0);
-        let output = tokens.output.max(0);
-        let reasoning = tokens.reasoning.unwrap_or(0).max(0);
-        let cache_read = tokens.cache.read.max(0);
-        let cache_write = tokens.cache.write.max(0);
+        let input = tokens.input;
+        let output = tokens.output;
+        let reasoning = tokens.reasoning.unwrap_or(0);
+        let cache_read = tokens.cache.read;
+        let cache_write = tokens.cache.write;
         let token_breakdown = TokenBreakdown {
             input,
             output,
@@ -477,8 +477,15 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Result<ScannedInput, OpenCodeSql
             cache_write,
             reasoning,
         };
-        if crate::positive_token_total(&token_breakdown) == 0 {
-            continue;
+        match crate::positive_token_total(&token_breakdown) {
+            Some(0) => continue,
+            Some(_) => {}
+            None => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
         }
 
         let session_id: String = match row.get(1) {
@@ -781,6 +788,49 @@ mod tests {
         assert_eq!(scanned.rejections.total(), 1);
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
+        assert!(scanned.interrupted.is_none());
+    }
+
+    #[test]
+    fn rejects_negative_buckets_and_overflow_without_dropping_good_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        let conn = create_current_db(&path);
+        let invalid_tokens = [
+            (-1, 5, 2, 3, 1),
+            (10, -1, 2, 3, 1),
+            (10, 5, -1, 3, 1),
+            (10, 5, 2, -1, 1),
+            (10, 5, 2, 3, -1),
+            (i64::MAX, 1, 0, 0, 0),
+        ];
+        for (index, (input, output, reasoning, cache_read, cache_write)) in
+            invalid_tokens.into_iter().enumerate()
+        {
+            let data = format!(
+                r#"{{"role":"assistant","modelID":"gpt-5.5-fast","providerID":"openai","tokens":{{"input":{input},"output":{output},"reasoning":{reasoning},"cache":{{"read":{cache_read},"write":{cache_write}}}}},"time":{{"created":1766000000000}}}}"#
+            );
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![format!("0{index}-bad"), "ses_1", data],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["10-good", "ses_1", assistant_data(None, 20, "build")],
+        )
+        .unwrap();
+        drop(conn);
+
+        let scanned = parse_opencode_sqlite(&path).unwrap();
+
+        assert_eq!(scanned.messages.len(), 1);
+        assert_eq!(scanned.messages[0].tokens.input, 20);
+        assert_eq!(scanned.rejections.total(), invalid_tokens.len() as u64);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+        assert_eq!(rejection.count, invalid_tokens.len() as u64);
         assert!(scanned.interrupted.is_none());
     }
 
@@ -1502,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    fn clamps_negative_token_components() {
+    fn negative_token_components_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.db");
         let conn = create_current_db(&path);
@@ -1514,16 +1564,13 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let message = parse_opencode_sqlite(&path)
-            .unwrap()
-            .messages
-            .pop()
-            .unwrap();
-        assert_eq!(message.tokens.input, 0);
-        assert_eq!(message.tokens.output, 5);
-        assert_eq!(message.tokens.reasoning, 0);
-        assert_eq!(message.tokens.cache_read, 0);
-        assert_eq!(message.tokens.cache_write, 0);
+        let scanned = parse_opencode_sqlite(&path).unwrap();
+        assert!(scanned.messages.is_empty());
+        assert_eq!(scanned.rejections.total(), 1);
+        assert_eq!(
+            scanned.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
     }
 }
 

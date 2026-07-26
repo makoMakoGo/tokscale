@@ -292,12 +292,9 @@ fn subscription_payload(
     })
 }
 
-pub async fn fetch() -> Result<SubscriptionPayload> {
+pub async fn fetch(client: &reqwest::Client) -> Result<SubscriptionPayload> {
     let credentials = read_credentials()?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
-    let response = fetch_billing(&client, &credentials).await?;
+    let response = fetch_billing(client, &credentials).await?;
     subscription_payload(&credentials, response)
 }
 

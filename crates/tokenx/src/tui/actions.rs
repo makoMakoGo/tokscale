@@ -420,6 +420,7 @@ mod tests {
         let mut app = make_app(Tab::Subscription, true);
         app.set_subscription_provider_ids_for_test(vec![crate::subscription::ProviderId::Codex]);
         app.replace_subscription_errors_for_test(vec![crate::subscription::SubscriptionError {
+            provider_id: Some(crate::subscription::ProviderId::Claude),
             provider: "Claude".to_string(),
             message: "credential expired".to_string(),
         }]);
