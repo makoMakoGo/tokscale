@@ -1,32 +1,34 @@
-# tokscale personal/local-clients context
+# Tokenx maintainer context
 
-This fork is maintained for local client usage accounting on the
-`personal/local-clients` branch. Upstream changes are reviewed and ported
-selectively; upstream content is not merged wholesale. Branch decisions in this
-file take precedence when upstream semantics conflict with local needs.
+Tokenx accounts for usage recorded by local AI coding clients. This file
+summarizes the current product model; architecture decisions remain
+authoritative when more detail is needed.
 
 ## Vocabulary
 
 Terminology follows ADR 0007.
 
-- `client` is the canonical product identity for a concrete local tool or
-  integration, including its parsing policy, display facts, and filters.
+- `client` is the stable product identity of one concrete local tool.
+  `ClientId` is generated from the client catalog and survives through
+  acquisition, generation state, and projections.
+- `integration driver` owns one client's source discovery, decoding, and
+  record policy. The exhaustive integration registry binds an
+  identity-neutral driver to a `ClientId`.
 - `input` or `scan input` is one filesystem or database unit acquired by a
   client. Input diagnostics are exposed as Data Health.
 - `model_id` is the canonical model identifier used for grouping and local
   pricing. Raw observed labels may contain route, tier, release-date, or
-  free-channel decorations; local report finalization normalizes them through
-  the core model canonicalizer before aggregation and pricing. Date, release,
-  free-channel, and route decorations are not preserved as model identity in
-  this branch.
+  free-channel decorations; acquisition normalizes them through the engine's
+  model canonicalizer before aggregation and pricing. Date, release,
+  free-channel, and route decorations are not preserved as model identity.
 - `raw_model_label` is the non-empty model observation persisted by a client
   before final canonicalization. It remains valid usage identity when optional
   alias or provider enrichment is unavailable.
 - `provider_id` is attribution metadata resolved from an explicit observed
   value, deterministic model-family inference, or `unknown`. It is not a
   prerequisite for retaining model and token facts.
-- `workspace` is the local working directory attribution used by reports and
-  the TUI.
+- `workspace` is the local working-directory attribution exposed by
+  projections.
 
 ## Decisions
 
@@ -36,34 +38,33 @@ Terminology follows ADR 0007.
 - Do not reject a positive, timestamped usage record with a non-empty model
   label merely because provider attribution cannot be resolved. Keep the model
   and tokens, infer centrally when possible, and otherwise use `unknown`.
-- Read local client storage through the catalog and registered adapter for its
+- Read local client storage through the registered integration for its
   accepted current format, as established by ADR 0007. Schema and database
   I/O/query failures are explicit errors.
 - Keep Claude Code handling for `model = "<synthetic>"` placeholder records.
   That placeholder is malformed input cleanup, not a real model or client.
 - Keep Pi and OMP as separate client identities. OMP usage must not be
   counted as Pi usage by display or aggregation code.
-- Treat `cwd` workspace attribution as branch behavior, not as caller folklore.
-  Reports and TUI views should share the same workspace rules.
+- Treat `cwd` workspace attribution as an engine rule, not as caller
+  folklore. Every projection uses the same workspace rules.
 
 ## Architecture
 
-- Client identity comes from one catalog of display facts and stable ids shared
-  by core, CLI, and TUI.
-- This fork's active product surface is local Rust CLI/TUI. Hosted account
-  auth, hosted data submission, and the Next.js social frontend are outside
-  ADR 0009's maintained surface.
-- Each local client's discovery, fingerprint, parser, and input contract is
-  owned by its registered adapter.
-- The TUI is the complete local-report product. Models is its only headless
-  projection, and both consume the same canonical usage aggregation and export
-  semantics under ADR 0010 and ADR 0022.
-- Caches store derived data but never own aggregation rules.
-- TUI views share explicit scroll, hitbox, selection, presentation-state, and
-  action authorities under ADR 0028.
+- `tokenx-engine` owns acquisition and produces one immutable `Generation`
+  containing the canonical usage index, sessions, input footprint, health,
+  and diagnostics.
+- The exhaustive registry is the only binding from catalog identity to an
+  integration driver. Decoders emit source-neutral records; the runner applies
+  the bound `ClientId`.
+- `tokenx` owns CLI/TUI lifecycle and presentation. Models and every TUI
+  screen are projections of an installed generation; projection controls do
+  not scan or write caches.
+- The task supervisor owns background acquisition and subscription work and
+  drains it before terminal shutdown.
+- Generation and input-record caches are disposable accelerators. They never
+  own product facts or aggregation rules.
 
 ## Non-goals
 
-- This branch does not attempt to mirror every upstream client idea.
-- This branch does not hide parser, scanner, pricing, or aggregation errors in
-  order to keep the UI quiet.
+- Tokenx does not provide migration APIs, compatibility namespaces, generic
+  report frameworks, hosted services, or invented success states.

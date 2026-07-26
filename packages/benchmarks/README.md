@@ -11,7 +11,7 @@ workspace's Rust benchmark and scan-measurement scripts.
 bun run --cwd packages/benchmarks generate
 
 # Smaller smoke-test fixture outside the repository
-bun packages/benchmarks/generate.ts --output /tmp/tokscale-bench --scale 0.02
+bun packages/benchmarks/generate.ts --output /tmp/tokenx-bench --scale 0.02
 ```
 
 The generator recreates its output directory and writes:
@@ -35,12 +35,12 @@ when a comparison requires identical inputs.
 Build the release binary, then use the repository measurement script:
 
 ```bash
-cargo build -p tokscale-cli --release
+cargo build -p tokenx --release
 
-HOME=/tmp/tokscale-bench \
-  TOKSCALE_CONFIG_DIR=/tmp/tokscale-bench-config \
+HOME=/tmp/tokenx-bench \
+  TOKENX_CONFIG_DIR=/tmp/tokenx-bench-config \
   scripts/measure-scan-performance.sh \
-  "$PWD/target/release/tokscale" synthetic opencode,claude,codex,gemini 3
+  "$PWD/target/release/tokenx" synthetic opencode,claude,codex,gemini 3
 ```
 
 For generated data, set `HOME` to the output root. The script performs one
@@ -54,7 +54,7 @@ The Rust aggregation benchmark constructs a deterministic 100,000-message
 corpus in process:
 
 ```bash
-cargo bench -p tokscale-core --bench aggregation -- tui_client_model --quick
+cargo bench -p tokenx-engine --bench aggregation -- tui_client_model --quick
 ```
 
 Use its executable under `target/release/deps/` with `/usr/bin/time` when a

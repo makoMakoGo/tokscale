@@ -3,15 +3,13 @@ name: Launcher Validation
 on:
   workflow_dispatch:
   push:
-    branches: [main, develop, personal/local-clients]
+    branches: [main]
     paths:
-      - "packages/cli/bin.js"
-      - "packages/cli/src/**"
-      - "packages/cli/tsconfig.json"
-      - "packages/cli/package.json"
-      - "packages/tokscale/bin.js"
-      - "packages/tokscale/package.json"
-      - "packages/cli-*/package.json"
+      - "packages/tokenx/bin.js"
+      - "packages/tokenx/src/**"
+      - "packages/tokenx/tsconfig.json"
+      - "packages/tokenx/package.json"
+      - "packages/tokenx-*/package.json"
       - "scripts/test-package-launchers.sh"
       - ".github/actions/setup-bun/action.yml"
       - ".github/workflows/launcher_validation.yml"
@@ -20,15 +18,13 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
   pull_request:
-    branches: [main, develop, personal/local-clients]
+    branches: [main]
     paths:
-      - "packages/cli/bin.js"
-      - "packages/cli/src/**"
-      - "packages/cli/tsconfig.json"
-      - "packages/cli/package.json"
-      - "packages/tokscale/bin.js"
-      - "packages/tokscale/package.json"
-      - "packages/cli-*/package.json"
+      - "packages/tokenx/bin.js"
+      - "packages/tokenx/src/**"
+      - "packages/tokenx/tsconfig.json"
+      - "packages/tokenx/package.json"
+      - "packages/tokenx-*/package.json"
       - "scripts/test-package-launchers.sh"
       - ".github/actions/setup-bun/action.yml"
       - ".github/workflows/launcher_validation.yml"

@@ -15,11 +15,10 @@ git_config() {
 write_manifests() {
   local version="$1"
   mkdir -p \
-    packages/cli \
-    packages/cli-darwin-arm64 \
-    packages/cli-linux-x64-gnu \
-    packages/cli-win32-x64-msvc \
-    packages/tokscale
+    packages/tokenx \
+    packages/tokenx-darwin-arm64 \
+    packages/tokenx-linux-x64-gnu \
+    packages/tokenx-win32-x64-msvc
 
   cat > Cargo.toml <<EOF_MANIFEST
 [workspace.package]
@@ -31,61 +30,50 @@ EOF_MANIFEST
 version = 4
 
 [[package]]
-name = "tokscale-cli"
+name = "tokenx"
 version = "${version}"
 dependencies = [
- "tokscale-core",
+ "tokenx-engine",
 ]
 
 [[package]]
-name = "tokscale-core"
+name = "tokenx-engine"
 version = "${version}"
 EOF_LOCK
 
-  cat > packages/cli/package.json <<EOF_MANIFEST
+  cat > packages/tokenx/package.json <<EOF_MANIFEST
 {
-  "name": "@juya-ai/tokscale-cli",
+  "name": "@juya-ai/tokenx",
   "version": "${version}",
   "optionalDependencies": {
-    "@juya-ai/tokscale-cli-darwin-arm64": "${version}",
-    "@juya-ai/tokscale-cli-linux-x64-gnu": "${version}",
-    "@juya-ai/tokscale-cli-win32-x64-msvc": "${version}"
+    "@juya-ai/tokenx-darwin-arm64": "${version}",
+    "@juya-ai/tokenx-linux-x64-gnu": "${version}",
+    "@juya-ai/tokenx-win32-x64-msvc": "${version}"
   }
 }
 EOF_MANIFEST
 
   for package_dir in \
-    cli-darwin-arm64 \
-    cli-linux-x64-gnu \
-    cli-win32-x64-msvc; do
+    tokenx-darwin-arm64 \
+    tokenx-linux-x64-gnu \
+    tokenx-win32-x64-msvc; do
     cat > "packages/${package_dir}/package.json" <<EOF_MANIFEST
 {
-  "name": "@juya-ai/tokscale-${package_dir}",
+  "name": "@juya-ai/${package_dir}",
   "version": "${version}"
 }
 EOF_MANIFEST
   done
-
-  cat > packages/tokscale/package.json <<EOF_MANIFEST
-{
-  "name": "@juya-ai/tokscale",
-  "version": "${version}",
-  "dependencies": {
-    "@juya-ai/tokscale-cli": "${version}"
-  }
-}
-EOF_MANIFEST
 }
 
 git_add_release_manifests() {
   git add -- \
     Cargo.toml \
     Cargo.lock \
-    packages/cli/package.json \
-    packages/cli-darwin-arm64/package.json \
-    packages/cli-linux-x64-gnu/package.json \
-    packages/cli-win32-x64-msvc/package.json \
-    packages/tokscale/package.json
+    packages/tokenx/package.json \
+    packages/tokenx-darwin-arm64/package.json \
+    packages/tokenx-linux-x64-gnu/package.json \
+    packages/tokenx-win32-x64-msvc/package.json
 }
 
 create_origin() {

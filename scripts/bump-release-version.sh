@@ -11,7 +11,7 @@ fail() {
 
 [[ $# -eq 1 ]] || fail "Usage: bun run release:bump -- <major|minor|patch|version>"
 request="$1"
-current_version="$(jq -er '.version' packages/cli/package.json)"
+current_version="$(jq -er '.version' packages/tokenx/package.json)"
 
 new_version="$(python3 - "${current_version}" "${request}" <<'PY'
 import re
@@ -84,14 +84,13 @@ root = pathlib.Path(".")
 paths = [
     pathlib.Path("Cargo.toml"),
     pathlib.Path("Cargo.lock"),
-    pathlib.Path("packages/cli/package.json"),
+    pathlib.Path("packages/tokenx/package.json"),
 ]
-cli = json.loads((root / paths[-1]).read_text(encoding="utf-8"))
-for package_name in sorted(cli.get("optionalDependencies", {})):
-    if not package_name.startswith("@juya-ai/tokscale-cli-"):
+launcher = json.loads((root / paths[-1]).read_text(encoding="utf-8"))
+for package_name in sorted(launcher.get("optionalDependencies", {})):
+    if not package_name.startswith("@juya-ai/tokenx-"):
         raise SystemExit(f"Unexpected optional dependency package name: {package_name}")
-    paths.append(pathlib.Path("packages") / package_name.removeprefix("@juya-ai/tokscale-") / "package.json")
-paths.append(pathlib.Path("packages/tokscale/package.json"))
+    paths.append(pathlib.Path("packages") / package_name.removeprefix("@juya-ai/") / "package.json")
 for path in paths:
     print(path.as_posix())
 PY
@@ -121,24 +120,18 @@ def write_json(path: pathlib.Path, value: dict) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-cli_path = root / "packages/cli/package.json"
-cli = read_json(cli_path)
-cli["version"] = version
-for package_name in cli.get("optionalDependencies", {}):
-    if not package_name.startswith("@juya-ai/tokscale-cli-"):
+launcher_path = root / "packages/tokenx/package.json"
+launcher = read_json(launcher_path)
+launcher["version"] = version
+for package_name in launcher.get("optionalDependencies", {}):
+    if not package_name.startswith("@juya-ai/tokenx-"):
         raise SystemExit(f"Unexpected optional dependency package name: {package_name}")
-    cli["optionalDependencies"][package_name] = version
-    package_path = root / "packages" / package_name.removeprefix("@juya-ai/tokscale-") / "package.json"
+    launcher["optionalDependencies"][package_name] = version
+    package_path = root / "packages" / package_name.removeprefix("@juya-ai/") / "package.json"
     package = read_json(package_path)
     package["version"] = version
     write_json(package_path, package)
-write_json(cli_path, cli)
-
-wrapper_path = root / "packages/tokscale/package.json"
-wrapper = read_json(wrapper_path)
-wrapper["version"] = version
-wrapper["dependencies"]["@juya-ai/tokscale-cli"] = version
-write_json(wrapper_path, wrapper)
+write_json(launcher_path, launcher)
 
 cargo_path = root / "Cargo.toml"
 cargo = cargo_path.read_text(encoding="utf-8")

@@ -47,34 +47,26 @@ if expected_version and workspace_version != expected_version:
 def load_json(path: str) -> dict:
     return json.loads((root / path).read_text())
 
-cli_package = load_json("packages/cli/package.json")
-wrapper_package = load_json("packages/tokscale/package.json")
+launcher_package = load_json("packages/tokenx/package.json")
 
-platform_packages = sorted((root / "packages").glob("cli-*/package.json"))
+platform_packages = sorted((root / "packages").glob("tokenx-*/package.json"))
 if not platform_packages:
-    raise SystemExit("No platform package manifests found under packages/cli-*")
+    raise SystemExit("No platform package manifests found under packages/tokenx-*")
 
 errors: list[str] = []
 
 required_platform_names = {
-    "@juya-ai/tokscale-cli-darwin-arm64",
-    "@juya-ai/tokscale-cli-linux-x64-gnu",
-    "@juya-ai/tokscale-cli-win32-x64-msvc",
+    "@juya-ai/tokenx-darwin-arm64",
+    "@juya-ai/tokenx-linux-x64-gnu",
+    "@juya-ai/tokenx-win32-x64-msvc",
 }
 
 def expect_equal(label: str, actual: str, expected: str) -> None:
     if actual != expected:
         errors.append(f"{label}: expected {expected}, found {actual}")
 
-expect_equal("packages/cli/package.json version", cli_package["version"], workspace_version)
-expect_equal("packages/cli/package.json name", cli_package["name"], "@juya-ai/tokscale-cli")
-expect_equal("packages/tokscale/package.json version", wrapper_package["version"], workspace_version)
-expect_equal("packages/tokscale/package.json name", wrapper_package["name"], "@juya-ai/tokscale")
-expect_equal(
-    "packages/tokscale dependency on @juya-ai/tokscale-cli",
-    wrapper_package["dependencies"]["@juya-ai/tokscale-cli"],
-    workspace_version,
-)
+expect_equal("packages/tokenx/package.json version", launcher_package["version"], workspace_version)
+expect_equal("packages/tokenx/package.json name", launcher_package["name"], "@juya-ai/tokenx")
 
 platform_names = set()
 for path in platform_packages:
@@ -83,14 +75,14 @@ for path in platform_packages:
     if not name:
         errors.append(f"{path} missing package name")
         continue
-    if not name.startswith("@juya-ai/tokscale-cli-"):
-        errors.append(f"{path} package name must start with @juya-ai/tokscale-cli-")
+    if not name.startswith("@juya-ai/tokenx-"):
+        errors.append(f"{path} package name must start with @juya-ai/tokenx-")
         continue
     platform_names.add(name)
     expect_equal(f"{path} version", manifest["version"], workspace_version)
 
 expected_optional = platform_names
-actual_optional = set(cli_package["optionalDependencies"].keys())
+actual_optional = set(launcher_package["optionalDependencies"].keys())
 missing_required_manifests = required_platform_names - platform_names
 if missing_required_manifests:
     errors.append(
@@ -119,14 +111,14 @@ if unsupported_optional:
 
 if actual_optional != expected_optional:
     errors.append(
-        "packages/cli optionalDependencies keys mismatch: "
+        "packages/tokenx optionalDependencies keys mismatch: "
         f"expected {sorted(expected_optional)}, found {sorted(actual_optional)}"
     )
 
-for name, version in cli_package["optionalDependencies"].items():
-    expect_equal(f"packages/cli optional dependency {name}", version, workspace_version)
+for name, version in launcher_package["optionalDependencies"].items():
+    expect_equal(f"packages/tokenx optional dependency {name}", version, workspace_version)
 
-lock_workspace_packages = {"tokscale-cli", "tokscale-core"}
+lock_workspace_packages = {"tokenx", "tokenx-engine"}
 lock_packages = {
     package.get("name"): package.get("version")
     for package in cargo_lock_data.get("package", [])
@@ -152,9 +144,9 @@ if extra_manifests:
         f"{sorted(extra_manifests)}"
     )
 
-if expected_version and cli_package["version"] != expected_version:
+if expected_version and launcher_package["version"] != expected_version:
     errors.append(
-        f"packages/cli/package.json version mismatch: expected {expected_version}, found {cli_package['version']}"
+        f"packages/tokenx/package.json version mismatch: expected {expected_version}, found {launcher_package['version']}"
     )
 
 if errors:

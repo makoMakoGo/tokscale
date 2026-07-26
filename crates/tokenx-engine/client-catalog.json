@@ -1,0 +1,170 @@
+[
+  {
+    "variant": "OpenCode",
+    "id": "opencode",
+    "displayName": "OpenCode",
+    "shortName": "OpenCode"
+  },
+  {
+    "variant": "Claude",
+    "id": "claude",
+    "displayName": "Claude",
+    "shortName": "Claude"
+  },
+  {
+    "variant": "Codex",
+    "id": "codex",
+    "displayName": "Codex CLI",
+    "shortName": "Codex"
+  },
+  {
+    "variant": "Gemini",
+    "id": "gemini",
+    "displayName": "Gemini CLI",
+    "shortName": "Gemini"
+  },
+  {
+    "variant": "Amp",
+    "id": "amp",
+    "displayName": "Amp",
+    "shortName": "Amp"
+  },
+  {
+    "variant": "Droid",
+    "id": "droid",
+    "displayName": "Droid",
+    "shortName": "Droid"
+  },
+  {
+    "variant": "OpenClaw",
+    "id": "openclaw",
+    "displayName": "OpenClaw",
+    "shortName": "OpenClaw"
+  },
+  {
+    "variant": "Pi",
+    "id": "pi",
+    "displayName": "Pi",
+    "shortName": "Pi"
+  },
+  {
+    "variant": "Omp",
+    "id": "omp",
+    "displayName": "OMP",
+    "shortName": "OMP"
+  },
+  {
+    "variant": "Kimi",
+    "id": "kimi",
+    "displayName": "Kimi",
+    "shortName": "Kimi"
+  },
+  {
+    "variant": "Qwen",
+    "id": "qwen",
+    "displayName": "Qwen",
+    "shortName": "Qwen"
+  },
+  {
+    "variant": "RooCode",
+    "id": "roocode",
+    "displayName": "Roo Code",
+    "shortName": "Roo Code"
+  },
+  {
+    "variant": "Mux",
+    "id": "mux",
+    "displayName": "Mux",
+    "shortName": "Mux"
+  },
+  {
+    "variant": "Kilo",
+    "id": "kilo",
+    "displayName": "Kilo",
+    "shortName": "Kilo"
+  },
+  {
+    "variant": "Hermes",
+    "id": "hermes",
+    "displayName": "Hermes",
+    "shortName": "Hermes"
+  },
+  {
+    "variant": "Copilot",
+    "id": "copilot",
+    "displayName": "Copilot",
+    "shortName": "Copilot"
+  },
+  {
+    "variant": "Goose",
+    "id": "goose",
+    "displayName": "Goose",
+    "shortName": "Goose"
+  },
+  {
+    "variant": "Codebuff",
+    "id": "codebuff",
+    "displayName": "Codebuff",
+    "shortName": "Codebuff"
+  },
+  {
+    "variant": "CodeBuddy",
+    "id": "codebuddy",
+    "displayName": "CodeBuddy",
+    "shortName": "CodeBuddy"
+  },
+  {
+    "variant": "Antigravity",
+    "id": "antigravity",
+    "displayName": "Antigravity",
+    "shortName": "Antigravity"
+  },
+  {
+    "variant": "Zed",
+    "id": "zed",
+    "displayName": "Zed Agent",
+    "shortName": "Zed Agent"
+  },
+  {
+    "variant": "Zcode",
+    "id": "zcode",
+    "displayName": "ZCode",
+    "shortName": "ZCode"
+  },
+  {
+    "variant": "Kiro",
+    "id": "kiro",
+    "displayName": "Kiro",
+    "shortName": "Kiro"
+  },
+  {
+    "variant": "Junie",
+    "id": "junie",
+    "displayName": "Junie",
+    "shortName": "Junie"
+  },
+  {
+    "variant": "Warp",
+    "id": "warp",
+    "displayName": "Warp",
+    "shortName": "Warp"
+  },
+  {
+    "variant": "Cline",
+    "id": "cline",
+    "displayName": "Cline",
+    "shortName": "Cline"
+  },
+  {
+    "variant": "CommandCode",
+    "id": "commandcode",
+    "displayName": "Command Code",
+    "shortName": "Command"
+  },
+  {
+    "variant": "Grok",
+    "id": "grok",
+    "displayName": "Grok",
+    "shortName": "Grok"
+  }
+]

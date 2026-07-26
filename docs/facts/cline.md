@@ -10,7 +10,7 @@ content were inspected.
 
 ## Shared storage
 
-VS Code 4.0+ and CLI 3.x use the same SDK v1 session artifacts. Tokscale reads
+VS Code 4.0+ and CLI 3.x use the same SDK v1 session artifacts. Tokenx reads
 the fixed `~/.cline/data/sessions` root; additional roots are configured with
 `scanner.extraScanPaths.cline`.
 
@@ -68,7 +68,7 @@ metrics.cost (vendor field; may be absent)
 `max(inputTokens - cacheReadTokens - cacheWriteTokens, 0)`.
 
 The SDK contract includes vendor `cost`, but a verified Laguna M.1 free-model
-artifact omitted it; vendor cost is not a Tokscale usage input fact.
+artifact omitted it; vendor cost is not a Tokenx usage input fact.
 
 ## Verified local observation
 

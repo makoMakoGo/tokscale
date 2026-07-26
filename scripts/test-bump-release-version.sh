@@ -10,11 +10,10 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 write_manifests() {
   local version="$1"
   mkdir -p \
-    packages/cli \
-    packages/cli-darwin-arm64 \
-    packages/cli-linux-x64-gnu \
-    packages/cli-win32-x64-msvc \
-    packages/tokscale
+    packages/tokenx \
+    packages/tokenx-darwin-arm64 \
+    packages/tokenx-linux-x64-gnu \
+    packages/tokenx-win32-x64-msvc
 
   cat > Cargo.toml <<EOF_MANIFEST
 [workspace.package]
@@ -26,50 +25,40 @@ EOF_MANIFEST
 version = 4
 
 [[package]]
-name = "tokscale-cli"
+name = "tokenx"
 version = "${version}"
 dependencies = [
- "tokscale-core",
+ "tokenx-engine",
 ]
 
 [[package]]
-name = "tokscale-core"
+name = "tokenx-engine"
 version = "${version}"
 EOF_LOCK
 
-  cat > packages/cli/package.json <<EOF_MANIFEST
+  cat > packages/tokenx/package.json <<EOF_MANIFEST
 {
-  "name": "@juya-ai/tokscale-cli",
+  "name": "@juya-ai/tokenx",
   "version": "${version}",
   "optionalDependencies": {
-    "@juya-ai/tokscale-cli-darwin-arm64": "${version}",
-    "@juya-ai/tokscale-cli-linux-x64-gnu": "${version}",
-    "@juya-ai/tokscale-cli-win32-x64-msvc": "${version}"
+    "@juya-ai/tokenx-darwin-arm64": "${version}",
+    "@juya-ai/tokenx-linux-x64-gnu": "${version}",
+    "@juya-ai/tokenx-win32-x64-msvc": "${version}"
   }
 }
 EOF_MANIFEST
 
   for package_dir in \
-    cli-darwin-arm64 \
-    cli-linux-x64-gnu \
-    cli-win32-x64-msvc; do
+    tokenx-darwin-arm64 \
+    tokenx-linux-x64-gnu \
+    tokenx-win32-x64-msvc; do
     cat > "packages/${package_dir}/package.json" <<EOF_MANIFEST
 {
-  "name": "@juya-ai/tokscale-${package_dir}",
+  "name": "@juya-ai/${package_dir}",
   "version": "${version}"
 }
 EOF_MANIFEST
   done
-
-  cat > packages/tokscale/package.json <<EOF_MANIFEST
-{
-  "name": "@juya-ai/tokscale",
-  "version": "${version}",
-  "dependencies": {
-    "@juya-ai/tokscale-cli": "${version}"
-  }
-}
-EOF_MANIFEST
 }
 
 write_fake_cargo() {
@@ -97,7 +86,7 @@ import sys
 version = sys.argv[1]
 path = pathlib.Path("Cargo.lock")
 text = path.read_text()
-for package in ("tokscale-cli", "tokscale-core"):
+for package in ("tokenx", "tokenx-engine"):
     text, count = re.subn(
         rf'(\[\[package\]\]\nname = "{package}"\nversion = ")([^"]+)(")',
         rf"\g<1>{version}\g<3>",
@@ -148,7 +137,7 @@ test_patch_bump_updates_every_release_manifest() {
   (
     cd "${work}"
     bash scripts/check-version-coherence.sh --expect-version 4.3.1
-    test "$(git diff --name-only | wc -l)" -eq 7
+    test "$(git diff --name-only | wc -l)" -eq 6
   )
   grep -q "Prepared release version 4.3.0 -> 4.3.1" "${TMP_DIR}/patch-output.txt"
 }

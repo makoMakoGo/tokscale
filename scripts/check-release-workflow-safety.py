@@ -10,21 +10,21 @@ ROOT = pathlib.Path.cwd()
 WORKFLOWS_DIR = ROOT / ".github/workflows"
 PACKAGE_MANIFEST = ROOT / "package.json"
 BUN_SETUP_ACTION = ROOT / ".github/actions/setup-bun/action.yml"
-PUBLISH_WORKFLOW = ROOT / ".github/workflows/publish-cli.yml"
+PUBLISH_WORKFLOW = ROOT / ".github/workflows/publish.yml"
 BUILD_NATIVE_WORKFLOW = ROOT / ".github/workflows/build-native.yml"
-CORE_CI_WORKFLOW = ROOT / ".github/workflows/core_ci.yml"
+CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 LAUNCHER_VALIDATION_WORKFLOW = ROOT / ".github/workflows/launcher_validation.yml"
 TEST_COVERAGE_WORKFLOW = ROOT / ".github/workflows/test_coverage.yml"
 RELEASE_TOOLING_SCRIPT = ROOT / "scripts/test-release-tooling.sh"
 REQUIRED_ENV_KEYS = ("MACOSX_DEPLOYMENT_TARGET", "CARGO_TERM_COLOR", "CARGO_INCREMENTAL")
 COMMON_BUILD_FIELDS = ("host", "target", "build", "strip", "bin_name")
 TARGET_PACKAGES = {
-    "aarch64-apple-darwin": "cli-darwin-arm64",
-    "x86_64-unknown-linux-gnu": "cli-linux-x64-gnu",
-    "x86_64-pc-windows-msvc": "cli-win32-x64-msvc",
+    "aarch64-apple-darwin": "tokenx-darwin-arm64",
+    "x86_64-unknown-linux-gnu": "tokenx-linux-x64-gnu",
+    "x86_64-pc-windows-msvc": "tokenx-win32-x64-msvc",
 }
-DEFAULT_RELEASE_BRANCH = "personal/local-clients"
-RELEASE_TRIGGER_PATH = "packages/cli/package.json"
+DEFAULT_RELEASE_BRANCH = "main"
+RELEASE_TRIGGER_PATH = "packages/tokenx/package.json"
 RELEASE_TOOLING_COMMAND = "bash scripts/test-release-tooling.sh"
 LOCAL_BUN_SETUP_ACTION = "./.github/actions/setup-bun"
 RECOVERY_NPM_BASE_VERSION_EXPRESSION = (
@@ -37,9 +37,9 @@ RELEASE_VALIDATION_PATHS = {
     "package.json",
     ".github/actions/setup-bun/action.yml",
     ".github/workflows/build-native.yml",
-    ".github/workflows/core_ci.yml",
+    ".github/workflows/ci.yml",
     ".github/workflows/launcher_validation.yml",
-    ".github/workflows/publish-cli.yml",
+    ".github/workflows/publish.yml",
     ".github/workflows/test_coverage.yml",
 }
 LAUNCHER_TOOLCHAIN_PATHS = {
@@ -296,7 +296,7 @@ def package_manifest_name(package_dir: str) -> str:
 def main() -> None:
     publish_lines = read_lines(PUBLISH_WORKFLOW)
     native_lines = read_lines(BUILD_NATIVE_WORKFLOW)
-    core_ci_lines = read_lines(CORE_CI_WORKFLOW)
+    ci_lines = read_lines(CI_WORKFLOW)
     launcher_validation_lines = read_lines(LAUNCHER_VALIDATION_WORKFLOW)
     test_coverage_lines = read_lines(TEST_COVERAGE_WORKFLOW)
     errors: list[str] = []
@@ -364,7 +364,7 @@ def main() -> None:
         errors.append(f"release tooling entrypoint is not executable: {RELEASE_TOOLING_SCRIPT}")
 
     for label, workflow_lines in (
-        ("Core CI", core_ci_lines),
+        ("CI", ci_lines),
         ("Test & Coverage", test_coverage_lines),
     ):
         command_count = exact_run_command_count(workflow_lines, RELEASE_TOOLING_COMMAND)
@@ -375,9 +375,9 @@ def main() -> None:
 
     validate_bun_job(
         errors,
-        "Core CI rust-core",
-        core_ci_lines,
-        "rust-core",
+        "CI rust",
+        ci_lines,
+        "rust",
         RELEASE_TOOLING_COMMAND,
     )
     validate_bun_job(
@@ -396,18 +396,16 @@ def main() -> None:
     )
     validate_bun_job(
         errors,
-        "Publish publish-cli",
+        "Publish publish-launcher",
         publish_lines,
-        "publish-cli",
+        "publish-launcher",
         "bun install",
     )
-    validate_bun_job(
-        errors,
-        "Publish finalize",
-        publish_lines,
-        "finalize",
-        "bun scripts/generate-release-notes.ts",
-    )
+    finalize_block = job_block(publish_lines, "finalize")
+    if not text_indexes(finalize_block, "gh release create"):
+        errors.append("Publish finalize must create the GitHub Release")
+    if not text_indexes(finalize_block, "--generate-notes"):
+        errors.append("Publish finalize must request generated GitHub release notes")
 
     for event_name in ("push", "pull_request"):
         block = event_block(test_coverage_lines, event_name)
@@ -501,7 +499,7 @@ def main() -> None:
                 f"env {key} differs: publish={publish_env.get(key)!r}, build-native={native_env.get(key)!r}"
             )
 
-    publish_build = by_target(matrix_settings(publish_lines, "build-cli-binary"), "publish build")
+    publish_build = by_target(matrix_settings(publish_lines, "build-native-binary"), "publish build")
     native_build = by_target(matrix_settings(native_lines, "build"), "build-native")
 
     unexpected_native_targets = [
@@ -534,7 +532,7 @@ def main() -> None:
             errors.append(
                 f"build matrix {target} package_dir drift: expected {expected_package_dir}, found {publish_entry.get('package_dir')}"
             )
-        expected_artifact = f"cli-binary-{target}"
+        expected_artifact = f"tokenx-binary-{target}"
         if publish_entry.get("artifact_name") != expected_artifact:
             errors.append(
                 f"build matrix {target} artifact drift: expected {expected_artifact}, found {publish_entry.get('artifact_name')}"

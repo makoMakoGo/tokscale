@@ -57,12 +57,12 @@ Agents group by stable type or role, not per-run presentation labels:
   or `agent-N` path segments; and
 - a message without a recognized stable agent identity creates no Agents row.
 
-Parsers write stable identity into `UnifiedMessage.agent`; aggregation does not
+Parsers write stable identity into `AttributedUsageRecord.agent`; aggregation does not
 reinterpret runtime labels. Agent aggregation uses the structured
 `(client, agent)` identity and every public Agent entry carries exactly one
 Client, so equal labels from different Clients never merge. Identity-semantic
-changes invalidate affected message shards and the persisted TUI generation
-through the appropriate decoder revision and schema/version change.
+changes invalidate affected input-record shards and the canonical generation
+cache through the appropriate decoder revision and schema/version change.
 
 ### Group By projections
 
@@ -192,7 +192,7 @@ review.
 ### Product and contribution-graph surface
 
 The complete interactive local-usage product is the TUI. `models` is its one
-headless projection and calls `Generation::project` with the same `UsageQuery`
+headless projection and calls `Generation::project_usage` with the same `UsageQuery`
 as the TUI. Its renderer-owned JSON document contains `data.groupBy`, `data.models`,
 `data.totals`, Data Health, and `metadata.processingTimeMs`.
 

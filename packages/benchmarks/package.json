@@ -1,8 +1,8 @@
 {
-  "name": "@juya-ai/tokscale-benchmarks",
+  "name": "@juya-ai/tokenx-benchmarks",
   "version": "0.1.0",
   "private": true,
-  "description": "Synthetic current-format fixtures for tokscale benchmarks",
+  "description": "Synthetic current-format fixtures for tokenx benchmarks",
   "type": "module",
   "scripts": {
     "generate": "bun generate.ts"

@@ -1,22 +1,18 @@
-**Note:** This is a locally maintained fork of the upstream tokscale repository. User requirements take precedence.
-
-**Note:** When recording upstream ancestry or porting upstream commits, record the action in docs/upstream/yyyy-mm-dd.md to document the upstream commit, scope, and significant context or decisions. Keep these logs concise but informative, focusing on user-visible impact and details relevant to maintainers.
-
-**Note:** When a user explicitly requests breaking changes that diverge from upstream or major disagreements arise, remind them to record the decision and its rationale in docs/adr/xxxx-title.md. Keep ADRs concise, focusing on the decision, the "why", and any important context or trade-offs.
+**Note:** When a user explicitly requests breaking changes or major disagreements arise, remind them to record the decision and its rationale in docs/adr/xxxx-title.md. Keep ADRs concise, focusing on the decision, the "why", and any important context or trade-offs.
 
 # Repository Guidelines
 
 ## Project Structure & Module Organization
 
-Tokscale is a Rust workspace with Bun-managed JavaScript packages. Core parsing, scanning, aggregation, pricing, and session readers live in `crates/tokscale-core/src/`; CLI and TUI code live in `crates/tokscale-cli/src/`, with integration tests under `crates/tokscale-cli/tests/` and crate-level tests under `crates/tokscale-core/tests/`. npm-facing packages live in `packages/`: `packages/cli` is the TypeScript binary dispatcher, `packages/tokscale` is the wrapper package, and `packages/cli-*` contain platform package manifests.
+Tokenx is a Rust workspace with Bun-managed JavaScript packages. Core parsing, scanning, aggregation, pricing, and session readers live in `crates/tokenx-engine/src/`; CLI and TUI code live in `crates/tokenx/src/`, with integration tests under `crates/tokenx/tests/` and crate-level tests under `crates/tokenx-engine/tests/`. npm-facing packages live in `packages/`: `packages/tokenx` is the TypeScript launcher and `packages/tokenx-*` contain platform package manifests.
 
 ## Build, Test, and Development Commands
 
 - `cargo test` — run the Rust workspace test suite.
-- `cargo build -p tokscale-cli` — build the CLI binary for local verification.
+- `cargo build -p tokenx` — build the CLI binary for local verification.
 - `bun run build` — build the release Rust binary and TypeScript CLI package.
-- `bun run build:cli` — compile `packages/cli` with `tsc`.
-- `bun run cli -- --no-spinner ...` — run the local CLI wrapper; keep `--no-spinner` in automated runs unless spinner behavior is under test.
+- `bun run build:launcher` — compile the `packages/tokenx` launcher with `tsc`.
+- `bun run cli -- --no-spinner ...` — run the local launcher; keep `--no-spinner` in automated runs unless spinner behavior is under test.
 
 ## Coding Style & Naming Conventions
 
@@ -34,7 +30,7 @@ Use conventional commit and PR titles: `<type>(<scope>): <what changed and why>`
 
 Keep this file concise and constraint-focused. Do not add hardcoded module counts or exhaustive lists; prefer commands such as `ls crates/` for discovery. Add nested `AGENTS.md` files for crate-specific rules when needed, and delete outdated guidance instead of preserving it.
 
-Keep `README.md` as the fork entry page. Put longer user-facing command,
+Keep `README.md` as the product entry page. Put longer user-facing command,
 client, pricing, configuration, and development material under `docs/`,
 matching the split documented in `docs/development.md`.
 
@@ -74,17 +70,11 @@ matching the split documented in `docs/development.md`.
 ## Git Identity & Merge Discipline
 
 - Before any commit, inspect the effective Git identity (`git config user.name` / `user.email`) and remotes. If the identity does not match the contributor or expected automation account for the current branch, stop and ask for confirmation.
-- For fork/personal branches, the expected identity is the fork contributor identity from the active Git account/global config. Do not set repo-local `user.name` or `user.email` to an upstream maintainer identity.
+- The expected identity is the contributor identity from the active Git account/global config. Do not set repo-local `user.name` or `user.email` to another maintainer's identity.
 - If `.git/config` contains stale repo-local `user.name` or `user.email` values that override the expected contributor identity, remove or correct them before committing.
 - Never commit as worker/agent identities such as `worker1`, `worker2`, `worker3`, or `*@example.invalid`.
-- When merging fork-owned work through a pull request whose base repository is this fork, use squash merge (`gh pr merge --squash ...`) unless the user explicitly requests another merge strategy. Never use PR merge to import upstream content; port it under the Upstream Policy below.
+- When merging work through a pull request, use squash merge (`gh pr merge --squash ...`) unless the user explicitly requests another merge strategy.
 - Before merging, verify the squash commit title is the intended conventional PR title and does not contain worker/agent/internal review jargon.
-
-## Upstream Policy (content-ahead-only)
-
-- `personal/local-clients` never takes upstream content via merge; see `docs/adr/0009-ahead-only-upstream-policy.md`. A plain `git merge origin/main` is an error — abort it.
-- Keep the GitHub behind counter at zero with ancestry-only merges when asked or when the banner reappears: `git merge -s ours --no-ff origin/main -m "chore: record upstream ancestry without content (ADR 0009)"`. Verify `git diff HEAD^1 HEAD` is empty before pushing.
-- Port wanted upstream fixes by cherry-pick or hand-port, with `ported from upstream <sha>` in the commit body. Adopt new upstream clients by writing an adapter, using the upstream parser as reference only.
 
 ## Commit Message Convention
 
@@ -117,7 +107,7 @@ docs: update README with new CLI options
 
 ### Commit Message & PR Title Rules (CRITICAL)
 
-> These rules apply to **both commit messages AND pull request titles**. Fork pull request titles are the intended squash commit titles, so they must follow the same conventions.
+> These rules apply to **both commit messages AND pull request titles**. Pull request titles are the intended squash commit titles, so they must follow the same conventions.
 
 **DO:**
 - Describe the actual change in plain, technical terms
@@ -151,36 +141,29 @@ fix: hardening wave 1 compliance fixes         ❌  (PR title)
 
 ## Agent Command Execution
 
-- When running `tokscale` CLI commands from an automated agent (tests, CI, or tool-driven shells), always pass `--no-spinner` unless spinner behavior is the thing being tested.
+- When running `tokenx` CLI commands from an automated agent (tests, CI, or tool-driven shells), always pass `--no-spinner` unless spinner behavior is the thing being tested.
 - This avoids non-interactive terminal issues and keeps command output stable for assertions and logs.
 
 ## Release & Deployment
 
-The public npm packages `tokscale` and `@tokscale/*` belong to the upstream
-distribution. Fork npm releases use `@juya-ai/tokscale`,
-`@juya-ai/tokscale-cli`, and `@juya-ai/tokscale-cli-*`; the installed command is
-still `tokscale`. Do not run `.github/workflows/publish-cli.yml`, publish npm
-packages, create tags, or create GitHub Releases for this fork unless the user
-explicitly asks for that publish operation.
-
-For the current package status, see `docs/fork.md`.
+Repository npm releases use `@juya-ai/tokenx` and `@juya-ai/tokenx-*`; the
+installed command is `tokenx`. Do not run
+`.github/workflows/publish.yml`, publish npm packages, create tags, or
+create GitHub Releases for this repository unless the user explicitly asks for
+that publish operation.
 
 Before publishing, verify the release identity and recovery plan:
 
 - package name or distribution channel;
 - version/tag format;
 - target repository for release notes and changelog links;
-- whether upstream package names are intentionally reused or replaced;
+- whether existing package names are intentionally reused or replaced;
 - validation commands and rollback/recovery steps.
-
-Generated release notes must follow ADR 0009: enumerate only first-parent fork
-changes, link a pull request only when its base repository is this fork, and do
-not synthesize contributor mentions or fork PR URLs from upstream ancestry.
 
 For ordinary validation, prefer source-build checks:
 
 ```bash
 bun install
-bun run build:core
+bun run build:native
 bun run cli -- models --no-spinner
 ```

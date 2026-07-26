@@ -15,8 +15,8 @@ one client universe, another session attribution, and a separately calculated
 input-space total. It also made projection controls look like data-loading
 operations.
 
-This fork is a new application design. It does not retain migration APIs or
-cache-schema compatibility solely to preserve upstream implementation shapes.
+Tokenx is a new application design. It does not retain migration APIs or
+cache-schema compatibility for predecessor implementation shapes.
 
 ## Decision
 
@@ -25,19 +25,19 @@ cache-schema compatibility solely to preserve upstream implementation shapes.
 The executable data flow is:
 
 ```text
-ClientIntegration
-      |
-      v
-GenerationBuilder ----> immutable Generation
-                              |
-                              v
-                    UsageQuery / session filter
-                              |
-                              v
-                       CLI and TUI views
+ClientId + IntegrationDriver
+            |
+            v
+    AcquisitionEngine ----> immutable Generation
+                                  |
+                                  v
+                         UsageQuery / session filter
+                                  |
+                                  v
+                           CLI and TUI views
 ```
 
-`GenerationBuilder` is the only application service that discovers, parses,
+`AcquisitionEngine` is the only application service that discovers, parses,
 prices, aggregates, and installs local data. CLI and TUI consumers may request
 pure projections from an installed `Generation`; they may not call scanners,
 parsers, pricing loaders, or cache writers.
@@ -50,40 +50,52 @@ service. Domain types do not depend on CLI or TUI state.
 
 `Generation` is the only cacheable application state. It contains:
 
-- the resolved acquisition scope;
+- the resolved acquisition configuration;
 - one immutable, non-empty `ClientUniverse`;
 - one confirmed source fingerprint;
-- one canonical `UsageIndex`;
+- one canonical `FrozenUsageIndex`;
 - one session snapshot;
 - one `InputFootprint`;
 - Data Health; and
 - pricing diagnostics.
 
+The canonical fold always builds both the frozen usage index and session
+index. They are required generation components, not optional report modes;
+there is no projection bit-set and no partially populated aggregation result.
+
 Models, daily, hourly, period, agent, overview, and session screens are derived
 from that value. The cache stores exactly one serialized `Generation`; it does
 not store Common/Grouped bundles, renderer DTOs, alternative report envelopes,
-or compatibility schemas. Cache identity is the exact acquisition scope and
-client universe. A schema mismatch is a cache miss.
+or compatibility schemas. `AcquisitionConfig` is one flat, validated identity
+containing the resolved home directory, date range, client universe, and typed
+scanner settings. `AcquisitionEngine` binds that value at construction;
+discovery accepts no second configuration argument. Cache identity compares
+the same value as a whole. A schema mismatch is a cache miss.
 
-### Structural client identity
+### Structural acquisition identity
 
 `ClientId` is the sole client identity after command/config parsing.
 `PathBuf` remains the home-path representation after CLI parsing. Neither is
 lowered to a string and reparsed inside the acquisition pipeline.
+Date flags are likewise resolved once into a `DateRange` whose inclusive
+boundaries are `NaiveDate` values and whose optional calendar year is an
+integer. The same typed range is used by acquisition, generation-cache
+identity, and aggregation; filtering never reparses dates or compares date
+strings.
 
-Every `ClientIntegration` vertically owns:
+Every client-specific `IntegrationDriver` vertically owns:
 
-- its `ClientId`;
 - source discovery and source policy;
 - decoder route and revision;
 - record parsing and enrichment; and
 - integration-specific deduplication.
 
-The integration runner binds the integration's `ClientId` to source-neutral
-`UsageRecord` values when producing `UnifiedMessage`. Sessions, health issues,
-input footprint entries, usage buckets, and TUI selections retain `ClientId`.
-Strings appear only at configuration/CLI parsing and serialization or
-presentation boundaries.
+The exhaustive integration registry is the sole binding from `ClientId` to an
+identity-neutral driver. The runner supplies that typed identity to discovery
+and attributes source-neutral `UsageRecord` values as
+`AttributedUsageRecord`. Sessions, health issues, input footprint entries,
+usage buckets, and TUI selections retain `ClientId`. Strings appear only at
+configuration/CLI parsing and serialization or presentation boundaries.
 
 `ClientId` dispatch to integrations is a wildcard-free exhaustive match. A new
 catalog variant cannot compile until its integration is selected, and the
@@ -108,8 +120,10 @@ Overview Data Size = sum(InputFootprint[client])
 
 ### One runtime and refresh lifecycle
 
-The process creates one Tokio runtime. Background acquisition uses its handle;
-commands and subscription work do not create nested runtimes.
+The process creates one Tokio runtime. A task supervisor owns background
+acquisition and subscription tasks, cancels them on exit, and drains their
+handles before the application terminates. Commands and subscription work do
+not create nested runtimes or detached workers.
 
 Startup with a missing or stale generation, automatic refresh, and explicit
 manual refresh are the only local acquisition events. Client and Group By
@@ -137,4 +151,4 @@ report-builder hierarchy, or hidden compatibility loader is retained.
   intentional; the application rebuilds derived cache state from authoritative
   local inputs.
 - Tests protect current domain invariants and observable acquisition behavior,
-  not removed upstream abstractions or compatibility schemas.
+  not removed abstractions or compatibility schemas.

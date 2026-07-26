@@ -67,11 +67,12 @@ remains structurally absent rather than masquerading as an empty day. Adjacent
 activity grades therefore remain distinguishable without demanding an
 impossible 3:1 ratio between every step of a compact five-level ramp.
 
-Model-family and client-catalog colors remain identity colors rather than theme
-decoration. They retain their authoritative source and are adapted only for
-contrast against non-selected panel and table surfaces. Selection state takes
-precedence over identity: selected identity text uses the semantic selection
-foreground instead of forcing a brand color onto an unrelated background.
+Model-family and client presentation colors remain identity colors rather than
+theme decoration. Their exhaustive mappings are owned by the TUI and are
+adapted only for contrast against non-selected panel and table surfaces.
+Selection state takes precedence over identity: selected identity text uses the
+semantic selection foreground instead of forcing a brand color onto an
+unrelated background.
 The adapted identity palette is resolved once when a theme is constructed;
 renderers perform a direct lookup and never recompute WCAG blending per frame.
 
@@ -84,9 +85,8 @@ capability and does not maintain an ANSI downgrade palette. `NO_COLOR`,
 genuine no-color product requirement appears later, it must be designed as an
 explicit rendering mode rather than folded into theme identity.
 
-The persisted `colorPalette` key and all twelve existing values remain readable
-and writable in this change. Renaming the key is a separate configuration
-migration and is not required to establish the semantic rendering contract.
+The canonical `colorPalette` key accepts exactly the twelve names represented
+by `ThemeName`. Configuration and CLI parsing use the same lowercase names.
 
 ## Consequences
 
@@ -96,8 +96,8 @@ migration and is not required to establish the semantic rendering contract.
   the permitted role-to-surface contrast matrix, activity ordering, redundant
   contribution glyph encoding, and distinct theme signatures.
 - Adding a renderer color requires selecting or introducing a semantic role.
-- Existing saved theme names retain their syntax but intentionally gain broader
-  visual effect.
+- Theme names have one stable lowercase syntax across configuration and CLI
+  input.
 - Theme definitions become larger because each one owns a complete, testable
   palette.
 

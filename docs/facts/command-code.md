@@ -63,14 +63,14 @@ model: Qwen/Qwen3.7-Max-Free
 provider: command-code
 ```
 
-## Current Tokscale model projection
+## Current Tokenx model projection
 
 For every discovered main transcript, `COMMANDCODE_ADAPTER` attaches
 `~/.commandcode/config.json` as a required cache dependency. The parser then
 calls `model_from_config` and assigns the current `config.json.model` to every
 estimated assistant usage record in that historical session.
 
-Tokscale does not currently read `<session-id>.meta.json.model`.
+Tokenx does not currently read `<session-id>.meta.json.model`.
 
 Because `config.json` participates in the input fingerprint, changing its
 model invalidates the cached projection and reassigns the same unchanged
@@ -79,11 +79,11 @@ historical transcript:
 ```text
 Today:
   config.model = claude
-  historical session model reported by Tokscale = claude
+  historical session model reported by Tokenx = claude
 
 Tomorrow:
   config.model = gpt-5
-  the same historical session model reported by Tokscale = gpt-5
+  the same historical session model reported by Tokenx = gpt-5
 ```
 
 The transcript and estimated token counts do not need to change for this model

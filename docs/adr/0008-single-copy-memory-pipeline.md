@@ -4,7 +4,7 @@ Status: Accepted; application boundary and generation storage revised by ADR 003
 
 ## Context
 
-Tokscale processes large transcript collections. Materializing one integration's
+Tokenx processes large transcript collections. Materializing one integration's
 complete output, cloning cache hits into another collection, and rebuilding a
 monolithic cache can keep several copies of the same messages alive. Discovery
 performed separately from freshness checks or execution can also make one load
@@ -19,31 +19,36 @@ current formats, and ADR 0028 owns the TUI lifecycle built on this pipeline.
 
 ### Acquisition authority
 
-Selected `ClientIntegration` values own client attribution, input discovery,
-input identity, parsing, and error attribution. Public projection paths do not
+Selected integration bindings own client attribution, while their
+`IntegrationDriver` values own input discovery, input identity, parsing, and
+error classification. Public projection paths do not
 use a central `ScanResult`,
 `scan_all_clients*`, generic scanner error, or dead per-client database slots.
 `ScannerSettings` and focused scanner primitives remain integration and test seams;
 they do not define another product command or discovery authority.
 
-Discovery produces one consumptive `PreparedInventory`. It records:
+Discovery produces one consumptive `PreparedAcquisition`. It records:
 
 - requested clients in canonical order;
 - selected-integration and per-integration unit order;
 - decoder and unit identity;
-- one `InputPolicy` per unit, including its primary and decoder-relevant related
+- one `FingerprintPolicy` per unit, including its primary and decoder-relevant related
   inputs; and
 - compact pre-execution metadata snapshots.
 
-`InputUnit` is source-neutral. Its `DecoderSpec` atomically binds decoder ID,
-semantic revision, and decode route; decoder selection is never reconstructed
-from a client default. Session decoders produce `UsageRecord`, and message-cache
-bodies persist that same source-neutral type. Each integration's fold owns its cache
-and enrichment order, then applies filtering and deduplication before sending
-accepted records through the integration's `BoundMessageSink`. The sink alone
-combines its typed `ClientId` with the record and emits a `UnifiedMessage`. No
-production pipeline path lets an input, decoder, integration fold, or cache shard
-override that attribution.
+`DiscoveredInput` is source-neutral. Its `DecoderKind` directly carries the
+semantic revision and every detail required to select decoder behavior;
+persisted `DecoderVersion` cache identity is derived from that same value and
+is never reconstructed from a client default. Snapshotting promotes a
+`DiscoveredInput` to `PreparedInput`; cache planning then turns a miss into
+`ExecutionInput`, the only phase accepted by parsers. Session decoders produce
+`UsageRecord`, and input-record bodies persist that same source-neutral type.
+Each integration's fold owns its cache and enrichment order, then applies
+filtering and deduplication before sending accepted records through the
+integration's `BoundUsageSink`. The sink alone combines its typed `ClientId`
+with the record and emits an `AttributedUsageRecord`. No production pipeline
+path lets an input, decoder, integration fold, or cache shard override that
+attribution.
 
 Freshness probing and execution consume the same inventory and never rediscover
 inputs. A file added after preparation belongs to the next inventory. Related
@@ -83,9 +88,9 @@ Each inventory has two freshness keys:
 Automatic refresh prepares once. An unchanged process digest drops the
 inventory and skips parse, aggregation, and cache writes; a changed digest
 executes that same inventory. Forced refresh also prepares and executes once. A
-fresh TUI generation establishes the initial process digest from its persisted
-signature without startup discovery; stale or missing generations prepare and
-execute in the background.
+fresh cached generation establishes the initial process digest from its
+persisted signature without startup discovery; stale or missing generations
+prepare and execute in the background.
 
 Codex computes its full digest during the decoder's read. Append handling verifies
 the previous full digest as the expected prefix, then continues the same hasher
@@ -95,9 +100,9 @@ another input-byte pass.
 ### Single-copy bounded fold
 
 The production local load constructs the usage accumulator, health summary,
-input-space accounting, and session projection from one bounded message stream.
-A full `Vec<UnifiedMessage>` is not part of that path. APIs whose explicit
-contract returns all messages still materialize the final vector.
+input-space accounting, and session projection from one bounded usage-record stream.
+A full `Vec<AttributedUsageRecord>` is not part of that path. APIs whose explicit
+contract returns all records still materialize the final vector.
 
 Prepared integration groups execute in ordered batches:
 
@@ -138,7 +143,7 @@ instead of becoming empty usage.
 ### Message representation and aggregation
 
 `UsageRecord` is the single source-neutral decoder, shard, and enrichment
-representation. `UnifiedMessage` composes a typed integration-attributed `ClientId`
+representation. `AttributedUsageRecord` composes a typed integration-attributed `ClientId`
 with one `UsageRecord` for public aggregation; it does not repeat the record's
 fields or accept an untyped client string. The record otherwise stores no
 redundant derivable value:
@@ -190,16 +195,16 @@ independently proves it invalid or non-cacheable. Partial and unavailable input
 never publishes a shard.
 
 Cache writes serialize borrowed source-neutral `UsageRecord` slices and do
-not clone messages merely to construct a cache representation.
+not clone records merely to construct a cache representation.
 Decoder-semantic changes bump the owning decoder revision;
 serialization-layout changes bump the shard format.
 
-The message-shard envelope is the `TOKSHRD\0` magic, a little-endian format
+The input-record shard envelope is the `TOKENXR\0` magic, a little-endian format
 version, a little-endian `u64` header length, the bincode header, and the
-bincode message body. Ordinary reads and explicit pruning accept only the
+bincode record body. Ordinary reads and explicit pruning accept only the
 format version supported by the running binary.
 
-`tokscale cache prune` is an explicit full traversal of current shard files;
+`tokenx cache prune` is an explicit full traversal of current shard files;
 ordinary generation loads never invoke it. Pruning first validates and
 classifies the complete traversal. An unsupported version, unknown magic,
 truncated envelope, malformed header, undecodable header, oversized shard, or
@@ -210,15 +215,15 @@ derived from the input and decoder key, or a higher decoder revision exists for
 the same live input and decoder. Once deletion begins, an unlink failure is
 reported explicitly; already completed removals are not rolled back.
 
-### Atomic TUI generation storage
+### Atomic generation-cache storage
 
-One local fold produces one immutable `Generation`: scope, Client universe,
+One local fold produces one immutable `Generation`: acquisition configuration,
 confirmed source fingerprint, canonical `UsageIndex`, sessions,
 `InputFootprint`, Data Health, and pricing diagnostics. The cache serializes
 that value once behind a versioned binary envelope and atomic rename.
 
 Common/Grouped bundles and renderer projections are not cache state. Every
-usage view is projected from the installed `UsageIndex`, and Sessions filters
+usage projection is derived from the installed `UsageIndex`, and Sessions filters
 the installed session snapshot. Cache decoding validates the complete
 `Generation`, including exact universe membership for footprint, sessions, and
 health. A schema mismatch, malformed envelope, trailing bytes, or invalid

@@ -1,0 +1,327 @@
+name: Publish
+run-name: "${{ github.event_name == 'workflow_dispatch' && format('recover {0}', inputs.version) || format('publish {0}', github.sha) }}"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - packages/tokenx/package.json
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Existing release version to recover (for example, 4.3.1)"
+        required: true
+        type: string
+      commit:
+        description: "Exact version-bump commit to recover"
+        required: true
+        type: string
+
+concurrency:
+  group: publish-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: "10.13"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  prepare-release:
+    name: Validate release commit
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.release.outputs.should_publish }}
+      version: ${{ steps.release.outputs.version }}
+      base_version: ${{ steps.release.outputs.base_version }}
+      release_commit: ${{ steps.release.outputs.release_commit }}
+      recovery: ${{ steps.release.outputs.recovery }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Check release workflow safety
+        run: python3 scripts/check-release-workflow-safety.py
+
+      - name: Validate committed release version
+        id: release
+        env:
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_BEFORE_SHA: ${{ github.event.before }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_RELEASE_SHA: ${{ inputs.commit || github.sha }}
+        run: bash scripts/check-release-commit.sh
+
+  build-native-binary:
+    name: Build native binary - ${{ matrix.settings.target }}
+    needs: prepare-release
+    if: needs.prepare-release.outputs.should_publish == 'true'
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            package_dir: tokenx-darwin-arm64
+            artifact_name: tokenx-binary-aarch64-apple-darwin
+            bin_name: tokenx
+            build: cargo build --release -p tokenx --target aarch64-apple-darwin
+            strip: strip -x target/aarch64-apple-darwin/release/tokenx
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            package_dir: tokenx-linux-x64-gnu
+            artifact_name: tokenx-binary-x86_64-unknown-linux-gnu
+            bin_name: tokenx
+            build: cargo zigbuild --release -p tokenx --target x86_64-unknown-linux-gnu
+            strip: strip target/x86_64-unknown-linux-gnu/release/tokenx
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            package_dir: tokenx-win32-x64-msvc
+            artifact_name: tokenx-binary-x86_64-pc-windows-msvc
+            bin_name: tokenx.exe
+            build: cargo build --release -p tokenx --target x86_64-pc-windows-msvc
+            strip: ""
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_commit }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: tokenx-${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}-${{ hashFiles('Cargo.lock') }}
+
+      - uses: mlugg/setup-zig@v2
+        if: ${{ contains(matrix.settings.target, 'linux') }}
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        if: ${{ contains(matrix.settings.target, 'linux') }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build native binary
+        shell: bash
+        run: ${{ matrix.settings.build }}
+
+      - name: Strip native binary
+        if: ${{ matrix.settings.strip != '' }}
+        shell: bash
+        run: ${{ matrix.settings.strip }}
+
+      - name: Upload native binary artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.settings.artifact_name }}
+          path: target/${{ matrix.settings.target }}/release/${{ matrix.settings.bin_name }}
+          if-no-files-found: error
+
+  authorize-publish:
+    name: Authorize npm publish
+    needs: [prepare-release, build-native-binary]
+    if: needs.prepare-release.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_commit }}
+          persist-credentials: false
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Revalidate release commit after builds
+        env:
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+          RELEASE_BEFORE_SHA: ${{ github.event.before }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_RELEASE_SHA: ${{ needs.prepare-release.outputs.release_commit }}
+        run: bash scripts/check-release-commit.sh
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Check npm release state
+        env:
+          NEW_VERSION: ${{ needs.prepare-release.outputs.version }}
+          RELEASE_BASE_VERSION: ${{ needs.prepare-release.outputs.recovery == 'true' && needs.prepare-release.outputs.version || needs.prepare-release.outputs.base_version }}
+          RELEASE_RECOVERY: ${{ needs.prepare-release.outputs.recovery }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bash scripts/check-npm-release-state.sh
+
+  publish-platform-packages:
+    name: Publish platform package - ${{ matrix.settings.package_name }}
+    needs: [prepare-release, build-native-binary, authorize-publish]
+    if: needs.prepare-release.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - package_name: '@juya-ai/tokenx-darwin-arm64'
+            package_dir: tokenx-darwin-arm64
+            artifact_name: tokenx-binary-aarch64-apple-darwin
+            binary_name: tokenx
+          - package_name: '@juya-ai/tokenx-linux-x64-gnu'
+            package_dir: tokenx-linux-x64-gnu
+            artifact_name: tokenx-binary-x86_64-unknown-linux-gnu
+            binary_name: tokenx
+          - package_name: '@juya-ai/tokenx-win32-x64-msvc'
+            package_dir: tokenx-win32-x64-msvc
+            artifact_name: tokenx-binary-x86_64-pc-windows-msvc
+            binary_name: tokenx.exe
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_commit }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Download native binary artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ matrix.settings.artifact_name }}
+          path: artifacts/${{ matrix.settings.package_dir }}
+
+      - name: Prepare package binary
+        shell: bash
+        run: |
+          mkdir -p "packages/${{ matrix.settings.package_dir }}/bin"
+          cp "artifacts/${{ matrix.settings.package_dir }}/${{ matrix.settings.binary_name }}" "packages/${{ matrix.settings.package_dir }}/bin/${{ matrix.settings.binary_name }}"
+          if [ "${{ matrix.settings.binary_name }}" = "tokenx" ]; then
+            chmod +x "packages/${{ matrix.settings.package_dir }}/bin/tokenx"
+          fi
+          ls -la "packages/${{ matrix.settings.package_dir }}/bin"
+
+      - name: Publish platform package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_RECOVERY: ${{ needs.prepare-release.outputs.recovery }}
+        run: bash scripts/publish-npm-package.sh "packages/${{ matrix.settings.package_dir }}"
+
+  publish-launcher:
+    name: Publish @juya-ai/tokenx
+    needs: [prepare-release, authorize-publish, publish-platform-packages]
+    if: needs.prepare-release.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_commit }}
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        working-directory: packages/tokenx
+        run: bun install
+
+      - name: Build launcher
+        working-directory: packages/tokenx
+        run: bun run build
+
+      - name: Publish @juya-ai/tokenx
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_RECOVERY: ${{ needs.prepare-release.outputs.recovery }}
+        run: bash scripts/publish-npm-package.sh packages/tokenx
+
+  finalize:
+    name: Create release
+    needs: [prepare-release, publish-launcher]
+    if: needs.prepare-release.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_commit }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Create tag and GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          NEW_VERSION: ${{ needs.prepare-release.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.prepare-release.outputs.release_commit }}
+        run: |
+          if git rev-parse "v$NEW_VERSION" >/dev/null 2>&1; then
+            TAG_COMMIT="$(git rev-list -n 1 "v$NEW_VERSION")"
+            if [ "$TAG_COMMIT" != "$RELEASE_COMMIT" ]; then
+              echo "Tag v$NEW_VERSION points at $TAG_COMMIT, expected $RELEASE_COMMIT" >&2
+              exit 1
+            fi
+          else
+            git tag "v$NEW_VERSION" "$RELEASE_COMMIT"
+            git push origin "v$NEW_VERSION"
+          fi
+
+          if gh release view "v$NEW_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "v$NEW_VERSION" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "v$NEW_VERSION"
+          else
+            gh release create "v$NEW_VERSION" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "v$NEW_VERSION" \
+              --generate-notes
+          fi

@@ -1,0 +1,50 @@
+[package]
+name = "tokenx"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tokenx CLI and TUI for local AI coding usage analytics"
+publish = false
+
+[[bin]]
+name = "tokenx"
+path = "src/main.rs"
+
+[dependencies]
+tokenx-engine = { workspace = true }
+
+clap = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+comfy-table = { workspace = true }
+colored = { workspace = true }
+indicatif = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+rayon = { workspace = true }
+arboard = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+csv = "1.3"
+unicode-width = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.0"
+tempfile = "3.0"
+serial_test = "3.0"
+rusqlite = { workspace = true }

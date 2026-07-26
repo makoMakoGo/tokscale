@@ -39,7 +39,7 @@ EOF_TIME
 setup_fake_tools() {
   local bin_dir="$1"
   mkdir -p "${bin_dir}"
-  write_fake_binary "${bin_dir}/tokscale"
+  write_fake_binary "${bin_dir}/tokenx"
   write_fake_gtime "${bin_dir}/gtime"
 }
 
@@ -54,7 +54,7 @@ test_prefers_gtime_and_accepts_numeric_processing_time() {
     FAKE_BINARY_LOG="${binary_log}" \
     FAKE_GTIME_LOG="${gtime_log}" \
     FAKE_METRICS_JSON='{"data":{},"health":{},"metadata":{"processingTimeMs":12.5}}' \
-    bash "${SCRIPT_UNDER_TEST}" "${bin_dir}/tokscale" baseline opencode 1 >"${output}"
+    bash "${SCRIPT_UNDER_TEST}" "${bin_dir}/tokenx" baseline opencode 1 >"${output}"
 
   grep -Fxq $'label\trun\tprocessing_ms\twall_s\tuser_s\tsys_s\tmax_rss_kib' "${output}"
   grep -Fxq $'baseline\t1\t12.5\t0.01\t0.00\t0.00\t1234' "${output}"
@@ -77,7 +77,7 @@ test_rejects_missing_or_non_numeric_processing_time() {
     if PATH="${bin_dir}:${PATH}" \
       FAKE_GTIME_LOG="${gtime_log}" \
       FAKE_METRICS_JSON="${metrics_json}" \
-      bash "${SCRIPT_UNDER_TEST}" "${bin_dir}/tokscale" baseline opencode 1 >"${output}" 2>&1; then
+      bash "${SCRIPT_UNDER_TEST}" "${bin_dir}/tokenx" baseline opencode 1 >"${output}" 2>&1; then
       echo "Expected non-numeric processingTimeMs to fail: ${metrics_json}" >&2
       return 1
     fi
@@ -121,18 +121,18 @@ test_usr_bin_time_requires_gnu_capabilities_when_gtime_is_absent() {
   local bin_dir="${TMP_DIR}/usr-time-bin"
   local output="${TMP_DIR}/usr-time-output.txt"
   mkdir -p "${bin_dir}"
-  write_fake_binary "${bin_dir}/tokscale"
+  write_fake_binary "${bin_dir}/tokenx"
   ln -s "$(command -v jq)" "${bin_dir}/jq"
 
   if /usr/bin/time -f '' -o "${TMP_DIR}/host-time-probe.txt" true >/dev/null 2>&1; then
     PATH="${bin_dir}:/usr/bin:/bin" \
       FAKE_METRICS_JSON='{"data":{},"health":{},"metadata":{"processingTimeMs":7}}' \
-      bash "${SCRIPT_UNDER_TEST}" "${bin_dir}/tokscale" fallback opencode 1 >"${output}"
+      bash "${SCRIPT_UNDER_TEST}" "${bin_dir}/tokenx" fallback opencode 1 >"${output}"
     grep -q $'^fallback\t1\t7\t' "${output}"
   else
     if PATH="${bin_dir}:/usr/bin:/bin" \
       FAKE_METRICS_JSON='{"data":{},"health":{},"metadata":{"processingTimeMs":7}}' \
-      bash "${SCRIPT_UNDER_TEST}" "${bin_dir}/tokscale" fallback opencode 1 >"${output}" 2>&1; then
+      bash "${SCRIPT_UNDER_TEST}" "${bin_dir}/tokenx" fallback opencode 1 >"${output}" 2>&1; then
       echo "Expected non-GNU /usr/bin/time to fail capability probing" >&2
       return 1
     fi

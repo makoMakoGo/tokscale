@@ -1,24 +1,21 @@
 # Development and testing
 
-Tokscale is a Rust workspace with Bun-managed JavaScript packages.
+Tokenx is a Rust workspace with Bun-managed JavaScript packages.
 
 ## Layout
 
 ```text
 crates/
-  tokscale-core/        parsing, scanning, aggregation, pricing, session readers
-  tokscale-cli/         CLI, TUI, integration commands, integration tests
+  tokenx-engine/        parsing, scanning, aggregation, pricing, session readers
+  tokenx/               binary, CLI, TUI, subscriptions, integration tests
 
 packages/
-  cli/                  @juya-ai/tokscale-cli TypeScript dispatcher
-  tokscale/             @juya-ai/tokscale npm wrapper package
-  cli-*/                @juya-ai/tokscale-cli-* platform manifests
+  tokenx/               @juya-ai/tokenx TypeScript launcher
+  tokenx-*/             @juya-ai/tokenx-* platform manifests
 
 docs/
   adr/                  architecture decisions
-  performance/          measured optimization and regression reports
-  releases.md           fork release and recovery procedure
-  upstream/             upstream port logs
+  releases.md           release and recovery procedure
 ```
 
 ## Build
@@ -33,8 +30,8 @@ bun run build
 For narrower checks, run only the needed step:
 
 ```bash
-bun run build:core
-bun run build:cli
+bun run build:native
+bun run build:launcher
 ```
 
 For quick local CLI runs:
@@ -48,57 +45,34 @@ bun run cli -- models --no-spinner
 
 ```bash
 cargo test
-cargo test -p tokscale-core
-cargo test -p tokscale-cli
+cargo test -p tokenx-engine
+cargo test -p tokenx
 ```
 
-When running Tokscale itself from automated scripts, pass `--no-spinner` unless
+When running Tokenx itself from automated scripts, pass `--no-spinner` unless
 spinner behavior is what you are testing.
-
-Measured performance work must keep its command, corpus facts, raw samples, and
-cumulative comparison under `docs/performance/`. Do not replace an earlier
-baseline row when a later implementation changes the result.
 
 ## Client identity
 
 Client identity is catalog-driven:
 
-Update `crates/tokscale-core/client-catalog.json` when adding or renaming a
+Update `crates/tokenx-engine/client-catalog.json` when adding or renaming a
 client identity. The Rust build script validates the catalog and generates the
 compiled client identity data.
-
-## Upstream ports
-
-This fork is content-ahead-only. Do not merge upstream content wholesale into
-`personal/local-clients`.
-
-When porting an upstream fix:
-
-1. Review whether the upstream behavior fits this fork's local data model.
-2. Cherry-pick or hand-port the smallest useful change.
-3. Mention the upstream SHA in the commit body:
-
-   ```text
-   ported from upstream <sha>
-   ```
-
-4. Record notable upstream port batches under `docs/upstream/yyyy-mm-dd.md`.
-
-See [ADR 0009](adr/0009-ahead-only-upstream-policy.md).
 
 ## Releases
 
 Use `bun run release:bump -- <major|minor|patch|version>` to update every Rust
 and npm release manifest together. The standard path is a version-only pull
-request; merging it to `personal/local-clients` triggers npm publication, the
-version tag, and the GitHub Release. See [the release process](releases.md) for
-the direct maintainer path and exact-commit recovery procedure.
+request; merging it to the default branch triggers npm publication, the version
+tag, and the GitHub Release. See [the release process](releases.md) for the
+direct maintainer path and exact-commit recovery procedure.
 
 ## Documentation changes
 
-Keep `README.md` as the fork entry page. Put longer command, client, pricing,
+Keep `README.md` as the product entry page. Put longer command, client, pricing,
 and configuration details in `docs/`.
 
 If a client list becomes repetitive, prefer generating it from
-`crates/tokscale-core/client-catalog.json` rather than maintaining multiple
+`crates/tokenx-engine/client-catalog.json` rather than maintaining multiple
 manual tables.

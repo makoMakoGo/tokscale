@@ -3,67 +3,55 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "tokscale-monorepo",
+      "name": "tokenx-monorepo",
       "devDependencies": {
         "@types/node": "^20.0.0",
         "typescript": "^5.0.0",
       },
     },
     "packages/benchmarks": {
-      "name": "@juya-ai/tokscale-benchmarks",
+      "name": "@juya-ai/tokenx-benchmarks",
       "version": "0.1.0",
     },
-    "packages/cli": {
-      "name": "@juya-ai/tokscale-cli",
-      "version": "4.0.4",
+    "packages/tokenx": {
+      "name": "@juya-ai/tokenx",
+      "version": "0.1.0",
       "bin": {
-        "tokscale": "./bin.js",
+        "tokenx": "./bin.js",
       },
       "devDependencies": {
         "@types/node": "^20.0.0",
         "typescript": "^5.0.0",
       },
       "optionalDependencies": {
-        "@juya-ai/tokscale-cli-darwin-arm64": "4.0.4",
-        "@juya-ai/tokscale-cli-linux-x64-gnu": "4.0.4",
-        "@juya-ai/tokscale-cli-win32-x64-msvc": "4.0.4",
+        "@juya-ai/tokenx-darwin-arm64": "0.1.0",
+        "@juya-ai/tokenx-linux-x64-gnu": "0.1.0",
+        "@juya-ai/tokenx-win32-x64-msvc": "0.1.0",
       },
     },
-    "packages/cli-darwin-arm64": {
-      "name": "@juya-ai/tokscale-cli-darwin-arm64",
-      "version": "4.0.4",
+    "packages/tokenx-darwin-arm64": {
+      "name": "@juya-ai/tokenx-darwin-arm64",
+      "version": "0.1.0",
     },
-    "packages/cli-linux-x64-gnu": {
-      "name": "@juya-ai/tokscale-cli-linux-x64-gnu",
-      "version": "4.0.4",
+    "packages/tokenx-linux-x64-gnu": {
+      "name": "@juya-ai/tokenx-linux-x64-gnu",
+      "version": "0.1.0",
     },
-    "packages/cli-win32-x64-msvc": {
-      "name": "@juya-ai/tokscale-cli-win32-x64-msvc",
-      "version": "4.0.4",
-    },
-    "packages/tokscale": {
-      "name": "@juya-ai/tokscale",
-      "version": "4.0.4",
-      "bin": {
-        "tokscale": "./bin.js",
-      },
-      "dependencies": {
-        "@juya-ai/tokscale-cli": "4.0.4",
-      },
+    "packages/tokenx-win32-x64-msvc": {
+      "name": "@juya-ai/tokenx-win32-x64-msvc",
+      "version": "0.1.0",
     },
   },
   "packages": {
-    "@juya-ai/tokscale": ["@juya-ai/tokscale@workspace:packages/tokscale"],
+    "@juya-ai/tokenx": ["@juya-ai/tokenx@workspace:packages/tokenx"],
 
-    "@juya-ai/tokscale-benchmarks": ["@juya-ai/tokscale-benchmarks@workspace:packages/benchmarks"],
+    "@juya-ai/tokenx-benchmarks": ["@juya-ai/tokenx-benchmarks@workspace:packages/benchmarks"],
 
-    "@juya-ai/tokscale-cli": ["@juya-ai/tokscale-cli@workspace:packages/cli"],
+    "@juya-ai/tokenx-darwin-arm64": ["@juya-ai/tokenx-darwin-arm64@workspace:packages/tokenx-darwin-arm64"],
 
-    "@juya-ai/tokscale-cli-darwin-arm64": ["@juya-ai/tokscale-cli-darwin-arm64@workspace:packages/cli-darwin-arm64"],
+    "@juya-ai/tokenx-linux-x64-gnu": ["@juya-ai/tokenx-linux-x64-gnu@workspace:packages/tokenx-linux-x64-gnu"],
 
-    "@juya-ai/tokscale-cli-linux-x64-gnu": ["@juya-ai/tokscale-cli-linux-x64-gnu@workspace:packages/cli-linux-x64-gnu"],
-
-    "@juya-ai/tokscale-cli-win32-x64-msvc": ["@juya-ai/tokscale-cli-win32-x64-msvc@workspace:packages/cli-win32-x64-msvc"],
+    "@juya-ai/tokenx-win32-x64-msvc": ["@juya-ai/tokenx-win32-x64-msvc@workspace:packages/tokenx-win32-x64-msvc"],
 
     "@types/node": ["@types/node@20.19.27", "", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-N2clP5pJhB2YnZJ3PIHFk5RkygRX5WO/5f0WC08tp0wd+sv0rsJk3MqWn3CbNmT2J505a5336jaQj4ph1AdMug=="],
 

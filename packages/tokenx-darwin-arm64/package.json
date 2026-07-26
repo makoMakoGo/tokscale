@@ -1,0 +1,26 @@
+{
+  "name": "@juya-ai/tokenx-darwin-arm64",
+  "version": "0.1.0",
+  "description": "tokenx CLI binary for darwin arm64",
+  "license": "MIT",
+  "type": "module",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "bin/tokenx",
+  "files": [
+    "bin"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/makoMakoGo/tokenx.git",
+    "directory": "packages/tokenx-darwin-arm64"
+  }
+}

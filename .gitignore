@@ -8,11 +8,6 @@ packages/benchmarks/results/*
 packages/benchmarks/synthetic-data/
 coverage/
 
-# Legacy paths (keep for safety)
-benchmarks/results/*
-!benchmarks/results/.gitkeep
-benchmarks/synthetic-data/
-
 target/
 *.node
 
@@ -36,7 +31,7 @@ ai-todolist.md
 *.db
 .beads-credential-key
 
-self-host/tokscale-key.pem
+self-host/tokenx-key.pem
 self-host/
 .next/
 .vercel

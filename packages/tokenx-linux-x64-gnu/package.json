@@ -1,0 +1,29 @@
+{
+  "name": "@juya-ai/tokenx-linux-x64-gnu",
+  "version": "0.1.0",
+  "description": "tokenx CLI binary for linux x64 gnu",
+  "license": "MIT",
+  "type": "module",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "main": "bin/tokenx",
+  "files": [
+    "bin"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/makoMakoGo/tokenx.git",
+    "directory": "packages/tokenx-linux-x64-gnu"
+  }
+}

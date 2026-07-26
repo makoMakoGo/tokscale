@@ -22,7 +22,7 @@ The extension does not maintain a separate conversation store. Its backend and
 the command-line frontend use the same default Kilo database and schema when
 they run as the same OS user.
 
-Tokscale reads the fixed Linux and WSL default database:
+Tokenx reads the fixed Linux and WSL default database:
 
 ```text
 ~/.local/share/kilo/kilo.db

@@ -18,18 +18,18 @@ BUN_BIN="${BUN_BIN:-$(command -v bun)}"
 NODE_BIN="${NODE_BIN:-$(command -v node)}"
 LDD_BIN="${LDD_BIN:-$(command -v ldd || true)}"
 WHICH_BIN="${WHICH_BIN:-$(command -v which || true)}"
-TOKSCALE_SMOKE_BUILD_PROFILE="${TOKSCALE_SMOKE_BUILD_PROFILE:-debug}"
-case "${TOKSCALE_SMOKE_BUILD_PROFILE}" in
+TOKENX_SMOKE_BUILD_PROFILE="${TOKENX_SMOKE_BUILD_PROFILE:-debug}"
+case "${TOKENX_SMOKE_BUILD_PROFILE}" in
   debug)
-    CARGO_BUILD_ARGS=(-p tokscale-cli)
+    CARGO_BUILD_ARGS=(-p tokenx)
     CARGO_BINARY_DIR="target/debug"
     ;;
   release)
-    CARGO_BUILD_ARGS=(--release -p tokscale-cli)
+    CARGO_BUILD_ARGS=(--release -p tokenx)
     CARGO_BINARY_DIR="target/release"
     ;;
   *)
-    echo "Unsupported TOKSCALE_SMOKE_BUILD_PROFILE: ${TOKSCALE_SMOKE_BUILD_PROFILE}" >&2
+    echo "Unsupported TOKENX_SMOKE_BUILD_PROFILE: ${TOKENX_SMOKE_BUILD_PROFILE}" >&2
     exit 1
     ;;
 esac
@@ -38,13 +38,13 @@ PLATFORM_PACKAGE="$(node --input-type=module <<'NODE'
 import { execSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 
-// Keep in sync with detectLibcKind() in packages/cli/src/index.ts.
+// Keep in sync with detectLibcKind() in packages/tokenx/src/index.ts.
 function detectLibcKind() {
   if (process.platform !== "linux") {
     return null;
   }
 
-  const override = process.env.TOKSCALE_LIBC?.trim().toLowerCase();
+  const override = process.env.TOKENX_LIBC?.trim().toLowerCase();
   if (override === "musl") return "musl";
   if (override === "gnu" || override === "glibc") return "gnu";
 
@@ -104,14 +104,14 @@ function detectLibcKind() {
 const arch = process.arch;
 
 if (process.platform === "darwin") {
-  if (arch === "arm64") console.log("cli-darwin-arm64");
+  if (arch === "arm64") console.log("tokenx-darwin-arm64");
   else process.exit(1);
 } else if (process.platform === "linux") {
   const libc = detectLibcKind();
-  if (arch === "x64" && libc === "gnu") console.log("cli-linux-x64-gnu");
+  if (arch === "x64" && libc === "gnu") console.log("tokenx-linux-x64-gnu");
   else process.exit(1);
 } else if (process.platform === "win32") {
-  if (arch === "x64") console.log("cli-win32-x64-msvc");
+  if (arch === "x64") console.log("tokenx-win32-x64-msvc");
   else process.exit(1);
 } else {
   process.exit(1);
@@ -124,18 +124,17 @@ if [[ -z "${PLATFORM_PACKAGE}" ]]; then
   exit 1
 fi
 
-echo "Building CLI wrapper and native binary (${TOKSCALE_SMOKE_BUILD_PROFILE})..."
-bun run --cwd packages/cli build >/dev/null
+echo "Building launcher and native binary (${TOKENX_SMOKE_BUILD_PROFILE})..."
+bun run --cwd packages/tokenx build >/dev/null
 cargo build "${CARGO_BUILD_ARGS[@]}" >/dev/null
 
-TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/tokscale-launcher-smoke.XXXXXX")"
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/tokenx-launcher-smoke.XXXXXX")"
 cleanup() {
   rm -rf "${TMP_ROOT}"
 }
 trap cleanup EXIT
 
-CLI_STAGE="${TMP_ROOT}/cli"
-WRAPPER_STAGE="${TMP_ROOT}/tokscale"
+LAUNCHER_STAGE="${TMP_ROOT}/tokenx"
 PLATFORM_STAGE="${TMP_ROOT}/${PLATFORM_PACKAGE}"
 INSTALL_DIR="${TMP_ROOT}/install"
 NPM_CACHE="${TMP_ROOT}/npm-cache"
@@ -144,8 +143,7 @@ BUN_ONLY_DIR="${TMP_ROOT}/bun-only-path"
 NODE_ONLY_DIR="${TMP_ROOT}/node-only-path"
 STALE_PATH_DIR="${TMP_ROOT}/stale-path"
 
-cp -R packages/cli "${CLI_STAGE}"
-cp -R packages/tokscale "${WRAPPER_STAGE}"
+cp -R packages/tokenx "${LAUNCHER_STAGE}"
 cp -R "packages/${PLATFORM_PACKAGE}" "${PLATFORM_STAGE}"
 mkdir -p \
   "${PLATFORM_STAGE}/bin" \
@@ -155,15 +153,15 @@ mkdir -p \
   "${BUN_ONLY_DIR}" \
   "${NODE_ONLY_DIR}" \
   "${STALE_PATH_DIR}"
-cp "${CARGO_BINARY_DIR}/tokscale" "${PLATFORM_STAGE}/bin/tokscale"
+cp "${CARGO_BINARY_DIR}/tokenx" "${PLATFORM_STAGE}/bin/tokenx"
 
-chmod +x "${CLI_STAGE}/bin.js" "${WRAPPER_STAGE}/bin.js" "${PLATFORM_STAGE}/bin/tokscale"
+chmod +x "${LAUNCHER_STAGE}/bin.js" "${PLATFORM_STAGE}/bin/tokenx"
 
-cat > "${STALE_PATH_DIR}/tokscale" <<'SH'
+cat > "${STALE_PATH_DIR}/tokenx" <<'SH'
 #!/bin/sh
-echo "tokscale 2.0.0"
+echo "tokenx 2.0.0"
 SH
-chmod +x "${STALE_PATH_DIR}/tokscale"
+chmod +x "${STALE_PATH_DIR}/tokenx"
 
 ln -s "${BUN_BIN}" "${BUN_ONLY_DIR}/bun"
 ln -s "${NODE_BIN}" "${NODE_ONLY_DIR}/node"
@@ -179,7 +177,7 @@ BUN_ONLY_PATH="${BUN_ONLY_DIR}"
 NODE_ONLY_PATH="${NODE_ONLY_DIR}"
 
 PLATFORM_TGZ="$(cd "${PLATFORM_STAGE}" && NPM_CONFIG_CACHE="${NPM_CACHE}" npm pack --silent)"
-node --input-type=module - "${CLI_STAGE}/package.json" "@juya-ai/tokscale-${PLATFORM_PACKAGE}" "file:${PLATFORM_STAGE}/${PLATFORM_TGZ}" <<'NODE'
+node --input-type=module - "${LAUNCHER_STAGE}/package.json" "@juya-ai/${PLATFORM_PACKAGE}" "file:${PLATFORM_STAGE}/${PLATFORM_TGZ}" <<'NODE'
 import fs from "node:fs";
 
 const [manifestPath, packageName, packageSpec] = process.argv.slice(2);
@@ -187,103 +185,85 @@ const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 manifest.optionalDependencies = { [packageName]: packageSpec };
 fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 NODE
-CLI_TGZ="$(cd "${CLI_STAGE}" && NPM_CONFIG_CACHE="${NPM_CACHE}" npm pack --silent)"
-node --input-type=module - "${WRAPPER_STAGE}/package.json" "file:${CLI_STAGE}/${CLI_TGZ}" <<'NODE'
-import fs from "node:fs";
+LAUNCHER_TGZ="$(cd "${LAUNCHER_STAGE}" && NPM_CONFIG_CACHE="${NPM_CACHE}" npm pack --silent)"
 
-const [manifestPath, cliSpec] = process.argv.slice(2);
-const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-manifest.dependencies = {
-  ...manifest.dependencies,
-  "@juya-ai/tokscale-cli": cliSpec,
-};
-fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-NODE
-WRAPPER_TGZ="$(cd "${WRAPPER_STAGE}" && NPM_CONFIG_CACHE="${NPM_CACHE}" npm pack --silent)"
-
-echo "Installing local wrapper tarball with Bun..."
+echo "Installing local launcher tarball with Bun..."
 (
   cd "${INSTALL_DIR}"
-  env PATH="${BUN_ONLY_PATH}" bun add "${WRAPPER_STAGE}/${WRAPPER_TGZ}" >/dev/null
+  env PATH="${BUN_ONLY_PATH}" bun add "${LAUNCHER_STAGE}/${LAUNCHER_TGZ}" >/dev/null
 )
 
-INSTALLED_BIN="${INSTALL_DIR}/node_modules/.bin/tokscale"
+INSTALLED_BIN="${INSTALL_DIR}/node_modules/.bin/tokenx"
 if [[ ! -e "${INSTALLED_BIN}" ]]; then
-  echo "Installed tokscale launcher not found at ${INSTALLED_BIN}" >&2
+  echo "Installed tokenx launcher not found at ${INSTALLED_BIN}" >&2
   exit 1
 fi
-WRAPPER_PACKAGE_DIR="${INSTALL_DIR}/node_modules/@juya-ai/tokscale"
-CLI_PACKAGE_DIR="${INSTALL_DIR}/node_modules/@juya-ai/tokscale-cli"
-PLATFORM_PACKAGE_DIR="${INSTALL_DIR}/node_modules/@juya-ai/tokscale-${PLATFORM_PACKAGE}"
-WRAPPER_BIN="${WRAPPER_PACKAGE_DIR}/bin.js"
+LAUNCHER_PACKAGE_DIR="${INSTALL_DIR}/node_modules/@juya-ai/tokenx"
+PLATFORM_PACKAGE_DIR="${INSTALL_DIR}/node_modules/@juya-ai/${PLATFORM_PACKAGE}"
+LAUNCHER_BIN="${LAUNCHER_PACKAGE_DIR}/bin.js"
 for expected in \
-  "${WRAPPER_BIN}" \
-  "${CLI_PACKAGE_DIR}/bin.js" \
-  "${PLATFORM_PACKAGE_DIR}/bin/tokscale"; do
+  "${LAUNCHER_BIN}" \
+  "${PLATFORM_PACKAGE_DIR}/bin/tokenx"; do
   if [[ ! -e "${expected}" ]]; then
     echo "Expected installed package path missing: ${expected}" >&2
     exit 1
   fi
 done
-grep -q 'await import("@juya-ai/tokscale-cli")' "${WRAPPER_PACKAGE_DIR}/bin.js" || {
-  echo "Installed tokscale wrapper does not import @juya-ai/tokscale-cli" >&2
-  exit 1
-}
 if [[ -L "${INSTALLED_BIN}" ]]; then
   INSTALLED_BIN_TARGET="$(readlink "${INSTALLED_BIN}")"
-  echo "Installed tokscale bin points at ${INSTALLED_BIN_TARGET}"
+  echo "Installed tokenx bin points at ${INSTALLED_BIN_TARGET}"
 fi
 
-if [[ "${TOKSCALE_SMOKE_BUILD_PROFILE}" == "release" ]]; then
-  echo "Checking source-tree wrapper with Node-only PATH..."
-  env PATH="${NODE_ONLY_PATH}" "${ROOT_DIR}/packages/tokscale/bin.js" --version >/dev/null
+if [[ "${TOKENX_SMOKE_BUILD_PROFILE}" == "release" ]]; then
+  echo "Checking source-tree launcher with Node-only PATH..."
+  env PATH="${NODE_ONLY_PATH}" "${ROOT_DIR}/packages/tokenx/bin.js" --version >/dev/null
 else
-  echo "Skipping source-tree wrapper check for debug smoke profile..."
+  echo "Skipping source-tree launcher check for debug smoke profile..."
 fi
 
-echo "Checking installed wrapper package with Node-only PATH..."
-INSTALLED_WRAPPER_VERSION_NODE="$(env PATH="${NODE_ONLY_PATH}" "${WRAPPER_BIN}" --version)"
-[[ "${INSTALLED_WRAPPER_VERSION_NODE}" == tokscale* ]] || {
-  echo "Unexpected installed wrapper output: ${INSTALLED_WRAPPER_VERSION_NODE}" >&2
+echo "Checking installed launcher package with Node-only PATH..."
+INSTALLED_LAUNCHER_VERSION_NODE="$(env PATH="${NODE_ONLY_PATH}" "${LAUNCHER_BIN}" --version)"
+[[ "${INSTALLED_LAUNCHER_VERSION_NODE}" == tokenx* ]] || {
+  echo "Unexpected installed launcher output: ${INSTALLED_LAUNCHER_VERSION_NODE}" >&2
   exit 1
 }
 
 echo "Checking installed launcher via Bun runtime..."
 INSTALLED_VERSION_BUN="$(env PATH="${BUN_ONLY_PATH}" bun "${INSTALLED_BIN}" --version)"
-[[ "${INSTALLED_VERSION_BUN}" == tokscale* ]] || {
+[[ "${INSTALLED_VERSION_BUN}" == tokenx* ]] || {
   echo "Unexpected Bun launcher output: ${INSTALLED_VERSION_BUN}" >&2
   exit 1
 }
 
 echo "Checking installed launcher with Node-only PATH..."
 INSTALLED_VERSION_NODE="$(env PATH="${NODE_ONLY_PATH}" "${INSTALLED_BIN}" --version)"
-[[ "${INSTALLED_VERSION_NODE}" == tokscale* ]] || {
+[[ "${INSTALLED_VERSION_NODE}" == tokenx* ]] || {
   echo "Unexpected Node-only launcher output: ${INSTALLED_VERSION_NODE}" >&2
   exit 1
 }
 
-echo "Checking missing platform binary does not fall back to stale PATH tokscale..."
-rm -f "${INSTALL_DIR}/node_modules/@juya-ai/tokscale-${PLATFORM_PACKAGE}/bin/tokscale"
-rm -f "${INSTALL_DIR}/node_modules/@juya-ai/tokscale-cli/node_modules/@juya-ai/tokscale-${PLATFORM_PACKAGE}/bin/tokscale"
-rm -f "${INSTALL_DIR}/node_modules/@juya-ai/node_modules/@juya-ai/tokscale-${PLATFORM_PACKAGE}/bin/tokscale"
-rm -f "${INSTALL_DIR}/node_modules/node_modules/@juya-ai/tokscale-${PLATFORM_PACKAGE}/bin/tokscale"
-rm -f "${INSTALL_DIR}/node_modules/packages/${PLATFORM_PACKAGE}/bin/tokscale"
-rm -f "${INSTALL_DIR}/node_modules/target/release/tokscale"
-rm -f "${INSTALL_DIR}/node_modules/@juya-ai/tokscale-cli/bin/tokscale"
+echo "Checking missing platform binary does not fall back to stale PATH tokenx..."
+rm -f "${INSTALL_DIR}/node_modules/@juya-ai/${PLATFORM_PACKAGE}/bin/tokenx"
+rm -f "${INSTALL_DIR}/node_modules/@juya-ai/tokenx/node_modules/@juya-ai/${PLATFORM_PACKAGE}/bin/tokenx"
+rm -f "${INSTALL_DIR}/node_modules/@juya-ai/node_modules/@juya-ai/${PLATFORM_PACKAGE}/bin/tokenx"
+rm -f "${INSTALL_DIR}/node_modules/node_modules/@juya-ai/${PLATFORM_PACKAGE}/bin/tokenx"
+rm -f "${INSTALL_DIR}/node_modules/packages/${PLATFORM_PACKAGE}/bin/tokenx"
+rm -f "${INSTALL_DIR}/node_modules/target/release/tokenx"
+rm -f "${INSTALL_DIR}/node_modules/@juya-ai/tokenx/bin/tokenx"
 set +e
-STALE_OUTPUT="$(env PATH="${STALE_PATH_DIR}:${NODE_ONLY_PATH}" "${WRAPPER_BIN}" --version 2>&1)"
+STALE_OUTPUT="$(env PATH="${STALE_PATH_DIR}:${NODE_ONLY_PATH}" "${LAUNCHER_BIN}" --version 2>&1)"
 STALE_CODE=$?
 set -e
 if [[ ${STALE_CODE} -eq 0 ]]; then
-  echo "Expected launcher to fail instead of executing stale PATH tokscale" >&2
+  echo "Expected launcher to fail instead of executing stale PATH tokenx" >&2
   echo "Launcher output: ${STALE_OUTPUT}" >&2
   exit 1
 fi
-if [[ "${STALE_OUTPUT}" == *"tokscale 2.0.0"* ]]; then
-  echo "Launcher executed stale PATH tokscale: ${STALE_OUTPUT}" >&2
+if [[ "${STALE_OUTPUT}" == *"tokenx 2.0.0"* ]]; then
+  echo "Launcher executed stale PATH tokenx: ${STALE_OUTPUT}" >&2
   exit 1
 fi
-[[ "${STALE_OUTPUT}" == *"tokscale binary not found"* ]] || {
+[[ "${STALE_OUTPUT}" == *"tokenx binary not found"* ]] || {
   echo "Unexpected missing-binary error output: ${STALE_OUTPUT}" >&2
   exit 1
 }

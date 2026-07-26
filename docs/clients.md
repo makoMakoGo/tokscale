@@ -1,6 +1,6 @@
 # Local clients and inputs
 
-`crates/tokscale-core/client-catalog.json` is the canonical client-ID catalog.
+`crates/tokenx-engine/client-catalog.json` is the canonical client-ID catalog.
 The registered vertical integration and decoder schema for each ID are authoritative for
 discovery and parsing. This page is the current user-facing map of that
 executable contract.
@@ -11,7 +11,7 @@ Execute one registered integration and inspect its Data Health with:
 bun run cli -- models --client codex --json --no-spinner
 ```
 
-For an installed binary, replace `bun run cli --` with `tokscale`. The catalog,
+For an installed binary, replace `bun run cli --` with `tokenx`. The catalog,
 registered integrations, and table below define discovery; runtime input failures
 are reported by Models Data Health and the TUI rather than by a second path
 inventory.
@@ -37,7 +37,7 @@ current home directory. `**` means recursive discovery under the stated root.
 | `roocode` | Roo Code | `~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/**/ui_messages.json`; `~/.vscode-server/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/**/ui_messages.json` | Reads task UI messages together with the required `api_conversation_history.json` sibling. |
 | `mux` | Mux | `~/.mux/sessions/**/session-usage.json` | Reads per-session model usage summaries and applies stable record deduplication. |
 | `kilo` | Kilo | `~/.local/share/kilo/kilo.db` | Reads the Kilo SQLite store with committed WAL state for all Kilo frontends using that data environment. |
-| `hermes` | Hermes | `~/.hermes/state.db` | Reads token records from Hermes state and derives cost from Tokscale pricing. |
+| `hermes` | Hermes | `~/.hermes/state.db` | Reads token records from Hermes state and derives cost from Tokenx pricing. |
 | `copilot` | Copilot | `~/.copilot/otel/*.jsonl` | Reads Copilot OTEL file-export records and workspace metadata. |
 | `goose` | Goose | `~/.local/share/goose/sessions/sessions.db` or `~/Library/Application Support/goose/sessions/sessions.db` | Reads Goose SQLite session stores with committed WAL state. |
 | `codebuff` | Codebuff | `~/.config/{manicode,manicode-dev,manicode-staging}/projects/**/chat-messages.json` | Reads Codebuff conversation token records. |
@@ -93,7 +93,7 @@ non-file path, an unreadable database, or a schema mismatch is reported through
 Data Health. Automatic OpenCode discovery selects only `opencode.db` and
 `opencode-<channel>.db`.
 
-Extra roots use the same filename and schema rules as the adapter's default
+Extra roots use the same filename and schema rules as the integration's default
 root; they do not broaden accepted formats. Canonical paths are deduplicated
 before parsing. An explicit `--home` resolves the same fixed built-in layout
 beneath the supplied home; configured extra roots remain additional inputs.
@@ -107,10 +107,10 @@ reported as a clean empty input. Record-level schema failures are counted as
 rejections while valid records from the same input remain usable when parsing
 can continue.
 
-Adapters require the identity, model, session, timestamp, and token fields
+Integrations require the identity, model, session, timestamp, and token fields
 defined by their current schema. Timestamps and token counts must be finite,
 representable, and semantically valid for that schema. Provider is optional
-usage attribution: Tokscale infers it from a valid model when possible and uses
+usage attribution: Tokenx infers it from a valid model when possible and uses
 `unknown` otherwise.
 
 ## Warp local token parsing
@@ -126,7 +126,7 @@ Warp discovery selects these provider data directories:
 - Windows:
   `~\AppData\Local\warp\{Warp,WarpPreview,WarpDev,WarpLocal,WarpOss}\data\warp.sqlite`.
 
-The Warp adapter opens each discovered `warp.sqlite` read-only with its
+The Warp integration opens each discovered `warp.sqlite` read-only with its
 committed WAL state. It reads `agent_conversations.conversation_data`, emits one
 usage row for each positive conversation/model token total, and uses
 `last_modified_at` as the report timestamp. Each row requires a
@@ -139,6 +139,6 @@ non-integer, negative, or overflowing counter rejects that entry. This local
 acquisition does not call a Warp account or synchronization service.
 
 Warp stores these entries as total-token aggregates rather than input, output,
-cache, and reasoning buckets. Tokscale applies the fixed total-only allocation
+cache, and reasoning buckets. Tokenx applies the fixed total-only allocation
 to the complete set of accepted rows, then performs ordinary pricing and report
 aggregation.
