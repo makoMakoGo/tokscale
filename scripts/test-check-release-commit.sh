@@ -272,6 +272,33 @@ test_bootstrap_pr_is_validated_without_automatic_publish() {
   grep -q "automatic publishing is skipped" "${TMP_DIR}/bootstrap-push-log.txt"
 }
 
+test_initial_branch_push_is_validated_without_automatic_publish() {
+  local work release_sha output_file
+  work="${TMP_DIR}/initial-push-work"
+  git init -q "${work}"
+  (
+    cd "${work}"
+    git_config
+    git switch -qc main
+    mkdir -p scripts
+    cp "${SCRIPT_UNDER_TEST}" scripts/check-release-commit.sh
+    cp "${COHERENCE_SCRIPT}" scripts/check-version-coherence.sh
+    write_manifests 0.0.0
+    git add .
+    git commit -qm "feat: initialize Tokenx"
+  )
+  release_sha="$(git -C "${work}" rev-parse HEAD)"
+  output_file="${TMP_DIR}/initial-push-github-output.txt"
+
+  run_check "${work}" push "${release_sha}" "0000000000000000000000000000000000000000" "" "${output_file}" >"${TMP_DIR}/initial-push-log.txt"
+  grep -q '^should_publish=false$' "${output_file}"
+  grep -q '^version=0.0.0$' "${output_file}"
+  grep -q '^base_version=$' "${output_file}"
+  grep -q "^release_commit=${release_sha}$" "${output_file}"
+  grep -q '^recovery=false$' "${output_file}"
+  grep -q "repository bootstrap detected" "${TMP_DIR}/initial-push-log.txt"
+}
+
 test_auto_publish_rejects_stale_release_commit() {
   local origin work base_sha release_sha output_file
   origin="$(create_origin stale)"
@@ -350,6 +377,7 @@ test_accepts_release_only_version_push
 test_skips_push_without_version_change
 test_rejects_version_push_with_non_release_files
 test_bootstrap_pr_is_validated_without_automatic_publish
+test_initial_branch_push_is_validated_without_automatic_publish
 test_auto_publish_rejects_stale_release_commit
 test_recovery_accepts_exact_ancestor_release_commit
 test_recovery_rejects_later_commit_with_same_version

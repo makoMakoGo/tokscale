@@ -53,6 +53,10 @@ manifest_version_at() {
   git show "${commit}:${manifest}" | jq -er '.version'
 }
 
+is_null_commit() {
+  [[ -n "$1" && "$1" =~ ^0+$ ]]
+}
+
 assert_version_increased() {
   python3 - "$1" "$2" <<'PY'
 import re
@@ -195,6 +199,16 @@ fi
 case "${RELEASE_EVENT_NAME}" in
   push)
     [[ -n "${RELEASE_BEFORE_SHA}" ]] || fail "RELEASE_BEFORE_SHA is required for push releases"
+    if is_null_commit "${RELEASE_BEFORE_SHA}"; then
+      bash scripts/check-version-coherence.sh --expect-version "${current_version}"
+      write_output should_publish false
+      write_output version "${current_version}"
+      write_output base_version ""
+      write_output release_commit "${release_sha}"
+      write_output recovery false
+      echo "Tokenx ${current_version} repository bootstrap detected at ${release_sha}; automatic publishing is skipped"
+      exit 0
+    fi
     git rev-parse --verify "${RELEASE_BEFORE_SHA}^{commit}" >/dev/null ||
       fail "Push base is not a commit: ${RELEASE_BEFORE_SHA}"
     git merge-base --is-ancestor "${RELEASE_BEFORE_SHA}" "${release_sha}" ||
