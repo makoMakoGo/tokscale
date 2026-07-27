@@ -58,6 +58,11 @@ Engine microbenchmarks use `codspeed-criterion-compat` and run in CI through
 `.github/workflows/codspeed.yml`. The workflow authenticates with GitHub OIDC;
 it does not require a long-lived `CODSPEED_TOKEN`.
 
+Measure startup, acquisition, and RSS only with `target/release/tokenx`.
+`cargo build -p tokenx` produces an unoptimized debug binary for correctness
+work; it is not a performance artifact. Build the measured binary with
+`cargo build --release -p tokenx`.
+
 Every new GitHub repository must still be imported in the CodSpeed settings and
 authorized for the CodSpeed GitHub App before its workflow can publish a
 baseline. Repository history and baselines are external CodSpeed state, not
