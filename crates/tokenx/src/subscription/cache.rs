@@ -15,10 +15,6 @@ struct CacheEnvelope {
     data: Vec<SubscriptionOutput>,
 }
 
-fn cache_path() -> Result<std::path::PathBuf> {
-    Ok(tokenx_engine::paths::try_get_cache_dir()?.join("subscription-usage-cache.json"))
-}
-
 fn current_unix_timestamp() -> Result<u64> {
     Ok(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -26,8 +22,8 @@ fn current_unix_timestamp() -> Result<u64> {
         .as_secs())
 }
 
-pub(crate) fn save(data: &[SubscriptionOutput]) -> Result<()> {
-    save_at(&cache_path()?, data, current_unix_timestamp()?)
+pub(crate) fn save(path: &std::path::Path, data: &[SubscriptionOutput]) -> Result<()> {
+    save_at(path, data, current_unix_timestamp()?)
 }
 
 fn save_at(path: &std::path::Path, data: &[SubscriptionOutput], timestamp: u64) -> Result<()> {
@@ -43,8 +39,8 @@ fn save_at(path: &std::path::Path, data: &[SubscriptionOutput], timestamp: u64) 
 }
 
 #[cfg_attr(test, allow(dead_code))]
-pub(crate) fn load() -> Result<Option<Vec<SubscriptionOutput>>> {
-    load_at(&cache_path()?, current_unix_timestamp()?)
+pub(crate) fn load(path: &std::path::Path) -> Result<Option<Vec<SubscriptionOutput>>> {
+    load_at(path, current_unix_timestamp()?)
 }
 
 fn load_at(path: &std::path::Path, now: u64) -> Result<Option<Vec<SubscriptionOutput>>> {
@@ -124,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_uses_typed_provider_identity_in_v3_envelope() -> Result<()> {
+    fn round_trip_uses_typed_provider_identity_in_v1_envelope() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("subscription-usage-cache.json");
         let output = output();

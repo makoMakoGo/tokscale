@@ -43,6 +43,7 @@ impl TaskSupervisor {
         &mut self,
         request_id: u64,
         engine: tokenx_engine::AcquisitionEngine,
+        generation_cache_file: std::path::PathBuf,
         force: bool,
         last_fingerprint: Option<tokenx_engine::SourceFingerprint>,
     ) {
@@ -62,7 +63,11 @@ impl TaskSupervisor {
                 let _persistence_guard = persistence_gate
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                persist_background_load_with_cancellation(loaded, &cancellation)
+                persist_background_load_with_cancellation(
+                    &generation_cache_file,
+                    loaded,
+                    &cancellation,
+                )
             });
         }));
     }

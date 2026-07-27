@@ -143,7 +143,13 @@ impl Drop for HomeEnvGuard {
 }
 
 fn current_pricing_snapshot() -> Arc<crate::pricing::ResolvedPricingSnapshot> {
-    Arc::new(crate::pricing::ResolvedPricingSnapshot::resolve_current())
+    let root = std::env::var_os("TOKENX_CONFIG_DIR")
+        .map(PathBuf::from)
+        .expect("test product root must be configured");
+    Arc::new(crate::pricing::ResolvedPricingSnapshot::resolve_from(
+        &root.join("custom-pricing.json"),
+        &root.join("cache"),
+    ))
 }
 
 fn make_workspace_message(
@@ -372,7 +378,7 @@ fn generation_carries_prepared_input_footprint() {
         pricing.context().clone(),
     )
     .unwrap();
-    let generation = super::AcquisitionEngine::with_input_cache_dir(
+    let generation = super::AcquisitionEngine::new(
         config,
         pricing,
         super::input_cache_dir_for_test_home(home.path()),
@@ -1842,12 +1848,9 @@ fn prepare_generation_sources(
         pricing.context().clone(),
     )
     .unwrap();
-    let engine = AcquisitionEngine::with_input_cache_dir(
-        config,
-        pricing,
-        super::input_cache_dir_for_test_home(home),
-    )
-    .unwrap();
+    let engine =
+        AcquisitionEngine::new(config, pricing, super::input_cache_dir_for_test_home(home))
+            .unwrap();
     let sources = engine.prepare().unwrap();
     (engine, sources)
 }

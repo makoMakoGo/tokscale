@@ -256,6 +256,7 @@ pub fn run(runtime: tokio::runtime::Handle, plan: crate::cli::TuiPlan) -> Result
         debug,
         startup:
             crate::cli::StartupSnapshot {
+                paths,
                 input:
                     crate::cli::ResolvedInputScope {
                         home: home_dir,
@@ -292,6 +293,7 @@ pub fn run(runtime: tokio::runtime::Handle, plan: crate::cli::TuiPlan) -> Result
 
     // Single file read: load cache and check freshness in one pass.
     let acquisition = acquisition_engine(
+        paths.cache_dir(),
         home_dir,
         universe,
         date_range,
@@ -300,7 +302,10 @@ pub fn run(runtime: tokio::runtime::Handle, plan: crate::cli::TuiPlan) -> Result
         pricing,
     )?;
     let (cached_snapshot, mut needs_background_load, retry_backoff, cache_startup_warning) =
-        decide_initial_data(load_generation_cache(acquisition.config()));
+        decide_initial_data(load_generation_cache(
+            &paths.generation_cache_file(),
+            acquisition.config(),
+        ));
 
     let original_hook = panic::take_hook();
     let tui_thread_id = thread::current().id();
@@ -315,7 +320,7 @@ pub fn run(runtime: tokio::runtime::Handle, plan: crate::cli::TuiPlan) -> Result
     // the terminal session before TaskSupervisor can wait for blocking work.
     let mut tasks = TaskSupervisor::new(runtime);
     let mut terminal_session = TerminalSession::enter()?;
-    let mut app = App::new(config, settings)?;
+    let mut app = App::new(config, settings, paths.clone())?;
     if let Some(warning) = cache_startup_warning {
         tracing::warn!(warning = %warning, "generation cache unavailable at TUI startup");
         app.set_generation_cache_warning(Some(warning));
@@ -323,8 +328,12 @@ pub fn run(runtime: tokio::runtime::Handle, plan: crate::cli::TuiPlan) -> Result
     needs_background_load |= install_cached_generation(&mut app, cached_snapshot);
     let mut view_state = view_state::ViewState::default();
 
-    let mut generation_controller = GenerationController::new(acquisition, app.refresh_status())
-        .with_relative_date_range(relative_date_range);
+    let mut generation_controller = GenerationController::new(
+        acquisition,
+        paths.generation_cache_file(),
+        app.refresh_status(),
+    )
+    .with_relative_date_range(relative_date_range);
     generation_controller.set_retry_backoff(retry_backoff);
 
     if needs_background_load {
@@ -977,11 +986,16 @@ mod tests {
         app: &App,
         acquisition: tokenx_engine::AcquisitionEngine,
     ) -> GenerationController {
-        GenerationController::new(acquisition, app.refresh_status())
+        GenerationController::new(
+            acquisition,
+            std::path::PathBuf::from("/tmp/tokenx-tui-controller-generation.bin"),
+            app.refresh_status(),
+        )
     }
 
     fn controller_for_client(app: &App, client: ClientId) -> GenerationController {
         let acquisition = acquisition_engine(
+            std::path::PathBuf::from("/tmp/tokenx-tui-controller-cache"),
             std::path::PathBuf::from("/tmp/tokenx-tui-controller-test"),
             ClientUniverse::new([client]).unwrap(),
             tokenx_engine::DateRange::none(),
@@ -1149,12 +1163,13 @@ mod tests {
         let _guard = EnvGuard::set(home.path());
         write_amp_input(home.path(), 10);
         let loader = acquisition_engine(
+            home.path().join("cache"),
             home.path().to_path_buf(),
             ClientUniverse::new([ClientId::Amp]).unwrap(),
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
             tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
-            std::sync::Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current()),
+            crate::acquisition::test_pricing_snapshot(),
         )
         .unwrap();
         let prepared = loader.prepare().unwrap();
@@ -1196,12 +1211,13 @@ mod tests {
         let _guard = EnvGuard::set(home.path());
         write_amp_model_input(home.path(), "old-model", 10);
         let loader = acquisition_engine(
+            home.path().join("cache"),
             home.path().to_path_buf(),
             ClientUniverse::new([ClientId::Amp]).unwrap(),
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
             tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
-            std::sync::Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current()),
+            crate::acquisition::test_pricing_snapshot(),
         )
         .unwrap();
         let old = load_background_data(&loader, true, None).unwrap();
@@ -1387,12 +1403,13 @@ mod tests {
         let _guard = EnvGuard::set(home.path());
         write_amp_model_input(home.path(), "retained-model", 10);
         let loader = acquisition_engine(
+            home.path().join("cache"),
             home.path().to_path_buf(),
             ClientUniverse::new([ClientId::Amp]).unwrap(),
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
             tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
-            std::sync::Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current()),
+            crate::acquisition::test_pricing_snapshot(),
         )
         .unwrap();
         let loaded = load_background_data(&loader, true, None).unwrap();
@@ -1433,7 +1450,8 @@ mod tests {
             signature,
         ));
 
-        let persisted = persist_background_load(Ok(loaded)).unwrap();
+        let persisted =
+            persist_background_load(&blocked_config.join("generation.bin"), Ok(loaded)).unwrap();
 
         match persisted {
             BackgroundLoad::Loaded {

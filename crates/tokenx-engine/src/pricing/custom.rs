@@ -7,9 +7,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-const CUSTOM_PRICING_FILENAME: &str = "custom-pricing.json";
 const TOKENS_PER_MILLION: f64 = 1_000_000.0;
 const MAX_CUSTOM_PRICING_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CUSTOM_PRICING_MODEL_CAPACITY: usize = 10_000;
@@ -177,24 +176,6 @@ impl CustomModelPricing {
 }
 
 impl CustomPricing {
-    pub fn default_path() -> Result<PathBuf, crate::paths::ConfigDirUnavailable> {
-        crate::paths::try_get_config_dir().map(|directory| directory.join(CUSTOM_PRICING_FILENAME))
-    }
-
-    pub fn load_from_default_path() -> Self {
-        Self::default_path()
-            .map(|path| Self::load_from_path(&path))
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn load_from_default_path_with_diagnostics(
-        diagnostics: &mut PricingDiagnostics,
-    ) -> Self {
-        Self::default_path()
-            .map(|path| Self::load_from_path_with_diagnostics(&path, diagnostics))
-            .unwrap_or_default()
-    }
-
     pub fn load_from_path(path: &Path) -> Self {
         let mut diagnostics = None;
         Self::load_from_path_with_sink(path, &mut diagnostics)

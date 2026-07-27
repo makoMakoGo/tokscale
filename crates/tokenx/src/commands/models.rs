@@ -61,6 +61,7 @@ pub(crate) fn run_models(plan: ModelsPlan, no_spinner: bool) -> Result<()> {
         json,
         startup:
             StartupSnapshot {
+                paths,
                 input:
                     ResolvedInputScope {
                         home: home_dir,
@@ -86,6 +87,7 @@ pub(crate) fn run_models(plan: ModelsPlan, no_spinner: bool) -> Result<()> {
     let spinner = (!no_spinner).then(|| LightSpinner::start("Scanning session data..."));
     let start = Instant::now();
     let acquisition = acquisition_engine(
+        paths.cache_dir(),
         home_dir,
         universe.clone(),
         date_range_filter,

@@ -9,12 +9,6 @@ pub struct InputRecordCachePruneStats {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum InputRecordCacheError {
-    #[cfg(test)]
-    #[error("input-record cache directory is unavailable: {source}")]
-    CacheDirectoryUnavailable {
-        #[source]
-        source: crate::paths::ConfigDirUnavailable,
-    },
     #[error("failed to {operation} `{path}`: {source}")]
     Io {
         operation: &'static str,
@@ -100,11 +94,6 @@ pub(crate) enum RelatedInputFailurePolicy {
 
 #[derive(Debug, thiserror::Error)]
 pub enum InputRecordCachePruneError {
-    #[error("input-record cache directory is unavailable: {source}")]
-    CacheDirectoryUnavailable {
-        #[source]
-        source: crate::paths::ConfigDirUnavailable,
-    },
     #[error("failed to {operation} `{path}`: {source}")]
     Io {
         operation: &'static str,

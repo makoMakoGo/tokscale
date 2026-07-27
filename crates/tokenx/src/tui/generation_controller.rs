@@ -110,6 +110,7 @@ pub(super) struct AcquisitionTaskResult {
 /// owns a loader, source fingerprint, refresh clock, or in-flight authority.
 pub(super) struct GenerationController {
     acquisition: tokenx_engine::AcquisitionEngine,
+    generation_cache_file: std::path::PathBuf,
     status: RefreshStatus,
     last_checked: Instant,
     pending: Option<PendingRefresh>,
@@ -122,10 +123,12 @@ pub(super) struct GenerationController {
 impl GenerationController {
     pub(super) fn new(
         acquisition: tokenx_engine::AcquisitionEngine,
+        generation_cache_file: std::path::PathBuf,
         status: RefreshStatus,
     ) -> Self {
         Self {
             acquisition,
+            generation_cache_file,
             status,
             last_checked: Instant::now(),
             pending: None,
@@ -242,6 +245,7 @@ impl GenerationController {
         tasks.spawn_acquisition(
             request_id,
             self.acquisition.clone(),
+            self.generation_cache_file.clone(),
             force,
             last_fingerprint,
         );
@@ -254,6 +258,7 @@ impl GenerationController {
             .map(|relative| relative.resolve(effective_date))
             .unwrap_or_else(|| current.date_range().clone());
         let replacement = acquisition_engine(
+            self.acquisition.input_cache_dir().to_path_buf(),
             current.resolved_home_dir().to_path_buf(),
             current.universe().clone(),
             date_range,
@@ -463,14 +468,19 @@ pub(super) fn load_background_data_with_cancellation(
 }
 
 #[cfg(test)]
-pub(super) fn persist_background_load(result: Result<BackgroundLoad>) -> Result<BackgroundLoad> {
+pub(super) fn persist_background_load(
+    generation_cache_file: &std::path::Path,
+    result: Result<BackgroundLoad>,
+) -> Result<BackgroundLoad> {
     persist_background_load_with_cancellation(
+        generation_cache_file,
         result,
         &tokenx_engine::AcquisitionCancellation::default(),
     )
 }
 
 pub(super) fn persist_background_load_with_cancellation(
+    generation_cache_file: &std::path::Path,
     result: Result<BackgroundLoad>,
     cancellation: &tokenx_engine::AcquisitionCancellation,
 ) -> Result<BackgroundLoad> {
@@ -487,7 +497,7 @@ pub(super) fn persist_background_load_with_cancellation(
         return Ok(BackgroundLoad::Unchanged);
     };
 
-    match save_generation_cache_with_retry_backoff(&generation) {
+    match save_generation_cache_with_retry_backoff(generation_cache_file, &generation) {
         Ok(retry_backoff) => Ok(BackgroundLoad::Loaded {
             generation,
             cache_persistence_warning: None,
@@ -582,6 +592,7 @@ mod tests {
         let status = RefreshStatus::new(automatic, Duration::from_secs(30), Duration::ZERO);
         app.set_refresh_status(status);
         let acquisition = crate::acquisition::acquisition_engine(
+            std::path::PathBuf::from("/tmp/tokenx-generation-controller-test-cache"),
             std::path::PathBuf::from("/tmp/tokenx-generation-controller-test"),
             universe,
             tokenx_engine::DateRange::none(),
@@ -590,7 +601,11 @@ mod tests {
             crate::acquisition::test_pricing_snapshot(),
         )
         .unwrap();
-        let controller = GenerationController::new(acquisition, status);
+        let controller = GenerationController::new(
+            acquisition,
+            std::path::PathBuf::from("/tmp/tokenx-generation-controller-generation.bin"),
+            status,
+        );
         (app, controller)
     }
 

@@ -7,29 +7,9 @@ use tokenx_engine::{
     PreparedAcquisition,
 };
 
-#[cfg(not(test))]
-fn bind_engine(
-    config: AcquisitionConfig,
-    pricing: Arc<tokenx_engine::pricing::ResolvedPricingSnapshot>,
-) -> Result<AcquisitionEngine> {
-    Ok(AcquisitionEngine::new(config, pricing)?)
-}
-
-#[cfg(test)]
-fn bind_engine(
-    config: AcquisitionConfig,
-    pricing: Arc<tokenx_engine::pricing::ResolvedPricingSnapshot>,
-) -> Result<AcquisitionEngine> {
-    let input_cache_dir = config.resolved_home_dir().join(".tokenx-test-cache/input");
-    Ok(AcquisitionEngine::with_input_cache_dir(
-        config,
-        pricing,
-        input_cache_dir,
-    )?)
-}
-
 /// Resolve and bind the one immutable acquisition authority used by a command.
 pub(crate) fn acquisition_engine(
+    input_cache_dir: PathBuf,
     resolved_home_dir: PathBuf,
     clients: ClientUniverse,
     date_range: DateRange,
@@ -45,7 +25,7 @@ pub(crate) fn acquisition_engine(
         calendar,
         pricing.context().clone(),
     )?;
-    bind_engine(config, pricing)
+    Ok(AcquisitionEngine::new(config, pricing, input_cache_dir)?)
 }
 
 #[cfg(test)]
@@ -95,6 +75,7 @@ mod tests {
     #[test]
     fn acquisition_engine_binds_one_immutable_config() {
         let acquisition = acquisition_engine(
+            PathBuf::from("/tmp/tokenx-acquisition-test-cache"),
             PathBuf::from("/tmp/sessions"),
             ClientUniverse::new([ClientId::Amp]).unwrap(),
             DateRange::bounded(
@@ -129,6 +110,7 @@ mod tests {
     #[test]
     fn scanner_settings_are_hermetic_under_cfg_test() {
         let acquisition = acquisition_engine(
+            PathBuf::from("/tmp/tokenx-acquisition-test-cache"),
             PathBuf::from("/tmp/sessions"),
             ClientUniverse::new([ClientId::Amp]).unwrap(),
             DateRange::none(),

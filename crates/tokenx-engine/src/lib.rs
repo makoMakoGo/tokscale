@@ -11,7 +11,6 @@ pub mod input_health;
 mod input_record_cache;
 mod integrations;
 mod model_aliases;
-pub mod paths;
 pub mod pricing;
 mod provider_identity;
 mod records;

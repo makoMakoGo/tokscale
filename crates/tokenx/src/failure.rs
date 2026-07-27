@@ -2,6 +2,7 @@ use std::fmt;
 
 use tokenx_engine::AcquisitionError;
 
+use crate::product_paths::ProductPathsError;
 use crate::settings::SettingsLoadError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,7 @@ impl CliFailure {
 
     fn classify(error: &anyhow::Error) -> FailureClass {
         if error.is::<InvalidConfiguration>()
+            || error.is::<ProductPathsError>()
             || error
                 .downcast_ref::<AcquisitionError>()
                 .is_some_and(AcquisitionError::is_invalid_invocation)
@@ -62,6 +64,12 @@ impl From<anyhow::Error> for CliFailure {
 
 impl From<SettingsLoadError> for CliFailure {
     fn from(error: SettingsLoadError) -> Self {
+        Self::from(anyhow::Error::new(error))
+    }
+}
+
+impl From<ProductPathsError> for CliFailure {
+    fn from(error: ProductPathsError) -> Self {
         Self::from(anyhow::Error::new(error))
     }
 }

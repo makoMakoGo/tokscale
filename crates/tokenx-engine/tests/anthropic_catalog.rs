@@ -150,11 +150,16 @@ fn key_has_version(matched_lower: &str, version: &str) -> bool {
 /// Build the lookup exactly as `PricingService` does for cached datasets
 /// (filter github_copilot and include models.dev as the long-tail Pricing Source).
 fn load_lookup() -> PricingLookup {
-    let litellm_data =
-        litellm::load_cached_any_age().expect("LiteLLM pricing cache required for catalog test");
-    let openrouter_data = openrouter::load_cached_any_age()
+    let product_root = std::env::var_os("TOKENX_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".tokenx")))
+        .expect("Tokenx product root required for catalog test");
+    let cache_dir = product_root.join("cache");
+    let litellm_data = litellm::load_cached_any_age(&cache_dir)
+        .expect("LiteLLM pricing cache required for catalog test");
+    let openrouter_data = openrouter::load_cached_any_age(&cache_dir)
         .expect("OpenRouter pricing cache required for catalog test");
-    let models_dev_data = models_dev::load_cached_any_age()
+    let models_dev_data = models_dev::load_cached_any_age(&cache_dir)
         .expect("models.dev pricing cache required for catalog test");
 
     PricingLookup::new_with_models_dev(

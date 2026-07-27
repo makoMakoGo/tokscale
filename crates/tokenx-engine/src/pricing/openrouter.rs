@@ -2,6 +2,7 @@ use super::litellm::ModelPricing;
 use super::{cache, emit_warning, PricingDiagnosticSink, PricingDiagnostics};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -85,12 +86,12 @@ fn get_author_provider_name(model_id: &str) -> Option<&'static str> {
     }
 }
 
-pub fn load_cached() -> Option<HashMap<String, ModelPricing>> {
-    cache::load_cache(CACHE_FILENAME)
+pub fn load_cached(cache_dir: &Path) -> Option<HashMap<String, ModelPricing>> {
+    cache::load_cache(cache_dir, CACHE_FILENAME)
 }
 
-pub fn load_cached_any_age() -> Option<HashMap<String, ModelPricing>> {
-    cache::load_cache_any_age(CACHE_FILENAME)
+pub fn load_cached_any_age(cache_dir: &Path) -> Option<HashMap<String, ModelPricing>> {
+    cache::load_cache_any_age(cache_dir, CACHE_FILENAME)
 }
 
 fn parse_price(s: &str) -> Option<f64> {
@@ -185,22 +186,24 @@ fn select_models_for_author_pricing(model_ids: Vec<String>) -> Vec<(String, &'st
 }
 
 /// Fetch all models and get author pricing for each
-pub async fn fetch_all_models() -> HashMap<String, ModelPricing> {
+pub async fn fetch_all_models(cache_dir: &Path) -> HashMap<String, ModelPricing> {
     let mut diagnostics = None;
-    fetch_all_models_with_sink(&mut diagnostics).await
+    fetch_all_models_with_sink(cache_dir, &mut diagnostics).await
 }
 
 pub(crate) async fn fetch_all_models_with_diagnostics(
+    cache_dir: &Path,
     diagnostics: &mut PricingDiagnostics,
 ) -> HashMap<String, ModelPricing> {
     let mut diagnostics = Some(diagnostics);
-    fetch_all_models_with_sink(&mut diagnostics).await
+    fetch_all_models_with_sink(cache_dir, &mut diagnostics).await
 }
 
 async fn fetch_all_models_with_sink(
+    cache_dir: &Path,
     diagnostics: &mut PricingDiagnosticSink<'_>,
 ) -> HashMap<String, ModelPricing> {
-    if let Some(cached) = load_cached() {
+    if let Some(cached) = load_cached(cache_dir) {
         return cached;
     }
 
@@ -331,10 +334,10 @@ async fn fetch_all_models_with_sink(
     }
 
     if !result.is_empty() {
-        if let Err(e) = cache::save_cache(CACHE_FILENAME, &result) {
-            let cache_path = cache::get_cache_path(CACHE_FILENAME)
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|error| error.to_string());
+        if let Err(e) = cache::save_cache(cache_dir, CACHE_FILENAME, &result) {
+            let cache_path = cache::get_cache_path(cache_dir, CACHE_FILENAME)
+                .display()
+                .to_string();
             emit_warning(
                 diagnostics,
                 format!(
@@ -348,14 +351,15 @@ async fn fetch_all_models_with_sink(
     result
 }
 
-pub async fn fetch_all_mapped() -> HashMap<String, ModelPricing> {
-    fetch_all_models().await
+pub async fn fetch_all_mapped(cache_dir: &Path) -> HashMap<String, ModelPricing> {
+    fetch_all_models(cache_dir).await
 }
 
 pub(crate) async fn fetch_all_mapped_with_diagnostics(
+    cache_dir: &Path,
     diagnostics: &mut PricingDiagnostics,
 ) -> HashMap<String, ModelPricing> {
-    fetch_all_models_with_diagnostics(diagnostics).await
+    fetch_all_models_with_diagnostics(cache_dir, diagnostics).await
 }
 
 #[cfg(test)]

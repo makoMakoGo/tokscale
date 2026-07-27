@@ -1082,7 +1082,7 @@ fn test_explicit_prune_removes_orphans_and_stale_decoder_contracts() {
     assert!(orphan_shard.exists());
 
     drop(orphan_input);
-    let stats = prune_input_record_cache().unwrap();
+    let stats = prune_input_record_cache(&cache_dir().unwrap()).unwrap();
 
     assert_eq!(
         stats,
@@ -1129,7 +1129,7 @@ fn test_prune_unknown_magic_classification_error_causes_zero_deletion() {
     file.write_all(&[0xff]).unwrap();
     file.flush().unwrap();
 
-    let error = prune_input_record_cache().unwrap_err();
+    let error = prune_input_record_cache(&cache_dir().unwrap()).unwrap_err();
     assert!(matches!(
         error,
         InputRecordCachePruneError::UnknownMagic { .. }
@@ -1172,7 +1172,7 @@ fn test_prune_malformed_current_classification_error_causes_zero_deletion() {
     file.write_all(&body).unwrap();
     file.flush().unwrap();
 
-    let error = prune_input_record_cache().unwrap_err();
+    let error = prune_input_record_cache(&cache_dir().unwrap()).unwrap_err();
     match &error {
         InputRecordCachePruneError::Decode {
             path,
@@ -1212,7 +1212,7 @@ fn test_prune_future_format_classification_error_causes_zero_deletion() {
     )
     .unwrap();
 
-    let error = prune_input_record_cache().unwrap_err();
+    let error = prune_input_record_cache(&cache_dir().unwrap()).unwrap_err();
     assert!(matches!(
         error,
         InputRecordCachePruneError::UnsupportedFormat {

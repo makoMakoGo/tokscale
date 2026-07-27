@@ -255,12 +255,13 @@ after"#,
         .unwrap();
 
         let acquisition = acquisition_engine(
+            temp_dir.path().join("cache"),
             temp_dir.path().to_path_buf(),
             tokenx_engine::ClientUniverse::new([ClientId::RooCode]).unwrap(),
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
             tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
-            std::sync::Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current()),
+            crate::acquisition::test_pricing_snapshot(),
         )
         .unwrap();
         let usage = load_usage(
@@ -310,12 +311,13 @@ after"#,
         drop(conn);
 
         let acquisition = acquisition_engine(
+            temp_dir.path().join("cache"),
             temp_dir.path().to_path_buf(),
             tokenx_engine::ClientUniverse::new([ClientId::OpenCode]).unwrap(),
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
             tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
-            std::sync::Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current()),
+            crate::acquisition::test_pricing_snapshot(),
         )
         .unwrap();
         let usage = load_usage(

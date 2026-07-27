@@ -2,6 +2,7 @@ use super::litellm::ModelPricing;
 use super::{cache, emit_warning, PricingDiagnosticSink, PricingDiagnostics};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::Path;
 
 const CACHE_FILENAME: &str = "pricing-models-dev.json";
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
@@ -31,12 +32,12 @@ struct ModelCost {
 
 pub type PricingDataset = HashMap<String, ModelPricing>;
 
-pub fn load_cached() -> Option<PricingDataset> {
-    cache::load_cache(CACHE_FILENAME)
+pub fn load_cached(cache_dir: &Path) -> Option<PricingDataset> {
+    cache::load_cache(cache_dir, CACHE_FILENAME)
 }
 
-pub fn load_cached_any_age() -> Option<PricingDataset> {
-    cache::load_cache_any_age(CACHE_FILENAME)
+pub fn load_cached_any_age(cache_dir: &Path) -> Option<PricingDataset> {
+    cache::load_cache_any_age(cache_dir, CACHE_FILENAME)
 }
 
 pub(crate) fn parse_dataset(content: &str) -> Result<PricingDataset, serde_json::Error> {
@@ -44,25 +45,27 @@ pub(crate) fn parse_dataset(content: &str) -> Result<PricingDataset, serde_json:
     Ok(map_providers(providers))
 }
 
-pub async fn fetch() -> Result<PricingDataset, reqwest::Error> {
+pub async fn fetch(cache_dir: &Path) -> Result<PricingDataset, reqwest::Error> {
     let mut diagnostics = None;
-    fetch_inner(MODELS_DEV_URL, true, &mut diagnostics).await
+    fetch_inner(cache_dir, MODELS_DEV_URL, true, &mut diagnostics).await
 }
 
 pub(crate) async fn fetch_with_diagnostics(
+    cache_dir: &Path,
     diagnostics: &mut PricingDiagnostics,
 ) -> Result<PricingDataset, reqwest::Error> {
     let mut diagnostics = Some(diagnostics);
-    fetch_inner(MODELS_DEV_URL, true, &mut diagnostics).await
+    fetch_inner(cache_dir, MODELS_DEV_URL, true, &mut diagnostics).await
 }
 
 async fn fetch_inner(
+    cache_dir: &Path,
     url: &str,
     use_cache: bool,
     diagnostics: &mut PricingDiagnosticSink<'_>,
 ) -> Result<PricingDataset, reqwest::Error> {
     if use_cache {
-        if let Some(cached) = load_cached() {
+        if let Some(cached) = load_cached(cache_dir) {
             return Ok(cached);
         }
     }
@@ -108,10 +111,10 @@ async fn fetch_inner(
                 let content = response.text().await?;
                 match parse_dataset(&content) {
                     Ok(data) => {
-                        if let Err(e) = cache::save_cache(CACHE_FILENAME, &data) {
-                            let cache_path = cache::get_cache_path(CACHE_FILENAME)
-                                .map(|path| path.display().to_string())
-                                .unwrap_or_else(|error| error.to_string());
+                        if let Err(e) = cache::save_cache(cache_dir, CACHE_FILENAME, &data) {
+                            let cache_path = cache::get_cache_path(cache_dir, CACHE_FILENAME)
+                                .display()
+                                .to_string();
                             emit_warning(
                                 diagnostics,
                                 format!(
@@ -227,8 +230,9 @@ mod tests {
     async fn fetch_returns_error_after_retryable_http_statuses() {
         let url = retryable_status_server("HTTP/1.1 503 Service Unavailable");
         let mut diagnostics = None;
+        let cache_dir = tempfile::TempDir::new().unwrap();
 
-        let result = fetch_inner(&url, false, &mut diagnostics).await;
+        let result = fetch_inner(cache_dir.path(), &url, false, &mut diagnostics).await;
 
         assert!(result.is_err());
     }
@@ -238,8 +242,9 @@ mod tests {
         let url = retryable_status_server("HTTP/1.1 503 Service Unavailable");
         let mut diagnostics = Vec::new();
         let mut sink = Some(&mut diagnostics);
+        let cache_dir = tempfile::TempDir::new().unwrap();
 
-        let result = fetch_inner(&url, false, &mut sink).await;
+        let result = fetch_inner(cache_dir.path(), &url, false, &mut sink).await;
 
         assert!(result.is_err());
         assert!(

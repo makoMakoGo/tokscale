@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokenx_engine::paths::ConfigDirUnavailable;
 use tokenx_engine::scanner::{ScannerSettings, ScannerSettingsError};
 use tokenx_engine::{CalendarContext, ClientId};
 
+use crate::product_paths::ProductPaths;
 use crate::subscription::ProviderId;
 use crate::theme::ThemeName;
 
@@ -18,8 +18,6 @@ pub(crate) const AUTO_REFRESH_STEP_MS: u64 = 10_000;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SettingsLoadError {
-    #[error(transparent)]
-    ConfigDirectory(#[from] ConfigDirUnavailable),
     #[error("failed to read settings file `{path}`: {source}")]
     Read {
         path: PathBuf,
@@ -88,8 +86,6 @@ pub struct Settings {
     /// Remote subscription-quota surface and its explicit provider allowlist.
     #[serde(default)]
     pub subscription: SubscriptionSettings,
-    #[serde(skip)]
-    pub save_path_override: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -121,7 +117,6 @@ impl Default for Settings {
             default_clients: Vec::new(),
             time_zone: None,
             subscription: SubscriptionSettings::default(),
-            save_path_override: None,
         }
     }
 }
@@ -147,14 +142,8 @@ impl Settings {
         Ok(self)
     }
 
-    fn config_path() -> std::result::Result<PathBuf, SettingsLoadError> {
-        tokenx_engine::paths::try_get_config_dir()
-            .map(|directory| directory.join("settings.json"))
-            .map_err(SettingsLoadError::from)
-    }
-
-    fn writable_config_path() -> Result<PathBuf> {
-        let path = Self::config_path()?;
+    fn writable_config_path(paths: &ProductPaths) -> Result<PathBuf> {
+        let path = paths.settings_file();
         let parent = path
             .parent()
             .expect("settings path must have a configuration directory");
@@ -192,36 +181,20 @@ impl Settings {
             })
     }
 
-    pub fn load() -> std::result::Result<Self, SettingsLoadError> {
-        let path = Self::config_path()?;
-        let mut settings = Self::load_from_path(&path)?;
-        settings.save_path_override = Some(path);
-        Ok(settings)
+    pub fn load(paths: &ProductPaths) -> std::result::Result<Self, SettingsLoadError> {
+        let path = paths.settings_file();
+        Self::load_from_path(&path)
     }
 
-    pub fn save(&self) -> Result<()> {
+    pub fn save(&self, paths: &ProductPaths) -> Result<()> {
         self.clone().validate()?;
 
-        let path = self.save_path_override.clone().map_or_else(
-            Self::writable_config_path,
-            |path| -> Result<PathBuf> {
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                Ok(path)
-            },
-        )?;
+        let path = Self::writable_config_path(paths)?;
 
         let content = serde_json::to_string_pretty(self)?;
 
         tokenx_engine::fs_atomic::write_atomic(&path, content.as_bytes())?;
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub fn with_save_path_override(mut self, path: PathBuf) -> Self {
-        self.save_path_override = Some(path);
-        self
     }
 
     pub fn set_theme(&mut self, theme: ThemeName) {
@@ -239,9 +212,7 @@ mod tests {
     use std::error::Error as _;
 
     fn load_test_path(path: &Path) -> std::result::Result<Settings, SettingsLoadError> {
-        let mut settings = Settings::load_from_path(path)?;
-        settings.save_path_override = Some(path.to_path_buf());
-        Ok(settings)
+        Settings::load_from_path(path)
     }
 
     #[test]
@@ -277,7 +248,7 @@ mod tests {
         let mut loaded = load_test_path(&path).unwrap();
         loaded.color_palette = ThemeName::Halloween;
 
-        loaded.save().unwrap();
+        loaded.save(&ProductPaths::at(temp.path())).unwrap();
 
         let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["colorPalette"], "halloween");
@@ -515,11 +486,11 @@ mod tests {
     #[test]
     fn settings_save_uses_test_path_override() {
         let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join("isolated").join("settings.json");
+        let product_root = temp.path().join("isolated");
+        let path = product_root.join("settings.json");
 
         Settings::default()
-            .with_save_path_override(path.clone())
-            .save()
+            .save(&ProductPaths::at(product_root))
             .unwrap();
 
         assert!(

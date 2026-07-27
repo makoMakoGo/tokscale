@@ -139,7 +139,8 @@ the provider returns a real account id, both outputs carry no `UsageAccount`.
 closed envelope:
 
 - schema id `tokenx.subscription-usage`;
-- version `2`;
+- version `1`, reset with Tokenx's independent `0.1.0` product and cache
+  namespace;
 - a Unix-seconds storage timestamp; and
 - normalized `SubscriptionOutput` data whose provider is the canonical
   `ProviderId`, serialized with the same stable id accepted by

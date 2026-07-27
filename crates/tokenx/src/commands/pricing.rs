@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 pub(crate) async fn run_pricing_lookup(
+    paths: &crate::product_paths::ProductPaths,
     model_id: &str,
     json: bool,
     pricing_source: Option<&str>,
@@ -27,7 +28,8 @@ pub(crate) async fn run_pricing_lookup(
     };
 
     let result = match async {
-        let svc = PricingService::fetch_current().await?;
+        let svc =
+            PricingService::fetch_current(&paths.custom_pricing_file(), &paths.cache_dir()).await?;
         Ok::<_, String>(
             svc.lookup_with_pricing_source(model_id, pricing_source_normalized.as_deref()),
         )
@@ -134,7 +136,10 @@ pub(crate) async fn run_pricing_lookup(
     Ok(())
 }
 
-pub(crate) fn run_pricing_list_overrides(json: bool) -> Result<()> {
+pub(crate) fn run_pricing_list_overrides(
+    paths: &crate::product_paths::ProductPaths,
+    json: bool,
+) -> Result<()> {
     use colored::Colorize;
     use tokenx_engine::pricing::custom::CustomPricing;
     use tokenx_engine::pricing::ModelPricing;
@@ -171,7 +176,7 @@ pub(crate) fn run_pricing_list_overrides(json: bool) -> Result<()> {
         }
     }
 
-    let path = CustomPricing::default_path()?;
+    let path = paths.custom_pricing_file();
     let overrides = CustomPricing::load_from_path(&path);
     let mut entries: Vec<OverrideEntry> = overrides
         .entries()

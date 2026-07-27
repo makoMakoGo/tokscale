@@ -725,7 +725,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_height = inner.height.saturating_sub(1) as usize;
     app.set_max_visible_items(visible_height);
 
-    let rows_data = app.get_sorted_daily_detail_rows();
+    let rows_data = app.daily_detail_rows();
 
     let sort_field = app.sort_field;
     let sort_direction = app.sort_direction;
@@ -813,8 +813,10 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let rows: Vec<Row> = rows_data[start..end]
+    let rows: Vec<Row> = rows_data
         .iter()
+        .skip(start)
+        .take(end - start)
         .enumerate()
         .map(|(i, row)| {
             let idx = i + start;
@@ -1524,8 +1526,10 @@ mod tests {
             ),
         );
         app.usage_mut_for_test().daily = vec![usage];
-        app.selected_daily_detail_date =
-            Some(NaiveDate::parse_from_str("2026-06-09", "%Y-%m-%d").unwrap());
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
         app
     }
 

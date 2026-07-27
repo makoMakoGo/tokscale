@@ -6,6 +6,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(test)]
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -136,7 +137,6 @@ struct PreviousRetryMetadata {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CacheFailureKind {
-    Location,
     Read,
     Decode,
     Clock,
@@ -145,7 +145,6 @@ pub(crate) enum CacheFailureKind {
 impl CacheFailureKind {
     const fn label(self) -> &'static str {
         match self {
-            Self::Location => "location failure",
             Self::Read => "read failure",
             Self::Decode => "decode failure",
             Self::Clock => "clock failure",
@@ -228,8 +227,15 @@ impl CacheHeader {
     }
 }
 
-fn cache_file() -> Result<PathBuf, tokenx_engine::paths::ConfigDirUnavailable> {
-    tokenx_engine::paths::try_get_cache_dir().map(|directory| directory.join("generation.bin"))
+#[cfg(test)]
+fn cache_file() -> std::io::Result<PathBuf> {
+    let root = match std::env::var_os("TOKENX_CONFIG_DIR") {
+        Some(root) if !root.is_empty() => PathBuf::from(root),
+        _ => dirs::home_dir()
+            .map(|home| home.join(".tokenx"))
+            .ok_or_else(|| std::io::Error::other("test home directory is unavailable"))?,
+    };
+    Ok(root.join("cache/generation.bin"))
 }
 
 fn read_previous_retry_metadata(
@@ -263,17 +269,11 @@ fn read_previous_retry_metadata(
     Ok(header.previous_retry_metadata())
 }
 
-pub(crate) fn load_generation_cache(expected_config: &AcquisitionConfig) -> CacheResult {
-    let path = match cache_file() {
-        Ok(path) => path,
-        Err(error) => {
-            return CacheResult::Failure(CacheFailure::new(
-                CacheFailureKind::Location,
-                format!("generation cache location is unavailable: {error}"),
-            ));
-        }
-    };
-    let file = match std::fs::File::open(&path) {
+pub(crate) fn load_generation_cache(
+    path: &std::path::Path,
+    expected_config: &AcquisitionConfig,
+) -> CacheResult {
+    let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return CacheResult::Missing,
         Err(error) => {
@@ -392,16 +392,19 @@ pub(crate) fn load_generation_cache(expected_config: &AcquisitionConfig) -> Cach
     }
 }
 
-pub(crate) fn save_generation_cache(generation: &Generation) -> anyhow::Result<()> {
-    save_generation_cache_with_retry_backoff(generation).map(|_| ())
+pub(crate) fn save_generation_cache(
+    path: &std::path::Path,
+    generation: &Generation,
+) -> anyhow::Result<()> {
+    save_generation_cache_with_retry_backoff(path, generation).map(|_| ())
 }
 
 pub(crate) fn save_generation_cache_with_retry_backoff(
+    path: &std::path::Path,
     generation: &Generation,
 ) -> anyhow::Result<Option<RetryBackoff>> {
     generation.validate()?;
-    let path = cache_file()?;
-    let previous = match read_previous_retry_metadata(&path) {
+    let previous = match read_previous_retry_metadata(path) {
         Ok(previous) => previous,
         Err(error) => {
             tracing::warn!(
@@ -436,7 +439,7 @@ pub(crate) fn save_generation_cache_with_retry_backoff(
         .map_or([0; FAILURE_SIGNATURE_LEN], |backoff| {
             backoff.failure_signature
         });
-    tokenx_engine::fs_atomic::write_atomic_with(&path, |file| {
+    tokenx_engine::fs_atomic::write_atomic_with(path, |file| {
         file.write_all(&[0_u8; HEADER_LEN])?;
         let mut body_writer = DigestingWriter::new(file, MAX_GENERATION_BODY_BYTES);
         bincode::serialize_into(&mut body_writer, generation).map_err(std::io::Error::other)?;
@@ -763,6 +766,20 @@ mod tests {
     };
 
     use super::*;
+
+    fn load_generation_cache(expected_config: &AcquisitionConfig) -> CacheResult {
+        super::load_generation_cache(&cache_file().unwrap(), expected_config)
+    }
+
+    fn save_generation_cache(generation: &Generation) -> anyhow::Result<()> {
+        super::save_generation_cache(&cache_file().unwrap(), generation)
+    }
+
+    fn save_generation_cache_with_retry_backoff(
+        generation: &Generation,
+    ) -> anyhow::Result<Option<RetryBackoff>> {
+        super::save_generation_cache_with_retry_backoff(&cache_file().unwrap(), generation)
+    }
 
     struct EnvGuard {
         previous: Option<OsString>,
@@ -1206,17 +1223,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn cache_location_and_read_errors_are_explicit_failures() {
+    fn cache_read_errors_are_explicit_failures() {
         let temp = tempfile::TempDir::new().unwrap();
         let generation = generation(temp.path());
-        let _relative_guard = EnvGuard::set(std::path::Path::new("relative-tokenx-config"));
-        let CacheResult::Failure(location_failure) =
-            load_generation_cache(generation.acquisition_config())
-        else {
-            panic!("invalid cache location must be an explicit failure");
-        };
-        assert_eq!(location_failure.kind(), CacheFailureKind::Location);
-        drop(_relative_guard);
 
         let _guard = EnvGuard::set(temp.path());
         std::fs::create_dir_all(cache_file().unwrap()).unwrap();

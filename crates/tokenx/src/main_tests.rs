@@ -596,9 +596,22 @@ fn one_startup_snapshot_resolves_all_settings_driven_policy() {
     assert!(plan.startup.settings.subscription.enabled);
     assert_eq!(plan.startup.settings.subscription.providers.len(), 1);
     assert_eq!(
-        plan.startup.settings.save_path_override.as_deref(),
-        Some(settings_path.as_path()),
+        plan.startup.paths.settings_file(),
+        settings_path,
         "input discovery home must not redirect Tokenx product state"
+    );
+    let replacement_product_root = tempfile::TempDir::new().unwrap();
+    unsafe {
+        std::env::set_var("TOKENX_CONFIG_DIR", replacement_product_root.path());
+    }
+    assert_eq!(
+        plan.startup.paths.root(),
+        product_root.path(),
+        "a resolved startup snapshot must not observe later environment changes"
+    );
+    assert_eq!(
+        plan.startup.paths.generation_cache_file(),
+        product_root.path().join("cache/generation.bin")
     );
     assert_eq!(
         tokenx_engine::pricing::PricingStatus::from_diagnostics(plan.startup.pricing.diagnostics()),

@@ -23,8 +23,20 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub(super) fn cache_dir() -> Result<PathBuf, crate::paths::ConfigDirUnavailable> {
-    crate::paths::try_get_cache_dir()
+#[cfg(test)]
+pub(super) fn cache_dir() -> std::io::Result<PathBuf> {
+    let root = match std::env::var_os("TOKENX_CONFIG_DIR") {
+        Some(root) if !root.is_empty() => PathBuf::from(root),
+        _ => dirs::home_dir()
+            .map(|home| home.join(".tokenx"))
+            .ok_or_else(|| std::io::Error::other("test home directory is unavailable"))?,
+    };
+    if !root.is_absolute() {
+        return Err(std::io::Error::other(
+            "test Tokenx product root must be absolute",
+        ));
+    }
+    Ok(root.join("cache"))
 }
 
 pub(super) fn ensure_cache_dir(dir: &Path) -> std::io::Result<()> {
@@ -217,10 +229,7 @@ pub(super) fn shard_key_for_input_key(key: &CachedInputKey) -> [u8; 32] {
 }
 
 #[cfg(test)]
-pub(super) fn shard_path(
-    path: &Path,
-    decoder_version: DecoderVersion,
-) -> Result<PathBuf, crate::paths::ConfigDirUnavailable> {
+pub(super) fn shard_path(path: &Path, decoder_version: DecoderVersion) -> std::io::Result<PathBuf> {
     let dir = cache_dir()?;
     Ok(shard_path_for_input_key(
         &dir,

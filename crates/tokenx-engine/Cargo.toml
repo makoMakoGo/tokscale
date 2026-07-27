@@ -33,7 +33,6 @@ iana-time-zone = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
-dirs = { workspace = true }
 rusqlite = { workspace = true }
 zstd = { workspace = true }
 tracing = { workspace = true }
@@ -48,6 +47,7 @@ winapi-util = { workspace = true }
 codspeed-criterion-compat = { workspace = true }
 tempfile = { workspace = true }
 serial_test = { workspace = true }
+dirs = { workspace = true }
 
 [build-dependencies]
 serde = { workspace = true, features = ["rc"] }

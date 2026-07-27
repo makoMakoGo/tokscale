@@ -2,8 +2,8 @@ use super::error::{InputRecordCachePruneError, InputRecordCachePruneStats};
 use super::input::{CachedInputKey, CachedPath};
 use super::plan::CacheReadFailureReason;
 use super::wire::{
-    cache_dir, digest_exact, read_current_shard_envelope, read_current_shard_header,
-    shard_path_for_input_key, CachedShardHeader,
+    digest_exact, read_current_shard_envelope, read_current_shard_header, shard_path_for_input_key,
+    CachedShardHeader,
 };
 use super::{CACHE_FORMAT_VERSION, MAX_CACHE_FILE_BYTES, SHARDS_DIRNAME, SHARD_MAGIC};
 use std::collections::HashMap;
@@ -26,10 +26,9 @@ pub(super) struct PrunableShard {
 /// before deletion, so unknown, future, or malformed-current envelopes cause
 /// zero deletion. Once deletion starts, an unlink failure is returned
 /// explicitly; already completed unlinks are not rolled back.
-pub fn prune_input_record_cache() -> Result<InputRecordCachePruneStats, InputRecordCachePruneError>
-{
-    let cache_dir = cache_dir()
-        .map_err(|source| InputRecordCachePruneError::CacheDirectoryUnavailable { source })?;
+pub fn prune_input_record_cache(
+    cache_dir: &Path,
+) -> Result<InputRecordCachePruneStats, InputRecordCachePruneError> {
     let shards_dir = cache_dir.join(SHARDS_DIRNAME);
     let shard_paths = shard_paths_for_prune(&shards_dir)?;
     let mut shards = Vec::with_capacity(shard_paths.len());
@@ -49,7 +48,7 @@ pub fn prune_input_record_cache() -> Result<InputRecordCachePruneStats, InputRec
             path: header.path.clone(),
             decoder_version: header.decoder_version,
         };
-        let canonical_path = shard_path_for_input_key(&cache_dir, &key) == shard_path;
+        let canonical_path = shard_path_for_input_key(cache_dir, &key) == shard_path;
         let input_exists = match input_existence.get(&header.path) {
             Some(exists) => *exists,
             None => {

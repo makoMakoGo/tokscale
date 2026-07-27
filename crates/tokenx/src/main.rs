@@ -5,6 +5,7 @@ mod commands;
 mod failure;
 mod formatting;
 mod generation_cache;
+mod product_paths;
 mod report;
 mod settings;
 mod subscription;
@@ -99,21 +100,22 @@ fn execute(
             let no_spinner = effective_no_spinner(plan.json, plan.no_spinner);
             run_models(plan, no_spinner)
         }
-        ExecutionPlan::Pricing(subcommand) => match subcommand {
+        ExecutionPlan::Pricing { paths, subcommand } => match subcommand {
             PricingSubcommand::Lookup {
                 model_id,
                 json,
                 pricing_source,
                 no_spinner,
             } => runtime.block_on(run_pricing_lookup(
+                &paths,
                 &model_id,
                 json,
                 pricing_source.map(PricingSource::as_str),
                 effective_no_spinner(json, no_spinner),
             )),
-            PricingSubcommand::Overrides { json } => run_pricing_list_overrides(json),
+            PricingSubcommand::Overrides { json } => run_pricing_list_overrides(&paths, json),
         },
-        ExecutionPlan::CachePrune => run_input_record_cache_prune(),
+        ExecutionPlan::CachePrune(paths) => run_input_record_cache_prune(&paths),
         ExecutionPlan::CacheWarm(startup) => run_warm_generation_cache(startup),
     }?;
 

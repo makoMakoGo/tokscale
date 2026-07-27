@@ -61,28 +61,31 @@ Tokenx uses the following ownership model:
    and predecessor directories are not alternate authorities.
 9. Tokenx starts its own release line at `0.1.0`; predecessor versions do not
    describe this product.
-10. Each acquisition command resolves one immutable startup snapshot. It turns
-    optional `--home` input into one required input-discovery home before
-    constructing the acquisition engine and reads `settings.json` exactly once
-    from the Tokenx product root. `--home` never redirects settings, pricing, or
-    caches; `TOKENX_CONFIG_DIR` is the only explicit product-root override. The
+10. Each command first resolves one immutable `ProductPaths` value and carries
+    it through every product-owned read and write. Each acquisition command
+    then resolves one immutable startup snapshot. It turns optional `--home`
+    input into one required input-discovery home before constructing the
+    acquisition engine and reads `settings.json` exactly once from the frozen
+    Tokenx product root. `--home` never redirects settings, pricing, or caches;
+    `TOKENX_CONFIG_DIR` is the only explicit product-root override. The
     application composition root is the only boundary that resolves
-    environment-backed calendar and pricing state. Pricing resolution produces
-    one immutable runtime snapshot containing its serializable identity,
-    loaded pricing service, and diagnostics. Each pricing file is read once
-    into bounded owned bytes from which both identity and runtime data are
-    derived. Missing, malformed, unreadable, or oversized pricing inputs
-    degrade pricing diagnostics and may yield a partial or unavailable pricing
-    service, but cannot prevent usage acquisition. The startup snapshot parses
-    client ids and theme names into domain types, resolves one non-empty client
-    universe, captures the calendar context and shared pricing snapshot, and
-    carries the same scanner, subscription, refresh, theme, and save-path
-    policy through command execution. The acquisition engine retains that
-    pricing snapshot for every initial build and refresh; only its pricing
-    identity is serialized into a generation. Acquisition configuration,
-    diagnostics, cache warming, and `App` constructors receive those values
-    explicitly; they do not resolve another home, reread settings, or inspect
-    ambient calendar or pricing state.
+    environment-backed product paths, calendar, and pricing state. Pricing
+    resolution produces one immutable runtime snapshot containing its
+    serializable identity, loaded pricing service, and diagnostics. Each
+    pricing file is read once into bounded owned bytes from which both identity
+    and runtime data are derived. Missing, malformed, unreadable, or oversized
+    pricing inputs degrade pricing diagnostics and may yield a partial or
+    unavailable pricing service, but cannot prevent usage acquisition. The
+    startup snapshot parses client ids and theme names into domain types,
+    resolves one non-empty client universe, captures the product paths,
+    calendar context, and shared pricing snapshot, and carries the same
+    scanner, subscription, refresh, theme, and save-path policy through command
+    execution. The acquisition engine retains that pricing snapshot for every
+    initial build and refresh; only its pricing identity is serialized into a
+    generation. Acquisition configuration, diagnostics, cache warming, and
+    `App` constructors receive those values explicitly; they do not resolve
+    another product root, reread settings, or inspect ambient calendar or
+    pricing state.
 11. Built-in input discovery is scoped to the running platform and the resolved
     acquisition home. It never crosses into another operating-system home by
     inference. Cross-environment data, including Windows-mounted data observed
@@ -113,9 +116,11 @@ Tokenx uses the following ownership model:
     shards require atomic visibility but do not issue a durability barrier per
     input. If the shard store becomes unavailable, that acquisition disables it
     once and reports one global diagnostic instead of retrying per input.
-15. Expensive derived views are materialized once at the installed-projection
-    boundary. Render frames may sort lightweight references or indices, but do
-    not rebuild monthly or weekly aggregation trees.
+15. Expensive derived views are owned and memoized at the
+    installed-projection boundary. A selected detail projection is
+    materialized at most once for its current installed projection and
+    selection key. Render frames may sort lightweight references or indices,
+    but do not rebuild detail, monthly, or weekly aggregation trees.
 16. Local generation building is synchronous domain work executed on its
     acquisition-owned bounded Rayon pool. Tokio remains the owner of remote
     subscription I/O; it is not an adapter around synchronous local builds.

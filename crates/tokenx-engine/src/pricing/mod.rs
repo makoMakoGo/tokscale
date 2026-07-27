@@ -179,11 +179,11 @@ impl PricingService {
         data
     }
 
-    async fn fetch_inner() -> Result<Self, String> {
+    async fn fetch_inner(custom_path: &Path, cache_dir: &Path) -> Result<Self, String> {
         let (litellm_result, openrouter_data, models_dev_result) = tokio::join!(
-            litellm::fetch(),
-            openrouter::fetch_all_mapped(),
-            models_dev::fetch()
+            litellm::fetch(cache_dir),
+            openrouter::fetch_all_mapped(cache_dir),
+            models_dev::fetch(cache_dir)
         );
 
         let litellm_data = litellm_result.map_err(|e| e.to_string())?;
@@ -197,7 +197,7 @@ impl PricingService {
         };
 
         Ok(Self::new_with_custom_and_models_dev(
-            CustomPricing::load_from_default_path(),
+            CustomPricing::load_from_path(custom_path),
             litellm_data,
             openrouter_data,
             models_dev_data,
@@ -205,6 +205,8 @@ impl PricingService {
     }
 
     async fn fetch_inner_with_diagnostics(
+        custom_path: &Path,
+        cache_dir: &Path,
         diagnostics: &mut PricingDiagnostics,
     ) -> Result<Self, String> {
         let mut litellm_diagnostics = PricingDiagnostics::new();
@@ -212,9 +214,9 @@ impl PricingService {
         let mut models_dev_diagnostics = PricingDiagnostics::new();
 
         let (litellm_result, openrouter_data, models_dev_result) = tokio::join!(
-            litellm::fetch_with_diagnostics(&mut litellm_diagnostics),
-            openrouter::fetch_all_mapped_with_diagnostics(&mut openrouter_diagnostics),
-            models_dev::fetch_with_diagnostics(&mut models_dev_diagnostics)
+            litellm::fetch_with_diagnostics(cache_dir, &mut litellm_diagnostics),
+            openrouter::fetch_all_mapped_with_diagnostics(cache_dir, &mut openrouter_diagnostics),
+            models_dev::fetch_with_diagnostics(cache_dir, &mut models_dev_diagnostics)
         );
 
         diagnostics.extend(litellm_diagnostics);
@@ -234,7 +236,7 @@ impl PricingService {
         };
 
         Ok(Self::new_with_custom_and_models_dev(
-            CustomPricing::load_from_default_path_with_diagnostics(diagnostics),
+            CustomPricing::load_from_path_with_diagnostics(custom_path, diagnostics),
             litellm_data,
             openrouter_data,
             models_dev_data,
@@ -263,12 +265,12 @@ impl PricingService {
         ))
     }
 
-    pub fn load_cached_any_age() -> Option<Self> {
+    pub fn load_cached_any_age(custom_path: &Path, cache_dir: &Path) -> Option<Self> {
         Self::from_cached_datasets(
-            CustomPricing::load_from_default_path(),
-            litellm::load_cached_any_age(),
-            openrouter::load_cached_any_age(),
-            models_dev::load_cached_any_age(),
+            CustomPricing::load_from_path(custom_path),
+            litellm::load_cached_any_age(cache_dir),
+            openrouter::load_cached_any_age(cache_dir),
+            models_dev::load_cached_any_age(cache_dir),
         )
     }
 
@@ -276,14 +278,21 @@ impl PricingService {
     ///
     /// No process-global service is retained: each explicit refresh observes
     /// the current custom-pricing file and the catalogs fetched in that call.
-    pub async fn fetch_current() -> Result<Arc<PricingService>, String> {
-        Self::fetch_inner().await.map(Arc::new)
+    pub async fn fetch_current(
+        custom_path: &Path,
+        cache_dir: &Path,
+    ) -> Result<Arc<PricingService>, String> {
+        Self::fetch_inner(custom_path, cache_dir)
+            .await
+            .map(Arc::new)
     }
 
     pub async fn fetch_current_with_diagnostics(
+        custom_path: &Path,
+        cache_dir: &Path,
         diagnostics: &mut PricingDiagnostics,
     ) -> Result<Arc<PricingService>, String> {
-        Self::fetch_inner_with_diagnostics(diagnostics)
+        Self::fetch_inner_with_diagnostics(custom_path, cache_dir, diagnostics)
             .await
             .map(Arc::new)
     }
@@ -439,26 +448,8 @@ impl ResolvedPricingSnapshot {
     /// Each bounded file is captured once; identity and parsing derive from the
     /// same owned bytes. Missing, invalid, or oversized pricing inputs become
     /// diagnostics and never prevent local usage acquisition.
-    pub fn resolve_current() -> Self {
-        let product_root = match crate::paths::try_get_config_dir() {
-            Ok(product_root) => product_root,
-            Err(error) => {
-                let reason = error.to_string();
-                return Self::explicit(
-                    crate::PricingContext::explicit_with_catalog(
-                        unavailable_pricing_fingerprint("custom", &reason),
-                        unavailable_pricing_fingerprint("catalogs", &reason),
-                    ),
-                    None,
-                    vec![PricingDiagnostic::unavailable(format!(
-                        "[tokenx] pricing unavailable: {reason}"
-                    ))],
-                );
-            }
-        };
-        let custom_path = product_root.join("custom-pricing.json");
-        let custom_file = CapturedPricingFile::read(&custom_path, MAX_CUSTOM_SNAPSHOT_BYTES);
-        let cache_dir = product_root.join("cache");
+    pub fn resolve_from(custom_path: &Path, cache_dir: &Path) -> Self {
+        let custom_file = CapturedPricingFile::read(custom_path, MAX_CUSTOM_SNAPSHOT_BYTES);
         let catalog_files = CACHED_CATALOG_FILES.map(|filename| {
             CapturedPricingFile::read(&cache_dir.join(filename), MAX_CATALOG_SNAPSHOT_BYTES)
         });
@@ -472,10 +463,10 @@ impl ResolvedPricingSnapshot {
         }
         let catalog_fingerprint = finish_pricing_fingerprint(catalog_digest);
         let mut diagnostics = PricingDiagnostics::new();
-        let custom = match custom_file.content(&custom_path, "custom pricing", &mut diagnostics) {
+        let custom = match custom_file.content(custom_path, "custom pricing", &mut diagnostics) {
             Some(bytes) => CustomPricing::load_from_bytes_with_diagnostics(
                 bytes,
-                &custom_path,
+                custom_path,
                 &mut diagnostics,
             ),
             None => CustomPricing::default(),
@@ -648,15 +639,6 @@ fn parse_captured_catalog<T: for<'de> serde::Deserialize<'de>>(
     }
 }
 
-fn unavailable_pricing_fingerprint(authority: &str, reason: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"tokenx-pricing-unavailable-v1\0");
-    digest.update(authority.as_bytes());
-    digest.update(b"\0");
-    digest.update(reason.as_bytes());
-    finish_pricing_fingerprint(digest)
-}
-
 fn finish_pricing_fingerprint(digest: Sha256) -> String {
     digest
         .finalize()
@@ -671,30 +653,6 @@ fn finish_pricing_fingerprint(digest: Sha256) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
-
-    struct ConfigDirGuard(Option<std::ffi::OsString>);
-
-    impl ConfigDirGuard {
-        fn set(path: &Path) -> Self {
-            let previous = std::env::var_os("TOKENX_CONFIG_DIR");
-            unsafe {
-                std::env::set_var("TOKENX_CONFIG_DIR", path);
-            }
-            Self(previous)
-        }
-    }
-
-    impl Drop for ConfigDirGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match self.0.take() {
-                    Some(value) => std::env::set_var("TOKENX_CONFIG_DIR", value),
-                    None => std::env::remove_var("TOKENX_CONFIG_DIR"),
-                }
-            }
-        }
-    }
 
     #[test]
     fn pricing_status_classifies_resolution_diagnostics() {
@@ -745,17 +703,16 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn resolved_snapshot_remains_immutable_after_custom_pricing_changes() {
         let temp = tempfile::TempDir::new().unwrap();
-        let _guard = ConfigDirGuard::set(temp.path());
-        let path = custom::CustomPricing::default_path().unwrap();
+        let path = temp.path().join("custom-pricing.json");
+        let cache_dir = temp.path().join("cache");
         std::fs::write(
             &path,
             r#"{"models":{"snapshot-model":{"input_cost_per_token":0.000001}}}"#,
         )
         .unwrap();
-        let first = ResolvedPricingSnapshot::resolve_current();
+        let first = ResolvedPricingSnapshot::resolve_from(&path, &cache_dir);
         let usage = TokenBreakdown {
             input: 1_000_000,
             ..TokenBreakdown::default()
@@ -784,7 +741,7 @@ mod tests {
             "an installed generation keeps the exact pricing snapshot it started with"
         );
 
-        let second = ResolvedPricingSnapshot::resolve_current();
+        let second = ResolvedPricingSnapshot::resolve_from(&path, &cache_dir);
         assert_ne!(first.context(), second.context());
         assert_eq!(
             second
@@ -797,10 +754,8 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn malformed_and_oversized_inputs_degrade_pricing_without_failing_resolution() {
         let temp = tempfile::TempDir::new().unwrap();
-        let _guard = ConfigDirGuard::set(temp.path());
         let custom_path = temp.path().join("custom-pricing.json");
         std::fs::write(&custom_path, b"{not-json").unwrap();
         let cache_dir = temp.path().join("cache");
@@ -810,7 +765,7 @@ mod tests {
             .set_len(MAX_CATALOG_SNAPSHOT_BYTES + 1)
             .unwrap();
 
-        let snapshot = ResolvedPricingSnapshot::resolve_current();
+        let snapshot = ResolvedPricingSnapshot::resolve_from(&custom_path, &cache_dir);
 
         assert!(snapshot.service().is_none());
         assert_eq!(
@@ -828,12 +783,11 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn invalid_catalog_keeps_valid_custom_pricing_as_a_partial_snapshot() {
         let temp = tempfile::TempDir::new().unwrap();
-        let _guard = ConfigDirGuard::set(temp.path());
+        let custom_path = temp.path().join("custom-pricing.json");
         std::fs::write(
-            temp.path().join("custom-pricing.json"),
+            &custom_path,
             r#"{"models":{"snapshot-model":{"input_cost_per_token":0.000001}}}"#,
         )
         .unwrap();
@@ -841,7 +795,7 @@ mod tests {
         std::fs::create_dir_all(&cache_dir).unwrap();
         std::fs::write(cache_dir.join(CACHED_CATALOG_FILES[1]), b"{not-json").unwrap();
 
-        let snapshot = ResolvedPricingSnapshot::resolve_current();
+        let snapshot = ResolvedPricingSnapshot::resolve_from(&custom_path, &cache_dir);
 
         assert!(snapshot.service().is_some());
         assert_eq!(

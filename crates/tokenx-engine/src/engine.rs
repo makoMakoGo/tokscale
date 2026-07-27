@@ -119,21 +119,18 @@ impl AcquisitionEngine {
     pub fn new(
         config: AcquisitionConfig,
         pricing: Arc<crate::pricing::ResolvedPricingSnapshot>,
-    ) -> Result<Self, GenerationBuildError> {
-        let input_cache_dir = crate::paths::try_get_cache_dir()
-            .map_err(|error| GenerationBuildError::InvalidEnvironment(error.to_string()))?;
-        Self::with_input_cache_dir(config, pricing, input_cache_dir)
-    }
-
-    pub fn with_input_cache_dir(
-        config: AcquisitionConfig,
-        pricing: Arc<crate::pricing::ResolvedPricingSnapshot>,
         input_cache_dir: PathBuf,
     ) -> Result<Self, GenerationBuildError> {
         if input_cache_dir.as_os_str().is_empty() {
             return Err(GenerationBuildError::InvalidEnvironment(
                 "input cache directory must not be empty".to_string(),
             ));
+        }
+        if !input_cache_dir.is_absolute() {
+            return Err(GenerationBuildError::InvalidEnvironment(format!(
+                "input cache directory must be absolute: {}",
+                input_cache_dir.display()
+            )));
         }
         if config.pricing() != pricing.context() {
             return Err(GenerationBuildError::PricingSnapshotMismatch);
@@ -153,6 +150,10 @@ impl AcquisitionEngine {
 
     pub fn pricing_snapshot(&self) -> Arc<crate::pricing::ResolvedPricingSnapshot> {
         Arc::clone(&self.pricing)
+    }
+
+    pub fn input_cache_dir(&self) -> &std::path::Path {
+        &self.input_cache_dir
     }
 
     pub fn prepare(&self) -> Result<PreparedAcquisition, GenerationBuildError> {
@@ -400,12 +401,8 @@ mod tests {
             pricing.context().clone(),
         )
         .unwrap();
-        let engine = AcquisitionEngine::with_input_cache_dir(
-            config.clone(),
-            pricing,
-            PathBuf::from("/tmp/cache"),
-        )
-        .unwrap();
+        let engine =
+            AcquisitionEngine::new(config.clone(), pricing, PathBuf::from("/tmp/cache")).unwrap();
 
         assert_eq!(engine.config(), &config);
         assert_eq!(
@@ -473,12 +470,8 @@ mod tests {
             pricing.context().clone(),
         )
         .unwrap();
-        let engine = AcquisitionEngine::with_input_cache_dir(
-            config,
-            pricing,
-            home.path().join("input-cache"),
-        )
-        .unwrap();
+        let engine =
+            AcquisitionEngine::new(config, pricing, home.path().join("input-cache")).unwrap();
         let cancellation = AcquisitionCancellation::default();
         cancellation.cancel();
 
@@ -492,33 +485,19 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn build_reuses_resolved_pricing_snapshot_after_files_change() {
-        struct ConfigDirGuard(Option<std::ffi::OsString>);
-        impl Drop for ConfigDirGuard {
-            fn drop(&mut self) {
-                unsafe {
-                    match self.0.take() {
-                        Some(value) => std::env::set_var("TOKENX_CONFIG_DIR", value),
-                        None => std::env::remove_var("TOKENX_CONFIG_DIR"),
-                    }
-                }
-            }
-        }
-
         let home = tempfile::TempDir::new().unwrap();
-        let previous = std::env::var_os("TOKENX_CONFIG_DIR");
-        unsafe {
-            std::env::set_var("TOKENX_CONFIG_DIR", home.path());
-        }
-        let _guard = ConfigDirGuard(previous);
-        let custom_path = crate::pricing::custom::CustomPricing::default_path().unwrap();
+        let custom_path = home.path().join("custom-pricing.json");
+        let cache_dir = home.path().join("cache");
         std::fs::write(
             &custom_path,
             r#"{"models":{"snapshot-model":{"input_cost_per_token":0.000001}}}"#,
         )
         .unwrap();
-        let pricing = Arc::new(crate::pricing::ResolvedPricingSnapshot::resolve_current());
+        let pricing = Arc::new(crate::pricing::ResolvedPricingSnapshot::resolve_from(
+            &custom_path,
+            &cache_dir,
+        ));
         let config = AcquisitionConfig::new(
             home.path().to_path_buf(),
             DateRange::none(),
@@ -528,7 +507,7 @@ mod tests {
             pricing.context().clone(),
         )
         .unwrap();
-        let engine = AcquisitionEngine::with_input_cache_dir(
+        let engine = AcquisitionEngine::new(
             config,
             Arc::clone(&pricing),
             home.path().join("input-cache"),
@@ -578,12 +557,34 @@ mod tests {
         .unwrap();
 
         let error =
-            AcquisitionEngine::with_input_cache_dir(config, pricing, PathBuf::from("/tmp/cache"))
-                .unwrap_err();
+            AcquisitionEngine::new(config, pricing, PathBuf::from("/tmp/cache")).unwrap_err();
 
         assert!(matches!(
             error,
             GenerationBuildError::PricingSnapshotMismatch
+        ));
+    }
+
+    #[test]
+    fn engine_rejects_process_relative_cache_paths() {
+        let pricing = test_pricing();
+        let config = AcquisitionConfig::new(
+            PathBuf::from("/tmp/tokenx-home"),
+            DateRange::none(),
+            ClientUniverse::new([ClientId::Amp]).unwrap(),
+            ScannerSettings::default(),
+            test_calendar(),
+            pricing.context().clone(),
+        )
+        .unwrap();
+
+        let error =
+            AcquisitionEngine::new(config, pricing, PathBuf::from("relative-cache")).unwrap_err();
+
+        assert!(matches!(
+            error,
+            GenerationBuildError::InvalidEnvironment(message)
+                if message.contains("must be absolute")
         ));
     }
 
@@ -609,18 +610,14 @@ mod tests {
             pricing.context().clone(),
         )
         .unwrap();
-        let amp_engine = AcquisitionEngine::with_input_cache_dir(
+        let amp_engine = AcquisitionEngine::new(
             amp_config,
             Arc::clone(&pricing),
             home.path().join("amp-cache"),
         )
         .unwrap();
-        let codex_engine = AcquisitionEngine::with_input_cache_dir(
-            codex_config,
-            pricing,
-            home.path().join("codex-cache"),
-        )
-        .unwrap();
+        let codex_engine =
+            AcquisitionEngine::new(codex_config, pricing, home.path().join("codex-cache")).unwrap();
 
         let prepared = amp_engine.prepare().unwrap();
         let error = codex_engine.build(prepared).unwrap_err();

@@ -1,16 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const CACHE_TTL_SECS: u64 = 3600;
 
-pub fn get_cache_dir() -> Result<PathBuf, crate::paths::ConfigDirUnavailable> {
-    crate::paths::try_get_cache_dir()
-}
-
-pub fn get_cache_path(filename: &str) -> Result<PathBuf, crate::paths::ConfigDirUnavailable> {
-    get_cache_dir().map(|directory| directory.join(filename))
+pub fn get_cache_path(cache_dir: &Path, filename: &str) -> PathBuf {
+    cache_dir.join(filename)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -20,10 +16,11 @@ pub struct CachedData<T> {
 }
 
 fn load_cache_with_policy<T: for<'de> Deserialize<'de>>(
+    cache_dir: &Path,
     filename: &str,
     allow_stale: bool,
 ) -> Option<T> {
-    let canonical_path = get_cache_path(filename).ok()?;
+    let canonical_path = get_cache_path(cache_dir, filename);
     let content = fs::read_to_string(&canonical_path).ok()?;
     let cached: CachedData<T> = serde_json::from_str(&content).ok()?;
 
@@ -43,12 +40,15 @@ fn load_cache_with_policy<T: for<'de> Deserialize<'de>>(
     Some(cached.data)
 }
 
-pub fn load_cache<T: for<'de> Deserialize<'de>>(filename: &str) -> Option<T> {
-    load_cache_with_policy(filename, false)
+pub fn load_cache<T: for<'de> Deserialize<'de>>(cache_dir: &Path, filename: &str) -> Option<T> {
+    load_cache_with_policy(cache_dir, filename, false)
 }
 
-pub fn load_cache_any_age<T: for<'de> Deserialize<'de>>(filename: &str) -> Option<T> {
-    load_cache_with_policy(filename, true)
+pub fn load_cache_any_age<T: for<'de> Deserialize<'de>>(
+    cache_dir: &Path,
+    filename: &str,
+) -> Option<T> {
+    load_cache_with_policy(cache_dir, filename, true)
 }
 
 pub(crate) fn parse_cache_any_age<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, String> {
@@ -63,9 +63,12 @@ pub(crate) fn parse_cache_any_age<T: for<'de> Deserialize<'de>>(bytes: &[u8]) ->
     Ok(cached.data)
 }
 
-pub fn save_cache<T: Serialize>(filename: &str, data: &T) -> Result<(), std::io::Error> {
-    let dir = get_cache_dir().map_err(std::io::Error::other)?;
-    fs::create_dir_all(&dir)?;
+pub fn save_cache<T: Serialize>(
+    cache_dir: &Path,
+    filename: &str,
+    data: &T,
+) -> Result<(), std::io::Error> {
+    fs::create_dir_all(cache_dir)?;
 
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -78,7 +81,7 @@ pub fn save_cache<T: Serialize>(filename: &str, data: &T) -> Result<(), std::io:
     };
     let content = serde_json::to_string(&cached)?;
 
-    let final_path = dir.join(filename);
+    let final_path = get_cache_path(cache_dir, filename);
     // INVARIANT: All cache writes use atomic temp-file rename. NEVER delete
     // the canonical cache file before writing — a partial save or process
     // crash between delete and rename would lose the cache. The temp-file

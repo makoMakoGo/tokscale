@@ -55,8 +55,13 @@ impl Default for InputRecordShardStore {
 impl InputRecordShardStore {
     #[cfg(test)]
     pub(crate) fn load() -> Result<Self, InputRecordCacheError> {
-        let cache_dir = cache_dir()
-            .map_err(|source| InputRecordCacheError::CacheDirectoryUnavailable { source })?;
+        let cache_dir = cache_dir().map_err(|source| {
+            InputRecordCacheError::io(
+                "resolve test input-record cache directory",
+                Path::new("TOKENX_CONFIG_DIR"),
+                source,
+            )
+        })?;
         Self::open(&cache_dir)
     }
 

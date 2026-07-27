@@ -533,7 +533,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible_height = inner.height.saturating_sub(1) as usize;
     app.set_max_visible_items(visible_height);
 
-    let rows_data = app.get_sorted_period_detail_rows();
+    let rows_data = app.period_detail_rows();
 
     let sort_field = app.sort_field;
     let sort_direction = app.sort_direction;
@@ -617,8 +617,10 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let start = clamped_detail_start(scroll_offset, detail_len, visible_height);
     let end = (start + visible_height).min(detail_len);
 
-    let rows: Vec<Row> = rows_data[start..end]
+    let rows: Vec<Row> = rows_data
         .iter()
+        .skip(start)
+        .take(end - start)
         .enumerate()
         .map(|(i, row)| {
             let idx = i + start;
@@ -1080,7 +1082,7 @@ mod tests {
         assert_eq!(clamped_period_start(100, 8), 7);
     }
 
-    use crate::tui::app::{PeriodDetailSelection, Tab, TuiConfig};
+    use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::{DailyClientInfo, DailyModelInfo, DailyUsage, UsageTokenBreakdown};
     use chrono::NaiveDate;
     use ratatui::{backend::TestBackend, Terminal};
@@ -1247,13 +1249,11 @@ mod tests {
     }
 
     fn select_monthly_period(app: &mut App) {
-        let periods = app.period_usage(PeriodKind::Monthly);
-        let period = periods.first().expect("one monthly period");
-        app.selected_period_detail = Some(PeriodDetailSelection {
-            kind: PeriodKind::Monthly,
-            start_date: period.start_date,
-            end_date: period.end_date,
-        });
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(app.is_period_detail_active_for_kind(PeriodKind::Monthly));
     }
 
     fn render_monthly_body(app: &mut App, width: u16, height: u16) -> String {

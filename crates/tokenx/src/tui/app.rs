@@ -1,5 +1,6 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::Index;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,27 +9,29 @@ use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use tokenx_engine::{
-    pricing::PricingStatus, ClientId, ClientSelection, ClientUniverse, Generation, GroupBy,
-    UsageQuery,
+    pricing::PricingStatus, ClientId, ClientSelection, ClientUniverse, Generation, UsageQuery,
 };
 
 use ratatui::style::Color;
 
 use super::data::{
-    AgentEntry, DailyClientInfo, DailyUsage, HourlyUsage, OverviewSummary, PeriodKind, PeriodUsage,
-    UsageModelEntry, UsageProjection, UsageTokenBreakdown,
+    AgentEntry, DailyUsage, HourlyUsage, OverviewSummary, PeriodKind, PeriodUsage, UsageModelEntry,
+    UsageProjection,
 };
 use super::generation_controller::{RefreshControl, RefreshRequest, RefreshStatus};
 use super::interaction::{
     InteractionOutcome, ListInteraction, MoveCommand, TextViewport, WrapMode,
 };
+pub use super::local_usage::PeriodDetailSelection;
 use super::local_usage::{
-    InstalledGeneration, LocalUsageState, LocalUsageStatus, PreparedProjection,
+    DetailRow, DetailSelections, InstalledGeneration, LocalUsageState, LocalUsageStatus,
+    PreparedProjection,
 };
 use super::model_family::ModelFamily;
 use super::session_data::SessionSnapshot;
 use super::themes::{Theme, ThemeName};
 use super::ui::dialog::{ClientPickerDialog, DialogResult, DialogStack, UiCommand};
+use crate::product_paths::ProductPaths;
 use crate::settings::Settings;
 use crate::subscription::{
     FetchRequest, ProviderId, SubscriptionBatch, SubscriptionInstall, SubscriptionOutput,
@@ -214,6 +217,20 @@ struct UsageOrderKey {
     sort_direction: SortDirection,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailOrderSelection {
+    Daily(NaiveDate),
+    Period(PeriodDetailSelection),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DetailOrderKey {
+    usage_revision: u64,
+    selection: DetailOrderSelection,
+    sort_field: SortField,
+    sort_direction: SortDirection,
+}
+
 #[derive(Debug)]
 struct CachedRenderOrder<K> {
     key: K,
@@ -225,6 +242,7 @@ struct RenderOrderCache {
     models: Option<CachedRenderOrder<ModelOrderKey>>,
     daily: Option<CachedRenderOrder<UsageOrderKey>>,
     hourly: Option<CachedRenderOrder<UsageOrderKey>>,
+    detail: Option<CachedRenderOrder<DetailOrderKey>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -245,22 +263,6 @@ pub struct ClickArea {
     pub action: ClickAction,
 }
 
-#[derive(Debug, Clone)]
-pub struct DetailRow {
-    pub clients: Vec<ClientId>,
-    pub provider: String,
-    pub model: String,
-    pub model_id: String,
-    /// Workspace dimension for the Workspace column; populated only from
-    /// `DailyModelInfo` workspace fields (i.e. under `GroupBy::WorkspaceModel`).
-    pub workspace: Option<String>,
-    pub tokens: UsageTokenBreakdown,
-    pub cost: f64,
-    pub messages: u64,
-}
-
-pub type DailyDetailRow = DetailRow;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelDetailSelection {
     pub model: String,
@@ -273,54 +275,11 @@ enum ModelDetailClientUpdate {
     MissingSelection,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PeriodDetailSelection {
-    pub kind: PeriodKind,
-    pub start_date: NaiveDate,
-    pub end_date: NaiveDate,
-}
-
-pub type PeriodDetailRow = DetailRow;
-
 #[derive(Debug, Clone)]
 pub enum ClickAction {
     Tab(Tab),
     Sort(SortField),
     GraphCell { week: usize, day: usize },
-}
-
-struct DetailRowAccumulator {
-    client_totals: HashMap<ClientId, ClientContributionOrder>,
-    provider: String,
-    model: String,
-    model_id: String,
-    workspace: Option<String>,
-    tokens: UsageTokenBreakdown,
-    cost: f64,
-    messages: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct ClientContributionOrder {
-    first_seen: usize,
-    total_tokens: u64,
-}
-
-fn ordered_clients_by_token_contribution(
-    client_totals: &HashMap<ClientId, ClientContributionOrder>,
-) -> Vec<ClientId> {
-    let mut clients = client_totals
-        .iter()
-        .map(|(client, totals)| (*client, *totals))
-        .collect::<Vec<_>>();
-    clients.sort_by(|(left_client, left), (right_client, right)| {
-        right
-            .total_tokens
-            .cmp(&left.total_tokens)
-            .then_with(|| left.first_seen.cmp(&right.first_seen))
-            .then_with(|| left_client.cmp(right_client))
-    });
-    clients.into_iter().map(|(client, _)| client).collect()
 }
 
 fn client_ids_text(clients: &[ClientId]) -> String {
@@ -343,119 +302,12 @@ fn move_command_from_key(key: KeyCode) -> Option<MoveCommand> {
     }
 }
 
-fn add_detail_tokens(target: &mut UsageTokenBreakdown, addition: &UsageTokenBreakdown) {
-    *target = target
-        .checked_add(addition)
-        .expect("TUI detail token buckets exceed u64::MAX");
-}
-
-fn merge_provider_label(target: &mut String, provider: &str) {
-    if provider.is_empty() || target.split(", ").any(|existing| existing == provider) {
-        return;
-    }
-    if target.is_empty() {
-        target.push_str(provider);
-    } else {
-        target.push_str(", ");
-        target.push_str(provider);
-    }
-}
-
-#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
-enum DetailModelIdentity {
-    Model(Arc<str>),
-    ClientModel(ClientId, Arc<str>),
-    ClientProviderModel(ClientId, Arc<str>, Arc<str>),
-    WorkspaceModel(Option<Arc<str>>, Arc<str>),
-}
-
-fn detail_model_identity(
-    client: ClientId,
-    model: &tokenx_engine::projection::DailyModelInfo,
-    group_by: GroupBy,
-) -> DetailModelIdentity {
-    match group_by {
-        GroupBy::Model => DetailModelIdentity::Model(Arc::clone(&model.model_id)),
-        GroupBy::ClientModel => {
-            DetailModelIdentity::ClientModel(client, Arc::clone(&model.model_id))
-        }
-        GroupBy::ClientProviderModel => DetailModelIdentity::ClientProviderModel(
-            client,
-            Arc::clone(&model.provider),
-            Arc::clone(&model.model_id),
-        ),
-        GroupBy::WorkspaceModel => DetailModelIdentity::WorkspaceModel(
-            model.workspace_key.clone(),
-            Arc::clone(&model.model_id),
-        ),
-    }
-}
-
-fn build_detail_rows(
-    client_breakdown: &BTreeMap<ClientId, DailyClientInfo>,
-    group_by: GroupBy,
-) -> Vec<DetailRow> {
-    let mut rows_by_key: BTreeMap<DetailModelIdentity, DetailRowAccumulator> = BTreeMap::new();
-
-    for (client, client_info) in client_breakdown {
-        for model_info in &client_info.models {
-            let row = rows_by_key
-                .entry(detail_model_identity(*client, model_info, group_by))
-                .or_insert_with(|| DetailRowAccumulator {
-                    client_totals: HashMap::new(),
-                    provider: String::new(),
-                    model: if model_info.display_name.is_empty() {
-                        model_info.model_id.to_string()
-                    } else {
-                        model_info.display_name.to_string()
-                    },
-                    model_id: model_info.model_id.to_string(),
-                    workspace: model_info
-                        .workspace_label
-                        .as_deref()
-                        .or(model_info.workspace_key.as_deref())
-                        .map(str::to_owned),
-                    tokens: UsageTokenBreakdown::default(),
-                    cost: 0.0,
-                    messages: 0,
-                });
-
-            let client_count = row.client_totals.len();
-            let client_total =
-                row.client_totals
-                    .entry(*client)
-                    .or_insert_with(|| ClientContributionOrder {
-                        first_seen: client_count,
-                        total_tokens: 0,
-                    });
-            client_total.total_tokens = client_total
-                .total_tokens
-                .checked_add(model_info.tokens.total())
-                .expect("TUI client token total exceeds u64::MAX");
-
-            merge_provider_label(&mut row.provider, &model_info.provider);
-            add_detail_tokens(&mut row.tokens, &model_info.tokens);
-            row.cost += model_info.cost;
-            row.messages = row.messages.saturating_add(model_info.messages);
-        }
-    }
-
-    rows_by_key
-        .into_values()
-        .map(|row| DetailRow {
-            clients: ordered_clients_by_token_contribution(&row.client_totals),
-            provider: row.provider,
-            model: row.model,
-            model_id: row.model_id,
-            workspace: row.workspace,
-            tokens: row.tokens,
-            cost: row.cost,
-            messages: row.messages,
-        })
-        .collect()
-}
-
-fn sort_detail_rows(rows: &mut [DetailRow], field: SortField, direction: SortDirection) {
+fn sort_detail_order(
+    order: &mut [usize],
+    rows: &[DetailRow],
+    field: SortField,
+    direction: SortDirection,
+) {
     let tie_breaker = |a: &DetailRow, b: &DetailRow| {
         a.clients
             .cmp(&b.clients)
@@ -464,25 +316,68 @@ fn sort_detail_rows(rows: &mut [DetailRow], field: SortField, direction: SortDir
     };
 
     match (field, direction) {
-        (SortField::Cost, SortDirection::Descending) => {
-            rows.sort_by(|a, b| b.cost.total_cmp(&a.cost).then_with(|| tie_breaker(a, b)))
-        }
-        (SortField::Cost, SortDirection::Ascending) => {
-            rows.sort_by(|a, b| a.cost.total_cmp(&b.cost).then_with(|| tie_breaker(a, b)))
-        }
-        (SortField::Tokens, SortDirection::Descending) => rows.sort_by(|a, b| {
-            b.tokens
-                .total()
-                .cmp(&a.tokens.total())
-                .then_with(|| tie_breaker(a, b))
+        (SortField::Cost, SortDirection::Descending) => order.sort_by(|a, b| {
+            rows[*b]
+                .cost
+                .total_cmp(&rows[*a].cost)
+                .then_with(|| tie_breaker(&rows[*a], &rows[*b]))
         }),
-        (SortField::Tokens, SortDirection::Ascending) => rows.sort_by(|a, b| {
-            a.tokens
-                .total()
-                .cmp(&b.tokens.total())
-                .then_with(|| tie_breaker(a, b))
+        (SortField::Cost, SortDirection::Ascending) => order.sort_by(|a, b| {
+            rows[*a]
+                .cost
+                .total_cmp(&rows[*b].cost)
+                .then_with(|| tie_breaker(&rows[*a], &rows[*b]))
         }),
-        (SortField::Date, _) => rows.sort_by(tie_breaker),
+        (SortField::Tokens, SortDirection::Descending) => order.sort_by(|a, b| {
+            rows[*b]
+                .tokens
+                .total()
+                .cmp(&rows[*a].tokens.total())
+                .then_with(|| tie_breaker(&rows[*a], &rows[*b]))
+        }),
+        (SortField::Tokens, SortDirection::Ascending) => order.sort_by(|a, b| {
+            rows[*a]
+                .tokens
+                .total()
+                .cmp(&rows[*b].tokens.total())
+                .then_with(|| tie_breaker(&rows[*a], &rows[*b]))
+        }),
+        (SortField::Date, _) => {
+            order.sort_by(|a, b| tie_breaker(&rows[*a], &rows[*b]));
+        }
+    }
+}
+
+pub(crate) struct OrderedDetailRows<'a> {
+    rows: &'a [DetailRow],
+    order: Arc<[usize]>,
+}
+
+impl<'a> OrderedDetailRows<'a> {
+    pub(crate) fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    pub(crate) fn get(&self, index: usize) -> Option<&'a DetailRow> {
+        self.rows.get(*self.order.get(index)?)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &'a DetailRow> + '_ {
+        self.order.iter().map(|index| &self.rows[*index])
+    }
+}
+
+impl Index<usize> for OrderedDetailRows<'_> {
+    type Output = DetailRow;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index)
+            .expect("ordered detail row index is out of bounds")
     }
 }
 
@@ -490,6 +385,7 @@ pub struct App {
     pub current_tab: Tab,
     pub theme: Theme,
     pub settings: Settings,
+    product_paths: ProductPaths,
     local_usage: LocalUsageState,
 
     pub sort_field: SortField,
@@ -550,6 +446,18 @@ pub struct App {
 
 impl App {
     #[cfg(test)]
+    fn test_product_paths() -> ProductPaths {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+        ProductPaths::at(std::env::temp_dir().join(format!(
+            "tokenx-app-test-{}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        )))
+    }
+
+    #[cfg(test)]
     pub(crate) fn new_for_test(config: TuiConfig) -> Result<Self> {
         Self::new_for_test_with_settings(config, Settings::default())
     }
@@ -559,10 +467,23 @@ impl App {
         config: TuiConfig,
         settings: Settings,
     ) -> Result<Self> {
-        Self::new(config, settings)
+        Self::new(config, settings, Self::test_product_paths())
     }
 
-    pub(crate) fn new(config: TuiConfig, settings: Settings) -> Result<Self> {
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_settings_and_paths(
+        config: TuiConfig,
+        settings: Settings,
+        product_paths: ProductPaths,
+    ) -> Result<Self> {
+        Self::new(config, settings, product_paths)
+    }
+
+    pub(crate) fn new(
+        config: TuiConfig,
+        settings: Settings,
+        product_paths: ProductPaths,
+    ) -> Result<Self> {
         let theme_name = config.theme.unwrap_or(settings.color_palette);
         let theme = Theme::from_name(theme_name);
 
@@ -597,17 +518,10 @@ impl App {
         let current_tab = requested_tab;
         let (sort_field, sort_direction) = Self::default_sort_for_tab(current_tab);
         let subscription = if subscription_enabled {
-            #[cfg(not(test))]
-            {
-                SubscriptionState::new(
-                    settings.subscription.providers.clone(),
-                    crate::subscription::cache::load(),
-                )
-            }
-            #[cfg(test)]
-            {
-                SubscriptionState::new(settings.subscription.providers.clone(), Ok(None))
-            }
+            SubscriptionState::new(
+                settings.subscription.providers.clone(),
+                crate::subscription::cache::load(&product_paths.subscription_cache_file()),
+            )
         } else {
             SubscriptionState::disabled()
         };
@@ -616,6 +530,7 @@ impl App {
             current_tab,
             theme,
             settings,
+            product_paths,
             local_usage,
             sort_field,
             sort_direction,
@@ -708,6 +623,13 @@ impl App {
 
     pub(crate) fn period_usage(&self, kind: PeriodKind) -> &[PeriodUsage] {
         self.require_installed_generation().periods(kind)
+    }
+
+    fn detail_selections(&self) -> DetailSelections {
+        DetailSelections {
+            daily: self.selected_daily_detail_date,
+            period: self.selected_period_detail,
+        }
     }
 
     pub(crate) fn session_snapshot(&self) -> &SessionSnapshot {
@@ -833,7 +755,7 @@ impl App {
     ) {
         self.settings.auto_refresh_enabled = automatic;
         self.settings.auto_refresh_ms = interval.as_millis() as u64;
-        match self.settings.save() {
+        match self.settings.save(&self.product_paths) {
             Ok(()) => self.set_status(&message),
             Err(error) => self.set_status_with_tone(
                 &format!("{message} (save failed: {error})"),
@@ -899,7 +821,10 @@ impl App {
             group_by,
             effective_date: self.effective_date(),
         };
-        let projection = match self.local_usage.prepare_projection(query) {
+        let projection = match self
+            .local_usage
+            .prepare_projection(query, self.detail_selections())
+        {
             Ok(projection) => projection,
             Err(error) => {
                 let operation = if client_changed && !group_changed {
@@ -1051,7 +976,7 @@ impl App {
         self.try_auto_select_stats_today();
 
         // Exit Daily-detail mode if the refresh dropped the day we were
-        // viewing; otherwise `get_sorted_daily_detail_rows()` would return
+        // viewing; otherwise `daily_detail_rows()` would return
         // empty while the user is still nominally in detail mode.
         if let Some(date) = self.selected_daily_detail_date {
             if !self.usage().daily.iter().any(|day| day.date == date) {
@@ -1085,7 +1010,8 @@ impl App {
     #[cfg(test)]
     fn replace_usage_data_for_test(&mut self, data: UsageProjection, mark_refresh: bool) {
         let (had_graph_selection, selected_graph_date) = self.capture_usage_selection(mark_refresh);
-        self.local_usage.replace_view_for_test(data);
+        self.local_usage
+            .replace_view_for_test(data, self.detail_selections());
         self.bump_usage_revision();
         self.reconcile_usage_selection(had_graph_selection, selected_graph_date);
     }
@@ -1115,7 +1041,8 @@ impl App {
 
         let pricing_status = generation.pricing_status();
         let (had_graph_selection, selected_graph_date) = self.capture_usage_selection(true);
-        self.local_usage.install_generation(generation)?;
+        self.local_usage
+            .install_generation(generation, self.detail_selections())?;
         self.bump_usage_revision();
         self.pricing_status = pricing_status;
         self.reconcile_usage_selection(had_graph_selection, selected_graph_date);
@@ -1289,7 +1216,10 @@ impl App {
 
         match self.subscription.poll() {
             SubscriptionPoll::Batch(batch) => {
-                self.install_subscription_batch(batch, crate::subscription::cache::save);
+                let cache_file = self.product_paths.subscription_cache_file();
+                self.install_subscription_batch(batch, |outputs| {
+                    crate::subscription::cache::save(&cache_file, outputs)
+                });
             }
             SubscriptionPoll::Disconnected => {
                 self.subscription.install_disconnected();
@@ -1319,7 +1249,10 @@ impl App {
         };
 
         if self.has_installed_generation() {
-            match self.local_usage.prepare_projection(query) {
+            match self
+                .local_usage
+                .prepare_projection(query, self.detail_selections())
+            {
                 Ok(projection) => self.replace_usage_projection(projection, false),
                 Err(error) => {
                     self.set_generation_status_with_tone(
@@ -2121,14 +2054,12 @@ impl App {
             Tab::Models if self.is_model_detail_active() => self.model_row_count(),
             Tab::Models => self.usage().models.len(),
             Tab::Agents => self.usage().agents.len(),
-            Tab::Daily if self.is_daily_detail_active() => {
-                self.get_sorted_daily_detail_rows().len()
-            }
+            Tab::Daily if self.is_daily_detail_active() => self.daily_detail_row_count(),
             Tab::Monthly if self.is_period_detail_active_for_kind(PeriodKind::Monthly) => {
-                self.get_sorted_period_detail_rows().len()
+                self.period_detail_row_count()
             }
             Tab::Weekly if self.is_period_detail_active_for_kind(PeriodKind::Weekly) => {
-                self.get_sorted_period_detail_rows().len()
+                self.period_detail_row_count()
             }
             Tab::Monthly => self.period_usage(PeriodKind::Monthly).len(),
             Tab::Weekly => self.period_usage(PeriodKind::Weekly).len(),
@@ -2176,7 +2107,7 @@ impl App {
         self.theme = Theme::from_name(new_theme);
         self.dialog_stack.set_theme(self.theme.clone());
         self.settings.set_theme(new_theme);
-        if let Err(e) = self.settings.save() {
+        if let Err(e) = self.settings.save(&self.product_paths) {
             self.set_status_with_tone(
                 &format!("Theme: {} (save failed: {})", new_theme.as_str(), e),
                 StatusTone::Danger,
@@ -2401,6 +2332,13 @@ impl App {
             .map(|day| day.date);
 
         if let Some(date) = selected_date {
+            if let Err(error) = self.local_usage.materialize_daily_detail(date) {
+                self.set_generation_status_with_tone(
+                    &format!("Daily detail projection failed: {error:#}"),
+                    StatusTone::Danger,
+                );
+                return;
+            }
             self.persist_list_interaction_for(Tab::Daily);
             self.selected_daily_detail_date = Some(date);
             self.enter_daily_detail_sort_context();
@@ -2466,6 +2404,13 @@ impl App {
         };
 
         if let Some((selection, label)) = selected_period {
+            if let Err(error) = self.local_usage.materialize_period_detail(selection) {
+                self.set_generation_status_with_tone(
+                    &format!("Period detail projection failed: {error:#}"),
+                    StatusTone::Danger,
+                );
+                return;
+            }
             self.persist_list_interaction_for(Self::period_tab(kind));
             self.selected_period_detail = Some(selection);
             self.enter_period_detail_sort_context();
@@ -2540,7 +2485,7 @@ impl App {
                 )
             }),
             Tab::Daily if self.is_daily_detail_active() => self
-                .get_sorted_daily_detail_rows()
+                .daily_detail_rows()
                 .get(self.selected_index)
                 .map(|row| {
                     format!(
@@ -2552,9 +2497,8 @@ impl App {
                     )
                 }),
             Tab::Monthly | Tab::Weekly if self.is_period_detail_active() => self
-                .get_sorted_period_detail_rows()
+                .period_detail_rows()
                 .get(self.selected_index)
-                .cloned()
                 .map(|row| {
                     format!(
                         "{} / {}: {} tokens, ${:.4}",
@@ -2625,13 +2569,7 @@ impl App {
             "tokenx-export-{}.json",
             chrono::Utc::now().format("%Y%m%d-%H%M%S")
         );
-        let export_dir = match tokenx_engine::paths::try_get_config_dir() {
-            Ok(directory) => directory.join("exports"),
-            Err(error) => {
-                self.set_status_with_tone(&format!("Export failed: {error}"), StatusTone::Danger);
-                return;
-            }
-        };
+        let export_dir = self.product_paths.export_dir();
         let path = export_dir.join(filename);
         let group_by = self.export_group_by();
 
@@ -2971,57 +2909,79 @@ impl App {
             .map(|period| format!("{} {}", period.section_label, period.label))
     }
 
-    pub fn get_sorted_daily_detail_rows(&self) -> Vec<DailyDetailRow> {
-        let Some(date) = self.selected_daily_detail_date else {
-            return Vec::new();
+    fn detail_render_order(
+        &self,
+        selection: DetailOrderSelection,
+        rows: &[DetailRow],
+    ) -> Arc<[usize]> {
+        let key = DetailOrderKey {
+            usage_revision: self.usage_revision,
+            selection,
+            sort_field: self.sort_field,
+            sort_direction: self.sort_direction,
         };
-        let Some(day) = self.usage().daily.iter().find(|day| day.date == date) else {
-            return Vec::new();
-        };
+        if let Some(cached) = self
+            .render_order_cache
+            .borrow()
+            .detail
+            .as_ref()
+            .filter(|cached| cached.key == key)
+        {
+            return Arc::clone(&cached.order);
+        }
 
-        let mut rows = build_detail_rows(&day.client_breakdown, self.group_by());
-        sort_detail_rows(&mut rows, self.sort_field, self.sort_direction);
-        rows
+        let mut order = (0..rows.len()).collect::<Vec<_>>();
+        sort_detail_order(&mut order, rows, self.sort_field, self.sort_direction);
+        let order: Arc<[usize]> = order.into();
+        self.render_order_cache.borrow_mut().detail = Some(CachedRenderOrder {
+            key,
+            order: Arc::clone(&order),
+        });
+        order
+    }
+
+    pub(crate) fn daily_detail_rows(&self) -> OrderedDetailRows<'_> {
+        let Some(date) = self.selected_daily_detail_date else {
+            return OrderedDetailRows {
+                rows: &[],
+                order: Arc::from([]),
+            };
+        };
+        let rows = self.require_installed_generation().daily_detail(date);
+        OrderedDetailRows {
+            rows,
+            order: self.detail_render_order(DetailOrderSelection::Daily(date), rows),
+        }
     }
 
     pub(crate) fn daily_detail_row_count(&self) -> usize {
         let Some(date) = self.selected_daily_detail_date else {
             return 0;
         };
-        self.usage()
-            .daily
-            .iter()
-            .find(|day| day.date == date)
-            .map(|day| build_detail_rows(&day.client_breakdown, self.group_by()).len())
-            .unwrap_or(0)
+        self.require_installed_generation().daily_detail(date).len()
     }
 
-    pub fn get_sorted_period_detail_rows(&self) -> Vec<PeriodDetailRow> {
+    pub(crate) fn period_detail_rows(&self) -> OrderedDetailRows<'_> {
         let Some(selection) = self.selected_period_detail else {
-            return Vec::new();
+            return OrderedDetailRows {
+                rows: &[],
+                order: Arc::from([]),
+            };
         };
-        let Some(period) = self.period_usage(selection.kind).iter().find(|period| {
-            period.start_date == selection.start_date && period.end_date == selection.end_date
-        }) else {
-            return Vec::new();
-        };
-
-        let mut rows = build_detail_rows(&period.client_breakdown, self.group_by());
-        sort_detail_rows(&mut rows, self.sort_field, self.sort_direction);
-        rows
+        let rows = self.require_installed_generation().period_detail(selection);
+        OrderedDetailRows {
+            rows,
+            order: self.detail_render_order(DetailOrderSelection::Period(selection), rows),
+        }
     }
 
     pub(crate) fn period_detail_row_count(&self) -> usize {
         let Some(selection) = self.selected_period_detail else {
             return 0;
         };
-        self.period_usage(selection.kind)
-            .iter()
-            .find(|period| {
-                period.start_date == selection.start_date && period.end_date == selection.end_date
-            })
-            .map(|period| build_detail_rows(&period.client_breakdown, self.group_by()).len())
-            .unwrap_or(0)
+        self.require_installed_generation()
+            .period_detail(selection)
+            .len()
     }
 
     pub(crate) fn hourly_render_order(&self) -> Arc<[usize]> {
@@ -3152,7 +3112,6 @@ mod tests {
     use chrono::NaiveDate;
     use serial_test::serial;
     use std::collections::{BTreeMap, BTreeSet};
-    use std::ffi::OsString;
 
     type ClientModelCosts<'a> = Vec<(&'a str, Vec<(&'a str, &'a str, f64)>)>;
 
@@ -3291,10 +3250,14 @@ mod tests {
             auto_refresh_enabled: true,
             auto_refresh_ms: 40_000,
             ..Settings::default()
-        }
-        .with_save_path_override(path);
+        };
 
-        let app = App::new_for_test_with_settings(config_with_theme(None), settings).unwrap();
+        let app = App::new_for_test_with_settings_and_paths(
+            config_with_theme(None),
+            settings,
+            ProductPaths::at(temp.path()),
+        )
+        .unwrap();
 
         assert_eq!(app.theme.name, ThemeName::Lagoon);
         assert!(app.auto_refresh_enabled());
@@ -3540,45 +3503,7 @@ mod tests {
     // ── Helper ──────────────────────────────────────────────────────
 
     fn test_settings() -> Settings {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let path = file.path().to_path_buf();
-        drop(file);
-
-        Settings::default().with_save_path_override(path)
-    }
-
-    struct EnvGuard {
-        home: Option<OsString>,
-        config_dir: Option<OsString>,
-    }
-
-    impl EnvGuard {
-        fn set(home: &std::path::Path) -> Self {
-            let guard = Self {
-                home: std::env::var_os("HOME"),
-                config_dir: std::env::var_os("TOKENX_CONFIG_DIR"),
-            };
-            unsafe {
-                std::env::set_var("HOME", home);
-                std::env::set_var("TOKENX_CONFIG_DIR", home);
-            }
-            guard
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match self.home.take() {
-                    Some(value) => std::env::set_var("HOME", value),
-                    None => std::env::remove_var("HOME"),
-                }
-                match self.config_dir.take() {
-                    Some(value) => std::env::set_var("TOKENX_CONFIG_DIR", value),
-                    None => std::env::remove_var("TOKENX_CONFIG_DIR"),
-                }
-            }
-        }
+        Settings::default()
     }
 
     fn load_test_generation() -> (tempfile::TempDir, tokenx_engine::Generation) {
@@ -3596,14 +3521,14 @@ mod tests {
             )
             .unwrap();
         }
-        let _guard = EnvGuard::set(home.path());
         let acquisition = acquisition_engine(
+            home.path().join(".tokenx-test-cache"),
             home.path().to_path_buf(),
             ClientUniverse::new([ClientId::Claude]).unwrap(),
             tokenx_engine::DateRange::none(),
             tokenx_engine::scanner::ScannerSettings::default(),
             tokenx_engine::CalendarContext::explicit("UTC").unwrap(),
-            std::sync::Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current()),
+            crate::acquisition::test_pricing_snapshot(),
         )
         .unwrap();
         let prepared = acquisition.prepare().unwrap();
@@ -3861,38 +3786,6 @@ mod tests {
             message_count: 1,
             turn_count: 1,
         }
-    }
-
-    #[test]
-    fn detail_rows_keep_canonical_model_identity() {
-        let canonical_model_id = "claude-opus-4.6";
-        let model = DailyModelInfo {
-            provider: "amazon-bedrock".into(),
-            model_id: canonical_model_id.into(),
-            display_name: canonical_model_id.into(),
-            workspace_key: None,
-            workspace_label: None,
-            tokens: UsageTokenBreakdown {
-                input: 1,
-                ..UsageTokenBreakdown::default()
-            },
-            cost: 0.0,
-            messages: 1,
-        };
-        let client_breakdown = BTreeMap::from([(
-            ClientId::Kiro,
-            DailyClientInfo {
-                tokens: model.tokens.clone(),
-                cost: 0.0,
-                models: vec![model],
-            },
-        )]);
-
-        let rows = build_detail_rows(&client_breakdown, GroupBy::ClientProviderModel);
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].model_id, canonical_model_id);
-        assert_eq!(rows[0].model, canonical_model_id);
     }
 
     fn usage_data_with_graph_for_today(
@@ -4308,7 +4201,35 @@ mod tests {
 
         assert_eq!(app.sort_field, SortField::Tokens);
         assert_eq!(app.sort_direction, SortDirection::Descending);
-        assert_eq!(app.get_sorted_daily_detail_rows()[0].model, "z-high-token");
+        assert_eq!(app.daily_detail_rows()[0].model.as_ref(), "z-high-token");
+    }
+
+    #[test]
+    fn daily_detail_reuses_materialized_rows_and_sort_order() {
+        let mut app = make_app();
+        app.current_tab = Tab::Daily;
+        app.usage_mut_for_test().daily = vec![daily_usage(
+            "2026-05-17",
+            8.0,
+            vec![
+                ("a-low-token", "anthropic", 1.0),
+                ("z-high-token", "openai", 7.0),
+            ],
+        )];
+
+        app.handle_key_event(key(KeyCode::Enter));
+        let first = app.daily_detail_rows();
+        let first_rows = first.rows.as_ptr();
+        let first_order = Arc::clone(&first.order);
+        let repeated = app.daily_detail_rows();
+
+        assert_eq!(repeated.rows.as_ptr(), first_rows);
+        assert!(Arc::ptr_eq(&first_order, &repeated.order));
+
+        app.handle_key_event(key(KeyCode::Esc));
+        app.handle_key_event(key(KeyCode::Enter));
+        let reopened = app.daily_detail_rows();
+        assert_eq!(reopened.rows.as_ptr(), first_rows);
     }
 
     #[test]
@@ -4420,7 +4341,7 @@ mod tests {
             "update_data should drop detail mode when the selected date is gone"
         );
         assert_eq!(app.daily_detail_date(), None);
-        assert!(app.get_sorted_daily_detail_rows().is_empty());
+        assert!(app.daily_detail_rows().is_empty());
     }
 
     #[test]
@@ -4478,7 +4399,7 @@ mod tests {
 
         app.handle_key_event(key(KeyCode::Enter));
         assert!(app.is_daily_detail_active());
-        assert_eq!(app.get_sorted_daily_detail_rows().len(), 2);
+        assert_eq!(app.daily_detail_rows().len(), 2);
 
         app.set_group_by_for_test(tokenx_engine::GroupBy::Model);
         app.update_data(UsageProjection {
@@ -4493,15 +4414,18 @@ mod tests {
             ..Default::default()
         });
 
-        let rows = app.get_sorted_daily_detail_rows();
+        let rows = app.daily_detail_rows();
         assert!(app.is_daily_detail_active());
         assert_eq!(
             app.daily_detail_date(),
             Some(NaiveDate::from_ymd_opt(2026, 5, 17).unwrap())
         );
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].clients, [ClientId::Claude, ClientId::Codex]);
-        assert_eq!(rows[0].model, "gpt-5");
+        assert_eq!(
+            rows[0].clients.as_ref(),
+            &[ClientId::Claude, ClientId::Codex]
+        );
+        assert_eq!(rows[0].model.as_ref(), "gpt-5");
         assert_eq!(rows[0].tokens.total(), 730);
         assert_eq!(rows[0].messages, 2);
         assert!((rows[0].cost - 7.0).abs() < f64::EPSILON);
@@ -4532,7 +4456,7 @@ mod tests {
         assert_eq!(app.sort_field, SortField::Tokens);
         assert_eq!(app.sort_direction, SortDirection::Descending);
         assert_eq!(app.get_current_list_len().unwrap(), 2);
-        assert_eq!(app.get_sorted_period_detail_rows()[0].model, "target-a");
+        assert_eq!(app.period_detail_rows()[0].model.as_ref(), "target-a");
         assert_eq!(
             app.selected_period_detail.unwrap().start_date,
             selected_period
@@ -4560,10 +4484,7 @@ mod tests {
 
         app.handle_key_event(key(KeyCode::Enter));
 
-        assert_eq!(
-            app.get_sorted_period_detail_rows()[0].model,
-            "fallback-model"
-        );
+        assert_eq!(app.period_detail_rows()[0].model.as_ref(), "fallback-model");
     }
 
     #[test]
@@ -4636,7 +4557,7 @@ mod tests {
             !app.is_period_detail_active(),
             "update_data should drop period detail mode when the selected period is gone"
         );
-        assert!(app.get_sorted_period_detail_rows().is_empty());
+        assert!(app.period_detail_rows().is_empty());
     }
 
     #[test]
@@ -4661,11 +4582,14 @@ mod tests {
         app.selected_index = 1;
         app.handle_key_event(key(KeyCode::Enter));
 
-        let rows = app.get_sorted_period_detail_rows();
+        let rows = app.period_detail_rows();
         assert!(app.is_period_detail_active_for_kind(PeriodKind::Monthly));
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].clients, [ClientId::Claude, ClientId::Codex]);
-        assert_eq!(rows[0].model, "gpt-5");
+        assert_eq!(
+            rows[0].clients.as_ref(),
+            &[ClientId::Claude, ClientId::Codex]
+        );
+        assert_eq!(rows[0].model.as_ref(), "gpt-5");
         assert_eq!(rows[0].tokens.total(), 730);
         assert_eq!(rows[0].messages, 2);
         assert!((rows[0].cost - 7.0).abs() < f64::EPSILON);
@@ -5056,7 +4980,7 @@ mod tests {
     fn test_handle_key_theme_cycle() {
         let mut app = make_app();
         let initial_theme = app.theme.name;
-        let settings_path = app.settings.save_path_override.clone().unwrap();
+        let settings_path = app.product_paths.settings_file();
 
         app.handle_key_event(key(KeyCode::Char('p')));
         assert_ne!(app.theme.name, initial_theme);

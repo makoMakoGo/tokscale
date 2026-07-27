@@ -9,6 +9,7 @@ use tokenx_engine::{CalendarContext, ClientId, ClientUniverse, DateRange, GroupB
 
 use crate::commands::shared::{parse_client_id_arg, resolve_client_universe};
 use crate::failure::CliFailure;
+use crate::product_paths::ProductPaths;
 use crate::settings::Settings;
 use crate::theme::ThemeName;
 use crate::tui::Tab;
@@ -242,6 +243,7 @@ pub(crate) struct ResolvedInputScope {
 /// then the immutable input scope and all application policy share this value.
 #[derive(Debug)]
 pub(crate) struct StartupSnapshot {
+    pub(crate) paths: ProductPaths,
     pub(crate) input: ResolvedInputScope,
     pub(crate) settings: Settings,
     pub(crate) calendar: CalendarContext,
@@ -310,8 +312,11 @@ pub(crate) struct TuiPlan {
 pub(crate) enum ExecutionPlan {
     Tui(TuiPlan),
     Models(ModelsPlan),
-    Pricing(PricingSubcommand),
-    CachePrune,
+    Pricing {
+        paths: ProductPaths,
+        subcommand: PricingSubcommand,
+    },
+    CachePrune(ProductPaths),
     CacheWarm(StartupSnapshot),
 }
 
@@ -320,9 +325,12 @@ impl ExecutionPlan {
         match cli.command.unwrap_or(Commands::Tui(TuiArgs::default())) {
             Commands::Tui(args) => resolve_tui(args, terminal).map(Self::Tui),
             Commands::Models(args) => resolve_models(args).map(Self::Models),
-            Commands::Pricing { subcommand } => Ok(Self::Pricing(subcommand)),
+            Commands::Pricing { subcommand } => Ok(Self::Pricing {
+                paths: ProductPaths::resolve()?,
+                subcommand,
+            }),
             Commands::Cache { subcommand } => match subcommand {
-                CacheSubcommand::Prune => Ok(Self::CachePrune),
+                CacheSubcommand::Prune => Ok(Self::CachePrune(ProductPaths::resolve()?)),
                 CacheSubcommand::Warm { input } => resolve_startup(input).map(Self::CacheWarm),
             },
         }
@@ -374,12 +382,18 @@ fn resolve_startup(args: InputScopeArgs) -> Result<StartupSnapshot, CliFailure> 
     // Product state and input discovery are deliberately separate authorities:
     // settings always come from Tokenx's product root, while `--home` changes
     // only the home used to derive built-in client input paths.
-    let settings = Settings::load()?;
+    let paths = ProductPaths::resolve()?;
+    let settings = Settings::load(&paths)?;
     let calendar = match settings.time_zone {
         Some(calendar) => calendar,
         None => CalendarContext::system().map_err(anyhow::Error::new)?,
     };
-    let pricing = Arc::new(tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_current());
+    let pricing = Arc::new(
+        tokenx_engine::pricing::ResolvedPricingSnapshot::resolve_from(
+            &paths.custom_pricing_file(),
+            &paths.cache_dir(),
+        ),
+    );
     let home = args.home.or_else(dirs::home_dir).ok_or_else(|| {
         CliFailure::invalid_message(
             "could not determine the home directory; pass --home PATH".to_string(),
@@ -387,6 +401,7 @@ fn resolve_startup(args: InputScopeArgs) -> Result<StartupSnapshot, CliFailure> 
     })?;
     let (universe, restricted) = resolve_client_universe(args.clients, &settings.default_clients)?;
     Ok(StartupSnapshot {
+        paths,
         input: ResolvedInputScope {
             home,
             universe,
