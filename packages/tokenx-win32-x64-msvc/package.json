@@ -1,0 +1,26 @@
+{
+  "name": "@juya-ai/tokenx-win32-x64-msvc",
+  "version": "0.1.0",
+  "description": "tokenx CLI binary for win32 x64 msvc",
+  "license": "MIT",
+  "type": "module",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "bin/tokenx.exe",
+  "files": [
+    "bin"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/makoMakoGo/tokenx.git",
+    "directory": "packages/tokenx-win32-x64-msvc"
+  }
+}

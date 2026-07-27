@@ -1,0 +1,1 @@
+# packages/tokenx is a plain launcher entrypoint and does not require Bun preloads.

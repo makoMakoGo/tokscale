@@ -7,9 +7,9 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "cargo build --release -p tokscale-cli && bun run build:cli",
-    "build:cli": "bun run --cwd packages/cli build",
-    "build:core": "cargo build --release -p tokscale-cli",
+    "build": "cargo build --release -p tokenx && bun run build:launcher",
+    "build:launcher": "bun run --cwd packages/tokenx build",
+    "build:native": "cargo build --release -p tokenx",
     "cli": "./scripts/cli.sh",
     "release:bump": "bash scripts/bump-release-version.sh",
     "test:launchers": "bash scripts/test-package-launchers.sh"

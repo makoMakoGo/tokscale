@@ -1,20 +1,20 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/tokscale-core",
-    "crates/tokscale-cli",
+    "crates/tokenx-engine",
+    "crates/tokenx",
 ]
 
 [workspace.package]
-version = "4.9.0"
+version = "0.1.0"
 edition = "2021"
-authors = ["Junho Yeo <hello@junho.io>"]
+authors = ["makoMakoGo <48956204+makoMakoGo@users.noreply.github.com>"]
 license = "MIT"
-repository = "https://github.com/junhoyeo/tokscale"
+repository = "https://github.com/makoMakoGo/tokenx"
 
 [workspace.dependencies]
 # Internal crates
-tokscale-core = { path = "crates/tokscale-core" }
+tokenx-engine = { path = "crates/tokenx-engine" }
 
 # Parallelism
 rayon = "1.10"
@@ -33,6 +33,8 @@ walkdir = "2"
 
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = { version = "0.10", features = ["serde"] }
+iana-time-zone = "0.1"
 
 # Error handling
 thiserror = "2"
@@ -43,15 +45,12 @@ libc = "0.2"
 reqwest = { version = "0.12", features = ["json", "native-tls-vendored"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
 
-# For disk caching (XDG paths)
+# Platform directory discovery for external client data
 dirs = "5"
 
 # SQLite database support (bundled for cross-compilation)
 rusqlite = { version = "0.32", features = ["bundled"] }
 zstd = "0.13"
-
-# Lazy static initialization
-once_cell = "1"
 
 # CLI framework
 clap = { version = "4.5", features = ["derive", "cargo"] }

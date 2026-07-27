@@ -1,8 +1,8 @@
-# Fork release process
+# Release process
 
-Fork releases publish the `@juya-ai/tokscale` package family from an immutable
-version-bump commit on the default branch. The publish workflow never edits or
-pushes the protected branch.
+Repository releases publish the `@juya-ai/tokenx` package family from an
+immutable version-bump commit on the default branch. The publish workflow never
+edits or pushes the protected branch.
 
 ## Standard release
 
@@ -11,33 +11,33 @@ Prepare the release on a dedicated branch:
 ```bash
 git switch -c release/v<version>
 bun run release:bump -- <major|minor|patch|version>
-git add Cargo.toml Cargo.lock packages/cli/package.json \
-  packages/cli-*/package.json packages/tokscale/package.json
+git add Cargo.toml Cargo.lock packages/tokenx/package.json \
+  packages/tokenx-*/package.json
 git commit -m "chore(release): bump version to <version>"
 ```
 
-Open a pull request targeting `personal/local-clients`. The release commit must
-contain only the listed manifests. Core CI verifies version coherence and the
+Open a pull request targeting the default branch. The release commit must
+contain only the listed manifests. CI verifies version coherence and the
 release tooling. Squash-merge the PR after its required checks pass.
 
-When the version-bump commit reaches `personal/local-clients`, the `Publish`
-workflow automatically:
+When the version-bump commit reaches the default branch, the `Publish` workflow
+automatically:
 
 1. verifies that every Rust and npm manifest has the same increasing version;
 2. verifies that the push changed only release manifests;
 3. builds the three supported native packages;
 4. rechecks that the release commit is still the default-branch head;
-5. publishes native packages, the CLI dispatcher, and then the wrapper;
+5. publishes native packages and then the launcher package;
 6. creates `v<version>` and the GitHub Release after every npm publish succeeds.
 
 No manual workflow dispatch is needed for a normal release.
 
 ## Maintainer direct release
 
-The repository owner may prepare the same version-only commit directly on
-`personal/local-clients` and push it using the existing ruleset bypass. That
-push enters the same `Publish` workflow and receives the same validation. This
-is an explicit maintainer path, not the routine release path.
+The repository owner may prepare the same version-only commit directly on the
+default branch and push it using the existing ruleset bypass. That push enters
+the same `Publish` workflow and receives the same validation. This is an
+explicit maintainer path, not the routine release path.
 
 Do not combine code, documentation, or workflow changes with the version bump.
 The publish workflow rejects such a commit even if the branch push itself is
@@ -46,8 +46,7 @@ allowed.
 ## Recovery
 
 npm publication is not atomic. If only part of the package family was
-published, run the `Publish` workflow manually from
-`personal/local-clients` with:
+published, run the `Publish` workflow manually from the default branch with:
 
 - `version`: the failed release version;
 - `commit`: the exact version-bump commit SHA from the failed run.
@@ -73,6 +72,6 @@ Before changing release infrastructure, run:
 bash scripts/test-release-tooling.sh
 ```
 
-This script is the canonical release-tooling suite used by both Core CI and
+This script is the canonical release-tooling suite used by both CI and
 Test & Coverage. Add or remove release checks there instead of maintaining
 separate command lists in workflow YAML.

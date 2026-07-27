@@ -1,0 +1,142 @@
+[
+  {
+    "variant": "OpenCode",
+    "id": "opencode",
+    "displayName": "OpenCode"
+  },
+  {
+    "variant": "Claude",
+    "id": "claude",
+    "displayName": "Claude"
+  },
+  {
+    "variant": "Codex",
+    "id": "codex",
+    "displayName": "Codex"
+  },
+  {
+    "variant": "Gemini",
+    "id": "gemini",
+    "displayName": "Gemini CLI"
+  },
+  {
+    "variant": "Amp",
+    "id": "amp",
+    "displayName": "Amp"
+  },
+  {
+    "variant": "Droid",
+    "id": "droid",
+    "displayName": "Droid"
+  },
+  {
+    "variant": "OpenClaw",
+    "id": "openclaw",
+    "displayName": "OpenClaw"
+  },
+  {
+    "variant": "Pi",
+    "id": "pi",
+    "displayName": "Pi"
+  },
+  {
+    "variant": "Omp",
+    "id": "omp",
+    "displayName": "OMP"
+  },
+  {
+    "variant": "Kimi",
+    "id": "kimi",
+    "displayName": "Kimi"
+  },
+  {
+    "variant": "Qwen",
+    "id": "qwen",
+    "displayName": "Qwen"
+  },
+  {
+    "variant": "RooCode",
+    "id": "roocode",
+    "displayName": "Roo Code"
+  },
+  {
+    "variant": "Mux",
+    "id": "mux",
+    "displayName": "Mux"
+  },
+  {
+    "variant": "Kilo",
+    "id": "kilo",
+    "displayName": "Kilo"
+  },
+  {
+    "variant": "Hermes",
+    "id": "hermes",
+    "displayName": "Hermes"
+  },
+  {
+    "variant": "Copilot",
+    "id": "copilot",
+    "displayName": "Copilot"
+  },
+  {
+    "variant": "Goose",
+    "id": "goose",
+    "displayName": "Goose"
+  },
+  {
+    "variant": "Codebuff",
+    "id": "codebuff",
+    "displayName": "Codebuff"
+  },
+  {
+    "variant": "CodeBuddy",
+    "id": "codebuddy",
+    "displayName": "CodeBuddy"
+  },
+  {
+    "variant": "Antigravity",
+    "id": "antigravity",
+    "displayName": "Antigravity"
+  },
+  {
+    "variant": "Zed",
+    "id": "zed",
+    "displayName": "Zed Agent"
+  },
+  {
+    "variant": "Zcode",
+    "id": "zcode",
+    "displayName": "ZCode"
+  },
+  {
+    "variant": "Kiro",
+    "id": "kiro",
+    "displayName": "Kiro"
+  },
+  {
+    "variant": "Junie",
+    "id": "junie",
+    "displayName": "Junie"
+  },
+  {
+    "variant": "Warp",
+    "id": "warp",
+    "displayName": "Warp"
+  },
+  {
+    "variant": "Cline",
+    "id": "cline",
+    "displayName": "Cline"
+  },
+  {
+    "variant": "CommandCode",
+    "id": "commandcode",
+    "displayName": "Command Code"
+  },
+  {
+    "variant": "Grok",
+    "id": "grok",
+    "displayName": "Grok"
+  }
+]

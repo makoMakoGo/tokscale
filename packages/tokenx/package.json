@@ -1,0 +1,48 @@
+{
+  "name": "@juya-ai/tokenx",
+  "version": "0.1.0",
+  "description": "A high-performance CLI tool and visualization dashboard for tracking AI coding assistant token usage and costs across multiple platforms.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "tokenx": "./bin.js"
+  },
+  "files": [
+    "bin.js",
+    "dist/**/*"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/makoMakoGo/tokenx.git",
+    "directory": "packages/tokenx"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "bun src/index.ts",
+    "start": "node dist/index.js",
+    "prepublishOnly": "bun run build"
+  },
+  "dependencies": {},
+  "optionalDependencies": {
+    "@juya-ai/tokenx-darwin-arm64": "0.1.0",
+    "@juya-ai/tokenx-linux-x64-gnu": "0.1.0",
+    "@juya-ai/tokenx-win32-x64-msvc": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "tokenx",
+    "opencode",
+    "claude-code",
+    "gemini",
+    "codex",
+    "cli"
+  ]
+}

@@ -1,0 +1,5860 @@
+use super::{
+    apply_token_pricing, finalize_token_priced_messages, input_record_cache, load_test_usage,
+    load_test_usage_with_health, normalize_model_for_grouping, parse_all_messages_with_health,
+    parse_all_messages_with_health_with_settings, parse_all_messages_with_pricing,
+    parse_all_messages_with_pricing_with_settings, positive_token_total, pricing, scanner,
+    AcquisitionConfig, AcquisitionEngine, AttributedUsageRecord, ClientId, ClientUniverse,
+    DateRange, GroupBy, PreparedAcquisition, TestAcquisitionRequest, TokenBreakdown,
+    UNKNOWN_WORKSPACE_LABEL,
+};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsString;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
+
+#[derive(Debug)]
+struct LocalMessagesForTest {
+    messages: Vec<AttributedUsageRecord>,
+    counts: TestClientCounts,
+    health: super::DataHealth,
+}
+
+#[derive(Debug)]
+struct TestClientCounts([i32; ClientId::COUNT]);
+
+impl Default for TestClientCounts {
+    fn default() -> Self {
+        Self(std::array::from_fn(|_| 0))
+    }
+}
+
+impl TestClientCounts {
+    fn from_messages(messages: &[AttributedUsageRecord]) -> Self {
+        let mut counts = Self::default();
+        for message in messages {
+            counts.0[message.client as usize] =
+                counts.0[message.client as usize].saturating_add(message.message_count.max(0));
+        }
+        counts
+    }
+
+    fn get(&self, client: ClientId) -> i32 {
+        self.0[client as usize]
+    }
+}
+
+fn load_local_messages_for_test(
+    options: TestAcquisitionRequest,
+) -> Result<LocalMessagesForTest, super::AcquisitionError> {
+    let prepared = super::prepare_test_inventory(options.clone())?;
+    let mut messages = Vec::new();
+    let health =
+        super::fold_prepared_local_inputs_with_pricing(prepared, None, &mut messages)?.health;
+    let messages = super::filter_usage_records(messages, &options);
+    let counts = TestClientCounts::from_messages(&messages);
+    Ok(LocalMessagesForTest {
+        messages,
+        counts,
+        health,
+    })
+}
+
+fn input_cache_for_test_home(home: &Path) -> input_record_cache::InputRecordShardStore {
+    input_record_cache::InputRecordShardStore::with_cache_dir(
+        &super::input_cache_dir_for_test_home(home),
+    )
+}
+
+fn test_decoder(decoder_id: input_record_cache::DecoderId) -> crate::integrations::DecoderKind {
+    crate::integrations::DecoderKind::plain(decoder_id)
+}
+
+fn plain_test_input(
+    decoder_id: input_record_cache::DecoderId,
+    path: PathBuf,
+) -> crate::integrations::DiscoveredInput {
+    crate::integrations::DiscoveredInput::plain_file(path, test_decoder(decoder_id))
+}
+
+fn sqlite_test_input(
+    decoder_id: input_record_cache::DecoderId,
+    path: PathBuf,
+) -> crate::integrations::DiscoveredInput {
+    crate::integrations::DiscoveredInput::sqlite_with_wal(path, test_decoder(decoder_id))
+}
+
+fn opencode_test_input(path: PathBuf) -> crate::integrations::DiscoveredInput {
+    crate::integrations::DiscoveredInput::sqlite_with_wal(
+        path,
+        crate::integrations::DecoderKind::opencode_sqlite(),
+    )
+}
+
+fn parse_all_messages_with_pricing_in_cache(
+    home_dir: &str,
+    clients: &[String],
+    cache_dir: &Path,
+) -> Result<Vec<AttributedUsageRecord>, super::AcquisitionError> {
+    let clients = clients
+        .iter()
+        .map(|client| ClientId::from_str(client).unwrap())
+        .collect();
+    let mut prepared = super::prepare_test_inventory(TestAcquisitionRequest {
+        home_dir: Some(PathBuf::from(home_dir)),
+        clients: Some(clients),
+        ..TestAcquisitionRequest::default()
+    })?;
+    prepared.input_cache_dir = cache_dir.to_path_buf();
+    let mut messages = Vec::new();
+    super::fold_prepared_local_inputs_with_pricing(prepared, None, &mut messages)?;
+    Ok(messages)
+}
+
+struct HomeEnvGuard {
+    home: Option<OsString>,
+    config_dir: Option<OsString>,
+}
+
+impl HomeEnvGuard {
+    fn set(home: &Path) -> Self {
+        let guard = Self {
+            home: std::env::var_os("HOME"),
+            config_dir: std::env::var_os("TOKENX_CONFIG_DIR"),
+        };
+        std::env::set_var("HOME", home);
+        std::env::set_var("TOKENX_CONFIG_DIR", home);
+        guard
+    }
+}
+
+impl Drop for HomeEnvGuard {
+    fn drop(&mut self) {
+        match self.home.take() {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        match self.config_dir.take() {
+            Some(config_dir) => std::env::set_var("TOKENX_CONFIG_DIR", config_dir),
+            None => std::env::remove_var("TOKENX_CONFIG_DIR"),
+        }
+    }
+}
+
+fn current_pricing_snapshot() -> Arc<crate::pricing::ResolvedPricingSnapshot> {
+    let root = std::env::var_os("TOKENX_CONFIG_DIR")
+        .map(PathBuf::from)
+        .expect("test product root must be configured");
+    Arc::new(crate::pricing::ResolvedPricingSnapshot::resolve_from(
+        &root.join("custom-pricing.json"),
+        &root.join("cache"),
+    ))
+}
+
+fn make_workspace_message(
+    client: ClientId,
+    model_id: &str,
+    provider_id: &str,
+    session_id: &str,
+    cost: f64,
+    workspace_key: Option<&str>,
+    workspace_label: Option<&str>,
+) -> AttributedUsageRecord {
+    let mut msg = AttributedUsageRecord::new(
+        client,
+        model_id,
+        provider_id,
+        session_id,
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        cost,
+    );
+    msg.set_workspace(
+        workspace_key.map(str::to_string),
+        workspace_label.map(str::to_string),
+    );
+    msg
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_message_with_tokens(
+    client: ClientId,
+    model_id: &str,
+    provider_id: &str,
+    session_id: &str,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+) -> AttributedUsageRecord {
+    AttributedUsageRecord::new(
+        client,
+        model_id,
+        provider_id,
+        session_id,
+        1_733_011_200_000,
+        TokenBreakdown {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning,
+        },
+        0.0,
+    )
+}
+
+fn aggregate_finalized_model_usage_entries(
+    mut messages: Vec<AttributedUsageRecord>,
+    group_by: &GroupBy,
+) -> Vec<crate::projection::UsageModelEntry> {
+    for msg in &mut messages {
+        let model = crate::model_aliases::canonicalize_model_id(&msg.model_id);
+        msg.model_id = crate::records::intern::intern(&model);
+        msg.refresh_derived_fields();
+    }
+    aggregate_model_usage_entries(messages, group_by)
+}
+
+fn aggregate_model_usage_entries(
+    messages: Vec<AttributedUsageRecord>,
+    group_by: &GroupBy,
+) -> Vec<crate::projection::UsageModelEntry> {
+    crate::build_usage_index(
+        &messages,
+        DateRange::none(),
+        crate::CalendarContext::explicit("UTC").unwrap(),
+    )
+    .unwrap()
+    .project_usage(
+        group_by,
+        chrono::NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
+    )
+    .unwrap()
+    .models
+}
+
+fn write_streaming_fold_fixture(home: &Path) {
+    let db_path = home.join(".local/share/opencode/opencode.db");
+    let conn = create_opencode_sqlite_db(&db_path);
+    insert_opencode_sqlite_message(
+        &conn,
+        "msg-1",
+        "opencode-session",
+        "/repo",
+        r#"{"id":"msg-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":1,"cache":{"read":2,"write":3}},"time":{"created":1733011200000}}"#,
+    );
+
+    let codex_dir = home.join(".codex/sessions");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("codex-session.jsonl"),
+        concat!(
+            r#"{"timestamp":"2024-12-01T01:00:00Z","type":"session_meta","payload":{"id":"codex-session","source":"interactive","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2024-12-01T01:00:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+            "\n",
+            r#"{"timestamp":"2024-12-01T01:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6,"reasoning_output_tokens":2},"last_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6,"reasoning_output_tokens":2}}}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+}
+
+fn streaming_acquisition_options(home: &Path, clients: Vec<&str>) -> TestAcquisitionRequest {
+    TestAcquisitionRequest {
+        home_dir: Some(home.to_path_buf()),
+        clients: Some(
+            clients
+                .into_iter()
+                .map(|client| ClientId::from_str(client).unwrap())
+                .collect(),
+        ),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings::default(),
+    }
+}
+
+fn reference_usage(options: &TestAcquisitionRequest) -> crate::projection::UsageProjection {
+    let home_dir = options.home_dir.as_deref().unwrap();
+    let clients = options.clients.clone().unwrap();
+    let client_names = clients
+        .iter()
+        .map(|client| client.as_str().to_string())
+        .collect::<Vec<_>>();
+    let messages = parse_all_messages_with_pricing_with_settings(
+        home_dir.to_str().unwrap(),
+        &client_names,
+        None,
+        &options.scanner_settings,
+    )
+    .unwrap();
+    let mut accumulator = crate::aggregate::GenerationAccumulator::new(
+        options.date_range.clone(),
+        crate::CalendarContext::explicit("UTC").unwrap(),
+    );
+    for message in &messages {
+        accumulator.push(message);
+    }
+    accumulator
+        .into_usage_index()
+        .unwrap()
+        .project_usage(
+            &GroupBy::ClientModel,
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 26).unwrap(),
+        )
+        .unwrap()
+}
+
+#[test]
+#[serial_test::serial]
+fn acquisition_usage_matches_direct_aggregation() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(cache_home.path());
+
+    write_streaming_fold_fixture(input_home.path());
+    let options = TestAcquisitionRequest {
+        home_dir: Some(input_home.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode, ClientId::Codex]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings::default(),
+    };
+    let (streaming, health) =
+        load_test_usage_with_health(options.clone(), GroupBy::ClientModel, None).unwrap();
+    let reference = reference_usage(&options);
+
+    // The reference harness exercises aggregation from a bare message list,
+    // which intentionally has no data-health envelope. Health propagation
+    // is covered by the local loader independently from payload parity.
+    assert!(health.complete());
+
+    assert_eq!(format!("{streaming:?}"), format!("{reference:?}"));
+}
+
+#[test]
+#[serial_test::serial]
+fn generation_footprint_sums_the_two_client_fixture() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(home.path());
+    write_streaming_fold_fixture(home.path());
+
+    let (builder, sources) = prepare_generation_sources(home.path(), &["opencode", "codex"]);
+    let generation = builder.build(sources).unwrap();
+
+    let footprint = generation.input_footprint();
+    let opencode_bytes = footprint.bytes_for(ClientId::OpenCode);
+    let codex_bytes = footprint.bytes_for(ClientId::Codex);
+    assert!(opencode_bytes > 0);
+    assert!(codex_bytes > 0);
+    assert_eq!(
+        footprint.total_bytes().unwrap(),
+        opencode_bytes.checked_add(codex_bytes).unwrap()
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn generation_carries_prepared_input_footprint() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(home.path());
+    write_streaming_fold_fixture(home.path());
+
+    let pricing = current_pricing_snapshot();
+    let config = super::AcquisitionConfig::new(
+        home.path().to_path_buf(),
+        DateRange::none(),
+        super::ClientUniverse::new([ClientId::OpenCode, ClientId::Codex]).unwrap(),
+        scanner::ScannerSettings::default(),
+        crate::CalendarContext::explicit("UTC").unwrap(),
+        pricing.context().clone(),
+    )
+    .unwrap();
+    let generation = super::AcquisitionEngine::new(
+        config,
+        pricing,
+        super::input_cache_dir_for_test_home(home.path()),
+    )
+    .unwrap()
+    .acquire()
+    .unwrap();
+
+    assert_ne!(generation.source_fingerprint().as_bytes(), &[0_u8; 32]);
+    let footprint = generation.input_footprint();
+    let opencode_bytes = footprint.bytes_for(ClientId::OpenCode);
+    let codex_bytes = footprint.bytes_for(ClientId::Codex);
+    assert!(opencode_bytes > 0);
+    assert!(codex_bytes > 0);
+    assert_eq!(
+        footprint.total_bytes().unwrap(),
+        opencode_bytes.checked_add(codex_bytes).unwrap()
+    );
+}
+
+#[test]
+fn disabled_input_cache_reports_one_global_issue_and_retries_next_acquisition() {
+    let input_home = tempfile::TempDir::new().unwrap();
+    let cache_home = tempfile::TempDir::new().unwrap();
+    write_streaming_fold_fixture(input_home.path());
+    let cache_path = cache_home.path().join("input-records");
+    std::fs::write(&cache_path, b"cache path intentionally blocked").unwrap();
+    let request = TestAcquisitionRequest {
+        home_dir: Some(input_home.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode, ClientId::Codex]),
+        ..TestAcquisitionRequest::default()
+    };
+    let acquire = |cache_path: &Path| {
+        let mut prepared = super::prepare_test_inventory(request.clone()).unwrap();
+        prepared.input_cache_dir = cache_path.to_path_buf();
+        let mut messages = Vec::new();
+        let outcome =
+            super::fold_prepared_local_inputs_with_pricing(prepared, None, &mut messages).unwrap();
+        (messages, outcome.health.summarize())
+    };
+
+    let (messages, disabled_health) = acquire(&cache_path);
+    assert!(!messages.is_empty());
+    assert_eq!(disabled_health.issue_count(), 1);
+    assert_eq!(disabled_health.issues[0].issue, "input-cache-unavailable");
+    assert_eq!(disabled_health.issues[0].handling, "cache-bypassed");
+
+    std::fs::remove_file(&cache_path).unwrap();
+    let (retried_messages, retried_health) = acquire(&cache_path);
+    assert_eq!(retried_messages, messages);
+    assert_eq!(retried_health.issue_count(), 0);
+}
+
+#[test]
+#[serial_test::serial]
+fn acquisition_usage_applies_date_range() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(cache_home.path());
+
+    write_streaming_fold_fixture(input_home.path());
+
+    let included = load_test_usage(
+        TestAcquisitionRequest {
+            home_dir: Some(input_home.path().to_path_buf()),
+            clients: Some(vec![ClientId::OpenCode, ClientId::Codex]),
+            date_range: DateRange::bounded(
+                Some(chrono::NaiveDate::from_ymd_opt(2024, 12, 1).unwrap()),
+                Some(chrono::NaiveDate::from_ymd_opt(2024, 12, 1).unwrap()),
+            )
+            .unwrap(),
+            scanner_settings: scanner::ScannerSettings::default(),
+        },
+        GroupBy::ClientModel,
+        None,
+    )
+    .unwrap();
+    let excluded = load_test_usage(
+        TestAcquisitionRequest {
+            home_dir: Some(input_home.path().to_path_buf()),
+            clients: Some(vec![ClientId::OpenCode, ClientId::Codex]),
+            date_range: DateRange::bounded(
+                Some(chrono::NaiveDate::from_ymd_opt(2024, 12, 2).unwrap()),
+                None,
+            )
+            .unwrap(),
+            scanner_settings: scanner::ScannerSettings::default(),
+        },
+        GroupBy::ClientModel,
+        None,
+    )
+    .unwrap();
+
+    assert!(included.total_tokens > 0);
+    assert!(!included.models.is_empty());
+    assert_eq!(excluded.total_tokens, 0);
+    assert!(excluded.models.is_empty());
+    assert!(excluded.daily.is_empty());
+    assert!(excluded.hourly.is_empty());
+}
+
+#[test]
+#[serial_test::serial]
+fn acquisition_client_filter_matches_direct_aggregation() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(cache_home.path());
+
+    write_streaming_fold_fixture(input_home.path());
+    let options = streaming_acquisition_options(input_home.path(), vec!["codex"]);
+
+    let streaming = load_test_usage(options.clone(), GroupBy::ClientModel, None).unwrap();
+    let reference = reference_usage(&options);
+
+    assert_eq!(format!("{streaming:?}"), format!("{reference:?}"));
+    assert_eq!(streaming.models.len(), 1);
+    assert_eq!(streaming.models[0].clients, [ClientId::Codex]);
+}
+
+#[test]
+#[serial_test::serial]
+fn warm_input_cache_matches_cold_acquisition() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(cache_home.path());
+
+    write_streaming_fold_fixture(input_home.path());
+    let options = streaming_acquisition_options(input_home.path(), vec!["opencode", "codex"]);
+
+    let cold = load_test_usage(options.clone(), GroupBy::ClientModel, None).unwrap();
+    let warm = load_test_usage(options, GroupBy::ClientModel, None).unwrap();
+
+    assert_eq!(format!("{cold:?}"), format!("{warm:?}"));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_opencode_sqlite_payload(
+    created_ms: f64,
+    completed_ms: f64,
+    input: i64,
+    output: i64,
+    reasoning: i64,
+    cache_read: i64,
+    cache_write: i64,
+    cost: f64,
+) -> String {
+    format!(
+        r#"{{
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "cost": {cost},
+            "tokens": {{
+                "input": {input},
+                "output": {output},
+                "reasoning": {reasoning},
+                "cache": {{ "read": {cache_read}, "write": {cache_write} }}
+            }},
+            "time": {{ "created": {created_ms}, "completed": {completed_ms} }},
+            "mode": "build"
+        }}"#
+    )
+}
+
+fn create_opencode_sqlite_db(db_path: &std::path::Path) -> rusqlite::Connection {
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session (
+            id TEXT PRIMARY KEY,
+            directory TEXT NOT NULL
+        );
+        CREATE TABLE message (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            data TEXT NOT NULL
+        );",
+    )
+    .unwrap();
+    conn
+}
+
+fn insert_opencode_sqlite_message(
+    conn: &rusqlite::Connection,
+    row_id: &str,
+    session_id: &str,
+    directory: &str,
+    data: &str,
+) {
+    conn.execute(
+        "INSERT OR IGNORE INTO session (id, directory) VALUES (?1, ?2)",
+        rusqlite::params![session_id, directory],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+        rusqlite::params![row_id, session_id, data],
+    )
+    .unwrap();
+}
+
+fn write_single_opencode_sqlite_fixture(home: &Path) {
+    let conn = create_opencode_sqlite_db(&home.join(".local/share/opencode/opencode.db"));
+    insert_opencode_sqlite_message(
+        &conn,
+        "msg-1",
+        "session-1",
+        "",
+        r#"{"id":"msg-1","role":"assistant","modelID":"gpt-5.5","providerID":"openai","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+    );
+}
+
+fn encode_proto_varint(mut value: u64) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        bytes.push(byte);
+        if value == 0 {
+            return bytes;
+        }
+    }
+}
+
+fn encode_proto_varint_field(field: u64, value: u64) -> Vec<u8> {
+    let mut bytes = encode_proto_varint(field << 3);
+    bytes.extend(encode_proto_varint(value));
+    bytes
+}
+
+fn encode_proto_len_field(field: u64, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = encode_proto_varint((field << 3) | 2);
+    bytes.extend(encode_proto_varint(payload.len() as u64));
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+fn write_single_antigravity_fixture(home: &Path) {
+    let db_path = home.join(".gemini/antigravity-cli/conversations/session.db");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE gen_metadata (idx integer, data blob, size integer);
+         CREATE TABLE trajectory_metadata_blob (id text, data blob);",
+    )
+    .unwrap();
+
+    let mut usage = Vec::new();
+    usage.extend(encode_proto_varint_field(1, 12));
+    usage.extend(encode_proto_varint_field(5, 2));
+    usage.extend(encode_proto_varint_field(9, 4));
+    usage.extend(encode_proto_varint_field(10, 1));
+    usage.extend(encode_proto_len_field(11, b"response-1"));
+    let mut chat_model = encode_proto_len_field(4, &usage);
+    chat_model.extend(encode_proto_len_field(21, b"Gemini 3.5 Flash (Medium)"));
+    let generation = encode_proto_len_field(1, &chat_model);
+
+    let created_at = encode_proto_varint_field(1, 1_711_200_000);
+    let trajectory = encode_proto_len_field(2, &created_at);
+
+    conn.execute(
+        "INSERT INTO gen_metadata (idx, data, size) VALUES (0, ?1, 0)",
+        rusqlite::params![generation],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO trajectory_metadata_blob (id, data) VALUES ('main', ?1)",
+        rusqlite::params![trajectory],
+    )
+    .unwrap();
+}
+
+fn create_hermes_sqlite_db(db_path: &std::path::Path) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            model TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            cache_read_tokens INTEGER DEFAULT 0,
+            cache_write_tokens INTEGER DEFAULT 0,
+            reasoning_tokens INTEGER DEFAULT 0,
+            billing_provider TEXT,
+            estimated_cost_usd REAL,
+            actual_cost_usd REAL
+        );",
+    )
+    .unwrap();
+    conn
+}
+
+fn create_zed_sqlite_db(db_path: &std::path::Path) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            summary TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_at TEXT,
+            folder_paths TEXT,
+            folder_paths_order TEXT,
+            data_type TEXT NOT NULL,
+            data BLOB NOT NULL
+        );",
+    )
+    .unwrap();
+    conn
+}
+
+fn insert_zed_thread(conn: &rusqlite::Connection, id: &str, model: &str) {
+    let payload = format!(
+        r#"{{
+            "version": "0.3.0",
+            "title": "Test thread",
+            "updated_at": "2026-05-01T12:30:00Z",
+            "request_token_usage": {{
+                "turn-1": {{
+                    "input_tokens": 42,
+                    "output_tokens": 7,
+                    "cache_creation_input_tokens": 3,
+                    "cache_read_input_tokens": 5
+                }}
+            }},
+            "model": {{
+                "provider": "zed.dev",
+                "model": "{model}"
+            }},
+            "imported": false
+        }}"#
+    );
+    conn.execute(
+        "INSERT INTO threads (
+            id, summary, updated_at, created_at, folder_paths, folder_paths_order, data_type, data
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            id,
+            "Test thread",
+            "2026-05-01T12:30:00Z",
+            "2026-05-01T12:00:00Z",
+            Option::<&str>::None,
+            Option::<&str>::None,
+            "json",
+            payload.as_bytes()
+        ],
+    )
+    .unwrap();
+}
+
+fn insert_hermes_session(
+    conn: &rusqlite::Connection,
+    id: &str,
+    model: &str,
+    message_count: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    actual_cost_usd: f64,
+) {
+    conn.execute(
+        "INSERT INTO sessions (
+            id, source, model, started_at, message_count,
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+            billing_provider, estimated_cost_usd, actual_cost_usd
+        ) VALUES (?1, 'cli', ?2, 1775001102.0, ?3, ?4, ?5, 0, 0, 0, 'anthropic', NULL, ?6)",
+        rusqlite::params![
+            id,
+            model,
+            message_count,
+            input_tokens,
+            output_tokens,
+            actual_cost_usd
+        ],
+    )
+    .unwrap();
+}
+
+fn write_pi_fixture(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        r#"{"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-sonnet-4.6","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}"#,
+    )
+    .unwrap();
+}
+
+fn write_omp_parent_child_fixture(session_root: &Path) {
+    let parent_path = session_root.with_extension("jsonl");
+    let child_path = session_root.join("0-ReviewFindings.jsonl");
+    std::fs::create_dir_all(child_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        parent_path,
+        r#"{"type":"session","version":3,"id":"root-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"root_001","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_001","name":"task","arguments":{"agent":"reviewer","tasks":[{"id":"ReviewFindings","description":"Review findings","assignment":"Check the diff"}]}}],"model":"gpt-5.5","provider":"openai","usage":{"input":10,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":20}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        child_path,
+        r#"{"type":"session","id":"child-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"child_001","parentId":null,"timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","provider":"openai","usage":{"input":20,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}"#,
+    )
+    .unwrap();
+}
+
+fn scanner_settings_for_zed_threads_dir(threads_dir: PathBuf) -> scanner::ScannerSettings {
+    let mut extra_scan_paths = BTreeMap::new();
+    extra_scan_paths.insert(ClientId::Zed, vec![threads_dir]);
+    scanner::ScannerSettings {
+        extra_scan_paths,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_normalize_model_for_grouping() {
+    assert_eq!(
+        normalize_model_for_grouping("claude-opus-4-5-20251101"),
+        "claude-opus-4.5"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-sonnet-4-5-20250929"),
+        "claude-sonnet-4.5"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-sonnet-4-20250514"),
+        "claude-sonnet-4"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("qwen3.7-max-2026-05-20"),
+        "qwen3.7-max"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("qwen/qwen3.7-max-20260520"),
+        "qwen3.7-max"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("qwen3.7-max-2605"),
+        "qwen3.7-max"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("qwen3.7-max-05-20"),
+        "qwen3.7-max"
+    );
+
+    assert_eq!(
+        normalize_model_for_grouping("claude-opus-4.5"),
+        "claude-opus-4.5"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-sonnet-4.5"),
+        "claude-sonnet-4.5"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-opus-4.6"),
+        "claude-opus-4.6"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-opus-4-6"),
+        "claude-opus-4.6"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-opus-4-7"),
+        "claude-opus-4.7"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-sonnet-4-6"),
+        "claude-sonnet-4.6"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("anthropic/claude-4-6-sonnet"),
+        "claude-sonnet-4.6"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("anthropic/claude-4-5-haiku"),
+        "claude-haiku-4.5"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("anthropic/claude-4-6-opus"),
+        "claude-opus-4.6"
+    );
+
+    assert_eq!(normalize_model_for_grouping("gpt-5.2"), "gpt-5.2");
+    assert_eq!(normalize_model_for_grouping("gpt-5.4(xhigh)"), "gpt-5.4");
+    assert_eq!(normalize_model_for_grouping("gpt-5.4(high)"), "gpt-5.4");
+    assert_eq!(normalize_model_for_grouping("gpt-5.4(minimal)"), "gpt-5.4");
+    assert_eq!(normalize_model_for_grouping("gpt-5.4(auto)"), "gpt-5.4");
+    assert_eq!(normalize_model_for_grouping("gpt-5.4(none)"), "gpt-5.4");
+    assert_eq!(
+        normalize_model_for_grouping("gpt-5.4(weirdgarbage)"),
+        "gpt-5.4(weirdgarbage)"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-sonnet-4.5(high)"),
+        "claude-sonnet-4.5"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("gemini-3-pro(auto)"),
+        "gemini-3-pro(auto)"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("gemini-2.5-pro"),
+        "gemini-2.5-pro"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("longcat-flash-3b-all-quant-0203-eagle3"),
+        "longcat-flash-3b"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("LongCat-Flash-3B-All-Quant-0203-Eagle3"),
+        "longcat-flash-3b"
+    );
+
+    assert_eq!(
+        normalize_model_for_grouping("claude-opus-4-5-high"),
+        "claude-opus-4.5"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-opus-4-5-thinking-high"),
+        "claude-opus-4.5"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-opus-4-5-sub2api-pro"),
+        "claude-opus-4.5"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-opus-4-5-20251101-sub2api-pro"),
+        "claude-opus-4.5"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-sonnet-4-5-20250929-thinking"),
+        "claude-sonnet-4.5"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-sonnet-4-5-high"),
+        "claude-sonnet-4.5"
+    );
+
+    assert_eq!(
+        normalize_model_for_grouping("claude-4-sonnet"),
+        "claude-sonnet-4"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-4-opus-thinking"),
+        "claude-opus-4"
+    );
+
+    assert_eq!(normalize_model_for_grouping("big-pickle"), "big-pickle");
+    assert_eq!(normalize_model_for_grouping("grok-code"), "grok-code");
+
+    assert_eq!(
+        normalize_model_for_grouping("claude-opus-4.5-20251101"),
+        "claude-opus-4.5"
+    );
+
+    assert_eq!(normalize_model_for_grouping("glm-4.7-free"), "glm-4.7");
+    assert_eq!(normalize_model_for_grouping("glm-4.7 (free)"), "glm-4.7");
+    assert_eq!(normalize_model_for_grouping("glm-4.7:free"), "glm-4.7");
+    assert_eq!(normalize_model_for_grouping("glm-4.7-free-high"), "glm-4.7");
+    assert_eq!(
+        normalize_model_for_grouping("glm-4.7-free-sub2api-pro"),
+        "glm-4.7"
+    );
+    assert_eq!(normalize_model_for_grouping("glm-4.7:free-fast"), "glm-4.7");
+    assert_eq!(
+        normalize_model_for_grouping("glm-4.7 (free)-medium"),
+        "glm-4.7"
+    );
+    assert_eq!(normalize_model_for_grouping("glm-5.1"), "glm-5.1");
+    assert_eq!(
+        normalize_model_for_grouping("gemini-2.5-pro-free"),
+        "gemini-2.5-pro"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("gemini-2.5-pro-free-xhigh"),
+        "gemini-2.5-pro-xhigh"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("claude-sonnet-4-free-thinking"),
+        "claude-sonnet-4"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("deepseek-v4 (free)"),
+        "deepseek-v4"
+    );
+    assert_eq!(normalize_model_for_grouping("kimi-k2.5:free"), "kimi-k2.5");
+    assert_eq!(
+        normalize_model_for_grouping("mimo-v2-pro-20260318"),
+        "mimo-v2-pro"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("gpt-4o-mini-2024-07-18"),
+        "gpt-4o-mini"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("openai/gpt-4o-mini-2024-07-18"),
+        "gpt-4o-mini"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("nemotron-3-ultra-free"),
+        "nemotron-3-ultra"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("qwen3.7-max-free"),
+        "qwen3.7-max"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("mistral-small-2603"),
+        "mistral-small"
+    );
+    assert_eq!(normalize_model_for_grouping("k2p5"), "kimi-k2.5");
+    assert_eq!(normalize_model_for_grouping("k2-p5"), "kimi-k2.5");
+    assert_eq!(normalize_model_for_grouping("k2p6"), "kimi-k2.6");
+    assert_eq!(normalize_model_for_grouping("k2-p6"), "kimi-k2.6");
+    assert_eq!(
+        normalize_model_for_grouping("kimi-for-coding/k2p5"),
+        "kimi-k2.5"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("kimi-for-coding/k2p6"),
+        "kimi-k2.6"
+    );
+
+    assert_eq!(
+        normalize_model_for_grouping("custom:gpt-5.5-xhigh-sub2api-pro"),
+        "gpt-5.5-xhigh-sub2api-pro"
+    );
+    assert_eq!(normalize_model_for_grouping("gpt-5.5-xhigh"), "gpt-5.5");
+    assert_eq!(normalize_model_for_grouping("gpt-5.5-fast"), "gpt-5.5");
+    assert_eq!(normalize_model_for_grouping("gpt-5-5-0"), "gpt-5-5-0");
+    assert_eq!(normalize_model_for_grouping("gpt-5.4-medium"), "gpt-5.4");
+    assert_eq!(
+        normalize_model_for_grouping("deepseek/deepseek-v4-pro"),
+        "deepseek-v4-pro"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("minimaxai/minimax-m2.5"),
+        "minimax-m2.5"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("accounts/fireworks/models/deepseek-v3-0324"),
+        "deepseek-v3"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("gpt-5.3-codex"),
+        "gpt-5.3-codex"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("gpt-5.1-codex-max"),
+        "gpt-5.1-codex-max"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("gpt-5.5-codex-fast"),
+        "gpt-5.5-codex"
+    );
+    assert_eq!(
+        normalize_model_for_grouping("gpt-5.1-codex-max-xhigh"),
+        "gpt-5.1-codex-max"
+    );
+}
+
+#[test]
+fn test_normalize_model_for_grouping_canonicalizes_gpt_5_6_family_efforts() {
+    let cases = [
+        ("custom:gpt-5.6-sol-high", "gpt-5.6-sol"),
+        ("custom:gpt-5.6-sol-xhigh", "gpt-5.6-sol"),
+        ("custom:gpt-5.6-sol-max", "gpt-5.6-sol"),
+        ("custom:gpt-5.6-terra-xhigh", "gpt-5.6-terra"),
+        ("custom:gpt-5.6-terra-max", "gpt-5.6-terra"),
+        ("custom:gpt-5.6-luna-medium", "gpt-5.6-luna"),
+        ("custom:gpt-5.6-luna-max", "gpt-5.6-luna"),
+    ];
+
+    for (raw, expected) in cases {
+        assert_eq!(normalize_model_for_grouping(raw), expected);
+    }
+}
+
+#[test]
+fn test_normalize_model_for_grouping_canonicalizes_gpt_5_6_sol_alias() {
+    let cases = [
+        "gpt-5.6",
+        "gpt-5.6-high",
+        "gpt-5.6-max",
+        "gpt-5.6(max)",
+        "custom:gpt-5.6-max",
+        "gpt-5.6-sol-max",
+        "gpt-5.6-free",
+        "gpt-5.6:free",
+        "gpt-5.6 (free)",
+        "gpt-5.6-2607",
+        "gpt-5.6-high-free",
+    ];
+
+    for raw in cases {
+        let canonical = normalize_model_for_grouping(raw);
+        assert_eq!(canonical, "gpt-5.6-sol", "raw model: {raw}");
+        assert_eq!(
+            normalize_model_for_grouping(&canonical),
+            canonical,
+            "raw model: {raw}"
+        );
+    }
+}
+
+#[test]
+fn test_group_by_from_str_valid_values() {
+    assert_eq!(GroupBy::from_str("model").unwrap(), GroupBy::Model);
+    assert_eq!(
+        GroupBy::from_str("client,model").unwrap(),
+        GroupBy::ClientModel
+    );
+    assert_eq!(
+        GroupBy::from_str("client,provider,model").unwrap(),
+        GroupBy::ClientProviderModel
+    );
+    assert_eq!(
+        GroupBy::from_str("workspace,model").unwrap(),
+        GroupBy::WorkspaceModel
+    );
+    assert!(GroupBy::from_str("client-model").is_err());
+    assert!(GroupBy::from_str("client-provider-model").is_err());
+    assert!(GroupBy::from_str("workspace-model").is_err());
+    assert!(GroupBy::from_str("session").is_err());
+    assert!(GroupBy::from_str("client,session,model").is_err());
+    assert!(GroupBy::from_str("unknown").is_err());
+}
+
+#[test]
+fn test_group_by_default_is_model() {
+    assert_eq!(GroupBy::default(), GroupBy::Model);
+}
+
+#[test]
+fn test_group_by_display_round_trips_with_from_str() {
+    let variants = [
+        GroupBy::Model,
+        GroupBy::ClientModel,
+        GroupBy::ClientProviderModel,
+        GroupBy::WorkspaceModel,
+    ];
+
+    for variant in variants {
+        let rendered = variant.to_string();
+        let parsed = GroupBy::from_str(&rendered).unwrap();
+        assert_eq!(parsed, variant);
+    }
+}
+
+#[test]
+fn test_group_by_from_str_whitespace_handling() {
+    assert_eq!(
+        GroupBy::from_str("client, model").unwrap(),
+        GroupBy::ClientModel
+    );
+    assert_eq!(GroupBy::from_str(" model ").unwrap(), GroupBy::Model);
+    assert_eq!(
+        GroupBy::from_str("client , provider , model").unwrap(),
+        GroupBy::ClientProviderModel
+    );
+    assert_eq!(
+        GroupBy::from_str("workspace, model").unwrap(),
+        GroupBy::WorkspaceModel
+    );
+}
+
+#[test]
+fn test_workspace_model_grouping_merges_same_workspace_and_model() {
+    let entries = aggregate_model_usage_entries(
+        vec![
+            make_workspace_message(
+                ClientId::Claude,
+                "claude-sonnet-4.5",
+                "anthropic",
+                "session-1",
+                1.25,
+                Some("/repo-a"),
+                Some("repo-a"),
+            ),
+            make_workspace_message(
+                ClientId::Qwen,
+                "claude-sonnet-4.5",
+                "anthropic",
+                "session-2",
+                2.75,
+                Some("/repo-a"),
+                Some("repo-a"),
+            ),
+        ],
+        &GroupBy::WorkspaceModel,
+    );
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].model_id.as_ref(), "claude-sonnet-4.5");
+    assert_eq!(entries[0].workspace_key.as_deref(), Some("/repo-a"));
+    assert_eq!(entries[0].workspace_label.as_deref(), Some("repo-a"));
+    assert_eq!(entries[0].cost, 4.0);
+    assert_eq!(entries[0].clients, [ClientId::Claude, ClientId::Qwen]);
+}
+
+#[test]
+fn test_model_grouping_cleans_fast_variant() {
+    let entries = aggregate_finalized_model_usage_entries(
+        vec![
+            make_workspace_message(
+                ClientId::OpenCode,
+                "gpt-5.5-fast",
+                "openai",
+                "session-1",
+                3.0,
+                None,
+                None,
+            ),
+            make_workspace_message(
+                ClientId::Codex,
+                "gpt-5.5",
+                "openai",
+                "session-2",
+                2.0,
+                None,
+                None,
+            ),
+        ],
+        &GroupBy::Model,
+    );
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].model_id.as_ref(), "gpt-5.5");
+    assert_eq!(entries[0].cost, 5.0);
+}
+
+#[test]
+fn test_model_grouping_cleans_hyphenated_date_snapshot() {
+    let entries = aggregate_finalized_model_usage_entries(
+        vec![
+            make_workspace_message(
+                ClientId::Qwen,
+                "qwen3.7-max-2026-05-20",
+                "qwen",
+                "session-1",
+                1.25,
+                None,
+                None,
+            ),
+            make_workspace_message(
+                ClientId::Qwen,
+                "qwen3.7-max",
+                "qwen",
+                "session-2",
+                2.75,
+                None,
+                None,
+            ),
+        ],
+        &GroupBy::ClientModel,
+    );
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].model_id.as_ref(), "qwen3.7-max");
+    assert_eq!(entries[0].cost, 4.0);
+}
+
+#[test]
+fn test_model_grouping_cleans_anthropic_prefixed_claude_variant() {
+    let entries = aggregate_finalized_model_usage_entries(
+        vec![
+            make_workspace_message(
+                ClientId::Claude,
+                "anthropic/claude-4-6-sonnet",
+                "anthropic",
+                "session-1",
+                1.25,
+                Some("/repo-a"),
+                Some("repo-a"),
+            ),
+            make_workspace_message(
+                ClientId::Claude,
+                "claude-sonnet-4.6",
+                "anthropic",
+                "session-2",
+                2.75,
+                Some("/repo-b"),
+                Some("repo-b"),
+            ),
+        ],
+        &GroupBy::ClientModel,
+    );
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].model_id.as_ref(), "claude-sonnet-4.6");
+    assert_eq!(entries[0].cost, 4.0);
+}
+
+#[test]
+fn test_model_grouping_uses_finalized_provider_ids() {
+    let entries = aggregate_finalized_model_usage_entries(
+        vec![
+            make_workspace_message(
+                ClientId::OpenCode,
+                "xiaomi/mimo-v2.5-pro",
+                "xiaomi",
+                "session-1",
+                1.0,
+                None,
+                None,
+            ),
+            make_workspace_message(
+                ClientId::OpenCode,
+                "xiaomi/mimo-v2.5-pro",
+                "xiaomi",
+                "session-2",
+                2.0,
+                None,
+                None,
+            ),
+        ],
+        &GroupBy::Model,
+    );
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].model_id.as_ref(), "mimo-v2.5-pro");
+    assert_eq!(entries[0].provider.as_ref(), "xiaomi");
+    assert_eq!(entries[0].cost, 3.0);
+}
+
+#[test]
+fn test_client_provider_model_grouping_uses_finalized_provider_ids() {
+    let entries = aggregate_finalized_model_usage_entries(
+        vec![
+            make_workspace_message(
+                ClientId::OpenCode,
+                "xiaomi/mimo-v2.5-pro",
+                "xiaomi",
+                "session-1",
+                1.0,
+                None,
+                None,
+            ),
+            make_workspace_message(
+                ClientId::OpenCode,
+                "xiaomi/mimo-v2.5-pro",
+                "xiaomi",
+                "session-2",
+                2.0,
+                None,
+                None,
+            ),
+        ],
+        &GroupBy::ClientProviderModel,
+    );
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].clients, [ClientId::OpenCode]);
+    assert_eq!(entries[0].provider.as_ref(), "xiaomi");
+    assert_eq!(entries[0].model_id.as_ref(), "mimo-v2.5-pro");
+    assert_eq!(entries[0].cost, 3.0);
+}
+
+#[test]
+fn test_model_grouping_orders_merged_clients_by_total_tokens() {
+    let entries = aggregate_model_usage_entries(
+        vec![
+            make_message_with_tokens(
+                ClientId::OpenCode,
+                "gpt-5.5",
+                "openai",
+                "session-opencode",
+                10,
+                0,
+                0,
+                0,
+                0,
+            ),
+            make_message_with_tokens(
+                ClientId::Codex,
+                "gpt-5.5",
+                "openai",
+                "session-codex",
+                30,
+                0,
+                0,
+                0,
+                0,
+            ),
+            make_message_with_tokens(
+                ClientId::Pi,
+                "gpt-5.5",
+                "openai",
+                "session-pi",
+                100,
+                0,
+                0,
+                0,
+                0,
+            ),
+        ],
+        &GroupBy::Model,
+    );
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].clients,
+        [ClientId::Pi, ClientId::Codex, ClientId::OpenCode]
+    );
+}
+
+#[test]
+fn test_model_grouping_ignores_negative_client_token_contribution() {
+    let entries = aggregate_model_usage_entries(
+        vec![
+            make_message_with_tokens(
+                ClientId::Amp,
+                "gpt-5.5",
+                "openai",
+                "session-negative",
+                -1_000,
+                0,
+                0,
+                0,
+                0,
+            ),
+            make_message_with_tokens(
+                ClientId::Codex,
+                "gpt-5.5",
+                "openai",
+                "session-positive",
+                10,
+                0,
+                0,
+                0,
+                0,
+            ),
+        ],
+        &GroupBy::Model,
+    );
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].clients, [ClientId::Codex, ClientId::Amp]);
+}
+
+#[test]
+fn test_workspace_model_grouping_separates_different_workspaces() {
+    let entries = aggregate_model_usage_entries(
+        vec![
+            make_workspace_message(
+                ClientId::Claude,
+                "claude-sonnet-4-5-20250929",
+                "anthropic",
+                "session-1",
+                1.0,
+                Some("/repo-a"),
+                Some("repo-a"),
+            ),
+            make_workspace_message(
+                ClientId::Claude,
+                "claude-sonnet-4-5-20250929",
+                "anthropic",
+                "session-2",
+                2.0,
+                Some("/repo-b"),
+                Some("repo-b"),
+            ),
+        ],
+        &GroupBy::WorkspaceModel,
+    );
+
+    assert_eq!(entries.len(), 2);
+    let labels: HashSet<_> = entries
+        .iter()
+        .map(|entry| entry.workspace_label.as_deref().unwrap())
+        .collect();
+    assert_eq!(labels, HashSet::from(["repo-a", "repo-b"]));
+}
+
+#[test]
+fn test_workspace_model_grouping_uses_unknown_bucket_without_workspace_metadata() {
+    let entries = aggregate_model_usage_entries(
+        vec![
+            make_workspace_message(
+                ClientId::Claude,
+                "claude-sonnet-4-5-20250929",
+                "anthropic",
+                "session-1",
+                1.0,
+                None,
+                None,
+            ),
+            make_workspace_message(
+                ClientId::Claude,
+                "claude-sonnet-4-5-20250929",
+                "anthropic",
+                "session-2",
+                "2.0".parse().unwrap(),
+                None,
+                None,
+            ),
+        ],
+        &GroupBy::WorkspaceModel,
+    );
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].workspace_key, None);
+    assert_eq!(
+        entries[0].workspace_label.as_deref(),
+        Some(UNKNOWN_WORKSPACE_LABEL)
+    );
+    assert_eq!(entries[0].cost, 3.0);
+}
+
+#[test]
+fn test_workspace_model_grouping_keeps_real_unknown_workspace_separate() {
+    let entries = aggregate_model_usage_entries(
+        vec![
+            make_workspace_message(
+                ClientId::Claude,
+                "claude-sonnet-4-5-20250929",
+                "anthropic",
+                "session-1",
+                1.0,
+                Some("unknown-workspace"),
+                Some("unknown-workspace"),
+            ),
+            make_workspace_message(
+                ClientId::Claude,
+                "claude-sonnet-4-5-20250929",
+                "anthropic",
+                "session-2",
+                2.0,
+                None,
+                None,
+            ),
+        ],
+        &GroupBy::WorkspaceModel,
+    );
+
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().any(|entry| {
+        entry.workspace_key.as_deref() == Some("unknown-workspace")
+            && entry.workspace_label.as_deref() == Some("unknown-workspace")
+            && (entry.cost - 1.0).abs() < f64::EPSILON
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry.workspace_key.is_none()
+            && entry.workspace_label.as_deref() == Some(UNKNOWN_WORKSPACE_LABEL)
+            && (entry.cost - 2.0).abs() < f64::EPSILON
+    }));
+}
+
+#[test]
+fn test_workspace_model_grouping_avoids_separator_key_collisions() {
+    let entries = aggregate_model_usage_entries(
+        vec![
+            make_workspace_message(
+                ClientId::Claude,
+                "c",
+                "anthropic",
+                "session-1",
+                1.0,
+                Some("a:b"),
+                Some("workspace-ab"),
+            ),
+            make_workspace_message(
+                ClientId::Claude,
+                "b:c",
+                "anthropic",
+                "session-2",
+                2.0,
+                Some("a"),
+                Some("workspace-a"),
+            ),
+        ],
+        &GroupBy::WorkspaceModel,
+    );
+
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().any(|entry| {
+        entry.workspace_key.as_deref() == Some("a:b")
+            && entry.model_id.as_ref() == "c"
+            && (entry.cost - 1.0).abs() < f64::EPSILON
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry.workspace_key.as_deref() == Some("a")
+            && entry.model_id.as_ref() == "b:c"
+            && (entry.cost - 2.0).abs() < f64::EPSILON
+    }));
+}
+
+fn write_kimi_code_usage_fixture(input_home: &std::path::Path) {
+    let kimi_home = input_home.join(".kimi-code");
+    std::fs::create_dir_all(&kimi_home).unwrap();
+    std::fs::write(
+        kimi_home.join("config.toml"),
+        r#"[models."openai-pro/gpt-5.5"]
+provider = "openai-pro"
+model = "gpt-5.5"
+max_context_size = 128000
+"#,
+    )
+    .unwrap();
+
+    let session_dir = kimi_home.join("sessions/wd-project/session_1/agents/main");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(
+        session_dir.join("wire.jsonl"),
+        r#"{"type":"metadata","protocol_version":"1.5"}
+{"type":"context.append_loop_event","time":1770983410000,"event":{"type":"step.end","usage":{"inputOther":10,"output":1,"inputCacheRead":0,"inputCacheCreation":0}}}
+{"type":"llm.request","kind":"loop","provider":"openai-responses","model":"gpt-5.5","modelAlias":"openai-pro/gpt-5.5","maxTokens":128000,"time":1770983409000}
+{"type":"usage.record","time":1770983410000,"model":"openai-pro/gpt-5.5","usageScope":"turn","usage":{"inputOther":10,"output":1,"inputCacheRead":0,"inputCacheCreation":0}}
+{"type":"usage.record","time":1770983420000,"model":"openai-pro/gpt-5.5","usageScope":"turn","usage":{"inputOther":20,"output":2,"inputCacheRead":5,"inputCacheCreation":0}}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+#[serial_test::serial]
+fn test_parse_all_messages_with_pricing_kimi_code_usage_records() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        write_kimi_code_usage_fixture(input_home.path());
+
+        let messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["kimi".to_string()],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].provider_id.as_ref(), "openai");
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 30);
+        assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 3);
+        assert_eq!(messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(), 5);
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_local_message_loader_kimi_code_usage_records() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        write_kimi_code_usage_fixture(input_home.path());
+
+        let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+            home_dir: Some(input_home.path().to_path_buf()),
+            clients: Some(vec![ClientId::Kimi]),
+            date_range: DateRange::none(),
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Kimi), 2);
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(parsed.messages[0].provider_id.as_ref(), "openai");
+        assert_eq!(parsed.messages[0].model_id.as_ref(), "gpt-5.5");
+        assert_eq!(
+            parsed.messages.iter().map(|m| m.tokens.input).sum::<i64>(),
+            30
+        );
+        assert_eq!(
+            parsed.messages.iter().map(|m| m.tokens.output).sum::<i64>(),
+            3
+        );
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|m| m.tokens.cache_read)
+                .sum::<i64>(),
+            5
+        );
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn kimi_unavailable_optional_config_preserves_current_wire_usage_in_production_pipeline() {
+    let input_home = tempfile::TempDir::new().unwrap();
+    write_kimi_code_usage_fixture(input_home.path());
+
+    let options = inventory_options(input_home.path(), &["kimi"]);
+    let prepared = super::prepare_test_inventory(options.clone()).unwrap();
+    let wire_path = input_home
+        .path()
+        .join(".kimi-code/sessions/wd-project/session_1/agents/main/wire.jsonl");
+    let decoder_version = prepared.groups[0].units[0].decoder.version();
+    let mut cold_messages = Vec::new();
+    let cold_health =
+        super::fold_prepared_local_inputs_with_pricing(prepared, None, &mut cold_messages)
+            .unwrap()
+            .health;
+    assert_eq!(cold_messages.len(), 2);
+    assert_eq!(cold_health.issue_count(), 0);
+    assert!(input_cache_for_test_home(input_home.path())
+        .get_meta(&wire_path, decoder_version)
+        .unwrap()
+        .is_some());
+
+    let prepared = super::prepare_test_inventory(options.clone()).unwrap();
+    let regular_config_signature = prepared.source_fingerprint();
+    let config_path = input_home.path().join(".kimi-code/config.toml");
+    std::fs::remove_file(&config_path).unwrap();
+    std::fs::create_dir(&config_path).unwrap();
+    let prepared = super::prepare_test_inventory(options).unwrap();
+    let unavailable_config_signature = prepared.source_fingerprint();
+    assert_ne!(regular_config_signature, unavailable_config_signature);
+    assert_eq!(prepared.health.failed_inputs(), 0);
+
+    let mut messages = Vec::new();
+    let health = super::fold_prepared_local_inputs_with_pricing(prepared, None, &mut messages)
+        .unwrap()
+        .health;
+    assert_eq!(messages.len(), 2);
+    assert!(messages
+        .iter()
+        .all(|message| message.model_id.as_ref() == "gpt-5.5"));
+    assert!(messages
+        .iter()
+        .all(|message| message.provider_id.as_ref() == "openai"));
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.tokens.input)
+            .sum::<i64>(),
+        30
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.tokens.output)
+            .sum::<i64>(),
+        3
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.tokens.cache_read)
+            .sum::<i64>(),
+        5
+    );
+    assert_eq!(health.partial_inputs(), 1);
+    assert_eq!(health.failed_inputs(), 0);
+    assert!(input_cache_for_test_home(input_home.path())
+        .get_meta(&wire_path, decoder_version)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+#[serial_test::serial]
+fn test_input_cache_refreshes_stale_provider_on_cache_hit() {
+    let input_home = tempfile::TempDir::new().unwrap();
+
+    {
+        let path = input_home.path().join(".local/share/opencode/opencode.db");
+        let conn = create_opencode_sqlite_db(&path);
+        insert_opencode_sqlite_message(
+            &conn,
+            "msg-1",
+            "session-1",
+            "",
+            r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+        );
+        drop(conn);
+
+        let unit = opencode_test_input(path.clone());
+        let fingerprint = unit.input_policy().fingerprint().unwrap();
+        // Provider deliberately wrong for the model: the cache-hit path
+        // must re-run refresh_derived_fields (dates are derived from
+        // timestamps since schema v24, so provider identity is the
+        // remaining derived field).
+        let stale_message = crate::records::UsageRecord::new(
+            "gpt-5.5",
+            "anthropic",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        );
+
+        let mut cache = input_cache_for_test_home(input_home.path());
+        cache.insert(input_record_cache::CachedInputEntry::new_with_version(
+            &path,
+            unit.decoder.version(),
+            fingerprint,
+            vec![stale_message],
+            None,
+        ));
+        cache.save_if_dirty().unwrap();
+
+        let messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["opencode".to_string()],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].provider_id.as_ref(),
+            "openai",
+            "cache hits must refresh derived provider identity"
+        );
+    }
+}
+
+fn inventory_options(home: &Path, clients: &[&str]) -> TestAcquisitionRequest {
+    TestAcquisitionRequest {
+        home_dir: Some(home.to_path_buf()),
+        clients: Some(
+            clients
+                .iter()
+                .map(|client| ClientId::from_str(client).unwrap())
+                .collect(),
+        ),
+        scanner_settings: scanner::ScannerSettings::default(),
+        ..TestAcquisitionRequest::default()
+    }
+}
+
+fn prepare_generation_sources(
+    home: &Path,
+    clients: &[&str],
+) -> (AcquisitionEngine, PreparedAcquisition) {
+    let universe = ClientUniverse::new(
+        clients
+            .iter()
+            .map(|client| ClientId::from_str(client).unwrap()),
+    )
+    .unwrap();
+    let pricing = current_pricing_snapshot();
+    let config = AcquisitionConfig::new(
+        home.to_path_buf(),
+        DateRange::none(),
+        universe,
+        scanner::ScannerSettings::default(),
+        crate::CalendarContext::explicit("UTC").unwrap(),
+        pricing.context().clone(),
+    )
+    .unwrap();
+    let engine =
+        AcquisitionEngine::new(config, pricing, super::input_cache_dir_for_test_home(home))
+            .unwrap();
+    let sources = engine.prepare().unwrap();
+    (engine, sources)
+}
+
+fn signature_for_test_units(
+    requested_clients: &[ClientId],
+    client: ClientId,
+    units: Vec<crate::integrations::DiscoveredInput>,
+) -> super::SourceFingerprint {
+    let group = prepared_test_group(
+        client,
+        units
+            .into_iter()
+            .map(crate::integrations::test_prepare)
+            .collect(),
+    );
+    let universe = ClientUniverse::new(requested_clients.iter().copied()).unwrap();
+    super::source_fingerprint(&universe, &[group])
+}
+
+fn prepared_test_group(
+    client: ClientId,
+    units: Vec<crate::integrations::PreparedInput>,
+) -> crate::integrations::PreparedIntegrationInputs {
+    crate::integrations::PreparedIntegrationInputs {
+        binding: crate::integrations::integration_for(client),
+        units,
+    }
+}
+
+#[test]
+fn input_footprint_counts_related_inputs_once_by_file_identity() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let input = dir.path().join("input.jsonl");
+    let dependency = dir.path().join("dependency.json");
+    std::fs::write(&input, b"12345678").unwrap();
+    std::fs::write(&dependency, b"12345").unwrap();
+
+    let with_dependency = plain_test_input(input_record_cache::DecoderId::Amp, input.clone())
+        .with_dependency(dependency)
+        .prepare_snapshot()
+        .unwrap();
+    let duplicate = plain_test_input(input_record_cache::DecoderId::Amp, input)
+        .prepare_snapshot()
+        .unwrap();
+
+    let group = prepared_test_group(ClientId::Amp, vec![with_dependency, duplicate]);
+    let universe = ClientUniverse::new([ClientId::Amp]).unwrap();
+    let footprint = super::inventory_input_footprint(&universe, std::slice::from_ref(&group));
+    assert_eq!(footprint.bytes_for(ClientId::Amp), 13);
+}
+
+#[test]
+fn prepared_inventory_is_stable_sensitive_and_reads_no_input_bytes() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    let first = amp_dir.join("T-first.json");
+    std::fs::write(&first, r#"{"id":"amp-first"}"#).unwrap();
+    input_record_cache::reset_input_read_stats(&first);
+
+    let first_inventory =
+        super::prepare_test_inventory(inventory_options(home.path(), &["amp"])).unwrap();
+    let first_signature = first_inventory.source_fingerprint();
+    let second_signature = super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .source_fingerprint();
+    assert_eq!(first_signature, second_signature);
+    assert_eq!(
+        input_record_cache::get_input_read_stats(&first),
+        input_record_cache::InputReadStats::default(),
+        "inventory signatures must use metadata only"
+    );
+
+    std::fs::write(&first, r#"{"id":"amp-first","grew":true}"#).unwrap();
+    let changed = super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .source_fingerprint();
+    assert_ne!(first_signature, changed);
+
+    std::fs::write(amp_dir.join("T-second.json"), r#"{"id":"amp-second"}"#).unwrap();
+    let added = super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .source_fingerprint();
+    assert_ne!(changed, added);
+
+    let other_client = super::prepare_test_inventory(inventory_options(home.path(), &["claude"]))
+        .unwrap()
+        .source_fingerprint();
+    assert_ne!(added, other_client);
+}
+
+#[test]
+fn inventory_signature_changes_for_same_size_same_mtime_atomic_replacement() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    let input = amp_dir.join("T-first.json");
+    let replacement = amp_dir.join("replacement.json");
+    std::fs::write(&input, b"aaaaaaaa").unwrap();
+    let original_mtime = std::fs::metadata(&input).unwrap().modified().unwrap();
+    let before = super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .source_fingerprint();
+
+    std::fs::write(&replacement, b"bbbbbbbb").unwrap();
+    std::fs::File::open(&replacement)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+        .unwrap();
+    #[cfg(windows)]
+    std::fs::remove_file(&input).unwrap();
+    std::fs::rename(&replacement, &input).unwrap();
+
+    let after = super::prepare_test_inventory(inventory_options(home.path(), &["amp"]))
+        .unwrap()
+        .source_fingerprint();
+    assert_ne!(before, after);
+}
+
+#[test]
+fn inventory_signature_tracks_order_paths_related_stamps_and_unit_identity() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let first = dir.path().join("first.db");
+    let second = dir.path().join("second.db");
+    let wal = dir.path().join("first.db-wal");
+    std::fs::write(&first, b"first").unwrap();
+    std::fs::write(&second, b"second").unwrap();
+    std::fs::write(&wal, b"wal-one").unwrap();
+    let clients = vec![ClientId::Zed, ClientId::Amp];
+
+    let ordered = signature_for_test_units(
+        &clients,
+        ClientId::Amp,
+        vec![
+            plain_test_input(input_record_cache::DecoderId::Amp, first.clone()),
+            plain_test_input(input_record_cache::DecoderId::Amp, second.clone()),
+        ],
+    );
+    let reordered = signature_for_test_units(
+        &clients,
+        ClientId::Amp,
+        vec![
+            plain_test_input(input_record_cache::DecoderId::Amp, second),
+            plain_test_input(input_record_cache::DecoderId::Amp, first.clone()),
+        ],
+    );
+    assert_ne!(ordered, reordered, "unit discovery order is significant");
+
+    let canonical_clients = signature_for_test_units(
+        &[ClientId::Amp, ClientId::Zed],
+        ClientId::Amp,
+        vec![plain_test_input(
+            input_record_cache::DecoderId::Amp,
+            first.clone(),
+        )],
+    );
+    let reversed_clients = signature_for_test_units(
+        &[ClientId::Zed, ClientId::Amp],
+        ClientId::Amp,
+        vec![plain_test_input(
+            input_record_cache::DecoderId::Amp,
+            first.clone(),
+        )],
+    );
+    assert_eq!(canonical_clients, reversed_clients);
+
+    let sqlite_before = signature_for_test_units(
+        &[ClientId::Zed],
+        ClientId::Zed,
+        vec![sqlite_test_input(
+            input_record_cache::DecoderId::Zed,
+            first.clone(),
+        )],
+    );
+    std::fs::write(&wal, b"wal-two-and-longer").unwrap();
+    let sqlite_after = signature_for_test_units(
+        &[ClientId::Zed],
+        ClientId::Zed,
+        vec![sqlite_test_input(
+            input_record_cache::DecoderId::Zed,
+            first.clone(),
+        )],
+    );
+    assert_ne!(
+        sqlite_before, sqlite_after,
+        "related WAL stamp is significant"
+    );
+
+    let decoder_changed = signature_for_test_units(
+        &[ClientId::Amp],
+        ClientId::Amp,
+        vec![crate::integrations::DiscoveredInput::plain_file(
+            first,
+            crate::integrations::DecoderKind::plain(input_record_cache::DecoderId::Amp),
+        )],
+    );
+    assert_ne!(canonical_clients, decoder_changed);
+
+    let codebuddy_path = dir.path().join("codebuddy.jsonl");
+    std::fs::write(&codebuddy_path, b"codebuddy").unwrap();
+    let jsonl_decoder = signature_for_test_units(
+        &[ClientId::CodeBuddy],
+        ClientId::CodeBuddy,
+        vec![crate::integrations::DiscoveredInput::plain_file(
+            codebuddy_path.clone(),
+            crate::integrations::DecoderKind::codebuddy_jsonl(),
+        )],
+    );
+    let extension_decoder = signature_for_test_units(
+        &[ClientId::CodeBuddy],
+        ClientId::CodeBuddy,
+        vec![crate::integrations::DiscoveredInput::plain_file(
+            codebuddy_path.clone(),
+            crate::integrations::DecoderKind::codebuddy_extension_log(
+                crate::integrations::CodeBuddyLogOrigin::Extension,
+            ),
+        )],
+    );
+    assert_ne!(
+        jsonl_decoder, extension_decoder,
+        "decoder route is significant"
+    );
+
+    let plain_policy = signature_for_test_units(
+        &[ClientId::CodeBuddy],
+        ClientId::CodeBuddy,
+        vec![crate::integrations::DiscoveredInput::plain_file(
+            codebuddy_path.clone(),
+            crate::integrations::DecoderKind::codebuddy_jsonl(),
+        )],
+    );
+    let no_cache_policy = signature_for_test_units(
+        &[ClientId::CodeBuddy],
+        ClientId::CodeBuddy,
+        vec![crate::integrations::DiscoveredInput::no_record_cache(
+            codebuddy_path,
+            crate::integrations::DecoderKind::codebuddy_jsonl(),
+        )],
+    );
+    assert_ne!(plain_policy, no_cache_policy, "input policy is significant");
+
+    let amp_group_path = dir.path().join("amp-group.json");
+    let codebuddy_group_path = dir.path().join("codebuddy-group.json");
+    std::fs::write(&amp_group_path, b"amp").unwrap();
+    std::fs::write(&codebuddy_group_path, b"codebuddy").unwrap();
+    let amp_group = || {
+        prepared_test_group(
+            ClientId::Amp,
+            vec![
+                plain_test_input(input_record_cache::DecoderId::Amp, amp_group_path.clone())
+                    .prepare_snapshot()
+                    .unwrap(),
+            ],
+        )
+    };
+    let codebuddy_group = || {
+        prepared_test_group(
+            ClientId::CodeBuddy,
+            vec![crate::integrations::DiscoveredInput::plain_file(
+                codebuddy_group_path.clone(),
+                crate::integrations::DecoderKind::codebuddy_jsonl(),
+            )
+            .prepare_snapshot()
+            .unwrap()],
+        )
+    };
+    let universe = ClientUniverse::new([ClientId::Amp, ClientId::CodeBuddy]).unwrap();
+    let group_order = super::source_fingerprint(&universe, &[amp_group(), codebuddy_group()]);
+    let reversed_group_order =
+        super::source_fingerprint(&universe, &[codebuddy_group(), amp_group()]);
+    assert_ne!(
+        group_order, reversed_group_order,
+        "integration order is significant"
+    );
+}
+
+#[test]
+fn inventory_preparation_rejects_unavailable_primary_snapshots() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let missing_a = dir.path().join("missing-a.json");
+    let error = plain_test_input(input_record_cache::DecoderId::Amp, missing_a.clone())
+        .prepare_snapshot()
+        .expect_err("missing primary inputs must fail before inventory hashing");
+    assert!(error.to_string().contains(missing_a.to_str().unwrap()));
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_signature_hashes_native_non_utf8_paths() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let first = dir
+        .path()
+        .join(std::ffi::OsString::from_vec(b"input-\x80.json".to_vec()));
+    let second = dir
+        .path()
+        .join(std::ffi::OsString::from_vec(b"input-\x81.json".to_vec()));
+    assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+    std::fs::write(&first, b"same").unwrap();
+    std::fs::write(&second, b"same").unwrap();
+
+    let first_signature = signature_for_test_units(
+        &[ClientId::Amp],
+        ClientId::Amp,
+        vec![plain_test_input(input_record_cache::DecoderId::Amp, first)],
+    );
+    let second_signature = signature_for_test_units(
+        &[ClientId::Amp],
+        ClientId::Amp,
+        vec![plain_test_input(input_record_cache::DecoderId::Amp, second)],
+    );
+    assert_ne!(first_signature, second_signature);
+}
+
+#[test]
+fn prepare_discovers_once_and_execute_consumes_the_same_inventory() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    super::reset_prepare_discovery_count();
+
+    let prepared = super::prepare_test_inventory(inventory_options(home.path(), &["amp"])).unwrap();
+    assert_eq!(super::prepare_discovery_count(), 1);
+
+    std::fs::write(
+        amp_dir.join("T-added-after-prepare.json"),
+        r#"{
+            "id": "added-after-prepare",
+            "created": 1747800000000,
+            "messages": [{
+                "role": "assistant",
+                "messageId": 1,
+                "usage": {
+                    "timestamp": "2026-05-21T04:00:00Z",
+                    "model": "claude-opus-4-7",
+                    "inputTokens": 10,
+                    "outputTokens": 2
+                }
+            }]
+        }"#,
+    )
+    .unwrap();
+
+    let frozen = super::load_prepared_test_usage(prepared, GroupBy::Model, None).unwrap();
+    assert_eq!(super::prepare_discovery_count(), 1);
+    assert_eq!(frozen.total_tokens, 0);
+
+    let ordinary = super::load_test_usage(
+        inventory_options(home.path(), &["amp"]),
+        GroupBy::Model,
+        None,
+    )
+    .unwrap();
+    assert_eq!(ordinary.total_tokens, 12);
+}
+
+#[test]
+#[serial_test::serial]
+fn prepared_aggregation_projection_retains_only_live_interned_identities() {
+    let home = tempfile::TempDir::new().unwrap();
+    let amp_dir = home.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    let model = "claude-c5-production-lifecycle-dead-model";
+    std::fs::write(
+        amp_dir.join("T-c5-lifecycle.json"),
+        format!(
+            r#"{{
+                "id": "c5-lifecycle-session",
+                "created": 1747800000000,
+                "messages": [{{
+                    "role": "assistant",
+                    "messageId": 1,
+                    "usage": {{
+                        "timestamp": "2026-05-21T04:00:00Z",
+                        "model": "{model}",
+                        "inputTokens": 10,
+                        "outputTokens": 2
+                    }}
+                }}]
+            }}"#
+        ),
+    )
+    .unwrap();
+
+    let externally_live = crate::records::intern::intern("c5-production-lifecycle-live");
+    let prune_before = crate::records::intern::prune_count();
+    let prepared = super::prepare_test_inventory(inventory_options(home.path(), &["amp"])).unwrap();
+    let usage = super::load_prepared_test_usage(prepared, GroupBy::Model, None).unwrap();
+
+    assert_eq!(usage.models[0].model_id.as_ref(), model);
+    assert_eq!(usage.models[0].display_name.as_ref(), model);
+    assert_eq!(crate::records::intern::prune_count(), prune_before + 1);
+    assert_eq!(crate::records::intern::indexed_live_count(model), 1);
+    let shared_model = crate::records::intern::intern(model);
+    assert!(Arc::ptr_eq(&usage.models[0].model_id, &shared_model));
+    drop(shared_model);
+    assert_eq!(
+        crate::records::intern::indexed_live_count(&externally_live),
+        1
+    );
+    assert!(Arc::ptr_eq(
+        &externally_live,
+        &crate::records::intern::intern(&externally_live)
+    ));
+    drop(usage);
+    crate::records::intern::prune_dead();
+    assert_eq!(crate::records::intern::indexed_live_count(model), 0);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_warm_parse_taking_records_keeps_outputs_and_cache_stable() {
+    let input_home = tempfile::TempDir::new().unwrap();
+
+    {
+        let path = input_home.path().join(".local/share/opencode/opencode.db");
+        let conn = create_opencode_sqlite_db(&path);
+        insert_opencode_sqlite_message(
+            &conn,
+            "msg-1",
+            "session-1",
+            "",
+            r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+        );
+        drop(conn);
+        let unit = opencode_test_input(path.clone());
+
+        let home = input_home.path().to_str().unwrap();
+        let clients = ["opencode".to_string()];
+
+        // Cold parse populates the cache; the two warm parses exercise the
+        // move-out (take) path and must return identical results without
+        // corrupting the saved store (ADR 0008).
+        let cold = parse_all_messages_with_pricing(home, &clients, None).unwrap();
+        let warm_first = parse_all_messages_with_pricing(home, &clients, None).unwrap();
+        let warm_second = parse_all_messages_with_pricing(home, &clients, None).unwrap();
+
+        assert_eq!(cold.len(), 1);
+        assert_eq!(cold, warm_first);
+        assert_eq!(warm_first, warm_second);
+
+        let mut cache = input_cache_for_test_home(input_home.path());
+        let fingerprint = unit.input_policy().fingerprint().unwrap();
+        assert_eq!(
+            cache
+                .take_records(&input_record_cache::CacheReadPlan::new(
+                    &path,
+                    unit.decoder.version(),
+                    fingerprint.clone(),
+                ))
+                .expect("saved warm cache shard must remain readable")
+                .len(),
+            1,
+            "warm parses must leave the cached entry intact on disk"
+        );
+        assert!(matches!(
+            cache.take_records(&input_record_cache::CacheReadPlan::new(
+                std::path::Path::new("/nonexistent/opencode.db"),
+                unit.decoder.version(),
+                fingerprint,
+            )),
+            Err(input_record_cache::CacheReadFailure {
+                reason: input_record_cache::CacheReadFailureReason::Open { .. },
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_opencode_database_open_errors_are_not_cached_as_empty_success() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        let path = input_home.path().join(".local/share/opencode/opencode.db");
+        std::fs::create_dir_all(&path).unwrap();
+        let unit = opencode_test_input(path.clone());
+        let scanner_settings = scanner::ScannerSettings {
+            opencode_db_paths: vec![path.clone()],
+            ..scanner::ScannerSettings::default()
+        };
+
+        let (first_messages, first_health) = parse_all_messages_with_health_with_settings(
+            input_home.path().to_str().unwrap(),
+            &["opencode".to_string()],
+            None,
+            &scanner_settings,
+        )
+        .unwrap();
+        assert!(first_messages.is_empty());
+        assert_eq!(first_health.failed_inputs(), 1);
+        let input = &first_health.inputs()[0];
+        assert_eq!(input.path, path);
+        let failure = input.status.failure().unwrap();
+        assert!(
+            failure.message.contains("snapshot input metadata")
+                || failure
+                    .message
+                    .contains("read input metadata and file identity")
+                || failure
+                    .message
+                    .contains("open current OpenCode SQLite database")
+                || failure.operation.contains("snapshot input metadata")
+                || failure
+                    .operation
+                    .contains("open current OpenCode SQLite database"),
+            "failure must identify the failed input operation: {failure:?}"
+        );
+
+        let cache = input_record_cache::InputRecordShardStore::load().unwrap();
+        assert!(cache
+            .get_meta(&path, unit.decoder.version())
+            .unwrap()
+            .is_none());
+
+        std::fs::remove_dir(&path).unwrap();
+        let conn = create_opencode_sqlite_db(&path);
+        insert_opencode_sqlite_message(
+            &conn,
+            "msg-1",
+            "session-1",
+            "",
+            r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+        );
+        drop(conn);
+
+        let second_messages = parse_all_messages_with_pricing_with_settings(
+            input_home.path().to_str().unwrap(),
+            &["opencode".to_string()],
+            None,
+            &scanner_settings,
+        )
+        .unwrap();
+        assert_eq!(second_messages.len(), 1);
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_clean_empty_opencode_scan_result_is_not_cached() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        let path = input_home.path().join(".local/share/opencode/opencode.db");
+        let conn = create_opencode_sqlite_db(&path);
+        drop(conn);
+
+        let unit = opencode_test_input(path.clone());
+
+        let first_messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["opencode".to_string()],
+            None,
+        )
+        .unwrap();
+        assert!(first_messages.is_empty());
+
+        let cache = input_record_cache::InputRecordShardStore::load().unwrap();
+        assert!(cache
+            .get_meta(&path, unit.decoder.version())
+            .unwrap()
+            .is_none());
+
+        input_record_cache::reset_input_read_stats(&path);
+        let second_messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["opencode".to_string()],
+            None,
+        )
+        .unwrap();
+        assert!(second_messages.is_empty());
+        assert_eq!(
+            input_record_cache::get_input_read_stats(&path).hash_passes,
+            0,
+            "an uncached ordinary input must not add a separate fingerprint hash pass"
+        );
+        let cache = input_record_cache::InputRecordShardStore::load().unwrap();
+        assert!(
+            cache
+                .get_meta(&path, unit.decoder.version())
+                .unwrap()
+                .is_none(),
+            "a second clean empty scan must still leave no shard"
+        );
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_sqlite_input_cache_invalidates_on_wal_change() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        let db_dir = input_home.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("opencode.db");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode=WAL;", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_lowercase(), "wal");
+        conn.execute_batch(
+            "PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+             CREATE TABLE message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 data TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+
+        let row_one = r#"{
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "tokens": { "input": 100, "output": 50, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+        let row_two = r#"{
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "tokens": { "input": 120, "output": 60, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "time": { "created": 1700000001000.0 }
+        }"#;
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["msg-1", "session-1", row_one],
+        )
+        .unwrap();
+
+        let first_messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["opencode".to_string()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(first_messages.len(), 1);
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["msg-2", "session-1", row_two],
+        )
+        .unwrap();
+        assert!(db_path.with_extension("db-wal").exists());
+
+        let refreshed_messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["opencode".to_string()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(refreshed_messages.len(), 2);
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_parse_all_messages_dedups_across_channel_suffixed_opencode_dbs() {
+    // Regression guard: a session that appears in both `opencode.db` and
+    // `opencode-<channel>.db` (e.g. the user switches channels mid-session)
+    // must only be counted once.
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        let db_dir = input_home.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&db_dir).unwrap();
+
+        let schema = "PRAGMA journal_mode=WAL;
+             PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+             CREATE TABLE message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 data TEXT NOT NULL
+             );";
+        let row = |input: u64, ts: u64| {
+            format!(
+                r#"{{
+                    "role": "assistant",
+                    "modelID": "claude-sonnet-4",
+                    "providerID": "anthropic",
+                    "tokens": {{ "input": {input}, "output": 10, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+                    "time": {{ "created": {ts}.0 }}
+                }}"#
+            )
+        };
+
+        let default_db = db_dir.join("opencode.db");
+        let conn = rusqlite::Connection::open(&default_db).unwrap();
+        conn.execute_batch(schema).unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "shared-msg",
+                "session-shared",
+                row(100, 1_700_000_000_000u64)
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "latest-only",
+                "session-latest",
+                row(200, 1_700_000_001_000u64)
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let stable_db = db_dir.join("opencode-stable.db");
+        let conn = rusqlite::Connection::open(&stable_db).unwrap();
+        conn.execute_batch(schema).unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "shared-msg",
+                "session-shared",
+                row(100, 1_700_000_000_000u64)
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "stable-only",
+                "session-stable",
+                row(300, 1_700_000_002_000u64)
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["opencode".to_string()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            messages.len(),
+            3,
+            "expected 3 unique messages (shared + latest-only + stable-only), got {}",
+            messages.len()
+        );
+        let mut ids: Vec<u64> = messages.iter().filter_map(|m| m.dedup_key).collect();
+        ids.sort_unstable();
+        let mut expected: Vec<u64> = ["latest-only", "shared-msg", "stable-only"]
+            .iter()
+            .map(|key| crate::records::dedup_hash_str(key))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(ids, expected);
+
+        let messages_warm = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["opencode".to_string()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            messages_warm.len(),
+            3,
+            "warm cache must also dedup shared message across channel dbs"
+        );
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_parse_all_messages_with_pricing_opencode_sqlite_deduplicates_forked_history() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        let db_dir = input_home.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("opencode.db");
+        let conn = create_opencode_sqlite_db(&db_path);
+
+        let msg_a = build_opencode_sqlite_payload(
+            1_700_000_000_000.0,
+            1_700_000_000_500.0,
+            100,
+            50,
+            0,
+            10,
+            5,
+            0.01,
+        );
+        let msg_b = build_opencode_sqlite_payload(
+            1_700_000_001_000.0,
+            1_700_000_001_500.0,
+            200,
+            80,
+            10,
+            20,
+            0,
+            0.02,
+        );
+        let msg_c = build_opencode_sqlite_payload(
+            1_700_000_002_000.0,
+            1_700_000_002_500.0,
+            300,
+            120,
+            15,
+            0,
+            0,
+            0.03,
+        );
+
+        for (id, session_id, payload) in [
+            ("root_a", "root", msg_a.as_str()),
+            ("root_b", "root", msg_b.as_str()),
+            ("fork_a_copy", "fork", msg_a.as_str()),
+            ("fork_b_copy", "fork", msg_b.as_str()),
+            ("fork_c_new", "fork", msg_c.as_str()),
+        ] {
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, session_id, payload],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["opencode".to_string()],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 600);
+        assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 250);
+        assert_eq!(messages.iter().map(|m| m.cost).sum::<f64>(), 0.0);
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_local_message_loader_opencode_sqlite_counts_deduplicated_forked_history() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        let db_dir = input_home.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("opencode.db");
+        let conn = create_opencode_sqlite_db(&db_path);
+
+        let msg_a = build_opencode_sqlite_payload(
+            1_700_000_000_000.0,
+            1_700_000_000_500.0,
+            100,
+            50,
+            0,
+            10,
+            5,
+            0.01,
+        );
+        let msg_b = build_opencode_sqlite_payload(
+            1_700_000_001_000.0,
+            1_700_000_001_500.0,
+            200,
+            80,
+            10,
+            20,
+            0,
+            0.02,
+        );
+        let msg_c = build_opencode_sqlite_payload(
+            1_700_000_002_000.0,
+            1_700_000_002_500.0,
+            300,
+            120,
+            15,
+            0,
+            0,
+            0.03,
+        );
+
+        for (id, session_id, payload) in [
+            ("root_a", "root", msg_a.as_str()),
+            ("root_b", "root", msg_b.as_str()),
+            ("fork_a_copy", "fork", msg_a.as_str()),
+            ("fork_b_copy", "fork", msg_b.as_str()),
+            ("fork_c_new", "fork", msg_c.as_str()),
+        ] {
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, session_id, payload],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+            home_dir: Some(input_home.path().to_path_buf()),
+            clients: Some(vec![ClientId::OpenCode]),
+            date_range: DateRange::none(),
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::OpenCode), 3);
+        assert_eq!(parsed.messages.len(), 3);
+        assert_eq!(
+            parsed.messages.iter().map(|m| m.tokens.input).sum::<i64>(),
+            600
+        );
+        assert_eq!(
+            parsed.messages.iter().map(|m| m.tokens.output).sum::<i64>(),
+            250
+        );
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+fn write_codex_forked_history_fixture(input_home: &std::path::Path) {
+    let codex_dir = input_home.join(".codex/sessions");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("parent.jsonl"),
+        concat!(
+            r#"{"timestamp":"2026-04-30T10:00:00Z","type":"session_meta","payload":{"id":"parent-session","source":"interactive","model_provider":"openai","cwd":"/Users/alice/root"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-30T10:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-30T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-30T10:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"total_tokens":130},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65}}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        codex_dir.join("fork.jsonl"),
+        concat!(
+            r#"{"timestamp":"2026-04-30T10:01:00Z","type":"session_meta","payload":{"id":"fork-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session","depth":1}}},"model_provider":"openai","cwd":"/Users/alice/root-worktree"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-30T10:01:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"total_tokens":130},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"total_tokens":130}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-30T10:01:02Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-30T10:01:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-30T10:01:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"total_tokens":130},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"total_tokens":65}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-30T10:01:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":22,"output_tokens":33,"total_tokens":143},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"total_tokens":13}}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn write_codex_parent_replay_fixture(input_home: &std::path::Path) {
+    let codex_dir = input_home.join(".codex/sessions");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("parent.jsonl"),
+        concat!(
+            r#"{"timestamp":"2026-05-24T20:00:00Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-24T20:00:01Z","type":"turn_context","payload":{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-24T20:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110},"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-05-24T20:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":130,"output_tokens":13,"total_tokens":143},"last_token_usage":{"input_tokens":30,"output_tokens":3,"total_tokens":33}}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    for (filename, child_id, child_turn_id, timestamp) in [
+        (
+            "child-a.jsonl",
+            "019e5c03-1e99-7000-8000-000000000001",
+            "019e5c03-6425-7000-8000-000000000001",
+            "2026-05-24T21:00:00Z",
+        ),
+        (
+            "child-b.jsonl",
+            "019e5c04-1e99-7000-8000-000000000001",
+            "019e5c04-6425-7000-8000-000000000001",
+            "2026-05-24T22:00:00Z",
+        ),
+    ] {
+        std::fs::write(
+            codex_dir.join(filename),
+            format!(
+                concat!(
+                    r#"{{"timestamp":"{timestamp}","type":"session_meta","payload":{{"id":"{child_id}","forked_from_id":"019e5b00-0000-7000-8000-000000000001","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"019e5b00-0000-7000-8000-000000000001","depth":1}}}}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"{timestamp}","type":"session_meta","payload":{{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"{timestamp}","type":"turn_context","payload":{{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":100,"output_tokens":10,"total_tokens":110}},"last_token_usage":{{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":130,"output_tokens":13,"total_tokens":143}},"last_token_usage":{{"input_tokens":30,"output_tokens":3,"total_tokens":33}}}}}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"task_started","turn_id":"{child_turn_id}"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"{timestamp}","type":"turn_context","payload":{{"turn_id":"{child_turn_id}","model":"gpt-5.5","cwd":"/repo"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":140,"output_tokens":14,"total_tokens":154}},"last_token_usage":{{"input_tokens":10,"output_tokens":1,"total_tokens":11}}}}}}}}"#,
+                    "\n",
+                ),
+                timestamp = timestamp,
+                child_id = child_id,
+                child_turn_id = child_turn_id,
+            ),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_parse_all_messages_with_pricing_codex_deduplicates_forked_history() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        write_codex_forked_history_fixture(input_home.path());
+
+        let messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.tokens.input)
+                .sum::<i64>(),
+            88
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.tokens.cache_read)
+                .sum::<i64>(),
+            22
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.tokens.output)
+                .sum::<i64>(),
+            33
+        );
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_parse_all_messages_with_pricing_codex_deduplicates_parent_replay_across_forks() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        write_codex_parent_replay_fixture(input_home.path());
+
+        let messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        )
+        .unwrap();
+
+        // Parent contributes its two turns. The two forks each replay the
+        // parent history (skipped) and then emit one own turn that lands on
+        // the identical cumulative total (140/14). Sibling forks sharing a
+        // cumulative total is the signature of a replayed row, so the
+        // fork-parent-scoped dedup key collapses them into one. Real fork
+        // fan-out replays the same upstream totals into 10-100+ siblings;
+        // two distinct turns reaching a byte-identical cumulative vector by
+        // chance does not happen in practice because the cumulative encodes
+        // each fork's divergent context size.
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 140);
+        assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 14);
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+fn write_codex_twin_token_count_fixture(input_home: &std::path::Path) {
+    // Single session with two turns whose `last_token_usage` deltas are
+    // byte-identical but emitted at different timestamps. The fork-dedup
+    // key includes the cumulative total, so both turns must survive even
+    // when a user happens to send two turns producing the same per-turn
+    // delta.
+    let codex_dir = input_home.join(".codex/sessions");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("twin-deltas.jsonl"),
+        concat!(
+            r#"{"timestamp":"2026-04-30T11:00:00Z","type":"session_meta","payload":{"id":"twin-session","source":"interactive","model_provider":"openai","cwd":"/Users/alice/root"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-30T11:00:01Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-30T11:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-04-30T11:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+#[serial_test::serial]
+fn test_parse_all_messages_with_pricing_codex_keeps_twin_token_counts_at_distinct_timestamps() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        write_codex_twin_token_count_fixture(input_home.path());
+
+        let messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            messages.len(),
+            2,
+            "two turns with identical token deltas at distinct timestamps must both survive dedup",
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.tokens.input)
+                .sum::<i64>(),
+            16,
+            "input tokens normalize cache_read out of input: 2 turns × (10 - 2) = 16",
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.tokens.output)
+                .sum::<i64>(),
+            6,
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.tokens.cache_read)
+                .sum::<i64>(),
+            4,
+        );
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_local_message_loader_codex_counts_deduplicated_forked_history() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        write_codex_forked_history_fixture(input_home.path());
+
+        let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+            home_dir: Some(input_home.path().to_path_buf()),
+            clients: Some(vec![ClientId::Codex]),
+            date_range: DateRange::none(),
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(parsed.counts.get(ClientId::Codex), 3);
+        assert_eq!(parsed.messages.len(), 3);
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|message| message.tokens.input)
+                .sum::<i64>(),
+            88
+        );
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|message| message.tokens.cache_read)
+                .sum::<i64>(),
+            22
+        );
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|message| message.tokens.output)
+                .sum::<i64>(),
+            33
+        );
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_codex_cache_reparses_from_zero_when_incremental_prefix_is_stale() {
+    let fresh_cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+
+    {
+        let codex_dir = input_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let path = codex_dir.join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let initial_messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(initial_messages.len(), 1);
+        assert_eq!(initial_messages[0].model_id.as_ref(), "gpt-5.4");
+        assert!(input_cache_for_test_home(input_home.path())
+            .get_meta(
+                &path,
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
+            )
+            .unwrap()
+            .and_then(|meta| meta.codex_incremental)
+            .is_some());
+
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-27T10:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let warm_messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        )
+        .unwrap();
+        let fresh_messages = parse_all_messages_with_pricing_in_cache(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            fresh_cache_home.path(),
+        )
+        .unwrap();
+
+        assert_eq!(warm_messages, fresh_messages);
+        assert_eq!(warm_messages.len(), 2);
+        assert!(warm_messages
+            .iter()
+            .all(|message| message.model_id.as_ref() == "gpt-5.5"));
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_codex_untimestamped_token_row_is_partial_without_cache_shard() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        let codex_dir = input_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let path = codex_dir.join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let (messages, health) = parse_all_messages_with_health(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        )
+        .unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(health.partial_inputs(), 1);
+        assert_eq!(health.failed_inputs(), 0);
+        assert_eq!(health.rejected_records(), 1);
+        let input = &health.inputs()[0];
+        assert_eq!(input.path, path);
+        assert!(matches!(
+            input.status,
+            crate::input_health::InputStatus::Partial { .. }
+        ));
+        assert_eq!(
+            input.rejections.entries().next().unwrap().key,
+            "missing-timestamp"
+        );
+        let failure = input.status.failure().unwrap();
+        assert_eq!(failure.operation, "validate Codex token-count event");
+        assert!(
+            failure.message.contains("timestamp is missing"),
+            "{failure:?}"
+        );
+
+        assert!(input_record_cache::InputRecordShardStore::load()
+            .unwrap()
+            .get_meta(
+                &path,
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_codex_malformed_json_suffix_keeps_prefix_without_cache_shard() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        let codex_dir = input_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let path = codex_dir.join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-27T10:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":999""#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let (messages, health) = parse_all_messages_with_health(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
+        assert_eq!(messages[0].tokens.input, 8);
+        assert_eq!(health.partial_inputs(), 1);
+        assert_eq!(health.failed_inputs(), 0);
+        assert_eq!(health.rejected_records(), 1);
+        let input = &health.inputs()[0];
+        assert_eq!(input.path, path);
+        assert!(matches!(
+            input.status,
+            crate::input_health::InputStatus::Partial { .. }
+        ));
+        assert_eq!(
+            input.rejections.entries().next().unwrap().key,
+            "malformed-record"
+        );
+        let failure = input.status.failure().unwrap();
+        assert_eq!(failure.operation, "decode Codex JSONL entry");
+        assert!(input_record_cache::InputRecordShardStore::load()
+            .unwrap()
+            .get_meta(
+                &path,
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_codex_invalid_utf8_suffix_keeps_prefix_without_cache_shard() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        let session_dir = input_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let path = session_dir.join("session.jsonl");
+
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(
+            concat!(
+                r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                "\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        file.write_all(&[0xff, b'\n']).unwrap();
+        file.flush().unwrap();
+
+        let (messages, health) = parse_all_messages_with_health(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id.as_ref(), "gpt-5.4");
+        assert_eq!(messages[0].tokens.input, 8);
+        assert_eq!(health.partial_inputs(), 1);
+        assert_eq!(health.failed_inputs(), 0);
+        assert_eq!(health.rejected_records(), 0);
+        let input = &health.inputs()[0];
+        assert_eq!(input.path, path);
+        assert!(matches!(
+            input.status,
+            crate::input_health::InputStatus::Partial { .. }
+        ));
+        assert!(input.rejections.is_empty());
+        let failure = input.status.failure().unwrap();
+        assert_eq!(failure.operation, "read Codex JSONL line");
+
+        let cache = input_record_cache::InputRecordShardStore::load().unwrap();
+        assert!(cache
+            .get_meta(
+                &path,
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_codex_unknown_model_prefix_is_partial_then_parses_when_completed() {
+    let fresh_cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+
+    {
+        let session_dir = input_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let path = session_dir.join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"session_meta","payload":{"source":"interactive","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let (initial_messages, initial_health) = parse_all_messages_with_health(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        )
+        .unwrap();
+        assert!(initial_messages.is_empty());
+        assert_eq!(initial_health.partial_inputs(), 1);
+        assert_eq!(initial_health.failed_inputs(), 0);
+        assert_eq!(initial_health.rejected_records(), 1);
+        let input = &initial_health.inputs()[0];
+        assert_eq!(input.path, path);
+        assert!(matches!(
+            input.status,
+            crate::input_health::InputStatus::Partial { .. }
+        ));
+        assert_eq!(
+            input.rejections.entries().next().unwrap().key,
+            "missing-model"
+        );
+        let failure = input.status.failure().unwrap();
+        assert_eq!(failure.operation, "resolve Codex token-count model");
+        assert!(
+            failure.message.contains("model was never identified"),
+            "{failure:?}"
+        );
+        assert!(input_cache_for_test_home(input_home.path())
+            .get_meta(
+                &path,
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
+            )
+            .unwrap()
+            .is_none());
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(
+            concat!(
+                r#"{"timestamp":"2026-04-27T10:00:04Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+                "\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let resumed_messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        )
+        .unwrap();
+
+        let fresh_messages = parse_all_messages_with_pricing_in_cache(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            fresh_cache_home.path(),
+        )
+        .unwrap();
+
+        assert_eq!(resumed_messages, fresh_messages);
+        assert_eq!(resumed_messages.len(), 1);
+        assert_eq!(resumed_messages[0].model_id.as_ref(), "gpt-5.5");
+
+        assert!(input_cache_for_test_home(input_home.path())
+            .get_meta(
+                &path,
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
+            )
+            .unwrap()
+            .is_some());
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_codex_cache_skips_non_newline_terminated_resume_prefix() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let fresh_cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", cache_home.path());
+
+    {
+        let session_dir = input_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let path = session_dir.join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"timestamp":"2026-04-27T09:59:59Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-27T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#
+            ),
+        )
+        .unwrap();
+
+        let initial_messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(initial_messages.len(), 1);
+        assert!(input_record_cache::InputRecordShardStore::load()
+            .unwrap()
+            .get_meta(
+                &path,
+                input_record_cache::DecoderVersion::current(input_record_cache::DecoderId::Codex,)
+            )
+            .unwrap()
+            .is_none());
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(
+            concat!(
+                "\n",
+                r#"{"timestamp":"2026-04-27T10:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"cached_input_tokens":3,"output_tokens":5},"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#,
+                "\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let warm_messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        )
+        .unwrap();
+
+        std::env::set_var("HOME", fresh_cache_home.path());
+        let fresh_messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["codex".to_string()],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(warm_messages, fresh_messages);
+        assert_eq!(warm_messages.len(), 2);
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_input_cache_does_not_reuse_priced_cost_without_pricing_service() {
+    let temp_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", temp_home.path());
+    {
+        write_kimi_code_usage_fixture(input_home.path());
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-5.5".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                cache_read_input_token_cost: Some(0.0005),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let repriced_messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["kimi".to_string()],
+            Some(&pricing),
+        )
+        .unwrap();
+        assert_eq!(repriced_messages.len(), 2);
+        assert!(repriced_messages.iter().all(|message| message.cost > 0.0));
+
+        let cached_messages = parse_all_messages_with_pricing(
+            input_home.path().to_str().unwrap(),
+            &["kimi".to_string()],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(cached_messages.len(), 2);
+        assert!(cached_messages.iter().all(|message| message.cost == 0.0));
+    }
+
+    match original_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
+fn test_apply_token_pricing_clears_existing_cost_without_pricing() {
+    let mut msg = AttributedUsageRecord::new_with_agent(
+        ClientId::RooCode,
+        "gpt-4o",
+        "provider",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.42,
+        Some("planner".to_string()),
+    );
+
+    apply_token_pricing(&mut msg, None).unwrap();
+    assert_eq!(msg.cost, 0.0);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_parse_all_messages_with_pricing_prices_canonical_gpt_5_6_factory_model() {
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let input_home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(cache_home.path());
+    let session_dir = input_home.path().join(".factory/sessions/workspace");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(
+        session_dir.join("factory-session.settings.json"),
+        r#"{
+            "model": "custom:gpt-5.6-max",
+            "reasoningEffort": "max",
+            "providerLock": "openai",
+            "providerLockTimestamp": "2026-07-11T13:38:03.820Z",
+            "tokenUsage": {
+                "inputTokens": 10,
+                "outputTokens": 5,
+                "thinkingTokens": 2
+            }
+        }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        session_dir.join("factory-sol.settings.json"),
+        r#"{
+            "model": "custom:gpt-5.6-sol-xhigh",
+            "reasoningEffort": "xhigh",
+            "providerLock": "openai",
+            "providerLockTimestamp": "2026-07-11T13:39:03.820Z",
+            "tokenUsage": {
+                "inputTokens": 10,
+                "outputTokens": 5,
+                "thinkingTokens": 2
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "gpt-5.6-sol".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+    let cold_messages = parse_all_messages_with_pricing(
+        input_home.path().to_str().unwrap(),
+        &["droid".to_string()],
+        Some(&pricing),
+    )
+    .unwrap();
+    let warm_messages = parse_all_messages_with_pricing(
+        input_home.path().to_str().unwrap(),
+        &["droid".to_string()],
+        Some(&pricing),
+    )
+    .unwrap();
+
+    assert_eq!(cold_messages, warm_messages);
+    assert_eq!(warm_messages.len(), 2);
+    assert!(warm_messages
+        .iter()
+        .all(|message| message.model_id.as_ref() == "gpt-5.6-sol"));
+    assert!(warm_messages
+        .iter()
+        .all(|message| message.provider_id.as_ref() == "openai"));
+    assert!(warm_messages
+        .iter()
+        .all(|message| message.tokens.reasoning == 2));
+    assert!(warm_messages.iter().all(|message| message.cost == 0.024));
+}
+
+#[test]
+fn test_finalize_token_priced_messages_rejects_negative_and_filters_zero_tokens() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "gpt-4o".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut messages = vec![
+        AttributedUsageRecord::new(
+            ClientId::Gemini,
+            "gpt-4o",
+            "openai",
+            "zero",
+            1_733_011_200_000,
+            TokenBreakdown::default(),
+            0.42,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::Gemini,
+            "gpt-4o",
+            "openai",
+            "negative",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: -10,
+                output: -5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.42,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::Gemini,
+            "gpt-4o",
+            "openai",
+            "mixed",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: -10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.42,
+        ),
+        {
+            let mut record = AttributedUsageRecord::new(
+                ClientId::Gemini,
+                "gpt-4o",
+                "openai",
+                "negative-message-count",
+                1_733_011_200_000,
+                TokenBreakdown::default(),
+                0.42,
+            );
+            record.message_count = -1;
+            record
+        },
+    ];
+
+    let rejections = finalize_token_priced_messages(&mut messages, Some(&pricing));
+    assert!(messages.is_empty());
+    assert_eq!(rejections.total(), 3);
+    let rejection = rejections.entries().next().unwrap();
+    assert_eq!(rejection.key, "invalid-usage-record");
+    assert_eq!(rejection.count, 3);
+}
+
+#[test]
+fn test_finalize_token_priced_messages_canonicalizes_provider() {
+    let mut messages = vec![
+        AttributedUsageRecord::new(
+            ClientId::Pi,
+            "gpt-5.5",
+            "",
+            "missing-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::Mux,
+            "some-model",
+            "fireworks",
+            "canonical-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::OpenCode,
+            "grok-code-fast-1",
+            "xai-oauth",
+            "xai-oauth-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::OpenCode,
+            "grok-code-fast-1",
+            "grok-oauth",
+            "grok-oauth-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::Claude,
+            "kimi-for-coding",
+            "moonshotai",
+            "moonshot-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::Copilot,
+            "claude-sonnet-4.5",
+            "github-copilot",
+            "copilot-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::Codex,
+            "gpt-5.2",
+            "azure",
+            "azure-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::Antigravity,
+            "gemini-2.5-pro",
+            "vertex",
+            "vertex-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::OpenCode,
+            "glm-5.1",
+            "open.bigmodel.cn",
+            "bigmodel-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::Claude,
+            "hy3-preview-agent",
+            "",
+            "hy3-missing-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::Gemini,
+            "Jamba-1.5-Large",
+            "unknown",
+            "jamba-unknown-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::Gemini,
+            "perplexity/llama-3",
+            "",
+            "route-prefix-must-not-drive-provider",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+    ];
+
+    let _ = finalize_token_priced_messages(&mut messages, None);
+    assert_eq!(messages[0].provider_id.as_ref(), "openai");
+    assert_eq!(messages[1].provider_id.as_ref(), "fireworks");
+    assert_eq!(messages[2].provider_id.as_ref(), "xai");
+    assert_eq!(messages[3].provider_id.as_ref(), "xai");
+    assert_eq!(messages[4].provider_id.as_ref(), "kimi");
+    assert_eq!(messages[5].provider_id.as_ref(), "microsoft");
+    assert_eq!(messages[6].provider_id.as_ref(), "microsoft");
+    assert_eq!(messages[7].provider_id.as_ref(), "google");
+    assert_eq!(messages[8].provider_id.as_ref(), "zai");
+    assert_eq!(messages[9].provider_id.as_ref(), "tencent");
+    assert_eq!(messages[9].model_id.as_ref(), "hy3-preview-agent");
+    assert_eq!(messages[10].provider_id.as_ref(), "ai21");
+    assert_eq!(messages[10].model_id.as_ref(), "jamba-1.5-large");
+    assert_eq!(messages[11].provider_id.as_ref(), "meta");
+    assert_eq!(messages[11].model_id.as_ref(), "llama-3");
+}
+
+#[test]
+fn test_finalize_token_priced_messages_preserves_custom_provider_literal_tag() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "venice/claude-sonnet-4.5".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.01),
+            output_cost_per_token: Some(0.02),
+            ..Default::default()
+        },
+    );
+    litellm.insert(
+        "anthropic/claude-sonnet-4.5".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(1.0),
+            output_cost_per_token: Some(2.0),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut messages = vec![AttributedUsageRecord::new(
+        ClientId::Claude,
+        "claude-sonnet-4.5",
+        "venice",
+        "custom-provider",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    )];
+
+    let _ = finalize_token_priced_messages(&mut messages, Some(&pricing));
+    assert_eq!(messages[0].provider_id.as_ref(), "venice");
+    assert_eq!(messages[0].cost, 0.2);
+}
+
+#[test]
+fn test_finalize_token_priced_messages_preserves_owl_provider_identity() {
+    let mut messages = vec![AttributedUsageRecord::new(
+        ClientId::OpenCode,
+        "gpt-5.2",
+        "openai-owl",
+        "owl-provider",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    )];
+
+    let _ = finalize_token_priced_messages(&mut messages, None);
+    assert_eq!(messages[0].provider_id.as_ref(), "owl");
+}
+
+#[test]
+fn test_positive_token_total_rejects_overflow() {
+    let tokens = TokenBreakdown {
+        input: i64::MAX,
+        output: i64::MAX,
+        cache_read: i64::MAX,
+        cache_write: i64::MAX,
+        reasoning: i64::MAX,
+    };
+
+    assert_eq!(positive_token_total(&tokens), None);
+}
+
+#[test]
+fn test_positive_token_total_rejects_negative_bucket() {
+    let tokens = TokenBreakdown {
+        input: 10,
+        output: -1,
+        cache_read: 0,
+        cache_write: 0,
+        reasoning: 0,
+    };
+
+    assert_eq!(positive_token_total(&tokens), None);
+}
+
+#[test]
+#[should_panic(expected = "token total exceeds i64::MAX")]
+fn test_token_breakdown_total_rejects_overflow() {
+    let tokens = TokenBreakdown {
+        input: i64::MAX,
+        output: 1,
+        cache_read: 0,
+        cache_write: 0,
+        reasoning: 0,
+    };
+
+    let _ = tokens.total();
+}
+
+#[test]
+fn test_tui_model_aggregation_uses_unsigned_token_capacity() {
+    let message = || {
+        AttributedUsageRecord::new(
+            ClientId::Antigravity,
+            "gemini-3-pro",
+            "google",
+            "overflow-session",
+            1_700_000_000_000,
+            TokenBreakdown {
+                input: i64::MAX,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        )
+    };
+
+    let entries = aggregate_model_usage_entries(vec![message(), message()], &GroupBy::Model);
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].tokens.input, (i64::MAX as u64) * 2);
+}
+
+#[test]
+fn test_apply_token_pricing_overrides_cost_when_pricing_exists() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "gpt-4o".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::Codex,
+        "gpt-4o",
+        "provider",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.02);
+}
+
+#[test]
+fn test_apply_token_pricing_returns_non_finite_cost_as_typed_error() {
+    let pricing = pricing::PricingService::new(
+        HashMap::from([(
+            "overflow-model".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(f64::MAX),
+                ..Default::default()
+            },
+        )]),
+        HashMap::new(),
+    );
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::Codex,
+        "overflow-model",
+        "openai",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: i64::MAX,
+            ..TokenBreakdown::default()
+        },
+        0.0,
+    );
+
+    let error = apply_token_pricing(&mut msg, Some(&pricing)).unwrap_err();
+    assert_eq!(
+        error,
+        pricing::PricingComputationError::NonFiniteCost { component: "input" }
+    );
+    assert_eq!(msg.cost, 0.0);
+}
+
+#[test]
+fn test_apply_token_pricing_resolves_canonical_longcat_model() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "longcat-flash-3b".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::Claude,
+        "longcat-flash-3b",
+        "meituan",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.02);
+}
+
+#[test]
+fn test_apply_token_pricing_uses_same_price_for_zed_and_other_clients() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "claude-sonnet-4.5".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let tokens = TokenBreakdown {
+        input: 10,
+        output: 5,
+        cache_read: 0,
+        cache_write: 0,
+        reasoning: 0,
+    };
+    let mut zed_msg = AttributedUsageRecord::new(
+        ClientId::Zed,
+        "claude-sonnet-4-5",
+        crate::integrations::zed::decode::ZED_HOSTED_PROVIDER,
+        "session-1",
+        1_733_011_200_000,
+        tokens.clone(),
+        0.0,
+    );
+    let mut claude_msg = AttributedUsageRecord::new(
+        ClientId::Claude,
+        "claude-sonnet-4-5",
+        crate::integrations::zed::decode::ZED_HOSTED_PROVIDER,
+        "session-1",
+        1_733_011_200_000,
+        tokens,
+        0.0,
+    );
+
+    apply_token_pricing(&mut zed_msg, Some(&pricing)).unwrap();
+    apply_token_pricing(&mut claude_msg, Some(&pricing)).unwrap();
+    assert_eq!(zed_msg.cost, claude_msg.cost);
+    assert!((zed_msg.cost - 0.020).abs() < 1e-12);
+}
+
+#[test]
+fn test_apply_token_pricing_custom_zed_price_is_final_price() {
+    let mut custom = HashMap::new();
+    custom.insert(
+        "claude-sonnet-4.5".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.003),
+            output_cost_per_token: Some(0.004),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new_with_custom(
+        pricing::custom::CustomPricing::from_models(custom),
+        HashMap::new(),
+        HashMap::new(),
+    );
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::Zed,
+        "claude-sonnet-4-5",
+        crate::integrations::zed::decode::ZED_HOSTED_PROVIDER,
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert!((msg.cost - 0.050).abs() < 1e-12);
+}
+
+#[test]
+fn test_apply_token_pricing_uses_upstream_provider_for_zed_byok() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "claude-sonnet-4.5".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::Zed,
+        "claude-sonnet-4-5",
+        "anthropic",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert!((msg.cost - 0.020).abs() < 1e-12);
+}
+
+#[test]
+fn test_apply_token_pricing_uses_reasoning_for_gemini() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "gemini-2.5-pro".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::Gemini,
+        "gemini-2.5-pro",
+        "google",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 7,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.034);
+}
+
+#[test]
+fn test_apply_token_pricing_uses_cache_read_pricing_for_gemini() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "gemini-2.5-pro".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            cache_read_input_token_cost: Some(0.0001),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::Gemini,
+        "gemini-2.5-pro",
+        "google",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 7,
+            cache_write: 0,
+            reasoning: 3,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.0267);
+}
+
+#[test]
+fn test_finalize_token_pricing_cleans_free_variant_before_lookup() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "nemotron-3-ultra".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let msg = AttributedUsageRecord::new(
+        ClientId::OpenCode,
+        "nemotron-3-ultra-free",
+        "nvidia",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+    let mut messages = vec![msg];
+
+    let _ = finalize_token_priced_messages(&mut messages, Some(&pricing));
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].model_id.as_ref(), "nemotron-3-ultra");
+    assert!(messages[0].cost > 0.0);
+}
+
+#[test]
+fn test_finalize_token_pricing_cleans_date_variant_before_lookup() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "gpt-4o-mini".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let msg = AttributedUsageRecord::new(
+        ClientId::Copilot,
+        "gpt-4o-mini-2024-07-18",
+        "openai",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+    let mut messages = vec![msg];
+
+    let _ = finalize_token_priced_messages(&mut messages, Some(&pricing));
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].model_id.as_ref(), "gpt-4o-mini");
+    assert!(messages[0].cost > 0.0);
+}
+
+#[test]
+fn test_finalize_token_pricing_cleans_repeated_date_variant_before_lookup() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "gpt-4o-mini".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut messages = vec![
+        AttributedUsageRecord::new(
+            ClientId::Copilot,
+            "gpt-4o-mini-2024-07-18",
+            "openai",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+        AttributedUsageRecord::new(
+            ClientId::Copilot,
+            "gpt-4o-mini-2024-07-18",
+            "openai",
+            "session-2",
+            1_733_011_201_000,
+            TokenBreakdown {
+                input: 20,
+                output: 10,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.0,
+        ),
+    ];
+
+    let _ = finalize_token_priced_messages(&mut messages, Some(&pricing));
+    assert_eq!(messages.len(), 2);
+    assert!(messages
+        .iter()
+        .all(|message| message.model_id.as_ref() == "gpt-4o-mini"));
+    assert!(messages.iter().all(|message| message.cost > 0.0));
+}
+
+#[test]
+fn test_apply_token_pricing_prefers_provider_aware_match() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "xai/grok-code".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    litellm.insert(
+        "azure_ai/grok-code".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.01),
+            output_cost_per_token: Some(0.02),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::OpenCode,
+        "grok-code",
+        "azure",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.2);
+}
+
+#[test]
+fn test_apply_token_pricing_uses_nested_reseller_exact_match() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "gpt-4".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            ..Default::default()
+        },
+    );
+    litellm.insert(
+        "azure/openai/gpt-4".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.01),
+            output_cost_per_token: Some(0.02),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::OpenCode,
+        "gpt-4",
+        "azure",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.2);
+}
+
+#[test]
+fn test_apply_token_pricing_clears_cost_without_exact_pricing() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "fireworks_ai/accounts/fireworks/models/deepseek-r1-0528-distill-qwen3-8b".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.0000002),
+            output_cost_per_token: Some(0.0000002),
+            ..Default::default()
+        },
+    );
+
+    let mut openrouter = HashMap::new();
+    openrouter.insert(
+        "deepseek/deepseek-v4-pro".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.000001),
+            output_cost_per_token: Some(0.000002),
+            ..Default::default()
+        },
+    );
+
+    let pricing = pricing::PricingService::new(litellm, openrouter);
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::OpenCode,
+        "accounts/fireworks/models/deepseek-v4-pro",
+        "fireworks",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.123,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.0);
+}
+
+#[test]
+fn test_apply_token_pricing_prefers_provider_specific_exact_match_over_plain_exact() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "gemini-2.5-pro".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            cache_creation_input_token_cost: None,
+            ..Default::default()
+        },
+    );
+
+    let mut openrouter = HashMap::new();
+    openrouter.insert(
+        "google/gemini-2.5-pro".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.001),
+            output_cost_per_token: Some(0.002),
+            cache_creation_input_token_cost: Some(0.01),
+            ..Default::default()
+        },
+    );
+
+    let pricing = pricing::PricingService::new(litellm, openrouter);
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::OpenCode,
+        "gemini-2.5-pro",
+        "google",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 3,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.05);
+}
+
+#[test]
+fn test_apply_token_pricing_normalizes_openai_codex_provider() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "openai/gpt-5.2".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.01),
+            output_cost_per_token: Some(0.02),
+            ..Default::default()
+        },
+    );
+    litellm.insert(
+        "google/gpt-5.2".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.1),
+            output_cost_per_token: Some(0.2),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::OpenClaw,
+        "gpt-5.2",
+        "openai-codex",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.2);
+}
+
+#[test]
+fn test_apply_token_pricing_normalizes_openai_pro_provider() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "openai/gpt-5.2".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.01),
+            output_cost_per_token: Some(0.02),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::Kimi,
+        "gpt-5.2",
+        "openai-pro",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.2);
+}
+
+#[test]
+fn test_apply_token_pricing_honors_observed_owl_scope_for_gpt() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "owl/gpt-5.2".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.01),
+            output_cost_per_token: Some(0.02),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::OpenCode,
+        "gpt-5.2",
+        "owl",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.2);
+}
+
+#[test]
+fn test_apply_token_pricing_honors_observed_owl_scope_for_claude() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "owl/claude-sonnet-4.5".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.01),
+            output_cost_per_token: Some(0.02),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::OpenCode,
+        "claude-sonnet-4-5",
+        "owl",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.2);
+}
+
+#[test]
+fn test_apply_token_pricing_honors_observed_owl_scope_for_minimax() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "owl/minimax-m2.1".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.01),
+            output_cost_per_token: Some(0.02),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::OpenCode,
+        "MiniMax-M2.1",
+        "owl",
+        "session-1",
+        1_733_011_200_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.2);
+}
+
+#[test]
+fn test_apply_token_pricing_prices_claude_code_gpt_5_3_codex() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "gpt-5.3-codex".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.00000175),
+            output_cost_per_token: Some(0.000014),
+            cache_read_input_token_cost: Some(0.000000175),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::Claude,
+        "gpt-5.3-codex",
+        "openai",
+        "session-1",
+        1_776_000_000_000,
+        TokenBreakdown {
+            input: 1_000_000,
+            output: 100_000,
+            cache_read: 50_000,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    let expected = 1.75 + 1.4 + 0.00875;
+    assert!((msg.cost - expected).abs() < 1e-12);
+}
+
+#[test]
+fn test_apply_token_pricing_prices_claude_code_minimax_model() {
+    let mut litellm = HashMap::new();
+    litellm.insert(
+        "minimax/minimax-m2.1".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(0.01),
+            output_cost_per_token: Some(0.02),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::Claude,
+        "MiniMax-M2.1",
+        "minimax",
+        "session-1",
+        1_776_000_000_000,
+        TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    assert_eq!(msg.cost, 0.2);
+}
+
+#[test]
+fn test_apply_token_pricing_prices_canonical_kimi_k2_6() {
+    let mut openrouter = HashMap::new();
+    openrouter.insert(
+        "moonshotai/kimi-k2.6".into(),
+        pricing::ModelPricing {
+            input_cost_per_token: Some(9.5e-7),
+            output_cost_per_token: Some(0.000004),
+            ..Default::default()
+        },
+    );
+    let pricing = pricing::PricingService::new(HashMap::new(), openrouter);
+
+    let mut msg = AttributedUsageRecord::new(
+        ClientId::Kimi,
+        "kimi-k2.6",
+        "kimi",
+        "session-1",
+        1_776_000_000_000,
+        TokenBreakdown {
+            input: 1_000_000,
+            output: 250_000,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+        0.0,
+    );
+
+    apply_token_pricing(&mut msg, Some(&pricing)).unwrap();
+    let expected = 1_000_000.0 * 9.5e-7 + 250_000.0 * 0.000004;
+    assert!((msg.cost - expected).abs() < 1e-12);
+    assert!(msg.cost > 0.0);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_parse_all_messages_with_pricing_keeps_gateway_message_under_real_client_filter() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let conn =
+        create_opencode_sqlite_db(&temp_dir.path().join(".local/share/opencode/opencode.db"));
+    insert_opencode_sqlite_message(
+        &conn,
+        "msg-1",
+        "session-1",
+        "",
+        r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"hf:deepseek-ai/DeepSeek-V3-0324","providerID":"unknown","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+    );
+
+    let pricing = pricing::PricingService::new(HashMap::new(), HashMap::new());
+    let messages = parse_all_messages_with_pricing(
+        temp_dir.path().to_str().unwrap(),
+        &["opencode".to_string()],
+        Some(&pricing),
+    )
+    .unwrap();
+
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].client, ClientId::OpenCode);
+    assert_eq!(messages[0].model_id.as_ref(), "deepseek-v3");
+    assert_eq!(messages[0].provider_id.as_ref(), "deepseek");
+}
+
+#[test]
+#[serial_test::serial]
+fn test_local_message_loader_preserves_gateway_message_client_counts() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let conn =
+        create_opencode_sqlite_db(&temp_dir.path().join(".local/share/opencode/opencode.db"));
+    insert_opencode_sqlite_message(
+        &conn,
+        "msg-1",
+        "session-1",
+        "",
+        r#"{"id":"msg-1","sessionID":"session-1","role":"assistant","modelID":"accounts/fireworks/models/deepseek-v3-0324","providerID":"fireworks","cost":0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+    );
+
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings::default(),
+    })
+    .unwrap();
+
+    assert_eq!(parsed.counts.get(ClientId::OpenCode), 1);
+    assert_eq!(parsed.messages.len(), 1);
+    assert_eq!(parsed.messages[0].client, ClientId::OpenCode);
+    assert_eq!(parsed.messages[0].model_id.as_ref(), "deepseek-v3");
+    assert_eq!(parsed.messages[0].provider_id.as_ref(), "fireworks");
+}
+
+#[test]
+#[serial_test::serial]
+fn test_local_message_loader_honors_scanner_settings_opencode_db_paths() {
+    // Regression guard: local message loading must forward
+    // `options.scanner_settings` into OpenCode driver discovery. A configured
+    // database outside the fixed default directory must reach local message
+    // loading exactly as it reaches the Models projection.
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    // Deliberately do not create ~/.local/share/opencode so nothing
+    // is auto-discoverable; the only db the scanner can find must
+    // come from `scanner_settings`.
+    let outside_dir = temp_dir.path().join("elsewhere");
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    let external_db = outside_dir.join("opencode.db");
+
+    let conn = rusqlite::Connection::open(&external_db).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+         CREATE TABLE message (
+             id TEXT PRIMARY KEY,
+             session_id TEXT NOT NULL,
+             data TEXT NOT NULL
+         );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+        rusqlite::params![
+            "ext-msg-1",
+            "ext-session",
+            r#"{
+                "role": "assistant",
+                "modelID": "claude-sonnet-4",
+                "providerID": "anthropic",
+                "tokens": { "input": 42, "output": 7, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+                "time": { "created": 1700000000000.0 }
+            }"#
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    // Without scanner_settings: no rows (nothing auto-discoverable).
+    let parsed_default = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings::default(),
+    })
+    .unwrap();
+    assert_eq!(parsed_default.counts.get(ClientId::OpenCode), 0);
+    assert!(parsed_default.messages.is_empty());
+
+    // With scanner_settings pointing at the external db: the user
+    // row must show up.
+    let parsed_with_settings = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings {
+            opencode_db_paths: vec![external_db.clone()],
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    assert_eq!(
+        parsed_with_settings.counts.get(ClientId::OpenCode),
+        1,
+        "scanner.opencodeDbPaths must reach the local message loading path"
+    );
+    assert_eq!(parsed_with_settings.messages.len(), 1);
+    assert_eq!(parsed_with_settings.messages[0].client, ClientId::OpenCode);
+    assert_eq!(
+        parsed_with_settings.messages[0].model_id.as_ref(),
+        "claude-sonnet-4"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_missing_configured_opencode_database_is_an_explicit_error() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(temp_dir.path());
+    let missing_db = temp_dir.path().join("missing/custom-current.db");
+
+    let loaded = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode]),
+        scanner_settings: scanner::ScannerSettings {
+            opencode_db_paths: vec![missing_db.clone()],
+            ..Default::default()
+        },
+        ..TestAcquisitionRequest::default()
+    })
+    .unwrap();
+
+    assert!(loaded.messages.is_empty());
+    assert_eq!(loaded.health.failed_inputs(), 1);
+    let input = &loaded.health.inputs()[0];
+    assert_eq!(input.path, missing_db);
+    let failure = input.status.failure().unwrap();
+    assert!(
+        failure
+            .message
+            .contains("read input metadata and file identity")
+            || failure
+                .message
+                .contains("open current OpenCode SQLite database")
+            || failure.operation.contains("snapshot input metadata"),
+        "failure must identify the failed input operation: {failure:?}"
+    );
+
+    let unit = opencode_test_input(missing_db.clone());
+    assert!(input_record_cache::InputRecordShardStore::load()
+        .unwrap()
+        .get_meta(&missing_db, unit.decoder.version())
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+#[serial_test::serial]
+fn usage_projection_preserves_input_health() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(temp_dir.path());
+    let missing_db = temp_dir.path().join("missing/custom-current.db");
+
+    let (usage, health) = load_test_usage_with_health(
+        TestAcquisitionRequest {
+            home_dir: Some(temp_dir.path().to_path_buf()),
+            clients: Some(vec![ClientId::OpenCode]),
+            scanner_settings: scanner::ScannerSettings {
+                opencode_db_paths: vec![missing_db.clone()],
+                ..Default::default()
+            },
+            ..TestAcquisitionRequest::default()
+        },
+        GroupBy::default(),
+        None,
+    )
+    .expect("a broken third-party input must not abort the usage projection");
+
+    assert_eq!(usage.total_tokens, 0);
+    assert!(!health.complete());
+    assert_eq!(health.failed_inputs(), 1);
+    assert_eq!(health.issues[0].client, Some(ClientId::OpenCode));
+    assert_eq!(health.issues[0].issue, "input-unavailable");
+}
+
+#[test]
+#[serial_test::serial]
+fn test_opencode_auto_discovery_error_reaches_public_loader() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let data_root = temp_dir.path().join(".local/share/opencode");
+    std::fs::create_dir_all(data_root.parent().unwrap()).unwrap();
+    std::fs::write(&data_root, "not a directory").unwrap();
+
+    let loaded = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::OpenCode]),
+        ..TestAcquisitionRequest::default()
+    })
+    .unwrap();
+
+    assert!(loaded.messages.is_empty());
+    assert_eq!(loaded.health.failed_inputs(), 1);
+    let input_health = &loaded.health.inputs()[0];
+    assert_eq!(input_health.client, ClientId::OpenCode);
+    let failure = input_health.status.failure().unwrap();
+    assert!(
+        failure
+            .message
+            .contains("failed to read OpenCode data directory"),
+        "{failure:?}"
+    );
+    assert!(
+        failure.message.contains(data_root.to_str().unwrap()),
+        "{failure:?}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_local_message_loader_honors_scanner_extra_scan_paths_for_hermes_profile_db() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let profile_dir = temp_dir.path().join(".hermes/profiles/director_planning");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    let profile_db = profile_dir.join("state.db");
+    let conn = create_hermes_sqlite_db(&profile_db);
+    insert_hermes_session(
+        &conn,
+        "hermes-extra-session",
+        "claude-sonnet-4",
+        2,
+        100,
+        25,
+        0.07,
+    );
+    drop(conn);
+
+    let parsed_default = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Hermes]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings::default(),
+    })
+    .unwrap();
+    assert_eq!(parsed_default.counts.get(ClientId::Hermes), 0);
+    assert!(parsed_default.messages.is_empty());
+
+    let mut extra_scan_paths = std::collections::BTreeMap::new();
+    extra_scan_paths.insert(ClientId::Hermes, vec![profile_dir]);
+    let parsed_with_settings = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Hermes]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings {
+            extra_scan_paths,
+            ..Default::default()
+        },
+    })
+    .unwrap();
+
+    assert_eq!(parsed_with_settings.counts.get(ClientId::Hermes), 2);
+    assert_eq!(parsed_with_settings.messages.len(), 1);
+    assert_eq!(parsed_with_settings.messages[0].client, ClientId::Hermes);
+    assert_eq!(
+        parsed_with_settings.messages[0].agent.as_deref(),
+        Some("Hermes Agent")
+    );
+    assert_eq!(
+        parsed_with_settings.messages[0].session_id.as_ref(),
+        "hermes-extra-session"
+    );
+    assert_eq!(
+        parsed_with_settings.messages[0].model_id.as_ref(),
+        "claude-sonnet-4"
+    );
+    assert_eq!(parsed_with_settings.messages[0].tokens.input, 100);
+    assert_eq!(parsed_with_settings.messages[0].tokens.output, 25);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_local_message_loader_honors_scanner_extra_scan_paths_for_zed_threads_db() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let windows_threads_dir = temp_dir.path().join("AppData/Local/Zed/threads");
+    std::fs::create_dir_all(&windows_threads_dir).unwrap();
+    let threads_db = windows_threads_dir.join("threads.db");
+    let conn = create_zed_sqlite_db(&threads_db);
+    insert_zed_thread(&conn, "zed-extra-thread", "claude-sonnet-4-5");
+    drop(conn);
+
+    let parsed_default = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Zed]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings::default(),
+    })
+    .unwrap();
+    assert_eq!(parsed_default.counts.get(ClientId::Zed), 0);
+    assert!(parsed_default.messages.is_empty());
+
+    let mut extra_scan_paths = std::collections::BTreeMap::new();
+    extra_scan_paths.insert(ClientId::Zed, vec![windows_threads_dir]);
+    let parsed_with_settings = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Zed]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings {
+            extra_scan_paths,
+            ..Default::default()
+        },
+    })
+    .unwrap();
+
+    assert_eq!(parsed_with_settings.counts.get(ClientId::Zed), 1);
+    assert_eq!(parsed_with_settings.messages.len(), 1);
+    assert_eq!(parsed_with_settings.messages[0].client, ClientId::Zed);
+    assert_eq!(
+        parsed_with_settings.messages[0].session_id.as_ref(),
+        "zed-extra-thread"
+    );
+    assert_eq!(
+        parsed_with_settings.messages[0].model_id.as_ref(),
+        "claude-sonnet-4.5"
+    );
+    assert_eq!(parsed_with_settings.messages[0].tokens.input, 42);
+    assert_eq!(parsed_with_settings.messages[0].tokens.output, 7);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_default_usage_projection_includes_antigravity_database_rows() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    write_single_antigravity_fixture(temp_dir.path());
+
+    let usage = load_test_usage(
+        TestAcquisitionRequest {
+            home_dir: Some(temp_dir.path().to_path_buf()),
+            clients: None,
+            date_range: DateRange::none(),
+            scanner_settings: scanner::ScannerSettings::default(),
+        },
+        GroupBy::default(),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(usage.total_tokens, 19);
+    assert_eq!(usage.models.len(), 1);
+    assert_eq!(usage.models[0].clients, [ClientId::Antigravity]);
+    assert_eq!(usage.models[0].model_id.as_ref(), "gemini-3.5-flash");
+    assert_eq!(usage.models[0].display_name.as_ref(), "gemini-3.5-flash");
+}
+
+#[test]
+#[serial_test::serial]
+fn test_local_message_loader_dedups_zed_threads_across_default_and_extra_dbs() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+
+    // Place threads.db at the default platform path so the scanner finds it
+    // as `zed_db` AND we also pass it via extraScanPaths.
+    let default_threads_dir = temp_dir.path().join(".local/share/zed/threads");
+    std::fs::create_dir_all(&default_threads_dir).unwrap();
+    let default_db = default_threads_dir.join("threads.db");
+    let conn = create_zed_sqlite_db(&default_db);
+    insert_zed_thread(&conn, "shared-zed-thread", "claude-sonnet-4-5");
+    drop(conn);
+
+    // Point extraScanPaths.zed at the same directory — dedup should prevent
+    // the thread from appearing twice.
+    let mut extra_scan_paths = std::collections::BTreeMap::new();
+    extra_scan_paths.insert(ClientId::Zed, vec![default_threads_dir.clone()]);
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Zed]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings {
+            extra_scan_paths,
+            ..Default::default()
+        },
+    })
+    .unwrap();
+
+    // Should see exactly 1 message, not 2 (deduped by canonicalize).
+    assert_eq!(parsed.counts.get(ClientId::Zed), 1);
+    assert_eq!(parsed.messages.len(), 1);
+    assert_eq!(parsed.messages[0].session_id.as_ref(), "shared-zed-thread");
+}
+
+#[test]
+#[serial_test::serial]
+fn test_local_message_loader_zed_extra_scan_paths_nonexistent_dir_is_silent() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+
+    let mut extra_scan_paths = std::collections::BTreeMap::new();
+    extra_scan_paths.insert(ClientId::Zed, vec![temp_dir.path().join("does/not/exist")]);
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Zed]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings {
+            extra_scan_paths,
+            ..Default::default()
+        },
+    })
+    .unwrap();
+
+    assert_eq!(parsed.counts.get(ClientId::Zed), 0);
+    assert!(parsed.messages.is_empty());
+}
+
+#[test]
+#[serial_test::serial]
+fn acquisition_runs_only_the_requested_zed_integration() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+
+    let zed_threads_dir = temp_dir.path().join("zed-fixture/threads");
+    std::fs::create_dir_all(&zed_threads_dir).unwrap();
+    let zed_db = zed_threads_dir.join("threads.db");
+    let zed_conn = create_zed_sqlite_db(&zed_db);
+    insert_zed_thread(&zed_conn, "zed-only-thread", "claude-sonnet-4-5");
+    drop(zed_conn);
+
+    write_single_opencode_sqlite_fixture(temp_dir.path());
+
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Zed]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner_settings_for_zed_threads_dir(zed_threads_dir),
+    })
+    .unwrap();
+
+    assert_eq!(parsed.counts.get(ClientId::Zed), 1);
+    assert_eq!(
+        parsed.counts.get(ClientId::OpenCode),
+        0,
+        "an explicit Zed-only request must not scan OpenCode SQLite"
+    );
+    assert_eq!(parsed.messages.len(), 1);
+    assert_eq!(parsed.messages[0].client, ClientId::Zed);
+    assert_eq!(parsed.messages[0].session_id.as_ref(), "zed-only-thread");
+}
+
+#[test]
+#[serial_test::serial]
+fn acquisition_runs_only_the_requested_amp_integration() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+
+    let amp_dir = temp_dir.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    std::fs::write(
+        amp_dir.join("T-simple.json"),
+        r#"{
+            "id": "amp-thread",
+            "created": 1747800000000,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "messageId": 1,
+                    "usage": {
+                        "timestamp": "2026-05-21T04:00:00Z",
+                        "model": "claude-opus-4-7",
+                        "inputTokens": 10,
+                        "outputTokens": 2
+                    }
+                }
+            ]
+        }"#,
+    )
+    .unwrap();
+
+    write_single_opencode_sqlite_fixture(temp_dir.path());
+
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Amp]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings::default(),
+    })
+    .unwrap();
+
+    assert_eq!(parsed.counts.get(ClientId::Amp), 1);
+    assert_eq!(
+        parsed.counts.get(ClientId::OpenCode),
+        0,
+        "an explicit Amp-only request must not scan OpenCode SQLite"
+    );
+    assert_eq!(parsed.messages.len(), 1);
+    assert_eq!(parsed.messages[0].client, ClientId::Amp);
+    assert_eq!(parsed.messages[0].model_id.as_ref(), "claude-opus-4.7");
+}
+
+#[test]
+#[serial_test::serial]
+fn acquisition_runs_only_the_requested_codebuff_integration() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let cache_home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard::set(cache_home.path());
+
+    let codebuff_dir = temp_dir
+        .path()
+        .join(".config/manicode/projects/proj/chats/2025-12-20T12-00-00.000Z");
+    std::fs::create_dir_all(&codebuff_dir).unwrap();
+    std::fs::write(
+        codebuff_dir.join("chat-messages.json"),
+        r#"[
+            { "variant": "user", "content": "hi" },
+            { "variant": "ai",
+              "timestamp": "2025-12-20T12:00:05.000Z",
+              "metadata": {
+                "model": "claude-sonnet-4-20250514",
+                "usage": { "inputTokens": 10, "outputTokens": 5 }
+              }
+            }
+        ]"#,
+    )
+    .unwrap();
+
+    write_single_opencode_sqlite_fixture(temp_dir.path());
+
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Codebuff]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings::default(),
+    })
+    .unwrap();
+
+    assert_eq!(parsed.counts.get(ClientId::Codebuff), 1);
+    assert_eq!(
+        parsed.counts.get(ClientId::OpenCode),
+        0,
+        "an explicit Codebuff-only request must not scan OpenCode SQLite"
+    );
+    assert_eq!(parsed.messages.len(), 1);
+    assert_eq!(parsed.messages[0].client, ClientId::Codebuff);
+    assert_eq!(parsed.messages[0].model_id.as_ref(), "claude-sonnet-4");
+}
+
+#[test]
+#[serial_test::serial]
+fn acquisition_runs_independent_pi_and_omp_integrations() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+
+    let pi_path = temp_dir
+        .path()
+        .join(".pi/agent/sessions/project/pi-session.jsonl");
+    write_pi_fixture(&pi_path);
+
+    let omp_session_root = temp_dir
+        .path()
+        .join(".omp/agent/sessions/project/root-session");
+    write_omp_parent_child_fixture(&omp_session_root);
+
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Pi, ClientId::Omp]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings::default(),
+    })
+    .unwrap();
+
+    assert_eq!(parsed.counts.get(ClientId::Pi), 1);
+    assert_eq!(parsed.counts.get(ClientId::Omp), 2);
+    assert!(parsed.messages.iter().any(
+        |message| message.client == ClientId::Pi && message.session_id.as_ref() == "pi_ses_001"
+    ));
+    assert!(parsed.messages.iter().any(|message| {
+        message.client == ClientId::Omp
+            && message.session_id.as_ref() == "child-session"
+            && message.agent.as_deref() == Some("OMP Reviewer")
+    }));
+}
+
+#[test]
+#[serial_test::serial]
+fn complete_acquisition_runs_each_integration_once() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+
+    let zed_threads_dir = temp_dir.path().join("zed-fixture/threads");
+    std::fs::create_dir_all(&zed_threads_dir).unwrap();
+    let zed_db = zed_threads_dir.join("threads.db");
+    let zed_conn = create_zed_sqlite_db(&zed_db);
+    insert_zed_thread(&zed_conn, "zed-all-thread", "claude-sonnet-4-5");
+    drop(zed_conn);
+
+    write_single_opencode_sqlite_fixture(temp_dir.path());
+
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: None,
+        date_range: DateRange::none(),
+        scanner_settings: scanner_settings_for_zed_threads_dir(zed_threads_dir),
+    })
+    .unwrap();
+
+    assert_eq!(parsed.counts.get(ClientId::Zed), 1);
+    assert_eq!(parsed.counts.get(ClientId::OpenCode), 1);
+    assert_eq!(
+        parsed
+            .messages
+            .iter()
+            .filter(|message| message.client == ClientId::Zed)
+            .count(),
+        1
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_local_message_loader_dedups_hermes_sessions_across_default_and_extra_dbs() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+
+    let default_dir = temp_dir.path().join(".hermes");
+    std::fs::create_dir_all(&default_dir).unwrap();
+    let default_db = default_dir.join("state.db");
+    let default_conn = create_hermes_sqlite_db(&default_db);
+    insert_hermes_session(
+        &default_conn,
+        "shared-hermes-session",
+        "claude-sonnet-4",
+        2,
+        100,
+        25,
+        0.07,
+    );
+    drop(default_conn);
+
+    let profile_dir = temp_dir.path().join(".hermes/profiles/director_planning");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    let profile_db = profile_dir.join("state.db");
+    let profile_conn = create_hermes_sqlite_db(&profile_db);
+    insert_hermes_session(
+        &profile_conn,
+        "shared-hermes-session",
+        "claude-sonnet-4",
+        9,
+        999,
+        999,
+        9.99,
+    );
+    drop(profile_conn);
+
+    let mut extra_scan_paths = std::collections::BTreeMap::new();
+    extra_scan_paths.insert(ClientId::Hermes, vec![profile_db]);
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Hermes]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings {
+            extra_scan_paths,
+            ..Default::default()
+        },
+    })
+    .unwrap();
+
+    assert_eq!(parsed.counts.get(ClientId::Hermes), 2);
+    assert_eq!(parsed.messages.len(), 1);
+    assert_eq!(
+        parsed.messages[0].session_id.as_ref(),
+        "shared-hermes-session"
+    );
+    assert_eq!(parsed.messages[0].tokens.input, 100);
+    assert_eq!(parsed.messages[0].tokens.output, 25);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_local_message_loader_claude_filter_ignores_scanner_settings_opencode_db_paths() {
+    // Regression guard for the scanner client-filter bypass: even
+    // when `scanner.opencodeDbPaths` pins an external opencode db,
+    // a `--clients claude` request must NOT pull in OpenCode rows.
+    // Before the fix, the merge ran outside the OpenCode-enabled
+    // guard so user-pinned dbs leaked through both `messages` and
+    // `counts` (the latter is computed before the message-level
+    // client filter, so even the post-filter pipeline could not
+    // hide a leaked count).
+    let temp_dir = tempfile::TempDir::new().unwrap();
+
+    // Claude session: one assistant message, the only thing the
+    // filter should accept.
+    let claude_dir = temp_dir.path().join(".claude/projects/myproject");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("conversation.jsonl"),
+        r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_001","message":{"id":"msg_001","model":"claude-sonnet-4.6","usage":{"input_tokens":100,"output_tokens":50}}}
+"#,
+    )
+    .unwrap();
+
+    // External opencode.db that the user has pinned via
+    // scanner.opencodeDbPaths. Without the fix, this would leak
+    // into the Claude-only result.
+    let outside_dir = temp_dir.path().join("elsewhere");
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    let external_db = outside_dir.join("opencode.db");
+    let conn = rusqlite::Connection::open(&external_db).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+         CREATE TABLE message (
+             id TEXT PRIMARY KEY,
+             session_id TEXT NOT NULL,
+             data TEXT NOT NULL
+         );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+        rusqlite::params![
+            "leaked-opencode",
+            "should-not-show-up",
+            r#"{
+                "role": "assistant",
+                "modelID": "claude-sonnet-4",
+                "providerID": "anthropic",
+                "tokens": { "input": 9999, "output": 9999, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+                "time": { "created": 1700000000000.0 }
+            }"#
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Claude]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings {
+            opencode_db_paths: vec![external_db.clone()],
+            ..Default::default()
+        },
+    })
+    .unwrap();
+
+    assert_eq!(
+        parsed.counts.get(ClientId::OpenCode),
+        0,
+        "OpenCode count must stay zero under a Claude-only filter even \
+         when scanner.opencodeDbPaths is set"
+    );
+    assert_eq!(
+        parsed.counts.get(ClientId::Claude),
+        1,
+        "Claude message must still be counted"
+    );
+    assert_eq!(parsed.messages.len(), 1);
+    assert_eq!(parsed.messages[0].client, ClientId::Claude);
+    assert!(
+        parsed
+            .messages
+            .iter()
+            .all(|m| m.client != ClientId::OpenCode),
+        "no OpenCode messages may leak into a Claude-only result, got {:?}",
+        parsed.messages
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_local_message_loader_claude_transcripts_count_only_usage_metadata() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let transcripts_dir = temp_dir.path().join(".claude/transcripts");
+    std::fs::create_dir_all(&transcripts_dir).unwrap();
+    std::fs::write(
+        transcripts_dir.join("ses_123456789012345678901234567.jsonl"),
+        r#"{"type":"user","timestamp":"2026-04-01T10:00:00.000Z","message":{"content":"Wrapped prompt"}}
+{"type":"assistant","timestamp":"2026-04-01T10:00:01.000Z","requestId":"req_wrapper","message":{"id":"msg_wrapper","model":"claude-sonnet-4","usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":67,"cache_creation_input_tokens":8}}}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        transcripts_dir.join("ses_765432109876543210987654321.jsonl"),
+        r#"{"type":"user","timestamp":"2026-04-01T10:00:00.000Z","message":{"content":"Wrapped prompt"}}
+{"type":"tool_use","timestamp":"2026-04-01T10:00:01.000Z","message":{"content":"Run tool"}}
+{"type":"tool_result","timestamp":"2026-04-01T10:00:02.000Z","message":{"content":"Tool result"}}
+"#,
+    )
+    .unwrap();
+
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Claude]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings::default(),
+    })
+    .unwrap();
+
+    assert_eq!(parsed.counts.get(ClientId::Claude), 1);
+    assert_eq!(parsed.messages.len(), 1);
+    assert_eq!(parsed.messages[0].client, ClientId::Claude);
+    assert_eq!(
+        parsed.messages[0].session_id.as_ref(),
+        "ses_123456789012345678901234567"
+    );
+    assert_eq!(parsed.messages[0].model_id.as_ref(), "claude-sonnet-4");
+    assert_eq!(parsed.messages[0].tokens.input, 123);
+    assert_eq!(parsed.messages[0].tokens.output, 45);
+    assert_eq!(parsed.messages[0].tokens.cache_read, 67);
+    assert_eq!(parsed.messages[0].tokens.cache_write, 8);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_local_message_loader_amp_reads_current_thread_files() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let amp_dir = temp_dir.path().join(".local/share/amp/threads");
+    std::fs::create_dir_all(&amp_dir).unwrap();
+    std::fs::write(
+        amp_dir.join("T-current.json"),
+        r#"{
+            "id": "current-thread",
+            "created": 1747800000000,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "messageId": 1,
+                    "usage": {
+                        "timestamp": "2026-05-21T04:00:00Z",
+                        "model": "claude-opus-4-7",
+                        "inputTokens": 10,
+                        "outputTokens": 2
+                    }
+                }
+            ]
+        }"#,
+    )
+    .unwrap();
+
+    let parsed = load_local_messages_for_test(TestAcquisitionRequest {
+        home_dir: Some(temp_dir.path().to_path_buf()),
+        clients: Some(vec![ClientId::Amp]),
+        date_range: DateRange::none(),
+        scanner_settings: scanner::ScannerSettings::default(),
+    })
+    .unwrap();
+
+    assert_eq!(parsed.counts.get(ClientId::Amp), 1);
+    assert_eq!(parsed.messages.len(), 1);
+    assert_eq!(parsed.messages[0].client, ClientId::Amp);
+    assert_eq!(parsed.messages[0].model_id.as_ref(), "claude-opus-4.7");
+    assert_eq!(parsed.messages[0].provider_id.as_ref(), "anthropic");
+    assert_eq!(parsed.messages[0].tokens.input, 10);
+    assert_eq!(parsed.messages[0].tokens.output, 2);
+}

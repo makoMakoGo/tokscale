@@ -4,16 +4,13 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - personal/local-clients
+      - main
     paths:
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/codspeed.yml"
   pull_request:
-    branches:
-      - personal/local-clients
-      - "codex/**"
     paths:
       - "crates/**"
       - "Cargo.toml"
@@ -26,8 +23,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  rust-core:
-    name: CodSpeed / rust-core
+  rust:
+    name: CodSpeed / Rust
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -49,18 +46,18 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: codspeed-v2-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: codspeed-tokenx-v1-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            codspeed-v2-${{ runner.os }}-cargo-
+            codspeed-tokenx-v1-${{ runner.os }}-cargo-
 
       - name: Install cargo-codspeed
         run: cargo install cargo-codspeed --locked --version 4.7.0
 
       - name: Build benchmark targets
-        run: cargo codspeed build -p tokscale-core
+        run: cargo codspeed build -p tokenx-engine
 
       - name: Run benchmark targets
         uses: CodSpeedHQ/action@63f3e98b61959fe67f146a3ff022e4136fe9bb9c # v4
         with:
           mode: simulation
-          run: cargo codspeed run -p tokscale-core
+          run: cargo codspeed run -p tokenx-engine

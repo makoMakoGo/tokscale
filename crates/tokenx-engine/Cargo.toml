@@ -1,0 +1,55 @@
+[package]
+name = "tokenx-engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tokenx acquisition, parsing, aggregation, and projection engine"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[[bench]]
+name = "normalization"
+harness = false
+
+[[bench]]
+name = "aggregation"
+harness = false
+
+[dependencies]
+rayon = { workspace = true }
+simd-json = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+bincode = { workspace = true }
+walkdir = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+iana-time-zone = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+rusqlite = { workspace = true }
+zstd = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+libc = { workspace = true }
+fs2 = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = { workspace = true }
+
+[dev-dependencies]
+codspeed-criterion-compat = { workspace = true }
+tempfile = { workspace = true }
+serial_test = { workspace = true }
+dirs = { workspace = true }
+
+[build-dependencies]
+serde = { workspace = true, features = ["rc"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }

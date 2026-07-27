@@ -1,6 +1,6 @@
 # Pricing semantics
 
-Tokscale pricing estimates what parsed token buckets would cost under the
+Tokenx pricing estimates what parsed token buckets would cost under the
 configured pricing catalog. It is not an invoice reconciler.
 
 ## Local usage cost
@@ -9,7 +9,7 @@ For local usage, parsers emit token usage. App or vendor fields such as
 `cost`, `credits`, `cost_usd`, `dollar_float`, `spendCents`,
 `estimated_cost_usd`, `actual_cost_usd`, and `usage.cost.total` are ignored.
 
-`UnifiedMessage.cost` is derived by applying Tokscale pricing to these token
+`AttributedUsageRecord.cost` is derived by applying Tokenx pricing to these token
 buckets:
 
 - input tokens
@@ -32,7 +32,7 @@ See [ADR 0010](adr/0010-period-views-derive-from-daily.md).
 ## Pricing Source authority
 
 Exact custom overrides from `custom-pricing.json` are checked first. Otherwise,
-Tokscale searches LiteLLM, OpenRouter, and models.dev in that order. A forced
+Tokenx searches LiteLLM, OpenRouter, and models.dev in that order. A forced
 `--pricing-source` limits lookup to one catalog. Public lookup receives the
 canonical model component without a provider or route prefix and considers only
 catalog rows with that exact component.
@@ -51,9 +51,9 @@ pricing lookup.
 
 ### Model identity before pricing
 
-Tokscale canonicalizes parsed model ids before pricing lookup. Parsers may
+Tokenx canonicalizes parsed model ids before pricing lookup. Parsers may
 clean obvious observed model labels early, but the usage finalization path still
-normalizes every `UnifiedMessage.model_id` through the core model canonicalizer
+normalizes every `AttributedUsageRecord.model_id` through the core model canonicalizer
 before aggregation and `PricingService::calculate_cost_with_provider`.
 
 The pricing resolver is therefore not a route cleanup layer. It receives the
@@ -67,11 +67,10 @@ See [ADR 0010](adr/0010-period-views-derive-from-daily.md).
 
 ## Custom pricing overrides
 
-Create `custom-pricing.json` in the Tokscale config directory:
+Create `custom-pricing.json` in the Tokenx config directory:
 
 ```json
 {
-  "$schema": "https://tokscale.ai/custom-pricing.schema.json",
   "models": {
     "kimi-k2.6": {
       "input_cost_per_million_tokens": 2.0,
@@ -93,28 +92,28 @@ Overrides are exact-only and case-insensitive:
 - Local usage matches the canonical model id after model canonicalization, not
   necessarily the raw observed label emitted by a client or parser.
 - Key each local usage override by that final canonical id.
-- `tokscale pricing lookup <model>` matches the command argument as a catalog query.
+- `tokenx pricing lookup <model>` matches the command argument as a catalog query.
 
 Restart the command after editing the file because overrides are loaded at
 startup.
 
 ## Cache files
 
-Pricing data is cached under `${TOKSCALE_CONFIG_DIR}/cache/`:
+Pricing data is cached under `${TOKENX_CONFIG_DIR}/cache/`:
 
 - `pricing-litellm.json`
 - `pricing-openrouter.json`
 - `pricing-models-dev.json`
 
-Deleting these files forces Tokscale to fetch pricing data again on the next
+Deleting these files forces Tokenx to fetch pricing data again on the next
 lookup or usage load that needs pricing.
 
 ## Standalone lookup
 
 ```bash
-tokscale pricing lookup claude-sonnet-4-5 --no-spinner
-tokscale pricing lookup grok-code --pricing-source openrouter --no-spinner
-tokscale pricing overrides --json
+tokenx pricing lookup claude-sonnet-4-5 --no-spinner
+tokenx pricing lookup grok-code --pricing-source openrouter --no-spinner
+tokenx pricing overrides --json
 ```
 
 Standalone lookup does not infer arbitrary observed-model prefixes, route
@@ -123,5 +122,5 @@ query over the exact canonical model component, not a parser repair path.
 
 ## Subscription usage is separate
 
-The TUI Usage tab calls provider-specific quota endpoints and shows what the
+The TUI Subscription tab calls provider-specific quota endpoints and shows what the
 provider reports. Those numbers are not mixed into normal local token reports.

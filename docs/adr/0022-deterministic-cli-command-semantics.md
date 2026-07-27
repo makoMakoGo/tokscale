@@ -12,7 +12,7 @@ change the selected product operation or make an accepted option inert.
 
 ### Command roles
 
-Bare `tokscale` is the exact shorthand for an unconfigured `tokscale tui`. TUI
+Bare `tokenx` is the exact shorthand for an unconfigured `tokenx tui`. TUI
 options belong to the explicit `tui` subcommand.
 
 The complete root command set is:
@@ -21,7 +21,6 @@ The complete root command set is:
 tui
 models
 pricing
-wrapped
 cache
 ```
 
@@ -40,10 +39,10 @@ client,provider,model
 workspace,model
 ```
 
-`pricing` queries catalogs or overrides, `wrapped` renders the annual Top
-Clients artifact, and `cache` performs explicit cache maintenance.
+`pricing` queries catalogs or overrides, and `cache` performs explicit cache
+maintenance.
 
-Subscription Usage belongs exclusively to the TUI Usage tab under ADR 0014.
+Subscription Usage belongs exclusively to the TUI Subscription tab under ADR 0014.
 
 Only this grammar is accepted. Unrecognized commands, options, client ids, and
 values are ordinary parse failures. Parse-failure diagnostics are derived from
@@ -57,7 +56,6 @@ Options live on the narrowest command that owns them:
 - date scope: one preset or inclusive `--since` and `--until`;
 - Models grouping: `--group-by`;
 - Models presentation: `--json`, `--benchmark`, and `--no-spinner`;
-- Wrapped output: `--output`, `--year`, `--short`, and `--no-spinner`; and
 - TUI behavior: `--theme`, `--refresh`, `--no-refresh`, `--debug`, and
   `--tab`.
 
@@ -70,12 +68,14 @@ progress presentation, or other semantically equivalent formatting.
 Every accepted explicit argument changes the plan. An option that cannot affect
 its command is rejected.
 
-An explicit `--home` must be an existing directory and is authoritative for
-settings and input discovery. Every built-in input root is derived from that
-directory; configured extra scan inputs remain explicit additional
-authorities. Client ids come from the current ADR 0007 catalog and are
-deduplicated. Date presets are mutually exclusive, dates use inclusive
-local-time boundaries, and `since` cannot be later than `until`.
+An explicit `--home` must be an existing directory and is authoritative only
+for input discovery. Every built-in input root is derived from that directory;
+configured extra scan inputs remain explicit additional authorities. Tokenx
+product state remains under `~/.tokenx` or `TOKENX_CONFIG_DIR`, so selecting a
+source home cannot silently redirect settings, pricing, or caches. Client ids
+come from the current ADR 0007 catalog and are deduplicated. Date presets are
+mutually exclusive, dates use inclusive local-time boundaries, and `since`
+cannot be later than `until`.
 
 A TUI requires interactive stdin and stdout. Otherwise invocation fails as
 invalid usage with a report-command hint. A disabled optional tab also fails
@@ -113,19 +113,16 @@ terminal modes and the alternate screen are restored.
 ### Leaf command contracts
 
 `models` reads local inputs for its resolved client and date scope but never
-writes the TUI generation. Its JSON `data` contains `groupBy`, `models`, and
+writes the generation cache. Its JSON `data` contains `groupBy`, `models`, and
 `totals`; Data Health and processing time use the common envelope fields.
 
 Pricing uses `pricing lookup <model>` or `pricing overrides`;
 `--pricing-source` selects exactly one Pricing Source. ADR 0010 distinguishes
 custom pricing from the three public catalogs and owns exact lookup semantics.
 
-`wrapped` produces one annual Top Clients image for its resolved local input
-scope. Agent ranking is not a Wrapped identity.
-
-`cache warm` accepts local input scope and builds one complete all-date TUI
-generation. `cache prune` accepts no input scope and operates only on
-scan-input message shards; ADR 0008 owns classification and deletion.
+`cache warm` accepts local input scope and builds one complete all-date
+generation cache. `cache prune` accepts no input scope and operates only on
+input-record cache shards; ADR 0008 owns classification and deletion.
 
 Local input locations are documented by ADR 0007 and `docs/clients.md`.
 Unavailable or damaged inputs are reported through Models Data Health and the
@@ -135,5 +132,5 @@ TUI rather than through another discovery implementation.
 
 Scripts can determine the operation and semantic output from accepted argv.
 Terminal inspection is presentation-only, help describes the executable
-grammar, and report rendering cannot mutate the TUI generation as a side
+grammar, and report rendering cannot mutate an installed generation as a side
 effect.

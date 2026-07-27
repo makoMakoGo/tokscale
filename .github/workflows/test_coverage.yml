@@ -3,38 +3,35 @@ name: Test & Coverage
 on:
   workflow_dispatch:
   push:
-    branches: [main, develop, personal/local-clients]
+    branches: [main]
     paths:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'packages/cli/package.json'
-      - 'packages/tokscale/package.json'
-      - 'packages/cli-*/package.json'
+      - 'packages/tokenx/package.json'
+      - 'packages/tokenx-*/package.json'
       - 'scripts/**'
       - 'package.json'
       - '.github/actions/setup-bun/action.yml'
       - '.github/workflows/build-native.yml'
-      - '.github/workflows/core_ci.yml'
+      - '.github/workflows/ci.yml'
       - '.github/workflows/launcher_validation.yml'
-      - '.github/workflows/publish-cli.yml'
+      - '.github/workflows/publish.yml'
       - '.github/workflows/test_coverage.yml'
   pull_request:
-    branches: [main, develop, personal/local-clients]
     paths:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'packages/cli/package.json'
-      - 'packages/tokscale/package.json'
-      - 'packages/cli-*/package.json'
+      - 'packages/tokenx/package.json'
+      - 'packages/tokenx-*/package.json'
       - 'scripts/**'
       - 'package.json'
       - '.github/actions/setup-bun/action.yml'
       - '.github/workflows/build-native.yml'
-      - '.github/workflows/core_ci.yml'
+      - '.github/workflows/ci.yml'
       - '.github/workflows/launcher_validation.yml'
-      - '.github/workflows/publish-cli.yml'
+      - '.github/workflows/publish.yml'
       - '.github/workflows/test_coverage.yml'
 
 env:

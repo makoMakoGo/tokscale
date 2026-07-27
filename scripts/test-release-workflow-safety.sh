@@ -40,7 +40,7 @@ write_good_workflows() {
   mkdir -p \
     "${work}/.github/actions/setup-bun" \
     "${work}/.github/workflows" \
-    "${work}/packages/cli-linux-x64-gnu" \
+    "${work}/packages/tokenx-linux-x64-gnu" \
     "${work}/scripts"
   cat > "${work}/package.json" <<'EOF_MANIFEST'
 {
@@ -62,9 +62,9 @@ EOF_YAML
 set -euo pipefail
 EOF_SCRIPT
   chmod +x "${work}/scripts/test-release-tooling.sh"
-  cat > "${work}/packages/cli-linux-x64-gnu/package.json" <<'EOF_MANIFEST'
+  cat > "${work}/packages/tokenx-linux-x64-gnu/package.json" <<'EOF_MANIFEST'
 {
-  "name": "@juya-ai/tokscale-cli-linux-x64-gnu",
+  "name": "@juya-ai/tokenx-linux-x64-gnu",
   "version": "3.0.0"
 }
 EOF_MANIFEST
@@ -83,19 +83,26 @@ jobs:
         settings:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: cargo zigbuild --release -p tokscale-cli --target x86_64-unknown-linux-gnu
-            strip: strip target/x86_64-unknown-linux-gnu/release/tokscale
-            bin_name: tokscale
+            build: cargo zigbuild --release -p tokenx --target x86_64-unknown-linux-gnu
+            strip: strip target/x86_64-unknown-linux-gnu/release/tokenx
+            bin_name: tokenx
+    steps:
+      - name: Smoke native binary
+        run: |
+          "$TOKENX_BINARY" --version
+          smoke_home="$(mktemp -d)"
+          export TOKENX_CONFIG_DIR="$smoke_home/.tokenx"
+          "$TOKENX_BINARY" models --home "$smoke_home" --client amp --json --no-spinner
 EOF_YAML
-  cat > "${work}/.github/workflows/publish-cli.yml" <<'EOF_YAML'
+  cat > "${work}/.github/workflows/publish.yml" <<'EOF_YAML'
 name: Publish
 
 on:
   push:
     branches:
-      - personal/local-clients
+      - main
     paths:
-      - packages/cli/package.json
+      - packages/tokenx/package.json
   workflow_dispatch:
     inputs:
       version:
@@ -116,25 +123,32 @@ jobs:
   prepare-release:
     steps:
       - run: bash scripts/check-release-commit.sh
-  build-cli-binary:
+  build-native-binary:
     strategy:
       matrix:
         settings:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            package_dir: cli-linux-x64-gnu
-            artifact_name: cli-binary-x86_64-unknown-linux-gnu
-            bin_name: tokscale
-            build: cargo zigbuild --release -p tokscale-cli --target x86_64-unknown-linux-gnu
-            strip: strip target/x86_64-unknown-linux-gnu/release/tokscale
+            package_dir: tokenx-linux-x64-gnu
+            artifact_name: tokenx-binary-x86_64-unknown-linux-gnu
+            bin_name: tokenx
+            build: cargo zigbuild --release -p tokenx --target x86_64-unknown-linux-gnu
+            strip: strip target/x86_64-unknown-linux-gnu/release/tokenx
+    steps:
+      - name: Smoke native binary
+        run: |
+          "$TOKENX_BINARY" --version
+          smoke_home="$(mktemp -d)"
+          export TOKENX_CONFIG_DIR="$smoke_home/.tokenx"
+          "$TOKENX_BINARY" models --home "$smoke_home" --client amp --json --no-spinner
   publish-platform-packages:
     strategy:
       matrix:
         settings:
-          - package_name: '@juya-ai/tokscale-cli-linux-x64-gnu'
-            package_dir: cli-linux-x64-gnu
-            artifact_name: cli-binary-x86_64-unknown-linux-gnu
-            binary_name: tokscale
+          - package_name: '@juya-ai/tokenx-linux-x64-gnu'
+            package_dir: tokenx-linux-x64-gnu
+            artifact_name: tokenx-binary-x86_64-unknown-linux-gnu
+            binary_name: tokenx
   authorize-publish:
     steps:
       - run: bash scripts/check-release-commit.sh
@@ -142,7 +156,7 @@ jobs:
         env:
           RELEASE_BASE_VERSION: ${{ needs.prepare-release.outputs.recovery == 'true' && needs.prepare-release.outputs.version || needs.prepare-release.outputs.base_version }}
         run: bash scripts/check-npm-release-state.sh
-  publish-cli:
+  publish-launcher:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-bun
@@ -150,14 +164,13 @@ jobs:
   finalize:
     steps:
       - uses: actions/checkout@v5
-      - uses: ./.github/actions/setup-bun
-      - run: bun scripts/generate-release-notes.ts 3.0.0
+      - run: gh release create v3.0.0 --generate-notes
 EOF_YAML
-  cat > "${work}/.github/workflows/core_ci.yml" <<'EOF_YAML'
-name: Core CI (Test Only)
+  cat > "${work}/.github/workflows/ci.yml" <<'EOF_YAML'
+name: CI (Test Only)
 
 jobs:
-  rust-core:
+  rust:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-bun
@@ -193,9 +206,9 @@ on:
       - package.json
       - .github/actions/setup-bun/action.yml
       - .github/workflows/build-native.yml
-      - .github/workflows/core_ci.yml
+      - .github/workflows/ci.yml
       - .github/workflows/launcher_validation.yml
-      - .github/workflows/publish-cli.yml
+      - .github/workflows/publish.yml
       - .github/workflows/test_coverage.yml
   pull_request:
     paths:
@@ -203,9 +216,9 @@ on:
       - package.json
       - .github/actions/setup-bun/action.yml
       - .github/workflows/build-native.yml
-      - .github/workflows/core_ci.yml
+      - .github/workflows/ci.yml
       - .github/workflows/launcher_validation.yml
-      - .github/workflows/publish-cli.yml
+      - .github/workflows/publish.yml
       - .github/workflows/test_coverage.yml
 
 jobs:
@@ -236,7 +249,7 @@ test_accepts_matching_publish_and_native_workflows() {
 test_reads_workflows_as_utf8_when_locale_is_non_utf8() {
   local work="${TMP_DIR}/utf8-locale"
   write_good_workflows "${work}"
-  printf '# UTF-8 sentinel: 🧪\n' >> "${work}/.github/workflows/publish-cli.yml"
+  printf '# UTF-8 sentinel: 🧪\n' >> "${work}/.github/workflows/publish.yml"
   printf '# UTF-8 sentinel: 🧪\n' >> "${work}/.github/workflows/build-native.yml"
 
   (
@@ -250,7 +263,7 @@ test_reads_workflows_as_utf8_when_locale_is_non_utf8() {
 test_rejects_build_matrix_target_drift() {
   local work="${TMP_DIR}/target-drift"
   write_good_workflows "${work}"
-  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+  python3 - "${work}/.github/workflows/publish.yml" <<'PY'
 import pathlib
 import sys
 
@@ -272,7 +285,7 @@ PY
 test_rejects_publish_matrix_target_without_native_coverage() {
   local work="${TMP_DIR}/unverified-publish-target"
   write_good_workflows "${work}"
-  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+  python3 - "${work}/.github/workflows/publish.yml" <<'PY'
 import pathlib
 import sys
 
@@ -280,20 +293,24 @@ path = pathlib.Path(sys.argv[1])
 text = path.read_text()
 insert = """          - host: windows-latest
             target: x86_64-pc-windows-msvc
-            package_dir: cli-win32-x64-msvc
-            artifact_name: cli-binary-x86_64-pc-windows-msvc
-            bin_name: tokscale.exe
-            build: cargo build --release -p tokscale-cli --target x86_64-pc-windows-msvc
+            package_dir: tokenx-win32-x64-msvc
+            artifact_name: tokenx-binary-x86_64-pc-windows-msvc
+            bin_name: tokenx.exe
+            build: cargo build --release -p tokenx --target x86_64-pc-windows-msvc
             strip: \"\"
 """
-text = text.replace("  publish-platform-packages:\n", insert + "  publish-platform-packages:\n")
+text = text.replace(
+    "    steps:\n      - name: Smoke native binary\n",
+    insert + "    steps:\n      - name: Smoke native binary\n",
+    1,
+)
 path.write_text(text)
 PY
 
-  mkdir -p "${work}/packages/cli-win32-x64-msvc"
-  cat > "${work}/packages/cli-win32-x64-msvc/package.json" <<'EOF_MANIFEST'
+  mkdir -p "${work}/packages/tokenx-win32-x64-msvc"
+  cat > "${work}/packages/tokenx-win32-x64-msvc/package.json" <<'EOF_MANIFEST'
 {
-  "name": "@juya-ai/tokscale-cli-win32-x64-msvc",
+  "name": "@juya-ai/tokenx-win32-x64-msvc",
   "version": "3.0.0"
 }
 EOF_MANIFEST
@@ -310,7 +327,7 @@ EOF_MANIFEST
 test_rejects_release_env_drift() {
   local work="${TMP_DIR}/env-drift"
   write_good_workflows "${work}"
-  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+  python3 - "${work}/.github/workflows/publish.yml" <<'PY'
 import pathlib
 import sys
 
@@ -328,10 +345,25 @@ PY
   grep -q "env MACOSX_DEPLOYMENT_TARGET differs" "${output}"
 }
 
+test_rejects_missing_native_binary_smoke() {
+  local work="${TMP_DIR}/missing-native-smoke"
+  write_good_workflows "${work}"
+  replace_text \
+    "${work}/.github/workflows/build-native.yml" \
+    '"$TOKENX_BINARY" --version' \
+    'true'
+
+  assert_safety_rejected \
+    "${work}" \
+    "${TMP_DIR}/missing-native-smoke-output.txt" \
+    "build-native must execute the built binary in an isolated offline smoke test" \
+    "Expected workflow safety check to reject a missing native binary smoke"
+}
+
 test_rejects_missing_required_release_env() {
   local work="${TMP_DIR}/missing-env"
   write_good_workflows "${work}"
-  python3 - "${work}/.github/workflows/publish-cli.yml" "${work}/.github/workflows/build-native.yml" <<'PY'
+  python3 - "${work}/.github/workflows/publish.yml" "${work}/.github/workflows/build-native.yml" <<'PY'
 import pathlib
 import sys
 
@@ -356,12 +388,12 @@ PY
 test_rejects_platform_publish_matrix_drift() {
   local work="${TMP_DIR}/publish-drift"
   write_good_workflows "${work}"
-  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+  python3 - "${work}/.github/workflows/publish.yml" <<'PY'
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
-text = path.read_text().replace("artifact_name: cli-binary-x86_64-unknown-linux-gnu", "artifact_name: cli-binary-x86_64-unknown-linux-musl", 1)
+text = path.read_text().replace("artifact_name: tokenx-binary-x86_64-unknown-linux-gnu", "artifact_name: tokenx-binary-x86_64-unknown-linux-musl", 1)
 path.write_text(text)
 PY
 
@@ -377,12 +409,12 @@ PY
 test_rejects_missing_default_branch_push_trigger() {
   local work="${TMP_DIR}/missing-push-trigger"
   write_good_workflows "${work}"
-  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+  python3 - "${work}/.github/workflows/publish.yml" <<'PY'
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
-text = path.read_text().replace("      - personal/local-clients", "      - main", 1)
+text = path.read_text().replace("      - main", "      - develop", 1)
 path.write_text(text)
 PY
 
@@ -399,7 +431,7 @@ test_rejects_recovery_npm_base_version_drift() {
   local work="${TMP_DIR}/recovery-npm-base-version-drift"
   write_good_workflows "${work}"
   replace_text \
-    "${work}/.github/workflows/publish-cli.yml" \
+    "${work}/.github/workflows/publish.yml" \
     'RELEASE_BASE_VERSION: ${{ needs.prepare-release.outputs.recovery == '\''true'\'' && needs.prepare-release.outputs.version || needs.prepare-release.outputs.base_version }}' \
     'RELEASE_BASE_VERSION: ${{ needs.prepare-release.outputs.base_version }}'
 
@@ -413,7 +445,7 @@ test_rejects_recovery_npm_base_version_drift() {
 test_rejects_version_commits_in_publish_workflow() {
   local work="${TMP_DIR}/version-commit"
   write_good_workflows "${work}"
-  python3 - "${work}/.github/workflows/publish-cli.yml" <<'PY'
+  python3 - "${work}/.github/workflows/publish.yml" <<'PY'
 import pathlib
 import sys
 
@@ -438,7 +470,7 @@ PY
 test_rejects_branch_pushes_in_publish_workflow() {
   local work="${TMP_DIR}/branch-push"
   write_good_workflows "${work}"
-  printf '      - run: git push origin personal/local-clients\n' >> "${work}/.github/workflows/publish-cli.yml"
+  printf '      - run: git push origin main\n' >> "${work}/.github/workflows/publish.yml"
 
   local output="${TMP_DIR}/branch-push-output.txt"
   if (cd "${work}" && python3 "${SCRIPT_UNDER_TEST}" >"${output}" 2>&1); then
@@ -447,6 +479,21 @@ test_rejects_branch_pushes_in_publish_workflow() {
   fi
 
   grep -q "publish workflow contains unexpected git push commands" "${output}"
+}
+
+test_rejects_missing_generated_release_notes() {
+  local work="${TMP_DIR}/missing-generated-release-notes"
+  write_good_workflows "${work}"
+  replace_text \
+    "${work}/.github/workflows/publish.yml" \
+    "gh release create v3.0.0 --generate-notes" \
+    "gh release create v3.0.0"
+
+  assert_safety_rejected \
+    "${work}" \
+    "${TMP_DIR}/missing-generated-release-notes-output.txt" \
+    "Publish finalize must request generated GitHub release notes" \
+    "Expected workflow safety check to reject missing generated release notes"
 }
 
 test_rejects_release_tooling_command_drift() {
@@ -593,13 +640,13 @@ test_rejects_bun_setup_after_release_tooling() {
   local work="${TMP_DIR}/late-bun-setup"
   write_good_workflows "${work}"
   replace_text \
-    "${work}/.github/workflows/core_ci.yml" \
+    "${work}/.github/workflows/ci.yml" \
     $'      - uses: ./.github/actions/setup-bun\n      - run: bash scripts/test-release-tooling.sh' \
     $'      - run: bash scripts/test-release-tooling.sh\n      - uses: ./.github/actions/setup-bun'
   assert_safety_rejected \
     "${work}" \
     "${TMP_DIR}/late-bun-setup-output.txt" \
-    "Core CI rust-core must set up Bun before" \
+    "CI rust must set up Bun before" \
     "Expected workflow safety check to reject Bun setup after release tooling"
 }
 
@@ -622,12 +669,14 @@ test_reads_workflows_as_utf8_when_locale_is_non_utf8
 test_rejects_build_matrix_target_drift
 test_rejects_publish_matrix_target_without_native_coverage
 test_rejects_release_env_drift
+test_rejects_missing_native_binary_smoke
 test_rejects_missing_required_release_env
 test_rejects_platform_publish_matrix_drift
 test_rejects_missing_default_branch_push_trigger
 test_rejects_recovery_npm_base_version_drift
 test_rejects_version_commits_in_publish_workflow
 test_rejects_branch_pushes_in_publish_workflow
+test_rejects_missing_generated_release_notes
 test_rejects_release_tooling_command_drift
 test_rejects_missing_release_tooling_entrypoint
 test_accepts_executable_git_mode_without_worktree_execute_bits

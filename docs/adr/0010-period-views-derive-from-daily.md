@@ -24,7 +24,9 @@ workspace facts, daily totals, and finer-than-daily data that cannot be
 recovered later.
 
 Maintained time views coarser than daily are derived from the already aggregated
-daily buckets with `build_period_usage(daily, kind)`:
+projection with `build_period_usage(usage, kind)`. `UsageProjection` carries the
+`GroupBy` that produced its lossy daily model values, so period derivation
+cannot interpret those values under an independently supplied grouping:
 
 - monthly and weekly never add another per-message map;
 - hourly remains a per-message aggregate because daily has discarded hour
@@ -57,12 +59,13 @@ Agents group by stable type or role, not per-run presentation labels:
   or `agent-N` path segments; and
 - a message without a recognized stable agent identity creates no Agents row.
 
-Parsers write stable identity into `UnifiedMessage.agent`; aggregation does not
+Parsers write stable identity into `AttributedUsageRecord.agent`; aggregation does not
 reinterpret runtime labels. Agent aggregation uses the structured
 `(client, agent)` identity and every public Agent entry carries exactly one
 Client, so equal labels from different Clients never merge. Identity-semantic
-changes invalidate affected message shards and the persisted TUI generation
-through the appropriate decoder revision and schema/version change.
+changes invalidate affected input-record shards and the canonical generation
+cache through the source-derived decoder contract and the appropriate
+schema/version change.
 
 ### Group By projections
 
@@ -101,11 +104,14 @@ Model-carrying view entries have disjoint fields:
 - grouping dimensions such as `workspace_key` and `workspace_label` travel in
   dedicated structured fields.
 
-`GroupedModelKey::map_key` is a collision-free internal storage encoding, not a
-display or semantic fallback. `color_key` is not part of the model contract.
-Model color is the fixed brand color selected from canonical model family; an
-unclassified model receives the explicit neutral color. Provider, route, cost,
-rank, client, workspace, and Group By do not affect that color.
+Daily and hourly model collections are stable ordered vectors. Transient typed
+grouping identities determine their order but are not persisted as duplicate
+string keys. Period derivation reads the grouping authority from the same
+projection and uses transient typed `BTreeMap` buckets before emitting another
+stable vector. `color_key` is not part of the model contract. Model color is the
+fixed brand color selected from canonical model family; an unclassified model
+receives the explicit neutral color. Provider, route, cost, rank, client,
+workspace, and Group By do not affect that color.
 
 Exports identify `groupBy` and emit structured grouping fields such as
 `workspaceKey` and `workspaceLabel`, so payloads are self-describing.
@@ -192,7 +198,7 @@ review.
 ### Product and contribution-graph surface
 
 The complete interactive local-usage product is the TUI. `models` is its one
-headless projection and calls `Generation::project` with the same `UsageQuery`
+headless projection and calls `Generation::project_usage` with the same `UsageQuery`
 as the TUI. Its renderer-owned JSON document contains `data.groupBy`, `data.models`,
 `data.totals`, Data Health, and `metadata.processingTimeMs`.
 

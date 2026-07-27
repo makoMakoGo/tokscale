@@ -17,7 +17,7 @@ This ADR defines the complete contract for those responsibilities.
 
 ### Product boundary
 
-Bare `tokscale` and `tokscale tui` launch the complete interactive product.
+Bare `tokenx` and `tokenx tui` launch the complete interactive product.
 `--tab` changes only initial focus among Overview, Usage, Models, Monthly,
 Weekly, Daily, Hourly, Stats, Agents, and Sessions. Every tab participates in
 the same process, navigation, and action system. The local-usage tabs share
@@ -45,7 +45,7 @@ an outside click discards it. The picker has no per-client hotkeys.
 
 ### Generation and acquisition
 
-One local `Generation` contains its acquisition scope, Client universe,
+One local `Generation` contains its acquisition configuration, Client universe,
 confirmed source fingerprint, canonical `UsageIndex`, session snapshot,
 `InputFootprint`, Data Health, and pricing diagnostics. It contains no
 renderer-specific Common/Grouped views. The generation is published and
@@ -68,7 +68,7 @@ successful empty report. A warm refresh leaves the installed generation
 visible. If that refresh fails, the same generation remains installed and the
 failure is exposed as a degraded diagnostic.
 
-The remote Subscription Usage tab has the separate ADR 0014 lifecycle and is
+The remote Subscription tab has the separate ADR 0014 lifecycle and is
 not classified from the local generation. Its content, footer, and contextual
 actions share an independent Subscription Presentation authority. Local and
 subscription states may reuse stateless layout and activity renderers, but
@@ -148,10 +148,10 @@ does not claim to export hourly rows, graph cells, Sessions, Subscription
 Usage, or processing metadata. Row sorting, details, copying a row, and row hit
 areas are absent when there is no row to operate on.
 
-Usage accepts Subscription Usage refresh and scrolling plus shell-level tab
+Subscription accepts subscription refresh and scrolling plus shell-level tab
 navigation, theme, and quit. Local-generation refresh, auto-refresh control,
-refresh-interval adjustment, and export are unavailable while Usage is active;
-the user switches to a local-usage tab to invoke them. Usage footer summaries
+refresh-interval adjustment, and export are unavailable while Subscription is active;
+the user switches to a local-usage tab to invoke them. Subscription footer summaries
 and status never substitute constructor-default local totals or local
 diagnostics for absent subscription data.
 

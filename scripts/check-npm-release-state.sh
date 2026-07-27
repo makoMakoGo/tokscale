@@ -125,13 +125,12 @@ import json
 import pathlib
 
 root = pathlib.Path(".")
-paths = [root / "packages/cli/package.json"]
-cli = json.loads(paths[0].read_text())
-for package_name in cli.get("optionalDependencies", {}):
-    if not package_name.startswith("@juya-ai/tokscale-cli-"):
+paths = [root / "packages/tokenx/package.json"]
+launcher = json.loads(paths[0].read_text())
+for package_name in launcher.get("optionalDependencies", {}):
+    if not package_name.startswith("@juya-ai/tokenx-"):
         raise SystemExit(f"Unexpected optional dependency package name: {package_name}")
-    paths.append(root / "packages" / package_name.removeprefix("@juya-ai/tokscale-") / "package.json")
-paths.append(root / "packages/tokscale/package.json")
+    paths.append(root / "packages" / package_name.removeprefix("@juya-ai/") / "package.json")
 
 seen = set()
 for path in paths:
@@ -151,7 +150,7 @@ if [[ "${NPM_CHECK_AUTH}" != "0" ]]; then
   "${NPM_CMD}" whoami >/dev/null
 fi
 
-primary_packages=("@juya-ai/tokscale-cli" "@juya-ai/tokscale")
+primary_packages=("@juya-ai/tokenx")
 errors=()
 checked=0
 existing_targets=0
@@ -204,7 +203,7 @@ fi
 
 if [[ ${#missing_current_packages[@]} -gt 0 ]]; then
   if [[ ${visible_current_packages} -eq 0 ]]; then
-    echo "All release packages are not visible on npm yet; treating this as the first fork publish"
+    echo "All release packages are not visible on npm yet; treating this as the first repository publish"
   elif [[ "${RELEASE_RECOVERY}" != "true" ]]; then
     for package_name in "${missing_current_packages[@]}"; do
       errors+=("${package_name}: package is not visible on npm, but other release packages are visible")

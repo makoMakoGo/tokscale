@@ -15,11 +15,10 @@ git_config() {
 write_manifests() {
   local version="$1"
   mkdir -p \
-    packages/cli \
-    packages/cli-darwin-arm64 \
-    packages/cli-linux-x64-gnu \
-    packages/cli-win32-x64-msvc \
-    packages/tokscale
+    packages/tokenx \
+    packages/tokenx-darwin-arm64 \
+    packages/tokenx-linux-x64-gnu \
+    packages/tokenx-win32-x64-msvc
 
   cat > Cargo.toml <<EOF_MANIFEST
 [workspace.package]
@@ -31,61 +30,50 @@ EOF_MANIFEST
 version = 4
 
 [[package]]
-name = "tokscale-cli"
+name = "tokenx"
 version = "${version}"
 dependencies = [
- "tokscale-core",
+ "tokenx-engine",
 ]
 
 [[package]]
-name = "tokscale-core"
+name = "tokenx-engine"
 version = "${version}"
 EOF_LOCK
 
-  cat > packages/cli/package.json <<EOF_MANIFEST
+  cat > packages/tokenx/package.json <<EOF_MANIFEST
 {
-  "name": "@juya-ai/tokscale-cli",
+  "name": "@juya-ai/tokenx",
   "version": "${version}",
   "optionalDependencies": {
-    "@juya-ai/tokscale-cli-darwin-arm64": "${version}",
-    "@juya-ai/tokscale-cli-linux-x64-gnu": "${version}",
-    "@juya-ai/tokscale-cli-win32-x64-msvc": "${version}"
+    "@juya-ai/tokenx-darwin-arm64": "${version}",
+    "@juya-ai/tokenx-linux-x64-gnu": "${version}",
+    "@juya-ai/tokenx-win32-x64-msvc": "${version}"
   }
 }
 EOF_MANIFEST
 
   for package_dir in \
-    cli-darwin-arm64 \
-    cli-linux-x64-gnu \
-    cli-win32-x64-msvc; do
+    tokenx-darwin-arm64 \
+    tokenx-linux-x64-gnu \
+    tokenx-win32-x64-msvc; do
     cat > "packages/${package_dir}/package.json" <<EOF_MANIFEST
 {
-  "name": "@juya-ai/tokscale-${package_dir}",
+  "name": "@juya-ai/${package_dir}",
   "version": "${version}"
 }
 EOF_MANIFEST
   done
-
-  cat > packages/tokscale/package.json <<EOF_MANIFEST
-{
-  "name": "@juya-ai/tokscale",
-  "version": "${version}",
-  "dependencies": {
-    "@juya-ai/tokscale-cli": "${version}"
-  }
-}
-EOF_MANIFEST
 }
 
 git_add_release_manifests() {
   git add -- \
     Cargo.toml \
     Cargo.lock \
-    packages/cli/package.json \
-    packages/cli-darwin-arm64/package.json \
-    packages/cli-linux-x64-gnu/package.json \
-    packages/cli-win32-x64-msvc/package.json \
-    packages/tokscale/package.json
+    packages/tokenx/package.json \
+    packages/tokenx-darwin-arm64/package.json \
+    packages/tokenx-linux-x64-gnu/package.json \
+    packages/tokenx-win32-x64-msvc/package.json
 }
 
 create_origin() {
@@ -105,6 +93,30 @@ create_origin() {
     write_manifests 1.2.3
     git add .
     git commit -qm "seed release files"
+    git remote add origin "${origin}"
+    git push -q origin main
+  )
+  git --git-dir="${origin}" symbolic-ref HEAD refs/heads/main
+  printf '%s\n' "${origin}"
+}
+
+create_bootstrap_origin() {
+  local prefix="$1"
+  local origin="${TMP_DIR}/${prefix}-origin.git"
+  local seed="${TMP_DIR}/${prefix}-seed"
+
+  git init -q --bare "${origin}"
+  git init -q "${seed}"
+  (
+    cd "${seed}"
+    git_config
+    git switch -qc main
+    mkdir -p scripts
+    cp "${SCRIPT_UNDER_TEST}" scripts/check-release-commit.sh
+    cp "${COHERENCE_SCRIPT}" scripts/check-version-coherence.sh
+    echo "pre-Tokenx source" > README.md
+    git add .
+    git commit -qm "seed pre-Tokenx source"
     git remote add origin "${origin}"
     git push -q origin main
   )
@@ -230,6 +242,63 @@ test_rejects_version_push_with_non_release_files() {
   grep -q "version-bump commits may only change release manifests" "${TMP_DIR}/mixed-output.txt"
 }
 
+test_bootstrap_pr_is_validated_without_automatic_publish() {
+  local origin work base_sha release_sha output_file
+  origin="$(create_bootstrap_origin bootstrap)"
+  work="${TMP_DIR}/bootstrap-work"
+  clone_main "${origin}" "${work}"
+  base_sha="$(git -C "${work}" rev-parse HEAD)"
+  (
+    cd "${work}"
+    write_manifests 0.1.0
+    mkdir -p crates/tokenx/src
+    echo "fn main() {}" > crates/tokenx/src/main.rs
+    git add .
+    git commit -qm "feat: introduce Tokenx"
+    git push -q origin main
+  )
+  release_sha="$(git -C "${work}" rev-parse HEAD)"
+  output_file="${TMP_DIR}/bootstrap-github-output.txt"
+
+  run_check "${work}" pull_request "${release_sha}" "${base_sha}" "" "${TMP_DIR}/bootstrap-pr-output.txt" >"${TMP_DIR}/bootstrap-pr-log.txt"
+  grep -q "Release pull request OK: introducing Tokenx 0.1.0" "${TMP_DIR}/bootstrap-pr-log.txt"
+
+  run_check "${work}" push "${release_sha}" "${base_sha}" "" "${output_file}" >"${TMP_DIR}/bootstrap-push-log.txt"
+  grep -q '^should_publish=false$' "${output_file}"
+  grep -q '^version=0.1.0$' "${output_file}"
+  grep -q '^base_version=$' "${output_file}"
+  grep -q "^release_commit=${release_sha}$" "${output_file}"
+  grep -q '^recovery=false$' "${output_file}"
+  grep -q "automatic publishing is skipped" "${TMP_DIR}/bootstrap-push-log.txt"
+}
+
+test_initial_branch_push_is_validated_without_automatic_publish() {
+  local work release_sha output_file
+  work="${TMP_DIR}/initial-push-work"
+  git init -q "${work}"
+  (
+    cd "${work}"
+    git_config
+    git switch -qc main
+    mkdir -p scripts
+    cp "${SCRIPT_UNDER_TEST}" scripts/check-release-commit.sh
+    cp "${COHERENCE_SCRIPT}" scripts/check-version-coherence.sh
+    write_manifests 0.0.0
+    git add .
+    git commit -qm "feat: initialize Tokenx"
+  )
+  release_sha="$(git -C "${work}" rev-parse HEAD)"
+  output_file="${TMP_DIR}/initial-push-github-output.txt"
+
+  run_check "${work}" push "${release_sha}" "0000000000000000000000000000000000000000" "" "${output_file}" >"${TMP_DIR}/initial-push-log.txt"
+  grep -q '^should_publish=false$' "${output_file}"
+  grep -q '^version=0.0.0$' "${output_file}"
+  grep -q '^base_version=$' "${output_file}"
+  grep -q "^release_commit=${release_sha}$" "${output_file}"
+  grep -q '^recovery=false$' "${output_file}"
+  grep -q "repository bootstrap detected" "${TMP_DIR}/initial-push-log.txt"
+}
+
 test_auto_publish_rejects_stale_release_commit() {
   local origin work base_sha release_sha output_file
   origin="$(create_origin stale)"
@@ -307,6 +376,8 @@ test_recovery_rejects_later_commit_with_same_version() {
 test_accepts_release_only_version_push
 test_skips_push_without_version_change
 test_rejects_version_push_with_non_release_files
+test_bootstrap_pr_is_validated_without_automatic_publish
+test_initial_branch_push_is_validated_without_automatic_publish
 test_auto_publish_rejects_stale_release_commit
 test_recovery_accepts_exact_ancestor_release_commit
 test_recovery_rejects_later_commit_with_same_version

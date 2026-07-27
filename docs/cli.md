@@ -1,23 +1,22 @@
 # CLI usage
 
-Tokscale treats the TUI as the complete interactive local-usage product. The
+Tokenx treats the TUI as the complete interactive local-usage product. The
 CLI exposes one headless projection, `models`, plus commands whose jobs are
 not TUI tabs. Command meaning is determined entirely by argv; piping or
 redirecting output never selects another feature.
 
-Run commands from a built checkout with `bun run cli --`, or use `tokscale`
-with an installed fork package. Pass `--no-spinner` in automation.
+Run commands from a built checkout with `bun run cli --`, or use `tokenx`
+with an installed repository package. Pass `--no-spinner` in automation.
 
 ## Command surface
 
 | Command | Meaning |
 | --- | --- |
-| `tokscale` | Exact shortcut for `tokscale tui`. |
-| `tokscale tui` | Launch the complete interactive interface. |
-| `tokscale models` | Print the TUI Models projection as a table or JSON. |
-| `tokscale pricing ...` | Query pricing catalogs or custom overrides. |
-| `tokscale wrapped` | Generate the year-in-review image from local usage. |
-| `tokscale cache ...` | Explicitly maintain Tokscale's local caches. |
+| `tokenx` | Exact shortcut for `tokenx tui`. |
+| `tokenx tui` | Launch the complete interactive interface. |
+| `tokenx models` | Print the TUI Models projection as a table or JSON. |
+| `tokenx pricing ...` | Query pricing catalogs or custom overrides. |
+| `tokenx cache ...` | Explicitly maintain Tokenx's local caches. |
 
 The table is the complete accepted root grammar. Every other command name is
 invalid CLI usage.
@@ -25,31 +24,31 @@ invalid CLI usage.
 ## Interactive TUI
 
 ```bash
-tokscale
-tokscale tui
-tokscale tui --tab models
-tokscale tui --tab monthly
-tokscale tui --tab sessions
-tokscale tui --client opencode,claude --week
-tokscale tui --theme blue --refresh 30
-tokscale tui --no-refresh
+tokenx
+tokenx tui
+tokenx tui --tab models
+tokenx tui --tab monthly
+tokenx tui --tab sessions
+tokenx tui --client opencode,claude --week
+tokenx tui --theme blue --refresh 30
+tokenx tui --no-refresh
 ```
 
 `--tab` launches the same complete TUI and sets its initial focus. It does not
 run a hidden one-tab application. Every real TUI tab is accepted:
-`overview`, `usage`, `models`, `monthly`, `weekly`, `daily`, `hourly`,
+`overview`, `subscription`, `models`, `monthly`, `weekly`, `daily`, `hourly`,
 `stats`, `agents`, and `sessions`.
 
 Requesting a tab disabled by settings is an error rather than a silent jump to
 Overview. The TUI requires interactive stdin and stdout; for example,
-`tokscale | jq` fails and points to `tokscale models --json`.
+`tokenx | jq` fails and points to `tokenx models --json`.
 
 Monthly, Weekly, Daily, Hourly, Stats, Agents, and Sessions are intentionally
 TUI-only. Their richer interactions and cross-tab state are not duplicated in
 parallel CLI projection implementations.
 
-The Usage tab is the interactive subscription-plan and quota surface. Open it
-with `tokscale tui --tab usage`.
+The Subscription tab is the interactive plan and quota surface. Open it
+with `tokenx tui --tab subscription`.
 
 CLI options override settings for the current TUI process and do not rewrite
 `settings.json`. The TUI captures normal mouse input; use the terminal's
@@ -58,14 +57,14 @@ modified selection gesture, usually `Shift+drag`, to select terminal text.
 ## Models output
 
 ```bash
-tokscale models --no-spinner
-tokscale models --json
-tokscale models --group-by client,model --no-spinner
-tokscale models --group-by client,provider,model --json
-tokscale models --group-by workspace,model --json
+tokenx models --no-spinner
+tokenx models --json
+tokenx models --group-by client,model --no-spinner
+tokenx models --group-by client,provider,model --json
+tokenx models --group-by workspace,model --json
 ```
 
-`tokscale models` and `tokscale models --group-by model` are identical. Both
+`tokenx models` and `tokenx models --group-by model` are identical. Both
 consume the same `UsageData.models` projection as the TUI Models tab, including
 its token normalization, pricing, model identity, Client and Provider
 attribution, and ordering semantics. The table exposes:
@@ -136,88 +135,80 @@ automation must react to rejected records or unavailable Inputs.
 comma-separated:
 
 ```bash
-tokscale models --client opencode
-tokscale models --client opencode,claude
-tokscale models -c opencode -c claude
-tokscale models --home /tmp/test-home --no-spinner
-tokscale tui --client codex --home /tmp/test-home
+tokenx models --client opencode
+tokenx models --client opencode,claude
+tokenx models -c opencode -c claude
+tokenx models --home /tmp/test-home --no-spinner
+tokenx tui --client codex --home /tmp/test-home
 ```
 
 Repeated Client ids are deduplicated. An explicit `--client` list wins,
-otherwise `defaultClients` applies, and without either Tokscale uses every
+otherwise `defaultClients` applies, and without either Tokenx uses every
 accepted local Client. Unknown Clients are errors. `--home` must be an existing
 directory and is authoritative for every built-in input root. Configured
 `scanner.extraScanPaths` inputs remain additional roots.
 
 The TUI resolves its Client universe once. Its Clients picker applies a
 session-local projection of the installed generation without rescanning,
-writing the aggregate cache, or resetting refresh. Manual and automatic
+writing the generation cache, or resetting refresh. Manual and automatic
 refresh scan the original universe. Data Health continues to describe that
 complete universe.
 
-Date boundaries are inclusive and use the local timezone:
+Date boundaries are inclusive and use the one IANA calendar resolved from
+`timeZone` or the operating-system timezone at command startup:
 
 ```bash
-tokscale models --today
-tokscale models --week
-tokscale models --month
-tokscale models --year 2026
-tokscale models --since 2026-01-01
-tokscale models --until 2026-01-31
-tokscale models --since 2026-01-01 --until 2026-01-31
+tokenx models --today
+tokenx models --week
+tokenx models --month
+tokenx models --year 2026
+tokenx models --since 2026-01-01
+tokenx models --until 2026-01-31
+tokenx models --since 2026-01-01 --until 2026-01-31
 ```
 
 Choose one preset or a custom range. Combining presets, combining `--year`
 with `--since`/`--until`, or specifying `since > until` is invalid usage.
 
-## Subscription Usage
+## Subscription
 
 ```bash
-tokscale tui --tab usage
+tokenx tui --tab subscription
 ```
 
 Subscription Usage is account-level remote quota and plan state, not locally
-parsed token history. Entering the enabled Usage tab or pressing `u` follows
+parsed token history. Entering the enabled Subscription tab or pressing `u` follows
 the explicit provider-fetch lifecycle in ADR 0014. Local report refreshes do
 not contact subscription services.
 
-Tokscale consumes provider-owned credentials. Login, logout, account switching,
+Tokenx consumes provider-owned credentials. Login, logout, account switching,
 credential copying, and provider-specific synchronization are outside its
 command grammar.
-
-## Wrapped
-
-```bash
-tokscale wrapped
-```
-
-Wrapped always renders the top Client rankings for the selected local input
-scope.
 
 ## Cache maintenance
 
 ```bash
-tokscale cache warm
-tokscale cache warm --client codex
-tokscale cache prune
+tokenx cache warm
+tokenx cache warm --client codex
+tokenx cache prune
 ```
 
-`cache warm` explicitly builds the TUI aggregate cache for its Client scope.
-Models never writes that aggregate cache. Scan-input message shards remain an
+`cache warm` explicitly builds the canonical generation cache for its Client
+scope. Models never writes that generation cache. Input-record shards remain an
 internal derived cache and are written while parsing.
 
-`cache prune` removes orphaned Inputs and superseded decoder revisions.
+`cache prune` removes orphaned Inputs and stale decoder contracts.
 Unreadable or unclassifiable shards make the explicit maintenance command fail
 instead of reporting partial success.
 
 ## Pricing lookup
 
 ```bash
-tokscale pricing lookup claude-sonnet-4-5 --no-spinner
-tokscale pricing lookup grok-code --pricing-source openrouter --no-spinner
-tokscale pricing lookup claude-sonnet-4-5 --json
-tokscale pricing overrides
-tokscale pricing overrides --json
+tokenx pricing lookup claude-sonnet-4-5 --no-spinner
+tokenx pricing lookup grok-code --pricing-source openrouter --no-spinner
+tokenx pricing lookup claude-sonnet-4-5 --json
+tokenx pricing overrides
+tokenx pricing overrides --json
 ```
 
 `--pricing-source` selects a pricing catalog and is distinct from a model's

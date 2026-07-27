@@ -11,17 +11,16 @@ write_release_manifests() {
   local lock_version="${2:-${version}}"
 
   mkdir -p \
-    packages/cli \
-    packages/cli-darwin-arm64 \
-    packages/cli-linux-x64-gnu \
-    packages/cli-win32-x64-msvc \
-    packages/tokscale
+    packages/tokenx \
+    packages/tokenx-darwin-arm64 \
+    packages/tokenx-linux-x64-gnu \
+    packages/tokenx-win32-x64-msvc
 
   cat > Cargo.toml <<EOF_MANIFEST
 [workspace]
 members = [
-  "crates/tokscale-core",
-  "crates/tokscale-cli",
+  "crates/tokenx-engine",
+  "crates/tokenx",
 ]
 
 [workspace.package]
@@ -33,50 +32,40 @@ EOF_MANIFEST
 version = 4
 
 [[package]]
-name = "tokscale-cli"
+name = "tokenx"
 version = "${lock_version}"
 dependencies = [
- "tokscale-core",
+ "tokenx-engine",
 ]
 
 [[package]]
-name = "tokscale-core"
+name = "tokenx-engine"
 version = "${lock_version}"
 EOF_LOCK
 
-  cat > packages/cli/package.json <<EOF_MANIFEST
+  cat > packages/tokenx/package.json <<EOF_MANIFEST
 {
-  "name": "@juya-ai/tokscale-cli",
+  "name": "@juya-ai/tokenx",
   "version": "${version}",
   "optionalDependencies": {
-    "@juya-ai/tokscale-cli-darwin-arm64": "${version}",
-    "@juya-ai/tokscale-cli-linux-x64-gnu": "${version}",
-    "@juya-ai/tokscale-cli-win32-x64-msvc": "${version}"
+    "@juya-ai/tokenx-darwin-arm64": "${version}",
+    "@juya-ai/tokenx-linux-x64-gnu": "${version}",
+    "@juya-ai/tokenx-win32-x64-msvc": "${version}"
   }
 }
 EOF_MANIFEST
 
   for pkg in \
-    cli-darwin-arm64 \
-    cli-linux-x64-gnu \
-    cli-win32-x64-msvc; do
+    tokenx-darwin-arm64 \
+    tokenx-linux-x64-gnu \
+    tokenx-win32-x64-msvc; do
     cat > "packages/${pkg}/package.json" <<EOF_MANIFEST
 {
-  "name": "@juya-ai/tokscale-${pkg}",
+  "name": "@juya-ai/${pkg}",
   "version": "${version}"
 }
 EOF_MANIFEST
   done
-
-  cat > packages/tokscale/package.json <<EOF_MANIFEST
-{
-  "name": "@juya-ai/tokscale",
-  "version": "${version}",
-  "dependencies": {
-    "@juya-ai/tokscale-cli": "${version}"
-  }
-}
-EOF_MANIFEST
 }
 
 test_rejects_stale_workspace_versions_in_cargo_lock() {
@@ -93,8 +82,8 @@ test_rejects_stale_workspace_versions_in_cargo_lock() {
       return 1
     fi
 
-    grep -q "Cargo.lock package tokscale-cli: expected 3.0.0, found 2.1.3" "${output}"
-    grep -q "Cargo.lock package tokscale-core: expected 3.0.0, found 2.1.3" "${output}"
+    grep -q "Cargo.lock package tokenx: expected 3.0.0, found 2.1.3" "${output}"
+    grep -q "Cargo.lock package tokenx-engine: expected 3.0.0, found 2.1.3" "${output}"
   )
 }
 
@@ -119,7 +108,7 @@ test_ignores_registry_duplicate_names_in_cargo_lock() {
     cat >> Cargo.lock <<'EOF_LOCK'
 
 [[package]]
-name = "tokscale-core"
+name = "tokenx-engine"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 EOF_LOCK
@@ -135,10 +124,10 @@ test_rejects_unsupported_platform_package_when_manifest_and_optional_dependency_
   (
     cd "${work}"
     write_release_manifests "3.0.0"
-    mkdir -p packages/cli-linux-riscv64-gnu
-    cat > packages/cli-linux-riscv64-gnu/package.json <<'EOF_MANIFEST'
+    mkdir -p packages/tokenx-linux-riscv64-gnu
+    cat > packages/tokenx-linux-riscv64-gnu/package.json <<'EOF_MANIFEST'
 {
-  "name": "@juya-ai/tokscale-cli-linux-riscv64-gnu",
+  "name": "@juya-ai/tokenx-linux-riscv64-gnu",
   "version": "3.0.0"
 }
 EOF_MANIFEST
@@ -146,9 +135,9 @@ EOF_MANIFEST
 import json
 import pathlib
 
-path = pathlib.Path("packages/cli/package.json")
+path = pathlib.Path("packages/tokenx/package.json")
 manifest = json.loads(path.read_text())
-manifest["optionalDependencies"]["@juya-ai/tokscale-cli-linux-riscv64-gnu"] = "3.0.0"
+manifest["optionalDependencies"]["@juya-ai/tokenx-linux-riscv64-gnu"] = "3.0.0"
 path.write_text(json.dumps(manifest, indent=2) + "\n")
 PY
 
@@ -158,8 +147,8 @@ PY
       return 1
     fi
 
-    grep -q "Unsupported platform package manifests: \\['@juya-ai/tokscale-cli-linux-riscv64-gnu'\\]" "${output}"
-    grep -q "Unsupported platform optionalDependencies: \\['@juya-ai/tokscale-cli-linux-riscv64-gnu'\\]" "${output}"
+    grep -q "Unsupported platform package manifests: \\['@juya-ai/tokenx-linux-riscv64-gnu'\\]" "${output}"
+    grep -q "Unsupported platform optionalDependencies: \\['@juya-ai/tokenx-linux-riscv64-gnu'\\]" "${output}"
   )
 }
 
@@ -170,14 +159,14 @@ test_rejects_missing_canonical_platform_when_manifest_and_optional_dependency_ar
   (
     cd "${work}"
     write_release_manifests "3.0.0"
-    rm -rf packages/cli-win32-x64-msvc
+    rm -rf packages/tokenx-win32-x64-msvc
     python3 - <<'PY'
 import json
 import pathlib
 
-path = pathlib.Path("packages/cli/package.json")
+path = pathlib.Path("packages/tokenx/package.json")
 manifest = json.loads(path.read_text())
-manifest["optionalDependencies"].pop("@juya-ai/tokscale-cli-win32-x64-msvc")
+manifest["optionalDependencies"].pop("@juya-ai/tokenx-win32-x64-msvc")
 path.write_text(json.dumps(manifest, indent=2) + "\n")
 PY
 
@@ -187,8 +176,8 @@ PY
       return 1
     fi
 
-    grep -q "Missing required platform package manifests: \\['@juya-ai/tokscale-cli-win32-x64-msvc'\\]" "${output}"
-    grep -q "Missing required platform optionalDependencies: \\['@juya-ai/tokscale-cli-win32-x64-msvc'\\]" "${output}"
+    grep -q "Missing required platform package manifests: \\['@juya-ai/tokenx-win32-x64-msvc'\\]" "${output}"
+    grep -q "Missing required platform optionalDependencies: \\['@juya-ai/tokenx-win32-x64-msvc'\\]" "${output}"
   )
 }
 

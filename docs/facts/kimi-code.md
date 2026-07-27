@@ -2,7 +2,7 @@
 
 Last verified: 2026-07-18
 
-This document records observed upstream storage facts, not Tokscale policy. The
+This document records observed upstream storage facts, not Tokenx policy. The
 corresponding ingestion decision lives in
 [ADR 0001](../adr/0001-no-silent-fallback.md). Verification
 used `MoonshotAI/kimi-code` at commit
@@ -35,7 +35,7 @@ the verified corpus its top-level fields contained title/workdir/time/agent
 metadata and no model field.
 
 The older Kimi CLI root-level `wire.jsonl`/`context.jsonl` format is outside
-Tokscale's supported input boundary. Kimi Code still has read/migration code for
+Tokenx's supported input boundary. Kimi Code still has read/migration code for
 it, but current sessions write `agents/<agent-id>/wire.jsonl`; the verified
 corpus contained no root-level session wire.
 
@@ -129,7 +129,7 @@ max_context_size = 128000
 For a normal v2 request, `llm.request` is dispatched before the provider attempt
 and `usage.record` only after a successful response. The request therefore
 supplies the physical model ID without consulting `config.toml`. A providerless
-current config can affect Tokscale's config enrichment only when the same alias
+current config can affect Tokenx's config enrichment only when the same alias
 appears in an older wire prefix that has no preceding request trace. This mixed
 history is valid but was not present in the verified local corpus: all 21
 current model entries had a provider.

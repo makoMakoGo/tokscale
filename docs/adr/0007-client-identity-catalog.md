@@ -4,7 +4,7 @@ Status: Accepted; integration ownership revised by ADR 0030
 
 ## Context
 
-Tokscale needs a stable client identity for filters, reports, caches, and TUI
+Tokenx needs a stable client identity for filters, reports, caches, and TUI
 projections. It also needs a precise local-input contract for discovering and
 parsing provider artifacts. Identity, acquisition, usage attribution, and
 diagnostics are separate concerns:
@@ -22,10 +22,11 @@ providers behave like additional client identities.
 
 ### Identity authority
 
-`crates/tokscale-core/client-catalog.json` is the sole client identity catalog.
-Each entry defines the Rust variant, public ID, display labels, and presentation
-metadata. Generated `ClientId` data is the only client identity used by Rust
-code.
+`crates/tokenx-engine/client-catalog.json` is the sole client identity catalog.
+Each entry defines the Rust variant, public ID, and one display name. Generated
+`ClientId` data is the only client identity used by Rust code. Reports and TUI
+controls render that single display name directly from this catalog; local
+configuration cannot override it, and no alternate short label exists.
 
 The catalog IDs are the complete accepted namespace for:
 
@@ -41,30 +42,31 @@ model names, providers, or display labels.
 ### Local-input authority
 
 Every catalog entry is exhaustively dispatched to exactly one
-`ClientIntegration`. The dispatch is a wildcard-free `match` on `ClientId`, so
+`IntegrationDriver`. The dispatch is a wildcard-free `match` on `ClientId`, so
 adding a catalog variant without selecting an integration is a compile error.
 
-Each vertical integration owns one typed `ClientId`, its source definition,
-discovery, decoder route, and fold. Its identity is the sole authority
-associating discovered inputs and emitted usage with a client. Discovery
-remains authoritative for fixed default roots beneath the selected home,
-filename selection, companion files, database sidecars, and custom-root
-support. Additional roots come only from
+The exhaustive registry owns each `ClientId` binding. Its selected driver owns
+the source definition, discovery, decoder selection, and fold without declaring a
+second identity. The binding is the sole authority associating discovered
+inputs and emitted usage with a client. Discovery remains authoritative for
+fixed default roots beneath the selected home, filename selection, companion
+files, database sidecars, and custom-root support. Additional roots come only from
 `scanner.extraScanPaths`; OpenCode database files come only from
 `scanner.opencodeDbPaths`.
 
 The integration's decoder and schema are the sole authority for accepted
 envelopes, database schemas, required fields, record semantics, deduplication,
 and token interpretation, but not source identity. Each source-neutral
-`InputUnit` contains a `DecoderSpec` that atomically binds decoder ID, semantic
-revision, and decode route. There is no client-to-decoder default mapping that
-can drift from the selected route.
+`DiscoveredInput` contains one `DecoderKind` variant that carries the semantic
+revision and any execution detail required by that decoder. Its persisted
+`DecoderVersion` is derived from the same value, so cache identity cannot drift
+from decoder selection. There is no client-to-decoder default mapping.
 
 Decoders produce one source-neutral `UsageRecord` representation. Derived
-message-cache shards store that same type. The runner constructs a
-`BoundMessageSink` from the selected integration; the sink accepts only
+input-record shards store that same type. The runner constructs a
+`BoundUsageSink` from the selected integration binding; the sink accepts only
 `UsageRecord` and attaches the integration's typed `ClientId` to construct a
-`UnifiedMessage`. `UnifiedMessage` composes client attribution with a
+`AttributedUsageRecord`. `AttributedUsageRecord` composes client attribution with a
 `UsageRecord` instead of duplicating the usage fields. Neither an input,
 decoder, integration fold, nor cache shard can supply a competing client identity,
 so mismatched source attribution is not representable.
@@ -91,7 +93,7 @@ when it cannot be inferred, the provider is `unknown`. Provider attribution by
 itself never determines record eligibility.
 
 SQLite integrations that declare WAL-aware acquisition fingerprint and read the
-database with its committed WAL state. Derived message shards and aggregate
+database with its committed WAL state. Derived input-record shards and aggregate
 caches are reproducible acceleration artifacts, not local usage authorities.
 
 ### Public diagnostics
@@ -110,16 +112,16 @@ Adding a client requires one atomic contract change containing:
 
 1. one catalog identity;
 2. one scan definition;
-3. one vertical `ClientIntegration` selected by the exhaustive dispatch;
-4. one current source-neutral decoder specification and session schema;
+3. one vertical `IntegrationDriver` selected by the exhaustive dispatch;
+4. one current source-neutral decoder kind and session schema;
 5. focused discovery, decoder, and health tests;
 6. a catalog/integration identity check; and
 7. a current discovery row in `docs/clients.md`.
 
 Changing a root, filename rule, companion dependency, database schema, or record
 envelope requires an integration/schema change with focused tests and a matching
-documentation update. A decoder behavior change that affects cached output also
-requires a decoder revision change.
+documentation update. A decoder behavior change that affects cached output
+changes the integration's build-generated decoder contract automatically.
 
 ## Consequences
 
@@ -128,6 +130,7 @@ input contract. Projections, filters, scanner configuration, caches, and TUI vie
 therefore share the same client namespace. The production pipeline gives only
 the selected integration authority to attach `ClientId`; the source-neutral input,
 decoder output, persisted shard, and diagnostic errors carry no competing
-client field. Decoder identity, revision, and route cannot disagree because
-they are one `DecoderSpec`; path and format evolution stays owned by the integration
-and schema that can validate it.
+client field. Runtime decoder selection is one `DecoderKind`, and persisted
+cache identity is derived from it, so execution behavior and cache identity
+cannot drift independently; path and format evolution stays owned by the
+integration and schema that can validate it.

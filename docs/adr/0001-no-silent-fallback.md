@@ -4,12 +4,12 @@ Status: Accepted
 
 ## Context
 
-Tokscale uses third-party local storage for accounting. An unreadable input,
+Tokenx uses third-party local storage for accounting. An unreadable input,
 invalid record, or failed enrichment must not be turned into a plausible empty
 report, but one damaged record also must not erase healthy siblings or unrelated
 clients.
 
-The word "fallback" is not itself a defect. Tokscale has explicit decoding,
+The word "fallback" is not itself a defect. Tokenx has explicit decoding,
 normalization, reconciliation, token imputation, identity inference, cache
 recovery, and report-projection rules. These are valid when their authority and
 failure behavior are documented.

@@ -3,7 +3,7 @@
 Last verified: 2026-07-18
 
 This document records observed Factory Droid storage and runtime semantics, not
-Tokscale policy. The corresponding ingestion decision lives in
+Tokenx policy. The corresponding ingestion decision lives in
 [ADR 0001](../adr/0001-no-silent-fallback.md).
 Verification used the locally installed Droid `0.174.0` Linux executable and a
 read-only snapshot of the local `~/.factory` corpus. No credentials, prompts,
@@ -114,9 +114,9 @@ into the session, current config must not be used as proof of a historical
 session's endpoint. The persisted facts remain the raw custom model ID,
 protocol lock, timestamp, and token totals.
 
-## Tokscale interpretation boundary
+## Tokenx interpretation boundary
 
-Tokscale may retain `providerLock` as a routing label while parsing, but
+Tokenx may retain `providerLock` as a routing label while parsing, but
 must not present it as authoritative model ownership. Final report
 canonicalization can combine the normalized model ID with that label; for the
 verified `custom:glm-5.1` sessions, this yields model `glm-5.1`, provider `zai`,
