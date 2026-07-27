@@ -13,7 +13,6 @@ struct CatalogEntry {
     variant: String,
     id: String,
     display_name: String,
-    short_name: String,
 }
 
 fn main() {
@@ -67,11 +66,6 @@ fn validate_catalog(entries: &[CatalogEntry]) {
             "displayName must be set for {}",
             entry.id
         );
-        assert!(
-            !entry.short_name.trim().is_empty(),
-            "shortName must be set for {}",
-            entry.id
-        );
     }
 }
 
@@ -101,10 +95,9 @@ fn generate_rust(entries: &[CatalogEntry]) -> String {
         .iter()
         .map(|entry| {
             format!(
-                "    ClientIdentity {{ id: {}, display_name: {}, short_name: {} }},\n",
+                "    ClientIdentity {{ id: {}, display_name: {} }},\n",
                 rust_string(&entry.id),
                 rust_string(&entry.display_name),
-                rust_string(&entry.short_name),
             )
         })
         .collect::<String>();
@@ -119,7 +112,6 @@ pub enum ClientId {{
 pub struct ClientIdentity {{
     pub id: &'static str,
     pub display_name: &'static str,
-    pub short_name: &'static str,
 }}
 
 impl ClientId {{
@@ -140,10 +132,6 @@ impl ClientId {{
 
     pub fn display_name(self) -> &'static str {{
         self.identity().display_name
-    }}
-
-    pub fn short_name(self) -> &'static str {{
-        self.identity().short_name
     }}
 
     #[allow(clippy::should_implement_trait)]

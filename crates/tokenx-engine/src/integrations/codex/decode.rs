@@ -1,4 +1,4 @@
-//! Codex CLI session decoder.
+//! Codex session decoder.
 //!
 //! Parses the identical JSONL schema from `~/.codex/sessions/` and
 //! `~/.codex/archived_sessions/`. Scan-root discovery lives in the Codex

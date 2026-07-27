@@ -95,30 +95,30 @@ mod tests {
     }
 
     #[test]
-    fn test_client_as_str() {
-        assert_eq!(ClientId::short_name(ClientId::OpenCode), "OpenCode");
-        assert_eq!(ClientId::short_name(ClientId::Claude), "Claude");
-        assert_eq!(ClientId::short_name(ClientId::Codex), "Codex");
-        assert_eq!(ClientId::short_name(ClientId::Copilot), "Copilot");
-        assert_eq!(ClientId::short_name(ClientId::Gemini), "Gemini");
-        assert_eq!(ClientId::short_name(ClientId::Amp), "Amp");
-        assert_eq!(ClientId::short_name(ClientId::Droid), "Droid");
-        assert_eq!(ClientId::short_name(ClientId::OpenClaw), "OpenClaw");
-        assert_eq!(ClientId::short_name(ClientId::Pi), "Pi");
-        assert_eq!(ClientId::short_name(ClientId::Omp), "OMP");
-        assert_eq!(ClientId::short_name(ClientId::Kimi), "Kimi");
-        assert_eq!(ClientId::short_name(ClientId::Qwen), "Qwen");
-        assert_eq!(ClientId::short_name(ClientId::RooCode), "Roo Code");
-        assert_eq!(ClientId::short_name(ClientId::Mux), "Mux");
-        assert_eq!(ClientId::short_name(ClientId::Kilo), "Kilo");
-        assert_eq!(ClientId::short_name(ClientId::Hermes), "Hermes");
-        assert_eq!(ClientId::short_name(ClientId::Codebuff), "Codebuff");
-        assert_eq!(ClientId::short_name(ClientId::CodeBuddy), "CodeBuddy");
-        assert_eq!(ClientId::short_name(ClientId::Antigravity), "Antigravity");
-        assert_eq!(ClientId::short_name(ClientId::Zed), "Zed Agent");
-        assert_eq!(ClientId::short_name(ClientId::Zcode), "ZCode");
-        assert_eq!(ClientId::short_name(ClientId::Kiro), "Kiro");
-        assert_eq!(ClientId::short_name(ClientId::Cline), "Cline");
+    fn test_client_display_name() {
+        assert_eq!(ClientId::OpenCode.display_name(), "OpenCode");
+        assert_eq!(ClientId::Claude.display_name(), "Claude");
+        assert_eq!(ClientId::Codex.display_name(), "Codex");
+        assert_eq!(ClientId::Copilot.display_name(), "Copilot");
+        assert_eq!(ClientId::Gemini.display_name(), "Gemini CLI");
+        assert_eq!(ClientId::Amp.display_name(), "Amp");
+        assert_eq!(ClientId::Droid.display_name(), "Droid");
+        assert_eq!(ClientId::OpenClaw.display_name(), "OpenClaw");
+        assert_eq!(ClientId::Pi.display_name(), "Pi");
+        assert_eq!(ClientId::Omp.display_name(), "OMP");
+        assert_eq!(ClientId::Kimi.display_name(), "Kimi");
+        assert_eq!(ClientId::Qwen.display_name(), "Qwen");
+        assert_eq!(ClientId::RooCode.display_name(), "Roo Code");
+        assert_eq!(ClientId::Mux.display_name(), "Mux");
+        assert_eq!(ClientId::Kilo.display_name(), "Kilo");
+        assert_eq!(ClientId::Hermes.display_name(), "Hermes");
+        assert_eq!(ClientId::Codebuff.display_name(), "Codebuff");
+        assert_eq!(ClientId::CodeBuddy.display_name(), "CodeBuddy");
+        assert_eq!(ClientId::Antigravity.display_name(), "Antigravity");
+        assert_eq!(ClientId::Zed.display_name(), "Zed Agent");
+        assert_eq!(ClientId::Zcode.display_name(), "ZCode");
+        assert_eq!(ClientId::Kiro.display_name(), "Kiro");
+        assert_eq!(ClientId::Cline.display_name(), "Cline");
     }
 
     #[test]

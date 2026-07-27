@@ -5,7 +5,7 @@
  * Generates realistic test data for all 4 session clients:
  * - OpenCode: Current-format SQLite database
  * - Claude Code: JSONL files
- * - Codex CLI: JSONL files with token_count events
+ * - Codex: JSONL files with token_count events
  * - Gemini CLI: JSON session files
  * 
  * Usage: bunx benchmarks/generate.ts [--output <dir>] [--scale <multiplier>]

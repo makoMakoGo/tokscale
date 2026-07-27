@@ -23,10 +23,10 @@ providers behave like additional client identities.
 ### Identity authority
 
 `crates/tokenx-engine/client-catalog.json` is the sole client identity catalog.
-Each entry defines the Rust variant, public ID, display labels, and presentation
-metadata. Generated `ClientId` data is the only client identity used by Rust
-code. Reports and TUI controls render client labels directly from this catalog;
-local configuration cannot override them.
+Each entry defines the Rust variant, public ID, and one display name. Generated
+`ClientId` data is the only client identity used by Rust code. Reports and TUI
+controls render that single display name directly from this catalog; local
+configuration cannot override it, and no alternate short label exists.
 
 The catalog IDs are the complete accepted namespace for:
 

@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(get_client_display_name(ClientId::OpenClaw), "OpenClaw");
         assert_eq!(
             get_client_display_names(&[ClientId::OpenCode, ClientId::Codex, ClientId::Kiro]),
-            "OpenCode, Codex CLI, Kiro"
+            "OpenCode, Codex, Kiro"
         );
     }
 }

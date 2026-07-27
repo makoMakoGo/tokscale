@@ -25,7 +25,7 @@ current home directory. `**` means recursive discovery under the stated root.
 | --- | --- | --- | --- |
 | `opencode` | OpenCode | `~/.local/share/opencode/opencode.db` and `opencode-<channel>.db`; direct files from `scanner.opencodeDbPaths` | Reads SQLite with committed WAL state, joins messages to sessions, validates assistant token payloads, and deduplicates across databases. |
 | `claude` | Claude | `~/.claude/projects/**/*.jsonl`; `~/.claude/transcripts/**/*.jsonl` | Reads Claude Code assistant usage and resolves project/workspace metadata from the provider files. |
-| `codex` | Codex CLI | `~/.codex/sessions/**/*.jsonl`; `~/.codex/archived_sessions/**/*.jsonl` | Reads provider-written interactive and exec session events with append-aware parsing and stable cross-file deduplication. |
+| `codex` | Codex | `~/.codex/sessions/**/*.jsonl`; `~/.codex/archived_sessions/**/*.jsonl` | Reads provider-written interactive and exec session events with append-aware parsing and stable cross-file deduplication. |
 | `gemini` | Gemini CLI | `~/.gemini/tmp/<named-project>/chats/session-*.json` and `session-*.jsonl` | Requires `.project_root` in each named project directory and uses it as workspace identity. |
 | `amp` | Amp | `~/.local/share/amp/threads/**/T-*.json` | Reads token-bearing events from each thread usage ledger. |
 | `droid` | Droid | `~/.factory/sessions/**/*.settings.json` with the session event stream and Mission metadata beside it | Reads Factory session usage, workspace metadata, and agent-role attribution from the related provider artifacts. |

@@ -33,14 +33,17 @@ mod tests {
     }
 
     #[test]
-    fn grok_uses_the_short_brand_name_for_display() {
-        assert_eq!(ClientId::Grok.display_name(), "Grok");
-        assert_eq!(ClientId::Grok.short_name(), "Grok");
+    fn codex_uses_the_product_name_for_display() {
+        assert_eq!(ClientId::Codex.display_name(), "Codex");
     }
 
     #[test]
-    fn hermes_uses_the_short_brand_name_for_display() {
+    fn grok_uses_the_brand_name_for_display() {
+        assert_eq!(ClientId::Grok.display_name(), "Grok");
+    }
+
+    #[test]
+    fn hermes_uses_the_brand_name_for_display() {
         assert_eq!(ClientId::Hermes.display_name(), "Hermes");
-        assert_eq!(ClientId::Hermes.short_name(), "Hermes");
     }
 }

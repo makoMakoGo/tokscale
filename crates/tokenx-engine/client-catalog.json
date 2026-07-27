@@ -2,169 +2,141 @@
   {
     "variant": "OpenCode",
     "id": "opencode",
-    "displayName": "OpenCode",
-    "shortName": "OpenCode"
+    "displayName": "OpenCode"
   },
   {
     "variant": "Claude",
     "id": "claude",
-    "displayName": "Claude",
-    "shortName": "Claude"
+    "displayName": "Claude"
   },
   {
     "variant": "Codex",
     "id": "codex",
-    "displayName": "Codex CLI",
-    "shortName": "Codex"
+    "displayName": "Codex"
   },
   {
     "variant": "Gemini",
     "id": "gemini",
-    "displayName": "Gemini CLI",
-    "shortName": "Gemini"
+    "displayName": "Gemini CLI"
   },
   {
     "variant": "Amp",
     "id": "amp",
-    "displayName": "Amp",
-    "shortName": "Amp"
+    "displayName": "Amp"
   },
   {
     "variant": "Droid",
     "id": "droid",
-    "displayName": "Droid",
-    "shortName": "Droid"
+    "displayName": "Droid"
   },
   {
     "variant": "OpenClaw",
     "id": "openclaw",
-    "displayName": "OpenClaw",
-    "shortName": "OpenClaw"
+    "displayName": "OpenClaw"
   },
   {
     "variant": "Pi",
     "id": "pi",
-    "displayName": "Pi",
-    "shortName": "Pi"
+    "displayName": "Pi"
   },
   {
     "variant": "Omp",
     "id": "omp",
-    "displayName": "OMP",
-    "shortName": "OMP"
+    "displayName": "OMP"
   },
   {
     "variant": "Kimi",
     "id": "kimi",
-    "displayName": "Kimi",
-    "shortName": "Kimi"
+    "displayName": "Kimi"
   },
   {
     "variant": "Qwen",
     "id": "qwen",
-    "displayName": "Qwen",
-    "shortName": "Qwen"
+    "displayName": "Qwen"
   },
   {
     "variant": "RooCode",
     "id": "roocode",
-    "displayName": "Roo Code",
-    "shortName": "Roo Code"
+    "displayName": "Roo Code"
   },
   {
     "variant": "Mux",
     "id": "mux",
-    "displayName": "Mux",
-    "shortName": "Mux"
+    "displayName": "Mux"
   },
   {
     "variant": "Kilo",
     "id": "kilo",
-    "displayName": "Kilo",
-    "shortName": "Kilo"
+    "displayName": "Kilo"
   },
   {
     "variant": "Hermes",
     "id": "hermes",
-    "displayName": "Hermes",
-    "shortName": "Hermes"
+    "displayName": "Hermes"
   },
   {
     "variant": "Copilot",
     "id": "copilot",
-    "displayName": "Copilot",
-    "shortName": "Copilot"
+    "displayName": "Copilot"
   },
   {
     "variant": "Goose",
     "id": "goose",
-    "displayName": "Goose",
-    "shortName": "Goose"
+    "displayName": "Goose"
   },
   {
     "variant": "Codebuff",
     "id": "codebuff",
-    "displayName": "Codebuff",
-    "shortName": "Codebuff"
+    "displayName": "Codebuff"
   },
   {
     "variant": "CodeBuddy",
     "id": "codebuddy",
-    "displayName": "CodeBuddy",
-    "shortName": "CodeBuddy"
+    "displayName": "CodeBuddy"
   },
   {
     "variant": "Antigravity",
     "id": "antigravity",
-    "displayName": "Antigravity",
-    "shortName": "Antigravity"
+    "displayName": "Antigravity"
   },
   {
     "variant": "Zed",
     "id": "zed",
-    "displayName": "Zed Agent",
-    "shortName": "Zed Agent"
+    "displayName": "Zed Agent"
   },
   {
     "variant": "Zcode",
     "id": "zcode",
-    "displayName": "ZCode",
-    "shortName": "ZCode"
+    "displayName": "ZCode"
   },
   {
     "variant": "Kiro",
     "id": "kiro",
-    "displayName": "Kiro",
-    "shortName": "Kiro"
+    "displayName": "Kiro"
   },
   {
     "variant": "Junie",
     "id": "junie",
-    "displayName": "Junie",
-    "shortName": "Junie"
+    "displayName": "Junie"
   },
   {
     "variant": "Warp",
     "id": "warp",
-    "displayName": "Warp",
-    "shortName": "Warp"
+    "displayName": "Warp"
   },
   {
     "variant": "Cline",
     "id": "cline",
-    "displayName": "Cline",
-    "shortName": "Cline"
+    "displayName": "Cline"
   },
   {
     "variant": "CommandCode",
     "id": "commandcode",
-    "displayName": "Command Code",
-    "shortName": "Command"
+    "displayName": "Command Code"
   },
   {
     "variant": "Grok",
     "id": "grok",
-    "displayName": "Grok",
-    "shortName": "Grok"
+    "displayName": "Grok"
   }
 ]
