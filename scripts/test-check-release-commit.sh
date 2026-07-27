@@ -100,6 +100,30 @@ create_origin() {
   printf '%s\n' "${origin}"
 }
 
+create_bootstrap_origin() {
+  local prefix="$1"
+  local origin="${TMP_DIR}/${prefix}-origin.git"
+  local seed="${TMP_DIR}/${prefix}-seed"
+
+  git init -q --bare "${origin}"
+  git init -q "${seed}"
+  (
+    cd "${seed}"
+    git_config
+    git switch -qc main
+    mkdir -p scripts
+    cp "${SCRIPT_UNDER_TEST}" scripts/check-release-commit.sh
+    cp "${COHERENCE_SCRIPT}" scripts/check-version-coherence.sh
+    echo "pre-Tokenx source" > README.md
+    git add .
+    git commit -qm "seed pre-Tokenx source"
+    git remote add origin "${origin}"
+    git push -q origin main
+  )
+  git --git-dir="${origin}" symbolic-ref HEAD refs/heads/main
+  printf '%s\n' "${origin}"
+}
+
 clone_main() {
   local origin="$1"
   local work="$2"
@@ -218,6 +242,36 @@ test_rejects_version_push_with_non_release_files() {
   grep -q "version-bump commits may only change release manifests" "${TMP_DIR}/mixed-output.txt"
 }
 
+test_bootstrap_pr_is_validated_without_automatic_publish() {
+  local origin work base_sha release_sha output_file
+  origin="$(create_bootstrap_origin bootstrap)"
+  work="${TMP_DIR}/bootstrap-work"
+  clone_main "${origin}" "${work}"
+  base_sha="$(git -C "${work}" rev-parse HEAD)"
+  (
+    cd "${work}"
+    write_manifests 0.1.0
+    mkdir -p crates/tokenx/src
+    echo "fn main() {}" > crates/tokenx/src/main.rs
+    git add .
+    git commit -qm "feat: introduce Tokenx"
+    git push -q origin main
+  )
+  release_sha="$(git -C "${work}" rev-parse HEAD)"
+  output_file="${TMP_DIR}/bootstrap-github-output.txt"
+
+  run_check "${work}" pull_request "${release_sha}" "${base_sha}" "" "${TMP_DIR}/bootstrap-pr-output.txt" >"${TMP_DIR}/bootstrap-pr-log.txt"
+  grep -q "Release pull request OK: introducing Tokenx 0.1.0" "${TMP_DIR}/bootstrap-pr-log.txt"
+
+  run_check "${work}" push "${release_sha}" "${base_sha}" "" "${output_file}" >"${TMP_DIR}/bootstrap-push-log.txt"
+  grep -q '^should_publish=false$' "${output_file}"
+  grep -q '^version=0.1.0$' "${output_file}"
+  grep -q '^base_version=$' "${output_file}"
+  grep -q "^release_commit=${release_sha}$" "${output_file}"
+  grep -q '^recovery=false$' "${output_file}"
+  grep -q "automatic publishing is skipped" "${TMP_DIR}/bootstrap-push-log.txt"
+}
+
 test_auto_publish_rejects_stale_release_commit() {
   local origin work base_sha release_sha output_file
   origin="$(create_origin stale)"
@@ -295,6 +349,7 @@ test_recovery_rejects_later_commit_with_same_version() {
 test_accepts_release_only_version_push
 test_skips_push_without_version_change
 test_rejects_version_push_with_non_release_files
+test_bootstrap_pr_is_validated_without_automatic_publish
 test_auto_publish_rejects_stale_release_commit
 test_recovery_accepts_exact_ancestor_release_commit
 test_recovery_rejects_later_commit_with_same_version

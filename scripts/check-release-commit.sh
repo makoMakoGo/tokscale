@@ -45,6 +45,14 @@ for path in paths:
 PY
 }
 
+manifest_version_at() {
+  local commit="$1"
+  local manifest="packages/tokenx/package.json"
+
+  git cat-file -e "${commit}:${manifest}" 2>/dev/null || return 1
+  git show "${commit}:${manifest}" | jq -er '.version'
+}
+
 assert_version_increased() {
   python3 - "$1" "$2" <<'PY'
 import re
@@ -165,7 +173,11 @@ if [[ "${RELEASE_EVENT_NAME}" == "pull_request" ]]; then
     fail "Pull request base is not a commit: ${RELEASE_BEFORE_SHA}"
   git merge-base --is-ancestor "${RELEASE_BEFORE_SHA}" "${release_sha}" ||
     fail "Pull request base ${RELEASE_BEFORE_SHA} is not an ancestor of ${release_sha}"
-  base_version="$(git show "${RELEASE_BEFORE_SHA}:packages/tokenx/package.json" | jq -er '.version')"
+  if ! base_version="$(manifest_version_at "${RELEASE_BEFORE_SHA}")"; then
+    bash scripts/check-version-coherence.sh --expect-version "${current_version}"
+    echo "Release pull request OK: introducing Tokenx ${current_version}"
+    exit 0
+  fi
   if [[ "${current_version}" != "${base_version}" ]]; then
     assert_version_increased "${base_version}" "${current_version}"
     assert_release_only_diff "${RELEASE_BEFORE_SHA}" "${release_sha}"
@@ -187,7 +199,16 @@ case "${RELEASE_EVENT_NAME}" in
       fail "Push base is not a commit: ${RELEASE_BEFORE_SHA}"
     git merge-base --is-ancestor "${RELEASE_BEFORE_SHA}" "${release_sha}" ||
       fail "Push base ${RELEASE_BEFORE_SHA} is not an ancestor of ${release_sha}"
-    base_version="$(git show "${RELEASE_BEFORE_SHA}:packages/tokenx/package.json" | jq -er '.version')"
+    if ! base_version="$(manifest_version_at "${RELEASE_BEFORE_SHA}")"; then
+      bash scripts/check-version-coherence.sh --expect-version "${current_version}"
+      write_output should_publish false
+      write_output version "${current_version}"
+      write_output base_version ""
+      write_output release_commit "${release_sha}"
+      write_output recovery false
+      echo "Tokenx ${current_version} release manifests were introduced in ${release_sha}; automatic publishing is skipped"
+      exit 0
+    fi
 
     if [[ "${current_version}" == "${base_version}" ]]; then
       write_output should_publish false
@@ -213,7 +234,8 @@ case "${RELEASE_EVENT_NAME}" in
       fail "Recovery commit contains version ${current_version}, expected ${RELEASE_VERSION}"
     base_sha="$(git rev-parse "${release_sha}^")" ||
       fail "Recovery commit must have a parent"
-    base_version="$(git show "${base_sha}:packages/tokenx/package.json" | jq -er '.version')"
+    base_version="$(manifest_version_at "${base_sha}")" ||
+      fail "Recovery commit parent ${base_sha} does not contain Tokenx release manifests"
     [[ "${base_version}" != "${current_version}" ]] ||
       fail "Recovery commit ${release_sha} did not introduce version ${current_version}"
     assert_version_increased "${base_version}" "${current_version}"
