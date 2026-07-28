@@ -48,7 +48,8 @@ pub fn parse_devin_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
             s.id,
             s.model,
             n.created_at,
-            n.chat_message
+            n.chat_message,
+            n.node_id
         FROM message_nodes n
         JOIN sessions s ON s.id = n.session_id
         WHERE s.hidden = 0
@@ -106,8 +107,9 @@ pub fn parse_devin_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
                 continue;
             }
         };
+        let node_id: i64 = row.get(4).unwrap_or(-1);
 
-        match extract_assistant_usage(&chat_message) {
+        match extract_assistant_usage(&chat_message, node_id) {
             Ok(Some(metrics)) => {
                 let Some(model_id) = model_id
                     .map(|model| model.trim().to_string())
@@ -162,7 +164,7 @@ pub fn parse_devin_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
                 scanned.messages.push(msg);
             }
             Ok(None) => {}
-            Err(DevinMetricError::MalformedJson) => {
+            Err(DevinMetricError::MalformedJson | DevinMetricError::NegativeToken) => {
                 scanned
                     .rejections
                     .record(RecordRejectionReason::MalformedRecord);
@@ -183,15 +185,27 @@ struct DevinMetrics {
 
 enum DevinMetricError {
     MalformedJson,
+    NegativeToken,
 }
 
 /// Extract token metrics from an assistant `chat_message` JSON blob.
 ///
+/// `node_id` is the database row's `node_id` and is used to build a unique
+/// dedup fallback for assistant messages that lack a `message_id`, so
+/// multiple such messages in one session are not collapsed into a single
+/// dedup key.
+///
 /// Returns `Ok(None)` for non-assistant rows, assistant rows without
 /// metrics, and rows whose metrics object is null or empty — these are not
 /// usage rows and are silently skipped without a rejection. Returns
-/// `Err(MalformedJson)` only when the blob cannot be parsed as JSON.
-fn extract_assistant_usage(chat_message: &str) -> Result<Option<DevinMetrics>, DevinMetricError> {
+/// `Err(MalformedJson)` when the blob cannot be parsed as JSON, and
+/// `Err(NegativeToken)` when any token bucket is a negative number, so the
+/// caller can reject the row as `malformed-record` instead of silently
+/// zeroing it.
+fn extract_assistant_usage(
+    chat_message: &str,
+    node_id: i64,
+) -> Result<Option<DevinMetrics>, DevinMetricError> {
     let parsed: Value = match serde_json::from_str(chat_message) {
         Ok(value) => value,
         Err(_) => return Err(DevinMetricError::MalformedJson),
@@ -209,7 +223,7 @@ fn extract_assistant_usage(chat_message: &str) -> Result<Option<DevinMetrics>, D
         .get("message_id")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let node_fallback = message_id.clone().unwrap_or_default();
+    let node_fallback = format!("node-{node_id}");
 
     let metrics = match parsed
         .get("metadata")
@@ -219,10 +233,10 @@ fn extract_assistant_usage(chat_message: &str) -> Result<Option<DevinMetrics>, D
         Some(metrics) => metrics,
     };
 
-    let input = non_negative_i64(metrics.get("input_tokens"));
-    let output = non_negative_i64(metrics.get("output_tokens"));
-    let cache_read = non_negative_i64(metrics.get("cache_read_tokens"));
-    let cache_write = non_negative_i64(metrics.get("cache_creation_tokens"));
+    let input = token_bucket(metrics.get("input_tokens"))?;
+    let output = token_bucket(metrics.get("output_tokens"))?;
+    let cache_read = token_bucket(metrics.get("cache_read_tokens"))?;
+    let cache_write = token_bucket(metrics.get("cache_creation_tokens"))?;
 
     if input.is_none() && output.is_none() && cache_read.is_none() && cache_write.is_none() {
         return Ok(None);
@@ -238,23 +252,24 @@ fn extract_assistant_usage(chat_message: &str) -> Result<Option<DevinMetrics>, D
     }))
 }
 
-/// Map a JSON token count to a non-negative `i64`. Negative values are
-/// treated as malformed (returned as `None` so the caller can reject the
-/// row); null/absent fields return `None` so the caller can treat the
-/// bucket as zero.
-fn non_negative_i64(value: Option<&Value>) -> Option<i64> {
-    let value = value?;
-    if value.is_null() {
-        return None;
-    }
+/// Map a JSON token bucket to an `i64`. Returns `Ok(None)` for absent or
+/// null fields so the caller treats the bucket as zero. Returns
+/// `Err(NegativeToken)` for negative numbers so the caller rejects the row
+/// as `malformed-record` rather than silently zeroing a malformed value.
+fn token_bucket(value: Option<&Value>) -> Result<Option<i64>, DevinMetricError> {
+    let value = match value {
+        None | Some(Value::Null) => return Ok(None),
+        Some(value) => value,
+    };
     let numeric = value
         .as_i64()
         .or_else(|| value.as_u64().map(|v| v as i64))
-        .or_else(|| value.as_f64().map(|v| v as i64))?;
+        .or_else(|| value.as_f64().map(|v| v as i64))
+        .ok_or(DevinMetricError::NegativeToken)?;
     if numeric < 0 {
-        return None;
+        return Err(DevinMetricError::NegativeToken);
     }
-    Some(numeric)
+    Ok(Some(numeric))
 }
 
 #[cfg(test)]
@@ -630,8 +645,9 @@ mod tests {
         let path = dir.path().join("sessions.db");
         let conn = create_devin_db(&path);
         insert_session(&conn, "odd-cove", "claude-opus-4-8-medium", false, None);
-        // Assistant message without message_id — dedup falls back to empty
-        // string, so each such node is kept individually.
+        // Two assistant messages without message_id in the same session.
+        // Each must get a unique node-<id> fallback so both are retained
+        // instead of being collapsed into one dedup key.
         insert_node(
             &conn,
             "odd-cove",
@@ -640,10 +656,53 @@ mod tests {
             r#"{"role":"assistant","content":"hi","metadata":{"metrics":{"input_tokens":10,"output_tokens":2}}}"#,
             1752000000,
         );
+        insert_node(
+            &conn,
+            "odd-cove",
+            1,
+            Some(0),
+            r#"{"role":"assistant","content":"again","metadata":{"metrics":{"input_tokens":5,"output_tokens":1}}}"#,
+            1752000010,
+        );
+        drop(conn);
+
+        let scanned = parse_devin_sqlite(&path).unwrap();
+        assert_eq!(scanned.messages.len(), 2);
+        assert!(scanned.messages[0].dedup_key.is_some());
+        assert!(scanned.messages[1].dedup_key.is_some());
+        assert_ne!(scanned.messages[0].dedup_key, scanned.messages[1].dedup_key);
+    }
+
+    #[test]
+    fn negative_token_bucket_is_rejected_as_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let conn = create_devin_db(&path);
+        insert_session(&conn, "odd-cove", "claude-opus-4-8-medium", false, None);
+        // Negative input_tokens must reject the row, not silently zero it.
+        insert_node(
+            &conn,
+            "odd-cove",
+            0,
+            None,
+            &assistant_message("m-asst-0", Some(r#"{"input_tokens":-5,"output_tokens":2}"#)),
+            1752000000,
+        );
+        // A healthy sibling row is still kept.
+        insert_node(
+            &conn,
+            "odd-cove",
+            1,
+            Some(0),
+            &assistant_message("m-asst-1", Some(r#"{"input_tokens":10,"output_tokens":2}"#)),
+            1752000010,
+        );
         drop(conn);
 
         let scanned = parse_devin_sqlite(&path).unwrap();
         assert_eq!(scanned.messages.len(), 1);
-        assert!(scanned.messages[0].dedup_key.is_some());
+        assert_eq!(scanned.messages[0].tokens.input, 10);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
     }
 }
