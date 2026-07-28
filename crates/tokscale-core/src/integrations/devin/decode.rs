@@ -107,7 +107,15 @@ pub fn parse_devin_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
                 continue;
             }
         };
-        let node_id: i64 = row.get(4).unwrap_or(-1);
+        let node_id: i64 = match row.get(4) {
+            Ok(value) => value,
+            Err(_) => {
+                scanned
+                    .rejections
+                    .record(RecordRejectionReason::MalformedRecord);
+                continue;
+            }
+        };
 
         match extract_assistant_usage(&chat_message, node_id) {
             Ok(Some(metrics)) => {
@@ -174,6 +182,7 @@ pub fn parse_devin_sqlite(db_path: &Path) -> SessionParseResult<ScannedInput> {
     Ok(scanned)
 }
 
+#[derive(Debug, PartialEq)]
 struct DevinMetrics {
     input: i64,
     output: i64,
@@ -183,6 +192,7 @@ struct DevinMetrics {
     node_fallback: String,
 }
 
+#[derive(Debug, PartialEq)]
 enum DevinMetricError {
     MalformedJson,
     NegativeToken,
@@ -254,22 +264,38 @@ fn extract_assistant_usage(
 
 /// Map a JSON token bucket to an `i64`. Returns `Ok(None)` for absent or
 /// null fields so the caller treats the bucket as zero. Returns
-/// `Err(NegativeToken)` for negative numbers so the caller rejects the row
-/// as `malformed-record` rather than silently zeroing a malformed value.
+/// `Err(NegativeToken)` for negative numbers, non-integer floats, or floats
+/// outside the `i64` range so the caller rejects the row as
+/// `malformed-record` rather than silently truncating a malformed value.
 fn token_bucket(value: Option<&Value>) -> Result<Option<i64>, DevinMetricError> {
     let value = match value {
         None | Some(Value::Null) => return Ok(None),
         Some(value) => value,
     };
-    let numeric = value
-        .as_i64()
-        .or_else(|| value.as_u64().map(|v| v as i64))
-        .or_else(|| value.as_f64().map(|v| v as i64))
-        .ok_or(DevinMetricError::NegativeToken)?;
-    if numeric < 0 {
-        return Err(DevinMetricError::NegativeToken);
+    if let Some(numeric) = value.as_i64() {
+        return if numeric < 0 {
+            Err(DevinMetricError::NegativeToken)
+        } else {
+            Ok(Some(numeric))
+        };
     }
-    Ok(Some(numeric))
+    if let Some(numeric) = value.as_u64() {
+        return Ok(Some(numeric as i64));
+    }
+    if let Some(float) = value.as_f64() {
+        // Reject negatives (including -0.5 which would truncate to 0 and
+        // bypass the negative check), non-integer floats, and floats outside
+        // the i64 range. `as i64` would silently truncate all three.
+        if !float.is_finite() || float < 0.0 || float > i64::MAX as f64 {
+            return Err(DevinMetricError::NegativeToken);
+        }
+        let truncated = float as i64;
+        if truncated as f64 != float {
+            return Err(DevinMetricError::NegativeToken);
+        }
+        return Ok(Some(truncated));
+    }
+    Err(DevinMetricError::NegativeToken)
 }
 
 #[cfg(test)]
@@ -702,6 +728,52 @@ mod tests {
         let scanned = parse_devin_sqlite(&path).unwrap();
         assert_eq!(scanned.messages.len(), 1);
         assert_eq!(scanned.messages[0].tokens.input, 10);
+        let rejection = scanned.rejections.entries().next().unwrap();
+        assert_eq!(rejection.key, "malformed-record");
+    }
+
+    #[test]
+    fn fractional_and_overflowing_float_tokens_are_rejected() {
+        // -0.5 would truncate to 0 via `as i64` and bypass the negative
+        // check; 1.5 is a non-integer; 1e19 overflows i64. All three must
+        // be rejected as malformed rather than silently truncated.
+        for raw in ["-0.5", "1.5", "1e19"] {
+            let metrics = format!(r#"{{"input_tokens":{raw},"output_tokens":0}}"#);
+            assert_eq!(
+                extract_assistant_usage(&assistant_message("m-asst", Some(&metrics)), 0),
+                Err(DevinMetricError::NegativeToken),
+                "float {raw} must be rejected, not truncated"
+            );
+        }
+        // A plain integer float (10.0) is accepted.
+        assert!(matches!(
+            extract_assistant_usage(
+                &assistant_message("m-asst", Some(r#"{"input_tokens":10.0,"output_tokens":0}"#)),
+                0
+            ),
+            Ok(Some(_))
+        ));
+    }
+
+    #[test]
+    fn non_integer_node_id_is_rejected_as_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let conn = create_devin_db(&path);
+        insert_session(&conn, "odd-cove", "claude-opus-4-8-medium", false, None);
+        // SQLite INTEGER columns accept any affinity. Insert a text value
+        // for node_id so row.get::<_, i64>(4) fails — this must be rejected
+        // as malformed rather than collapsing into a shared node--1 key.
+        conn.execute(
+            "INSERT INTO message_nodes (session_id, node_id, parent_node_id, chat_message, created_at)
+             VALUES ('odd-cove', 'not-a-number', NULL, ?1, 1752000000)",
+            params![assistant_message("m-asst-0", Some(r#"{"input_tokens":10,"output_tokens":2}"#))],
+        )
+        .unwrap();
+        drop(conn);
+
+        let scanned = parse_devin_sqlite(&path).unwrap();
+        assert!(scanned.messages.is_empty());
         let rejection = scanned.rejections.entries().next().unwrap();
         assert_eq!(rejection.key, "malformed-record");
     }
